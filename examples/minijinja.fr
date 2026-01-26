@@ -1,33 +1,19 @@
 // this is an interpreter for a subset of the jinja templating language. 
 // jinja spec: https://jinja.palletsprojects.com/en/stable/templates/
-// i want to compile curl from source without depending on a python interpreter.
-// curl uses mbedtls which uses tf-psa-crypto which uses jinja to generate c code.
-// my goal for this program is to be shorter than the real jinja's uv.lock file (1244 lines). 
 // i expect this will be :SLOW but i enjoy experimenting with different styles.
-
-main :: fn() void = {
-    paths := @slice(
-        "/Users/luke/Downloads/mbedtls-7294fc1c1a3c5e0641fdc7dcdc7c9d9c716a4c4e/tf-psa-crypto/scripts/data_files/driver_templates/psa_crypto_driver_wrappers.h.jinja",
-        "/Users/luke/Downloads/mbedtls-7294fc1c1a3c5e0641fdc7dcdc7c9d9c716a4c4e/tf-psa-crypto/scripts/data_files/driver_templates/psa_crypto_driver_wrappers_no_static.c.jinja",
-        "/Users/luke/Downloads/mbedtls-7294fc1c1a3c5e0641fdc7dcdc7c9d9c716a4c4e/tf-psa-crypto/scripts/data_files/driver_templates/OS-template-opaque.jinja",
-        "/Users/luke/Downloads/mbedtls-7294fc1c1a3c5e0641fdc7dcdc7c9d9c716a4c4e/tf-psa-crypto/scripts/data_files/driver_templates/OS-template-transparent.jinja",
-    );
-    a: Arena.Allocator = init(general_allocator(), 4096);
-    for paths { path |
-        c: Ctx = (
-            variables = init(),
-            arena = a&.borrow(),
-        );
-        println(path);
-        src := read_entire_file_or_crash(temp(), path);
-        e := c&.expr(Code = (src = src, kind = .Text));
-        s := c&.eval(e);
-        @assert(s&.is(.String));
-        println(s.String);
-        a&.reset_retaining_capacity();
-    };
-    a&.deinit();
-}
+//
+// see the end of the file for an example program. 
+// implemented: 
+// - with name=value %} body
+// - if cond %} body
+// - for it in items if cond %} body
+// - "string".upper(), loop.index
+// - obj.field, obj[field], field in obj, obj[field] is defined
+// - +, ==, and
+// - 123, "", {{ expr }}
+// - include "file.jinja"
+// parsed but unfinished: {-, else, macro, call, filter. 
+// also there's no operator precedence.
 
 ::tagged_derive(KExpr);  // HACK: @rec
 KExpr :: @rec @tagged(
@@ -35,7 +21,7 @@ KExpr :: @rec @tagged(
     With: @struct(var: Str, value: *KExpr, body: *KExpr),
     Call: @struct(callee: *KExpr, args: []Arg),
     Binary: @struct(op: Binary, lhs: *KExpr, rhs: *KExpr),
-    Include: @struct(path: Str),
+    Include: @struct(path: *KExpr),
     For: @struct(var: Str, list: *KExpr, cond: *KExpr, body: *KExpr),
     Filter: @struct(call: *KExpr, body: *KExpr),
     Concat: []*KExpr,
@@ -44,7 +30,7 @@ KExpr :: @rec @tagged(
     GetVar: Str,
     Code: @struct(src: Str, kind: CodeKind),
     DeclareMacro: @struct(call: *KExpr, body: *KExpr),
-    Tag: @struct(tag: Str, src: Str, body: []*KExpr, depth: i64 /*temporary*/),
+    Tag: @struct(tag: Str, src: Str, body: []*KExpr),
     Method: @struct(receiver: *KExpr, call: *KExpr),
 );
 Arg :: @struct(name: Str, value: *KExpr);
@@ -56,28 +42,40 @@ Value :: @rec @tagged(
     Map: RawHashMap(Str, Value),
     List: RawList(Value),
     Macro: *Macro, 
-    RealString: Str, /*temporary for debugging. eventually just String*/
 );
-Binary :: @enum(Plus, And, Index, Equal);
+Binary :: @enum(Plus, And, Index, Equal, In);
 Macro :: @struct(args: Arg, body: *KExpr);
-CodeKind :: @enum(Text, Tag, Expr);
+CodeKind :: @enum(Text, Tag, Expr, String);
 
 Ctx :: @struct {
     variables: RawHashMap(Str, Value);
     arena: Alloc;
-    depth := 0;
+    sources: RawHashMap(Str, Str);
 };
 
 fn eval(c: *Ctx, e: *KExpr) Value = {
     @match(e) {
+        fn Include(it) => {
+            path := c.eval(it.path);
+            @assert(path&.is(.String), "include %", path&);
+            src := c.sources&.get(path.String)
+                || @panic("bad include %", path&);
+            e = c.expr(Code = (src = src, kind = .Text));
+            c.eval(e)
+        }
         fn Code(it) => {
             s := it.src;
             e := @match(it.kind) {
-                fn Text() => c.parse_top_level(it.src);
+                fn Text() => {
+                    parts := parse_top_level(it.src, c.arena);
+                    parts := c.arena.alloc_init(*KExpr, parts.len, fn(i) => c.expr(Code = parts[i]));
+                    c.expr(Concat = parts)
+                }
+                fn String() => c.expr(Value = (String = it.src));
                 fn Expr() => {
-                    _ := c.parse_expr(s&);
+                    e := c.parse_expr(s&);
                     @assert_eq(s.len, 0, "Expr didn't consume all: %", s);
-                    return(String = @tfmt("$%$\n", it.src))
+                    e
                 }
                 fn Tag() => @panic("unreachable: tag wasn't consumed: %", it.src);
             };
@@ -85,13 +83,10 @@ fn eval(c: *Ctx, e: *KExpr) Value = {
         };
         fn Tag(it) => {
             ee, body := c.parse_tag(it);
-            e := c.arena.alloc_uninit(*KExpr, 3);
-            pad := temp().alloc_init(u8, it.depth, fn(_) => " ".ascii());
-            e[0] = c.expr(Value = (String = @tfmt("%begin % %\n", pad, it.tag, it.src)));
-            e[1] = body;
-            e[2] = c.expr(Value = (String = @tfmt("%end %\n", pad, it.tag)));
-            e := c.expr(Concat = e);
-            c.eval(e)
+            c.eval(ee)
+        }
+        fn DeclareMacro(it) => {
+            (String = "/*TODO:DeclareMacro*/\n")
         }
         fn Concat(parts) => {
             parts := parts.items().shallow_copy(c.arena);
@@ -102,18 +97,133 @@ fn eval(c: *Ctx, e: *KExpr) Value = {
                 };
                 
                 it := c.eval(it[]);
-                @assert(it&.is(.String));
-                out.push_all(it.String);
+                @match(it) {
+                    fn String(it) => out.push_all(it);
+                    fn Number(it) => @fmt(out, "%", it);
+                    @default => @panic("concat %", it&);
+                };
             };
             (String = out.items())
         };
-        fn Value(it) => {
-            @if_let(it) fn RealString(s) => {
-                return(String = @tfmt("S(%)\n", s.len));
+        fn Value(it) => it[];
+        fn With(it) => {
+            value := c.eval(it.value);
+            prev := c.variables&.insert(it.var, value, c.arena);
+            result := c.eval(it.body);
+            if prev { prev |
+                c.variables&.insert(it.var, prev, c.arena);
+            };
+            result
+        }
+        fn For(it) => {  // :SLOW
+            collection := c.eval(it.list);
+            @assert(collection&.is(.List), "For %", collection&.tag());
+            collection := collection.List;
+            out := @ref list(*KExpr, c.arena);
+            enumerate collection { i, item |
+                loop: HashMap(Str, Value) = init(c.arena);
+                loop&.insert("index", (Number = i + 1));
+                body := c.expr(If = (cond = it.cond, then = it.body, else = c.expr(Value = (String = ""))));
+                body := c.expr(With = (var = it.var, value = c.expr(Value = item[]), body = body));
+                body := c.expr(With = (var = "loop", value = c.expr(Value = (Map = loop.raw)), body = body));
+                out.push(body);
+            };
+            e := c.expr(Concat = out.items());
+            c.eval(e)
+        }
+        fn If(it) => {
+            cond := c.eval(it.cond);
+            @assert(cond&.is(.Number), "If cond %", cond&.tag());
+            e := @if(cond.Number != 0, it.then, it.else);
+            c.eval(e)
+        }
+        fn GetVar(it) => {
+            value := c.variables&.get(it);
+            value || Value.Undefined
+        }
+        fn IsDefined(it) => {
+            it := c.eval(it[]);
+            (Number = int(!it&.is(.Undefined)))
+        }
+        fn Binary(it) => {
+            lhs := c.eval(it.lhs);
+            @match(it.op) {
+                fn Index() => {
+                    obj := lhs;
+                    index := c.eval(it.rhs);
+                    @match(obj) {
+                        fn List(it) => {
+                            @assert_eq(index&.tag(), .Number, "tried to index list");
+                            list := obj.List;
+                            @assert(index.Number.ult(list.len), "index oob %/%", index.Number, list.len);
+                            list[index.Number]
+                        }
+                        fn Map(it) => {
+                            @assert_eq(index&.tag(), .String, "tried to index map");
+                            value := it&.get(index.String);
+                            value || Value.Undefined
+                        }
+                        @default => @panic("% is not indexable", obj&.tag());
+                    }
+                }
+                fn Equal() => {
+                    rhs := c.eval(it.rhs);
+                    @assert(!lhs&.is(.Undefined) && !rhs&.is(.Undefined), "undefined ==");
+                    value := equal(lhs&, rhs&);
+                    (Number = int(value))
+                }
+                fn And() => {
+                    @assert(lhs&.is(.Number), "and %", lhs&);
+                    @if(lhs.Number == 0) return(lhs);
+                    c.eval(it.rhs)
+                }
+                fn Plus() => {
+                    rhs := c.eval(it.rhs);
+                    @assert_eq(lhs&.tag(), rhs&.tag(), "polymorphic plus");
+                    @match(lhs) {
+                        fn Number(lhs) => (Number = lhs + rhs.Number);
+                        fn String(lhs) => (String = items(@format("%%", lhs, rhs.String) c.arena));
+                        @default => @panic("TODO: % + %", lhs&, rhs&);
+                    }
+                }
+                fn In() => {
+                    index := lhs;
+                    obj := c.eval(it.rhs);
+                    
+                    value := @match(obj) {
+                        fn List(it) => it.contains(fn(it) => equal(it, index&));
+                        fn Map(it) => {
+                            @assert_eq(index&.tag(), .String, "tried to index map");
+                            it&.get(index.String).is_some()
+                        }
+                        @default => @panic("% is not indexable", obj&.tag());
+                    };
+                    (Number = int(value))
+                }
             }
-            it[]
-        };
-        @default => @panic("TODO: eval(%)", e.tag());
+        }
+        fn Method(it) => {
+            @assert(it.call.is(.Call), "method call %", it.call.tag());
+            @assert(it.call.Call.callee.is(.GetVar), "method var");
+            method_name := it.call.Call.callee.GetVar;
+            receiver := c.eval(it.receiver);
+            @assert(method_name == "upper" && receiver&.is(.String), "method upper");
+            s := receiver.String;
+            out := c.arena.alloc_init(u8, s.len, fn(i) => s[i].ascii_to_upper());
+            (String = out)
+        }
+        fn Filter(it) => (String = "/*TODO:filter*/");
+        fn Call(it) => (String = "/*TODO:call*/");
+    }
+}
+
+fn equal(lhs: *Value, rhs: *Value) bool = {
+    @assert(!lhs.is(.Undefined) && !rhs.is(.Undefined), "undefined ==");
+    @if(lhs.tag() != rhs.tag()) return(false);
+    @match(lhs) {
+        fn String(lhs) => lhs[] == rhs.String;
+        fn Number(lhs) => lhs[] == rhs.Number;
+        @default => @panic("TODO: eq %", lhs.tag());
     }
 }
 
@@ -122,13 +232,20 @@ fn eat_until_ending_tag(c: *Ctx, src: Str, parts: []*KExpr) void = {
     parts := parts.rest(1);
 
     start_tag, start_expr_i := eat_tag(src);
-    single_tags := @const_slice("else", "include");
-    if single_tags.contains(start_tag) {
-        root[] = c.expr(Value = (String = @tfmt("KW(%)\n", src)));
-        return();
+    @switch(start_tag) {
+        @case("include") => {
+            src := src.rest(start_expr_i);
+            path := c.parse_expr(src&);
+            root[] = c.expr(Include = (path = path));
+            return();
+        }
+        @case("else") => {
+            root[] = c.expr(Value = (String = "/*TODO:else*/"));
+            return();
+        }
+        @default => ();
     };
 
-    c.depth += 1;
     enumerate parts { i, it |
         it := it[];
         @if_let(it) fn Code(code) => if code.kind == .Tag {
@@ -141,8 +258,7 @@ fn eat_until_ending_tag(c: *Ctx, src: Str, parts: []*KExpr) void = {
                 each old_body { it |
                     it[] = c.expr(Value = (String = ""));
                 };
-                root[] = c.expr(Tag = (tag = start_tag, src = src.rest(start_expr_i), body = body, depth = c.depth));
-                c.depth -= 1;
+                root[] = c.expr(Tag = (tag = start_tag, src = src.rest(start_expr_i), body = body));
                 return();
             } else {
                 c.eat_until_ending_tag(code.src, parts.rest(i));
@@ -155,7 +271,6 @@ fn eat_until_ending_tag(c: *Ctx, src: Str, parts: []*KExpr) void = {
 fn parse_tag(c: *Ctx, it: *get_variant_type(KExpr, .Tag)) Ty(*KExpr, *KExpr) = {
     body := c.expr(Concat = it.body);
     src := it.src;
-    @println("TAG[%][%]", it.tag, src);
     e := @switch(it.tag) {
         @case("if") => {
             cond := c.parse_expr(src&);
@@ -215,7 +330,6 @@ fn parse_tag(c: *Ctx, it: *get_variant_type(KExpr, .Tag)) Ty(*KExpr, *KExpr) = {
 }
 
 fn parse_expr(c: *Ctx, src: *Str) *KExpr = {
-    @println("PARSE(%)", src[]);
     t := token(src);
     e := @match(t.type) {
         fn Ident() => c.expr(GetVar = t.s);
@@ -231,7 +345,6 @@ fn parse_expr(c: *Ctx, src: *Str) *KExpr = {
         @default => @panic("TODO: parse % %", t.type, t.s);
     };
     loop {
-        @println("LOOP(%)", src[]);
         @if(src.len == 0) return(e);
         @switch(src[0]) {
             @case("=".ascii()) => {
@@ -295,8 +408,7 @@ fn parse_expr(c: *Ctx, src: *Str) *KExpr = {
                 @if(src[].starts_with("in")) => {
                     _ := token(src);
                     list := c.parse_expr(src);
-                    e = c.expr(Binary = (op = .Index, lhs = list, rhs = e));
-                    e = c.expr(IsDefined = e);
+                    e = c.expr(Binary = (op = .In, lhs = e, rhs = list));
                 };
                 @else => return(e);
             };
@@ -310,19 +422,6 @@ fn parse_expr(c: *Ctx, src: *Str) *KExpr = {
             @default => return(e);
         };
     }
-}
-
-fn is_ending_tag(start_tag: Str, check: *KExpr) bool = {
-    code := @match(check) {
-        fn Code(it) => it;
-        @default => return(false);
-    };
-    @if(code.kind != .Tag || code.src.len < 3) return(false);
-    src := code.src;
-    tag, i := eat_tag(src);
-    @if(!tag.starts_with("end")) return(false);
-    tag = tag.rest(3);
-    tag == start_tag
 }
 
 eat_tag :: fn(src: Str) Ty(Str, i64) = {
@@ -344,15 +443,15 @@ eat_ident :: fn(src: Str) Ty(Str, i64) = {
     (src.slice(start, i), i)
 }
 
-fn parse_top_level(c: *Ctx, src: Str) *KExpr = {
-    parts := @ref list(*KExpr, c.arena);
+fn parse_top_level(src: Str, a: Alloc) []get_variant_type(KExpr, .Code) = {
+    parts := @ref list(get_variant_type(KExpr, .Code), a);
     i := 0;
     start_string := 0;
     while => i < src.len {
         paired_code("{%", "%}", .Tag);
         paired_code("{{", "}}", .Expr);
         if paired("{#", "#}") { string, _ |
-            parts.push(c.expr(Value = (RealString = string)));
+            parts.push(src = string, kind = .String);
         };
         
         paired :: fn(a: Str, b: Str) ?Ty(Str, Str) => {
@@ -373,14 +472,14 @@ fn parse_top_level(c: *Ctx, src: Str) *KExpr = {
         };
         
         paired_code :: fn(a: Str, b: Str, kind: CodeKind) => if paired(a, b) { string, code |
-            parts.push(c.expr(Value = (RealString = string)));
-            parts.push(c.expr(Code = (src = code, kind = kind)));
+            parts.push(src = string, kind = .String);
+            parts.push(src = code, kind = kind);
         };
         i += 1;
     };
     string := src.slice(start_string, i);
-    parts.push(c.expr(Value = (RealString = string)));
-    c.expr(Concat = parts.items())
+    parts.push(src = string, kind = .String);
+    parts.items()
 }
 
 token :: fn(src: *Str) Tok = {
@@ -393,7 +492,6 @@ token :: fn(src: *Str) Tok = {
 };
 
 eat_token :: fn(src: Str) Ty(Tok, Str) = {
-    println(src);
     i := 0;
     while => i < src.len && src[i].is_ascii_whitespace() {
         i += 1;
@@ -436,5 +534,113 @@ Tok :: @struct {
 fn expr(c: *Ctx, e: KExpr) *KExpr = 
     c.arena.boxed(KExpr, e);
 
-#use("@/lib/sys/fs.fr");
+load_json :: fn(src: Str, a: Alloc) Value = {
+    #use("@/lib/encoding/json.fr");
+    json: JsonParser = new_json(src, a);
+    part := json&.next().unwrap();
+    value := load(json&, part, a);
+    part := json&.next().unwrap();
+    @assert(part&.is(.Eof), "more after json");
+    return value;
+    
+    load :: fn(json: *JsonParser, part: JsonPart, a: Alloc) Value = {
+        @match(part) {
+            fn StartDict() => {
+                out: HashMap(Str, Value) = init(a);
+                part := json.next().unwrap();
+                while => !part&.is(.End) {
+                    @assert(part&.is(.Key), "expected key in json");
+                    key := part.Key;
+                    part = json.next().unwrap();
+                    value := load(json, part, a);
+                    out&.insert(key, value);
+                    part = json.next().unwrap();
+                };
+                (Map = out.raw)
+            }
+            fn StartList() => {
+                out := Value.list(a);
+                part := json.next().unwrap();
+                while => !part&.is(.End) {
+                    value := load(json, part, a);
+                    out&.push(value);
+                    part = json.next().unwrap();
+                };
+                (List = out.as_raw())
+            }
+            fn Null() => (.Undefined);
+            fn Float(it) => (Number = it.int());
+            fn BoolValue(it) => (Number = it.int());
+            fn StringValue(it) => return(String = it);
+            @default => @panic("invalid json %", part&.tag());
+        }
+    };
+}
+
+fn display(value: *Value, out: *List(u8)) void = {
+    @match(value) {
+        fn Number(it) => @fmt(out, "%", it[]);
+        fn String(it) => @fmt(out, "\"%\"", it[]);
+        fn Undefined() => @fmt(out, "undefined");
+        fn Macro() => @fmt(out, "<macro>");
+        fn List(it) => {
+            @fmt(out, "[");
+            each it { it |
+                display(it, out);
+                @fmt(out, ", ");
+            };
+            @fmt(out, "]");
+        }
+        fn Map(it) => {
+            @fmt(out, "{");
+            each it { key, it |
+                @fmt(out, "%: ", key);
+                display(it, out);
+                @fmt(out, ", ");
+            };
+            @fmt(out, "}");
+        }
+    }
+}
+
 #use("@/lib/collections/map.fr");
+
+main :: fn() void = {
+    a := temp();
+    start := "input.jinja";
+    sources: HashMap(Str, Str) = init(a);
+    sources&.insert(start, SRC);
+    arg := load_json(ARG, a);
+    c: Ctx = (
+        variables = init(),
+        arena = a,
+        sources = sources.raw,
+    ); c := c&;
+    arg := c.expr(Value = arg);
+    e := c.expr(Value = (String = start));
+    e := c.expr(Include = (path = e));
+    e := c.expr(With = (var = "args", value = arg, body = e));
+    s := c.eval(e);
+    @assert(s&.is(.String));
+    @assert_eq(s.String, EXPECT);
+    @print("[ok] SRC(ARG) == EXPECT\n");
+}
+
+// example input
+ARG :: """{
+    "foo": [2, 3], 
+    "bar": { "N": 3 },
+    "t": true,
+}""";
+SRC :: """
+1
+{% for it in args.foo if (args.foo[1] == 3) and (loop.index is defined) and args.t %}
+{{ it }}
+{% endfor %}
+{% with two=2 %}
+{% if (two in args.foo) and (("n".upper()) in args.bar) and (args["f" + "oo"][0] is defined) %}
+{{ args.bar.N + 1 }}
+{% endif %}
+{% endwith %}
+""";
+EXPECT :: "\n1\n\n2\n\n3\n\n\n\n4\n\n\n";

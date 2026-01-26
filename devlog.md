@@ -1,4 +1,10 @@
 
+## (Jan 26)
+
+- jinja: parse+eval. can run very simple templates. 
+  don't actually need it for tf-psa-crypto, just stripping the tags is enough to compile for curl,
+  but i still like it as an example program. 
+
 ## (Jan 25)
 
 - spent far too long doing trial and error to do ar on macos-arm and linux-amd. 
@@ -10,6 +16,10 @@
 - external/curl: for mbedtls (use one Ctx+Module and just reset macros+vars each compilation unit)
   instead of (each c file in its own Module + .o file, then ar them together, then link that with curl.o)
   - (4.015 s ±  0.036 s) -> (3.486 s ±  0.047 s)
+- the rustc_codegen thing might actually be doable. 
+  - i can compile the trivial `fn main() { return 42; }` from rust's MIR to my IR to .o file that it links. 
+  - reminded me that language servers are great for learning someone else's program, should probably have one of those for my language. 
+- started doing my own jinja thing for tf-psa-crypto. perhaps overkill. 
 
 ## (Jan 24)
 

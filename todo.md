@@ -330,7 +330,6 @@ cset	w0, eq
   - examples/toy
   - tests/external
     - raylib
-    - curl
     - wasm_spec
     - todo/musl
     - todo/coremark

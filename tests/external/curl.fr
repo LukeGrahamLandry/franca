@@ -1,30 +1,17 @@
 // #foreign("this example requires system headers");
 // TODO: macos (need to fix config_h and deal with system includes)
-// TODO: enable_tls works but you have to manually get the generated files from a real mbedtls build (which clearly is not acceptable)
-//       psa_crypto_driver_wrappers psa_crypto_driver_wrappers_no_static
 // TODO: the decompression stuff?
 // TODO: run their tests
 //       - seperate out the ones that don't need network to play nice with my sandboxing
-//       - move group(_) to deps.fr for prefetch
-// TODO: autotest
 // TODO: fetch.fr should use the libcurl i compile here instead of exec system installed curl. bootstrapping problem tho. 
 // TODO: this is far too much build-system-ish code for this :(
 // TODO: rv64 is untested
 
 main :: fn() void = {
-    mbedtls := group(
-        url = "https://github.com/Mbed-TLS/mbedtls/archive/7294fc1c1a3c5e0641fdc7dcdc7c9d9c716a4c4e.tar.gz", 
-        legacy = "6d4825f0c9c6d648da75555c6822795f127c478e3b63a8e217c4dd3c24e52ea6",
-        discard = @const_slice("cmake", "scripts"),
-    );
-    tfpsa := group(
-        url = "https://github.com/Mbed-TLS/TF-PSA-Crypto/archive/f7ad6b6931e179c2e40b3d04f3e6d207a7e3c36e.tar.gz", 
-        legacy = "7de6f5e278362ec03c064c1a58db190eb5baae098917ecbcf31b6eaa9e662966",
-        discard = @const_slice("cmake", "scripts"),
-    );
-    
-    enable_tls := false;  // TODO: enable by default once i can generate the files myself
-    mbedtls_ar := "target/curl/mbedtls.a";
+    enable_tls := true;
+    mbedtls := @if(enable_tls, Foreign'mbedtls(), "");
+    tfpsa := @if(enable_tls, Foreign'tfpsa(), "");
+    root := Foreign'curl();
     
     c := @ref zeroed(C.Compile.Ctx);
     m := @ref zeroed(Qbe.Module);
@@ -41,27 +28,22 @@ main :: fn() void = {
     
     if enable_tls {
         start := timestamp();
-
-        // TODO: this is generated TODO TODO TODO TODO TODO
-        HACK := read_entire_file_or_crash(temp(), "/Users/luke/Downloads/mbedtls-7294fc1c1a3c5e0641fdc7dcdc7c9d9c716a4c4e/tf-psa-crypto/core/psa_crypto_driver_wrappers.h");
-        write_entire_file_or_crash(@tfmt("%/core/psa_crypto_driver_wrappers.h", tfpsa), HACK);
-        HACK := read_entire_file_or_crash(temp(), "/Users/luke/Downloads/mbedtls-7294fc1c1a3c5e0641fdc7dcdc7c9d9c716a4c4e/tf-psa-crypto/core/psa_crypto_driver_wrappers_no_static.c");
-        write_entire_file_or_crash(@tfmt("%/core/psa_crypto_driver_wrappers_no_static.c", tfpsa), HACK);
-        
-        // these can be empty
-        write_entire_file_or_crash(@tfmt("%/library/mbedtls_config_check_before.h", mbedtls), "");
-        write_entire_file_or_crash(@tfmt("%/library/mbedtls_config_check_final.h", mbedtls), "");
-        write_entire_file_or_crash(@tfmt("%/library/mbedtls_config_check_user.h", mbedtls), "");
-        write_entire_file_or_crash(@tfmt("%/library/tf_psa_crypto_config_check_before.h", mbedtls), "");
-        write_entire_file_or_crash(@tfmt("%/library/tf_psa_crypto_config_check_user.h", mbedtls), "");
-        write_entire_file_or_crash(@tfmt("%/library/tf_psa_crypto_config_check_final.h", mbedtls), "");
-        
+        strip_driver_templates(tfpsa);
+        empty_files := @slice(
+            "mbedtls_config_check_before", "mbedtls_config_check_final", "mbedtls_config_check_user",
+            "tf_psa_crypto_config_check_before", "tf_psa_crypto_config_check_final", "tf_psa_crypto_config_check_user", 
+        );
+        for empty_files { name |
+            write_entire_file_or_crash(@tfmt("%/library/%.h", mbedtls, name), "/* @generated */");
+        };
         write_entire_file_or_crash(@tfmt("%/library/userconfigfile.h", mbedtls), """
+            /* @generated */
             #undef MBEDTLS_DEBUG_C
             #undef MBEDTLS_SELF_TEST
             #undef MBEDTLS_AESNI_C   // amd: needs asm/intrinsics
         """);
         write_entire_file_or_crash(@tfmt("%/library/error.c", mbedtls), """
+            /* @generated */
             void mbedtls_strerror(int ret, char *buf, long buflen) {
                 if (buflen > 0) buf[0] = 0;
             }
@@ -113,12 +95,6 @@ main :: fn() void = {
         };
         @println("mbedtls: %ms", timestamp() - start);
     };
-    
-    root := group(
-        url = "https://github.com/curl/curl/archive/3e3d526c4ce4fea3c3a1b46bf55cc1b64fa10c5d.tar.gz", 
-        legacy = "b08d770e9dd31729c0287edd8b0b2184376603f9dbdad033eeb93bc2bc177a08",
-        discard = @const_slice("CMake", "m4", "projects", "scripts", ".github"),
-    );
     
     src_files := collect_with_extension(@tfmt("%/src", root), ".c").unwrap();
     toolx := collect_with_extension(@tfmt("%/src/toolx", root), ".c").unwrap();
@@ -179,6 +155,18 @@ main :: fn() void = {
     @println("curl: %ms", timestamp() - start);
     @println("enable_tls = %, bin = %", enable_tls, out_path);
     
+    ;{  // make sure the exe loads successfully (no undefined imports)
+        ok, o, e := exec_and_catch(out_path, @slice("--help"), temp());
+        @assert(ok && o.contains("Usage: curl [options...] <url>"), "failed to run my curl --help\n%%", o.items(), e.items());
+        @print("[ok] --help\n");
+    };
+    
+    if !file_exists(Foreign.PATH.bin_sh) { 
+        // :HACK the point of the sandboxing is kinda defeated if i have to change the programs to accommodate it 
+        println("SKIP: built successfully but looks like running in a sandbox so not going to try network");
+        return();
+    };
+    
     paths := @slice("http://franca.lukegrahamlandry.ca/", "https://franca.lukegrahamlandry.ca/");
     if !enable_tls {
         paths = paths.slice(0, 1);
@@ -186,8 +174,55 @@ main :: fn() void = {
     for paths { it |
         ok, o, e := exec_and_catch(out_path, @slice("-f", it), temp());
         @assert(ok && o.contains("<html"), "failed to run my curl\n%%", o.items(), e.items());
+        @print("[ok] fetched (%) = % bytes\n", it, o.len);
     };
 }
+
+// curl uses mbedtls which uses tf-psa-crypto which uses jinja to generate c code.
+// i want to compile curl from source without depending on a python interpreter. 
+// the code being added to the template is only for "p256-m" and tests, both of which are optional. 
+// so it's sufficent to just strip out the jinja tags to get the default scaffolding code. 
+// in the end these files have functions like psa_driver_wrapper_FOO that call psa_FOO_builtin. 
+strip_driver_templates :: fn(tfpsa: Str) void = {
+    #use("@/examples/minijinja.fr");  // only 57 lines of this: [eat_tag, eat_ident, parse_top_level]
+    dir := @tfmt("%/scripts/data_files/driver_templates", tfpsa);
+    gen := @slice("psa_crypto_driver_wrappers.h", "psa_crypto_driver_wrappers_no_static.c");
+    out := @ref u8.list(102000, temp());
+    tags := @ref Str.list(temp());
+    for gen { name |
+        @fmt(out, """
+            // @generated %
+            #if defined(PSA_CRYPTO_ACCELERATOR_DRIVER_PRESENT) || MBEDTLS_PSA_P256M_DRIVER_ENABLED || defined(PSA_CRYPTO_DRIVER_TEST)
+            #error "[franca] see tests/external/curl.fr strip_driver_templates"
+            #endif
+        """, name);
+        src := read_entire_file_or_crash(temp(), @tfmt("%/%.jinja", dir, name));
+        parts := parse_top_level(src, temp());
+        depth := 0;
+        for parts { it |
+            @match(it.kind) {
+                fn Tag() => {
+                    tag, _ := eat_tag(it.src);
+                    standalone := tag == "include" || tag == "else";
+                    @if(!standalone)
+                    if tag.starts_with("end") {
+                        tags.pop();
+                    } else {
+                        tags.push(tag);
+                    };
+                }
+                fn String() => if tags.len == 0 || tags[tags.len - 1].starts_with("with") {
+                    out.push_all(it.src);
+                }
+                @default => ();
+            };
+        };
+        dest := @tfmt("%/core/%", tfpsa, name);
+        write_entire_file_or_crash(dest, out.items());
+        out.clear();
+        @debug_assert_eq(tags.len, 0);
+    };
+};
 
 prelude :: """
 #define __unix__
@@ -229,7 +264,6 @@ typedef long __PTRDIFF_TYPE__;
 // TODO
 #define __builtin_constant_p(_) 0
 """;
-
 
 // TODO: use it through import_module
 C :: import("@/examples/import_c/lib.fr");
