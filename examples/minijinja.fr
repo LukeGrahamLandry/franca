@@ -33,7 +33,7 @@ main :: fn() void = {
 KExpr :: @rec @tagged(
     If: @struct(cond: *KExpr, then: *KExpr, else: *KExpr),
     With: @struct(var: Str, value: *KExpr, body: *KExpr),
-    Call: @struct(callee: *KExpr, args: []Arg, method: bool),
+    Call: @struct(callee: *KExpr, args: []Arg),
     Binary: @struct(op: Binary, lhs: *KExpr, rhs: *KExpr),
     Include: @struct(path: Str),
     For: @struct(var: Str, list: *KExpr, cond: *KExpr, body: *KExpr),
@@ -43,7 +43,9 @@ KExpr :: @rec @tagged(
     IsDefined: *KExpr,
     GetVar: Str,
     Code: @struct(src: Str, kind: CodeKind),
+    DeclareMacro: @struct(call: *KExpr, body: *KExpr),
     Tag: @struct(tag: Str, src: Str, body: []*KExpr, depth: i64 /*temporary*/),
+    Method: @struct(receiver: *KExpr, call: *KExpr),
 );
 Arg :: @struct(name: Str, value: *KExpr);
 ::tagged_derive(Value);  // HACK: @rec
@@ -69,24 +71,20 @@ Ctx :: @struct {
 fn eval(c: *Ctx, e: *KExpr) Value = {
     @match(e) {
         fn Code(it) => {
+            s := it.src;
             e := @match(it.kind) {
                 fn Text() => c.parse_top_level(it.src);
-                fn Expr() => return(String = @tfmt("$%$\n", it.src));
+                fn Expr() => {
+                    _ := c.parse_expr(s&);
+                    @assert_eq(s.len, 0, "Expr didn't consume all: %", s);
+                    return(String = @tfmt("$%$\n", it.src))
+                }
                 fn Tag() => @panic("unreachable: tag wasn't consumed: %", it.src);
             };
             c.eval(e)
         };
         fn Tag(it) => {
-            body := c.expr(Concat = it.body);
-            @switch(it.tag) {
-                @case("if") => ();
-                @case("for") => ();
-                @case("macro") => ();
-                @case("filter") => ();
-                @case("with") => ();
-                @default => @panic("invalid tag: %", it.tag);
-            };
-        
+            ee, body := c.parse_tag(it);
             e := c.arena.alloc_uninit(*KExpr, 3);
             pad := temp().alloc_init(u8, it.depth, fn(_) => " ".ascii());
             e[0] = c.expr(Value = (String = @tfmt("%begin % %\n", pad, it.tag, it.src)));
@@ -154,6 +152,166 @@ fn eat_until_ending_tag(c: *Ctx, src: Str, parts: []*KExpr) void = {
     @panic("unclosed tag %", start_tag);
 }
 
+fn parse_tag(c: *Ctx, it: *get_variant_type(KExpr, .Tag)) Ty(*KExpr, *KExpr) = {
+    body := c.expr(Concat = it.body);
+    src := it.src;
+    @println("TAG[%][%]", it.tag, src);
+    e := @switch(it.tag) {
+        @case("if") => {
+            cond := c.parse_expr(src&);
+            c.expr(If = (
+                cond = cond, 
+                then = body, 
+                else = c.expr(Concat = empty()),
+            ))
+        };
+        @case("for") => {
+            name := token(src&);
+            @assert_eq(name.type, .Ident, "for var");
+            in := token(src&);
+            @assert(in.type == .Ident && in.s == "in", "expected 'in' after 'for %'", name.s);
+            list := c.parse_expr(src&);
+            cond := @if(src.starts_with("if"), {
+                _ := token(src&);
+                c.parse_expr(src&)
+            }, c.expr(Value = (Number = 1)));
+            c.expr(For = (
+                var = name.s,
+                cond = cond, 
+                list = list, 
+                body = body,
+            ))
+        };
+        @case("macro") => {
+            call := c.parse_expr(src&);
+            c.expr(DeclareMacro = (
+                call = call,
+                body = body,
+            ))
+        };
+        @case("filter") => {
+            c.expr(Filter = (
+                call = c.parse_expr(src&), 
+                body = body,
+            ))
+        };
+        @case("with") => {
+            name := token(src&);
+            @assert_eq(name.type, .Ident, "with var");
+            in := token(src&);
+            @assert(in.type == .Punct && in.s == "=", "expected '=' after 'with %'", name.s);
+            c.expr(With = (
+                var = name.s,
+                value = c.parse_expr(src&),
+                body = body,
+            ))
+        };
+        @default => @panic("invalid tag: %", it.tag);
+    };
+    t := token(src&);
+    @assert(t.s == "-" || t.s == "+" || t.s == "", "tag not fully consumed: % %", t.s, src);
+    @assert(src.len == 0, "tag not fully consumed: % %", t.s, src);
+    (e, body)
+}
+
+fn parse_expr(c: *Ctx, src: *Str) *KExpr = {
+    @println("PARSE(%)", src[]);
+    t := token(src);
+    e := @match(t.type) {
+        fn Ident() => c.expr(GetVar = t.s);
+        fn Int() => c.expr(Value = (Number = t.s.parse_int()));
+        fn String() => c.expr(Value = (String = t.s));
+        fn Punct() => {
+            @assert_eq(t.s, "(", "expected prefix operator");
+            e := c.parse_expr(src);
+            t := token(src);
+            @assert_eq(t.s, ")", "closing");
+            e
+        }
+        @default => @panic("TODO: parse % %", t.type, t.s);
+    };
+    loop {
+        @println("LOOP(%)", src[]);
+        @if(src.len == 0) return(e);
+        @switch(src[0]) {
+            @case("=".ascii()) => {
+                @if(!src[].starts_with("==")) return(e);
+                src[] = src[].rest(2);
+                e = c.expr(Binary = (op = .Equal, lhs = e, rhs = c.parse_expr(src)));
+            };
+            @case("+".ascii()) => {
+                _ := token(src);
+                e = c.expr(Binary = (op = .Plus, lhs = e, rhs = c.parse_expr(src)));
+            };
+            @case("|".ascii()) => {
+                _ := token(src);
+                e = c.expr(Filter = (call = c.parse_expr(src), body = e));
+            };
+            @case("[".ascii()) => {
+                _ := token(src);
+                index := c.parse_expr(src);
+                t := token(src);
+                @assert_eq(t.s, "]", "close index");
+                e = c.expr(Binary = (op = .Index, lhs = e, rhs = index));
+            };
+            @case(".".ascii()) => {
+                _ := token(src);
+                old_src := src[];
+                t := token(src);
+                @assert_eq(t.type, .Ident, "field name");
+                if src.len > 0 && src[0] == "(".ascii() {
+                    call := c.parse_expr(old_src&);
+                    src[] = old_src;
+                    e = c.expr(Method = (receiver = e, call = call));
+                } else {
+                    e = c.expr(Binary = (op = .Index, lhs = e, rhs = c.expr(Value = (String = t.s))));
+                }
+            };
+            @case("(".ascii()) => {
+                _ := token(src);
+                args := @ref Arg.list(c.arena);
+                while => !src[].starts_with(")") {
+                    name := c.parse_expr(src);
+                    if name.tag() == .GetVar && src[0] == "=".ascii() {
+                        _ := token(src);
+                        value := c.parse_expr(src);
+                        args.push(name = name.GetVar, value = value);
+                    } else{
+                        args.push(name = "", value = name);
+                    };
+                    if src[0] == ",".ascii() {
+                        _ := token(src);
+                    };
+                };
+                _ := token(src);
+                e = c.expr(Call = (callee = e, args = args.items()));
+            };
+            @case("i".ascii()) => @if_else {
+                @if(src[].starts_with("is defined")) => {
+                    _ := token(src);
+                    _ := token(src);
+                    e = c.expr(IsDefined = e);
+                };
+                @if(src[].starts_with("in")) => {
+                    _ := token(src);
+                    list := c.parse_expr(src);
+                    e = c.expr(Binary = (op = .Index, lhs = list, rhs = e));
+                    e = c.expr(IsDefined = e);
+                };
+                @else => return(e);
+            };
+            @case("a".ascii()) => {
+                if !src[].starts_with("and") {
+                    return e;
+                };
+                _ := token(src);
+                e = c.expr(Binary = (op = .And, lhs = e, rhs = c.parse_expr(src)));
+            };
+            @default => return(e);
+        };
+    }
+}
+
 fn is_ending_tag(start_tag: Str, check: *KExpr) bool = {
     code := @match(check) {
         fn Code(it) => it;
@@ -168,8 +326,10 @@ fn is_ending_tag(start_tag: Str, check: *KExpr) bool = {
 }
 
 eat_tag :: fn(src: Str) Ty(Str, i64) = {
-    src := src.rest(int("-=".contains(src[0])));
-    eat_ident(src)
+    step := int("-=".contains(src[0]));
+    src := src.rest(step);
+    s, i := eat_ident(src);
+    (s, i + step)
 }
 
 eat_ident :: fn(src: Str) Ty(Str, i64) = {
@@ -178,7 +338,7 @@ eat_ident :: fn(src: Str) Ty(Str, i64) = {
         i += 1;
     };
     start := i;
-    while => i < src.len && !src[i].is_ascii_whitespace() {
+    while => i < src.len && (src[i].is_ascii_alpha() || src[i] == "_".ascii()) {
         i += 1;
     };
     (src.slice(start, i), i)
@@ -222,6 +382,56 @@ fn parse_top_level(c: *Ctx, src: Str) *KExpr = {
     parts.push(c.expr(Value = (RealString = string)));
     c.expr(Concat = parts.items())
 }
+
+token :: fn(src: *Str) Tok = {
+    t, s := eat_token(src[]);
+    while => s.len > 0 && s[0].is_ascii_whitespace() {
+        s = s.rest(1);
+    };
+    src[] = s;
+    t
+};
+
+eat_token :: fn(src: Str) Ty(Tok, Str) = {
+    println(src);
+    i := 0;
+    while => i < src.len && src[i].is_ascii_whitespace() {
+        i += 1;
+    };
+    if i == src.len {
+        return((type = .Eof, s = ""), "");
+    };
+    c := src[i];
+    if ".-+=()[],|".contains(c) {
+        i += 1;
+        return((type = .Punct, s = src.slice(i-1, i)), src.rest(i));
+    };
+    if c.is_ascii_alpha() || c == "_".ascii() {
+        s, i2 := eat_ident(src.rest(i));
+        return((type = .Ident, s = s), src.rest(i+i2));
+    };
+    if "\"'".contains(c) {
+        i += 1;
+        start := i;
+        while => i < src.len && src[i] != c {
+            i += 1;
+        };
+        return((type = .String, s = src.slice(start, i)), src.rest(i+1));
+    };
+    if c.is_ascii_digit() {
+        start := i;
+        while => i < src.len && src[i].is_ascii_digit() {
+            i += 1;
+        };
+        return((type = .Int, s = src.slice(start, i)), src.rest(i));
+    };
+    @panic("TODO: unexpected char %", src.slice(i, i+1));
+}
+
+Tok :: @struct {
+    type: @enum(Ident, String, Punct, Int, Equals, Eof);
+    s: Str;
+};
 
 fn expr(c: *Ctx, e: KExpr) *KExpr = 
     c.arena.boxed(KExpr, e);
