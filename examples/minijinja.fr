@@ -1,0 +1,230 @@
+// this is an interpreter for a subset of the jinja templating language. 
+// jinja spec: https://jinja.palletsprojects.com/en/stable/templates/
+// i want to compile curl from source without depending on a python interpreter.
+// curl uses mbedtls which uses tf-psa-crypto which uses jinja to generate c code.
+// my goal for this program is to be shorter than the real jinja's uv.lock file (1244 lines). 
+// i expect this will be :SLOW but i enjoy experimenting with different styles.
+
+main :: fn() void = {
+    paths := @slice(
+        "/Users/luke/Downloads/mbedtls-7294fc1c1a3c5e0641fdc7dcdc7c9d9c716a4c4e/tf-psa-crypto/scripts/data_files/driver_templates/psa_crypto_driver_wrappers.h.jinja",
+        "/Users/luke/Downloads/mbedtls-7294fc1c1a3c5e0641fdc7dcdc7c9d9c716a4c4e/tf-psa-crypto/scripts/data_files/driver_templates/psa_crypto_driver_wrappers_no_static.c.jinja",
+        "/Users/luke/Downloads/mbedtls-7294fc1c1a3c5e0641fdc7dcdc7c9d9c716a4c4e/tf-psa-crypto/scripts/data_files/driver_templates/OS-template-opaque.jinja",
+        "/Users/luke/Downloads/mbedtls-7294fc1c1a3c5e0641fdc7dcdc7c9d9c716a4c4e/tf-psa-crypto/scripts/data_files/driver_templates/OS-template-transparent.jinja",
+    );
+    a: Arena.Allocator = init(general_allocator(), 4096);
+    for paths { path |
+        c: Ctx = (
+            variables = init(),
+            arena = a&.borrow(),
+        );
+        println(path);
+        src := read_entire_file_or_crash(temp(), path);
+        e := c&.expr(Code = (src = src, kind = .Text));
+        s := c&.eval(e);
+        @assert(s&.is(.String));
+        println(s.String);
+        a&.reset_retaining_capacity();
+    };
+    a&.deinit();
+}
+
+::tagged_derive(KExpr);  // HACK: @rec
+KExpr :: @rec @tagged(
+    If: @struct(cond: *KExpr, then: *KExpr, else: *KExpr),
+    With: @struct(var: Str, value: *KExpr, body: *KExpr),
+    Call: @struct(callee: *KExpr, args: []Arg, method: bool),
+    Binary: @struct(op: Binary, lhs: *KExpr, rhs: *KExpr),
+    Include: @struct(path: Str),
+    For: @struct(var: Str, list: *KExpr, cond: *KExpr, body: *KExpr),
+    Filter: @struct(call: *KExpr, body: *KExpr),
+    Concat: []*KExpr,
+    Value: Value,
+    IsDefined: *KExpr,
+    GetVar: Str,
+    Code: @struct(src: Str, kind: CodeKind),
+    Tag: @struct(tag: Str, src: Str, body: []*KExpr, depth: i64 /*temporary*/),
+);
+Arg :: @struct(name: Str, value: *KExpr);
+::tagged_derive(Value);  // HACK: @rec
+Value :: @rec @tagged(
+    String: Str, 
+    Number: i64, 
+    Undefined, 
+    Map: RawHashMap(Str, Value),
+    List: RawList(Value),
+    Macro: *Macro, 
+    RealString: Str, /*temporary for debugging. eventually just String*/
+);
+Binary :: @enum(Plus, And, Index, Equal);
+Macro :: @struct(args: Arg, body: *KExpr);
+CodeKind :: @enum(Text, Tag, Expr);
+
+Ctx :: @struct {
+    variables: RawHashMap(Str, Value);
+    arena: Alloc;
+    depth := 0;
+};
+
+fn eval(c: *Ctx, e: *KExpr) Value = {
+    @match(e) {
+        fn Code(it) => {
+            e := @match(it.kind) {
+                fn Text() => c.parse_top_level(it.src);
+                fn Expr() => return(String = @tfmt("$%$\n", it.src));
+                fn Tag() => @panic("unreachable: tag wasn't consumed: %", it.src);
+            };
+            c.eval(e)
+        };
+        fn Tag(it) => {
+            body := c.expr(Concat = it.body);
+            @switch(it.tag) {
+                @case("if") => ();
+                @case("for") => ();
+                @case("macro") => ();
+                @case("filter") => ();
+                @case("with") => ();
+                @default => @panic("invalid tag: %", it.tag);
+            };
+        
+            e := c.arena.alloc_uninit(*KExpr, 3);
+            pad := temp().alloc_init(u8, it.depth, fn(_) => " ".ascii());
+            e[0] = c.expr(Value = (String = @tfmt("%begin % %\n", pad, it.tag, it.src)));
+            e[1] = body;
+            e[2] = c.expr(Value = (String = @tfmt("%end %\n", pad, it.tag)));
+            e := c.expr(Concat = e);
+            c.eval(e)
+        }
+        fn Concat(parts) => {
+            parts := parts.items().shallow_copy(c.arena);
+            out := @ref u8.list(c.arena);
+            enumerate parts { i, it |
+                @if_let(it[]) fn Code(code) => if code.kind == .Tag {
+                    eat_until_ending_tag(c, code.src, parts.rest(i));
+                };
+                
+                it := c.eval(it[]);
+                @assert(it&.is(.String));
+                out.push_all(it.String);
+            };
+            (String = out.items())
+        };
+        fn Value(it) => {
+            @if_let(it) fn RealString(s) => {
+                return(String = @tfmt("S(%)\n", s.len));
+            }
+            it[]
+        };
+        @default => @panic("TODO: eval(%)", e.tag());
+    }
+}
+
+fn eat_until_ending_tag(c: *Ctx, src: Str, parts: []*KExpr) void = {
+    root := parts[0]&;
+    parts := parts.rest(1);
+
+    start_tag, start_expr_i := eat_tag(src);
+    single_tags := @const_slice("else", "include");
+    if single_tags.contains(start_tag) {
+        root[] = c.expr(Value = (String = @tfmt("KW(%)\n", src)));
+        return();
+    };
+
+    c.depth += 1;
+    enumerate parts { i, it |
+        it := it[];
+        @if_let(it) fn Code(code) => if code.kind == .Tag {
+            end_tag, _ := eat_tag(code.src);
+            if end_tag.starts_with("end") {
+                @assert_eq(end_tag.rest(3), start_tag, "malformed input: bad nesting");
+                old_body := parts.slice(0, i);
+                body := old_body.shallow_copy(c.arena);
+                old_body.len += 1;  // include ending tag in range to remove.
+                each old_body { it |
+                    it[] = c.expr(Value = (String = ""));
+                };
+                root[] = c.expr(Tag = (tag = start_tag, src = src.rest(start_expr_i), body = body, depth = c.depth));
+                c.depth -= 1;
+                return();
+            } else {
+                c.eat_until_ending_tag(code.src, parts.rest(i));
+            };
+        };
+    };
+    @panic("unclosed tag %", start_tag);
+}
+
+fn is_ending_tag(start_tag: Str, check: *KExpr) bool = {
+    code := @match(check) {
+        fn Code(it) => it;
+        @default => return(false);
+    };
+    @if(code.kind != .Tag || code.src.len < 3) return(false);
+    src := code.src;
+    tag, i := eat_tag(src);
+    @if(!tag.starts_with("end")) return(false);
+    tag = tag.rest(3);
+    tag == start_tag
+}
+
+eat_tag :: fn(src: Str) Ty(Str, i64) = {
+    src := src.rest(int("-=".contains(src[0])));
+    eat_ident(src)
+}
+
+eat_ident :: fn(src: Str) Ty(Str, i64) = {
+    i := 0;
+    while => i < src.len && src[i].is_ascii_whitespace() {
+        i += 1;
+    };
+    start := i;
+    while => i < src.len && !src[i].is_ascii_whitespace() {
+        i += 1;
+    };
+    (src.slice(start, i), i)
+}
+
+fn parse_top_level(c: *Ctx, src: Str) *KExpr = {
+    parts := @ref list(*KExpr, c.arena);
+    i := 0;
+    start_string := 0;
+    while => i < src.len {
+        paired_code("{%", "%}", .Tag);
+        paired_code("{{", "}}", .Expr);
+        if paired("{#", "#}") { string, _ |
+            parts.push(c.expr(Value = (RealString = string)));
+        };
+        
+        paired :: fn(a: Str, b: Str) ?Ty(Str, Str) => {
+            yield :: local_return;
+            if src.rest(i).starts_with(a) {
+                string := src.slice(start_string, i);
+                i += a.len;
+                start := i;
+                while => !src.rest(i).starts_with(b) {
+                    i += 1;
+                };
+                code := src.slice(start, i);
+                i += b.len;
+                start_string = i;
+                yield(Some = (string, code));
+            };
+            .None
+        };
+        
+        paired_code :: fn(a: Str, b: Str, kind: CodeKind) => if paired(a, b) { string, code |
+            parts.push(c.expr(Value = (RealString = string)));
+            parts.push(c.expr(Code = (src = code, kind = kind)));
+        };
+        i += 1;
+    };
+    string := src.slice(start_string, i);
+    parts.push(c.expr(Value = (RealString = string)));
+    c.expr(Concat = parts.items())
+}
+
+fn expr(c: *Ctx, e: KExpr) *KExpr = 
+    c.arena.boxed(KExpr, e);
+
+#use("@/lib/sys/fs.fr");
+#use("@/lib/collections/map.fr");
