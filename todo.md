@@ -118,9 +118,6 @@ main :: fn() void = {
   headers&payload part need to be done when doing the exe because they have machine code offsets
   but the source&files need to be in the cache file from the frontend. 
   so seal_debug_info needs to be split into two. 
-- `-debug-info` embedded source includes fill_export_ffi's `__baked_compctx :: <aslr bytes>`. 
-  already have logic for skipping that for the cache files so just need to reuse that 
-  (but be careful because it will change the byte offsets of Span so need to leave padding?)
 - extension of that is that the embedded source doesn't have the same reachability thing 
   as the code so if you use a big comptime thing, the functions won't be in aot binary
   but the source might if you ask for that. maybe that's what i want because i like the idea 
@@ -1269,7 +1266,7 @@ and not need to serialize the arguments to a string.
 
 - have a test where you force inline everything that's not recursive to stress test the backend dealing with large functions.
 - compiler/test.fr run for jit as well
-- automated test that builds are still reproducible (including with -debug-info which doesn't repro currently)
+- automated test that builds are still reproducible (including with -debug-info)
   (currently i only do it for the compiler via `run_tests release` in ci but should do it for all the programs)
 - fix the test programs to not all write to `./a.out` or whatever so they can run in parallel.  
   (including cross for different arches at the same time)

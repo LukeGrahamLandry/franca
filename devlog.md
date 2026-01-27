@@ -4,6 +4,41 @@
 - jinja: parse+eval. can run very simple templates. 
   don't actually need it for tf-psa-crypto, just stripping the tags is enough to compile for curl,
   but i still like it as an example program. 
+- rustc cg
+  - it seems like it doesn't finish the mir before getting to codegen, 
+    its demand driven or whatever so you keep having to call monomorphise on stuff. 
+  - sometimes they store values in types which i don't quite understand,
+    like sure i guess a type is a set of values and if there's only one in the set
+    that's the same as a value again but why?
+  - can call puts, but only if explicitly bind the argument to a const. 
+    - do they really have all this infastucture and not use it to inline `"".as_ptr()`?
+    - maybe i have to manually turn on more passes somehow? 
+      oh duh i need --release so -C opt-level=3 since im calling rustc directly. 
+  - frc needs a way to ask for the common opt passes.
+    previously i always saved ir after running part of the backend. 
+    add FncFlags.run_early_passes so the writer can decide. 
+  - cope with wide pointers
+- if im going to complain about rust being bad at reproducible builds i should fix a few things in mine i've been putting off
+  - fix repro with `-debug-info` (no aslr bytes for `__baked_compctx`)
+  - be explicit about zeroing the padding in incremental.Sym.P union. the one that mattered was Imp. 
+    - fixes web/build.fr repro because import_c's builtin string.h is a .frc file. 
+
+---
+
+```
+# this prevents bloating target folder by an extra ~250MB **each time** you run 
+# `touch franca-sys/exports.fr && ./test.sh` (only costs ~10MB now...)
+# it also makes a clean build twice as fast (6600ms -> 2800ms). 
+# it also makes incremental builds slightly faster. 
+# `touch rustc_codegen_ferb/src/emit.rs && ./test.sh` (750ms -> 670ms).
+# idk what pathological case im doing but here we are. 
+[profile.dev]
+codegen-units=1  
+```
+turning off debug info in `[profile.dev.package."*"]` fixes time but only halves the space bloat. 
+might be macos specific?? running in orb the ".rcgu.o" files seem to disappear when you're done compiling. 
+turning off debug for all fixes it but breaks locations in backtraces. 
+debug="line-tables-only" is similar to codegen-units=1 in that its mostly fine but not as good as on linux. 
 
 ## (Jan 25)
 

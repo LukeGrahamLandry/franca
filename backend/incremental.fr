@@ -50,10 +50,17 @@ Dep :: @struct {
 Sym :: @rec @struct {
     segment: Seg; 
     align_log2: u8 = 0;
+    _0: u16 = 0;
     name: Ref(u8);  // TODO: having names is kinda dumb
+    _1: u32 = 0;  // because Fnc has u64 alignment
     // TODO: this should parse when inlined but then need to :UpdateBoot :Compiler
-    P :: @union(fnc: Fnc, dat: Dat, imp: Imp, asm: Asm, alias: One(Sym));  
+    P :: @union(fnc: Fnc, dat: Dat, imp: Imp, asm: Asm, ali: Ali);  
     payload: P #use;  // active variant depends on segment
+};
+
+Ali :: @struct {
+    target: One(Sym);
+    _0 := zeroed Array(u32, 11);
 };
 
 Seg :: @enum(u8) (
@@ -71,6 +78,7 @@ Asm :: @struct {
     rv64:  Ref(u8);
     wasm32:Ref(u8);
     // when adding a field make sure this doesn't become the biggest variant (rn it's Fnc) or have a less dumb repr for arches. 
+    _0 := zeroed Array(u32, 4);
 };
 
 Fnc :: @struct {
@@ -83,6 +91,7 @@ Fnc :: @struct {
     either: @union(slot: i32, retty: Qbe.Ref);
     flags: u32;
     ntmp: u32 = Qbe.no_symbol;
+    _0: u32 = 0;
 };
 
 // :BitFieldsCompileError
@@ -92,7 +101,8 @@ FncFlags :: @bit_fields(
     __ := 4,
     dynalloc := 1,
     ret_cls := 3,  // Qbe.Cls
-    _ := 22,
+    run_early_passes := 1,
+    _ := 21,
 );
 
 Blk :: @struct {
@@ -107,6 +117,7 @@ Blk :: @struct {
 Dat :: @struct {
     bytes: Ref(u8);  // off=Qbe.no_symbol when it's all zeroes
     rel: Ref(Dat2.Reloc);
+    _0 := zeroed Array(u32, 8);
 };
 
 Imp :: @struct {
@@ -117,6 +128,9 @@ Imp :: @struct {
     //       it's used for bf2ir.fr
     temporary_funcid: u32 = Qbe.no_symbol;
     weak := false;
+    _0: u8 = 0;
+    _1: u16 = 0;
+    _2 := zeroed Array(u32, 9);
 };
 
 Lib :: @struct {
@@ -316,6 +330,9 @@ fn push(self: *Writer, f: *Qbe.Fn, did_regalloc: bool) void = {
         dynalloc = int(f.dynalloc),
         ret_cls = intcast(@as(i32) f.ret_cls),
         _ = 0,
+        // for now the caller is always finish_passes or emit_fn. 
+        // =1 is for modules created by a different writer (ie. rustc_codegen_ferb). 
+        run_early_passes = 0,  
     );
     self.sym[id].fnc.flags = flags.repr;
     
@@ -609,15 +626,22 @@ fn compile_all_symbols(header: *Header, m: *QbeModule) void = {
             fn Code() => {
                 did_regalloc := load(header, f&, i, syms);
                 zone := @if(ENABLE_ENABLE_TRACY, zone_begin(.Backend), ());
-                when_debug_printfn(f&, .Parsing, "\n## After loading:\n");
                 if did_regalloc {
+                    when_debug_printfn(f&, .Parsing, "\n## After loading:\n");
                     @debug_assert_ne(m.goal.type, .CachedEarly, "can't go backwards");
                     emit_fn(f&);
                 } else {
                     apply_type_offset(f&, type_offset);
-                
-                    // TODO: suspend for inlining (can be a bit in FncFlags)
-                    {f.globals.target.finish_passes}(f&);
+                    
+                    flags: FncFlags = (repr = it.fnc.flags);
+                    if flags.get(.run_early_passes) == 1 {
+                        // TODO: do_codegen.FromCache doesn't do this
+                        fill_use(f&); // :SLOW just to set t.cls
+                        run_qbe_passes(f&);
+                    } else {
+                        when_debug_printfn(f&, .Parsing, "\n## After loading:\n");
+                        {f.globals.target.finish_passes}(f&);
+                    };
                 };
                 @if(ENABLE_ENABLE_TRACY) zone_end(zone);
             }
@@ -634,7 +658,7 @@ fn compile_all_symbols(header: *Header, m: *QbeModule) void = {
             fn Alias() => {
                 lnk := Qbe.Lnk.zeroed();
                 lnk.id = syms[i.off.zext()];
-                target := syms[it.alias.off.zext()];
+                target := syms[it.ali.target.off.zext()];
                 declare_alias(m, target, lnk&);
             }
             @default => {
