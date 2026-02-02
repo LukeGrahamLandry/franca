@@ -1,4 +1,55 @@
 
+## (Feb 1) rcg
+
+- intrinsics: black_box, write_bytes
+- tricky part of lang_start is that it has to pass a &dyn closure to precompiled std code so have to match llvm abi. 
+  can't put it off. big thing i was missing was mir.spread_arg, that's why unpacking for dyncall didn't work.
+- trying to jump to an address that ends with d503245f is funny because that's bti. 
+  so its giving me a function pointer when i expect a pointer to a function pointer. 
+  i think its for the captured main in lang_start. the thing that implements the fn trait is &Closure
+  and the data pointer of the pair is always &T so need to add another level of indirection it seems. 
+  and then now i can undo it in terminatorkind::call which looks more reasonable. 
+
+---
+
+- import_wasm: fix run.fr heap_base so it can run standalone modules made by default_driver that want to memory.grow. 
+  - test: assert on helloworld output. bubble up status after calling exit(). 
+
+## (Jan 31) rcg
+
+- failed attempt at indexing. Val -> Placement. was enough of a break that i figured out indexing. 
+  main confusion was wide vs narrow pointer when you had a Slice after a deref instead of a ref Slice. 
+- for dyn calls, have to get a vtable. calling convention confusion, don't have to unpack the tuple?
+- be more consistant about skipping zst
+- can now make an object file without `#![no_std]` but it's linker hell. 
+  need to make wrappers for allocator functions and lang_start.
+
+## (Jan 29) rcg
+
+- my real problem was being afraid of multiple derefs. 
+  since its only allowed first, it just acts on the type and everything works out. 
+- now that i have for loops, can almost do mandelbrot, which is always my favourite. 
+- fcmp, arrays, fnptr
+- can pass opt 0/3 but not 1. so run them all. 
+- do the right tag size. (0..1).next() is an Option(u32) which is (i32, i32) not (i64, i32).
+
+## (Jan 28) rcg
+
+- varargs, track cls
+- writing to a static needs assert because it checks alignment of the raw pointer 
+- idk how to monomorphise the whole mir, it seems like every time i look at a type i have to explicitly monomorphise it
+- slow progress towards for loops. references, tuples. 
+- i have trouble with Place. i feel like they're represented backwards where you "load" the whole struct before computing a specific field you want. 
+  - rn the problem is the reborrow to convert `&mut` -> `&` is `&*_N` which im treating as refernece to scalar 
+    so giving it a slot and then the result is address of the slot instead.
+
+## (Jan 27) rcg
+
+- if,while,switch are easy. for is hard because it desugars so something crazy so that will have to wait. 
+- got very basic structs working. for enums without niches they're basically the same with one field being magic. 
+  - i have lots of trouble with getting fields out of types and stuff. 
+    probably just a skill issue of not knowing the code. 
+
 ## (Jan 26)
 
 - jinja: parse+eval. can run very simple templates. 

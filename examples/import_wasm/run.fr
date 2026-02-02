@@ -106,15 +106,17 @@ create_exports :: fn($Exports: Type, globals: *Globals) Rt.ExportsEnv = {
 
 Log :: @struct(f: @FnPtr(self: rawptr, err: bool, msg: []u8) void, ctx: rawptr);
 
-fn exec_wasm_file($Exports: Type, rt: *Rt.Engine, mod: *Wasm.Module, args: []CStr, log: Log) void = {
+fn exec_wasm_file($Exports: Type, rt: *Rt.Engine, mod: *Wasm.Module, args: []CStr, log: Log) i64 = {
     a := general_allocator();
     
     buf := page_allocator.alloc_uninit(u8, 1.shift_left(32));  // page allocator always gives zeros
     memory := a.boxed(SaneRawList(u8), (ptr = buf.ptr, cap = buf.len, len = 0));
     globals := a.box_zeroed(Globals);
+    globals.exit_status = -1;
     globals.thread = .None;
-    globals.memory = memory;
-    globals.heap_base = memory.cap.trunc();
+    // means the Exports will only work if the module imports the memory instead of creating its own
+    // but importing is what you have to do for threads anyway so it's always what i do. 
+    globals.memory = memory;  
     globals.create_exports = fn(self) = create_exports(Exports, self);
     globals.log = log;
     exports := (globals.create_exports)(globals);
@@ -137,7 +139,6 @@ fn exec_wasm_file($Exports: Type, rt: *Rt.Engine, mod: *Wasm.Module, args: []CSt
         argv = argv_;
     };
     
-    wasm_page_size :: 1.shift_left(16);
     globals.instance = instance;
     globals.mod = mod;
     
@@ -148,20 +149,23 @@ fn exec_wasm_file($Exports: Type, rt: *Rt.Engine, mod: *Wasm.Module, args: []CSt
     func := func.Function;
     f := assume_types_fn(Arg = Ty(rawptr, u32, u32, u32, u32), Ret = i64, ptr = func.callee);
     
-    @match(try(globals.exit_thread&)) {
+    result := @match(try(globals.exit_thread&)) {
         fn Try() => {
+            // TODO: if return type is void, result is a junk register
             result := f(func.context, argc.trunc(), argv.trunc(), 0, 0);
             if result != 0 {
                 @eprintln(">>> returned %", result);
             };
+            result
         }
-        fn Catch() => ();
+        fn Catch() => globals.exit_status;
     };
     
     // TODO
     //drop(m);
     //page_allocator.dealloc(u8, buf);
     //arena&.deinit();
+    result
 }
 
 fn write_cli_args(args: []CStr, buf: []u8, stackbase: *i32) Ty(i64, i64) = {
@@ -189,7 +193,6 @@ fn write_cli_args(args: []CStr, buf: []u8, stackbase: *i32) Ty(i64, i64) = {
 Globals :: @rec @struct {
     memory: *SaneRawList(u8);
     env: rawptr;
-    heap_base: u32;  // TODO: use rt'memory_grow instead
     table: *SaneRawList(Rt.Callable);
     instance: *Rt.Instance;
     engine: *Rt.Engine;
@@ -199,6 +202,7 @@ Globals :: @rec @struct {
     thread: ?*Thread;
     exit_thread: import("@/lib/sys/jump.fr").JumpBuf;
     log: Log;
+    exit_status: i64;
 };
 
 weak_imports :: @const_slice(
@@ -231,21 +235,23 @@ Exports :: @struct {
          sinf :: fn() void = panic("TODO: sinf");
          cosf :: fn() void = panic("TODO: cosf");
     
-        putchar :: fn(_: *u8, c: u8) i32 = 
-            import("@/examples/os/user/libc/stdio.fr")'putchar(c);
+        putchar :: fn(ctx: *Globals, c: u8) u8 #ctx = {
+            ctx.log(false, c&.slice(1));
+            c
+        }
         getchar :: fn(_: *u8) u8 = {
             getchar_UNBUFFERED().zext().trunc()
         }
-        puts :: fn(ctx: *u8, p: u32) i32 = 
-            import("@/examples/os/user/libc/stdio.fr")'puts(@as(CStr) (ptr = ctx.offset(p.zext())));
+        puts :: fn(ctx: *Globals, p: u32) i32 #ctx = {
+            msg := ctx.memory.items().rest(p.zext()).peek_cstr();
+            ctx.log(false, msg);
+            ctx.log(false, "\n");
+            0
+        }
         strlen :: fn(ctx: *u8, p: u32) i64 = 
             WellKnown'strlen(@as(CStr) (ptr = ctx.offset(p.zext())));
         labs :: fn(ctx: *u8, i: i64) i64 = 
             import("@/examples/os/user/libc/stdlib.fr")'labs(i);
-        calloc :: fn(ctx: *Globals, m: u32, n: u32) u32 #ctx = {  // HACK
-            ctx.heap_base -= align_to(m*n, 16);
-            ctx.heap_base
-        }
         // clocking in for my shift at the garbage pasta factory FIXME PLEASE
         vprintf :: fn(ctx: *u8, fmt: u32, valist: u32) u32 = {
             args := valist.zext();
@@ -278,12 +284,13 @@ Exports :: @struct {
         abort :: fn(ctx: *u8) void = {
             panic("wasm called abort");
         }
-        exit :: fn(ctx: *u8, status: u32) void = {
+        exit :: fn(ctx: *Globals, status: u32) void #ctx = {
             if status != 0 {
                 // i want a stack trace.
                 @panic("wasm guest called exit(%)", status);
             }
-            Syscall'exit(status.zext());
+            ctx.exit_status = status.zext();
+            throw(ctx.exit_thread&);
         }
         strcmp :: fn(ctx: *u8, a: u32, b: u32) i32 = 
             WellKnown'strcmp(ctx.offset(a.zext()), ctx.offset(b.zext()));
@@ -303,20 +310,23 @@ Exports :: @struct {
             strncmp(a, b, n.zext())
         }
         mmap :: fn(ctx: *Globals, addr: u32, len: u32, prot: u32, flags: u32, fd: u32, offset: u32) i64 #ctx = {
-            ctx.heap_base = align_back(ctx.heap_base, 65536);
-            calloc(ctx, 1, len.align_to(65536)).zext()
+            pages := align_to(len.zext(), wasm_page_size) / wasm_page_size;
+            old := Wasm'memory_grow(ctx.instance, ctx.memory, pages.intcast());
+            @assert(old != -1, "oom");
+            (old * wasm_page_size).intcast()
         }
         munmap :: fn(ctx: *u8, addr: u32, len: u32) i64 = 0;
           free :: fn(ctx: *u8, p: u32) i64 = 0;
-        malloc :: fn(ctx: *Globals, len: u32) i64 #ctx = calloc(ctx, 1, len).zext();
+        malloc :: fn(ctx: *Globals, len: u32) i64 #ctx = calloc(ctx, 1, len);
+        calloc :: fn(ctx: *Globals, m: u32, n: u32) i64 #ctx = {
+            mmap(ctx, 0, m*n, 0, 0, 0, 0)  // :SLOW
+        }
          write :: fn(ctx: *Globals, fd: i32, addr: u32, len: u32) i64 #ctx = {
             if fd != 1 && fd != 2 {
                 return(-1);
             };
             msg := ctx.memory.items().subslice(addr.zext(), len.zext());
-            ctx.engine.lock&.lock();
-            (ctx.log.f)(ctx.log.ctx, fd != 1, msg);
-            ctx.engine.lock&.unlock();
+            ctx.log(fd != 1, msg);
             len.zext()
         };
         
@@ -392,6 +402,7 @@ Exports :: @struct {
             child.globals.thread = (Some = t);
         }
         js_worker_stop :: fn(ctx: *Globals, status: i64) void #ctx = {
+            ctx.exit_status = status;
             if ctx.thread.is_none() && status != 0 {
                 msg := @tfmt(">>> exited with status %\n", status);
                 (ctx.log.f)(ctx.log.ctx, true, msg);
@@ -408,6 +419,12 @@ Exports :: @struct {
             @panic("wasm guest called a null function pointer");
         }
     }
+}
+
+fn log(ctx: *Globals, err: bool, msg: Str) void = {
+    ctx.engine.lock&.lock();
+    (ctx.log.f)(ctx.log.ctx, err, msg);
+    ctx.engine.lock&.unlock();
 }
 
 Child :: @struct {
@@ -597,3 +614,4 @@ fn printf_impl(
 
 #use("@/lib/variadic.fr");
 #use("@/lib/sys/threads.fr");
+wasm_page_size :: 1.shift_left(16);

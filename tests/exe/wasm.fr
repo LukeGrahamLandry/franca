@@ -3,19 +3,41 @@ driver :: fn() void = {
     franca := get_executable_path(temp());
     make_dirs_or_crash("target/web/target");
     hush(@slice(franca, "graphics/web/webgpu_api.fr"));
-    hush(@slice(franca, "examples/default_driver.fr", "build", "examples/os/host/web.fr", "-o", "target/web/target/demo.wasm", "-arch", "wasm32", "-unsafe", "-dynamiclib", "-keep-names"));
+    hush(@slice(
+        franca, "examples/default_driver.fr", "build", 
+        "examples/os/host/web.fr", "-o", demo_path, 
+        "-arch", "wasm32", "-unsafe", "-dynamiclib", "-keep-names", "-wasm_threads",
+    ));
+    hush(@slice(
+        franca, "examples/default_driver.fr", "build", 
+        "examples/toy/hello2.fr", "-o", hello_path, 
+        "-arch", "wasm32",
+    ));
     main();
 }
 
+demo_path :: "target/web/target/demo.wasm";
+hello_path :: "target/hello.wasm";
+
 main :: fn() void = {
-    wasm := temp().read_to_string_or_crash("target/web/target/demo.wasm").items();
+    wasm := temp().read_to_string_or_crash(demo_path).items();
     manifest := collect_tests();
 
     start := timestamp();
     a := general_allocator();
     rt: Rt.Engine = init_for_jit(a, "");
-    hello_world(rt&);
     mod := rt&.compile(wasm);
+    
+    hello_world(rt&, {
+        // tiny example that doesn't even have a __stackbase
+        #use("@/examples/bf/via_wasm.fr");
+        #use("@/examples/bf/README.fr");
+        to_wasm_module(temp(), HELLO_WORLD).items()
+    });
+    hello_world(rt&, {
+        // standalone .fr via default_driver (without memory.init)
+        read_entire_file_or_crash(temp(), hello_path)
+    });
     
     each manifest.compilers { it |
         State :: @struct(rt: *Rt.Engine, mod: *Rt.Module, name: CStr);
@@ -27,8 +49,8 @@ main :: fn() void = {
                 out := List(u8).ptr_from_raw(out);
                 out.push_all(msg);
             });
-            Runner'exec_wasm_file(Runner.AugmentedExports, state.rt, state.mod, a, log);
-            ok := !out.items().contains(">>> exited with status ");
+            status := Runner'exec_wasm_file(Runner.AugmentedExports, state.rt, state.mod, a, log);
+            ok := status == 0 && !out.items().contains(">>> exited with status ");
             (ok, out, list(temp()), "")
         });
     };
@@ -81,13 +103,19 @@ collect_tests :: fn() = {
     manifest
 }
 
-// tiny example that doesn't even have a __stackbase
-hello_world :: fn(rt: *Rt.Engine) void = {
-    #use("@/examples/bf/via_wasm.fr");
-    #use("@/examples/bf/README.fr");
-    wasm := to_wasm_module(temp(), HELLO_WORLD).items();
+hello_world :: fn(rt: *Rt.Engine, wasm: []u8) void = {
     mod := rt.compile(wasm);
-    Runner'exec_wasm_file(Runner.AugmentedExports, rt, mod, empty(), Runner.standard_log);
+    out, log := collect_log();
+    Runner'exec_wasm_file(Runner.AugmentedExports, rt, mod, empty(), log);
+    @assert_eq(out.items(), "Hello World!\n");
+    print(out.items());
+};
+
+collect_log :: fn() Ty(*List(u8), Runner.Log) #inline/*semantic*/ = {
+    f :: fn(self, err, msg) = 
+        ptr_from_raw(@type out[], self).push_all(msg);
+    out := @ref u8.list(temp());
+    (out, (ctx = raw_from_ptr(@type out[], out), f = f))
 };
 
 #use("@/lib/sys/process.fr");

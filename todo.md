@@ -1,4 +1,12 @@
 
+- this should work on wasm too. 
+```
+export function w $main() {
+@start
+    dbgloc 9876543210, $__this_symbol_doesnt_exist__
+    ret 0
+}
+```
 - qbe_frontend.fr: parse `retc %s.64, :T3`
 - TODO: for the hare urls, they do let you just download a tar file:
   https://git.sr.ht/~lukegrahamlandry/franca/archive/5671fd344d80207427f37d391435fa986839bcb3.tar.gz
@@ -58,12 +66,6 @@
   but if you don't do that its crazy town where uninit memory can have a different value every time it's observed. 
 - deduplicate identical basic blocks
 - the hare test runner is much prettier than mine
-- should make this work again (even without examples/os/host/web.fr)
-```
-franca examples/default_driver.fr build examples/toy/hello.fr -arch wasm32 -o a.wasm
-franca examples/import_wasm/run.fr a.wasm
-```
-  (at least part of it is just a problem with my run.fr memory.cap vs hacky heap_base)
 - allow #fold on a single argument and have it specilize the function if that argument is constant. 
   use that to make println("string literal") not do two syscalls. 
   need to be able to check if an expression is constant. 
