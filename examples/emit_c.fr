@@ -3,9 +3,9 @@ Emit :: @struct(
     program: *SelfHosted,
     var_lookup: HashMap(VarId, Str),
     inlined_return_addr: HashMap(LabelId, ReturnTarget),
-    pending: *List(FuncId), 
-    next_fake_label: u32 = 0,
+    use: *HashSet(ItemKey),
     next_var := 0,
+    next_blk := 0,
     indent := 0,
     out: *List(u8),
     last_statement_start := 0,
@@ -19,16 +19,13 @@ ReturnTarget :: @struct(
 
 Placement :: @tagged(Assign: Str, Declare: Str, NewMemory, Discard);
 
-emit_ir :: fn(comp: *SelfHosted, f: FuncId, pending: *List(FuncId), out: *List(u8)) void = {
-    self: Emit = (
-        program = comp,
-        var_lookup = init(temp()),
-        inlined_return_addr = init(temp()),
-        pending = pending,
-        out = out,
-    );
-    self&.emit_body(f);
-};
+fn init(comp: *SelfHosted, use: *HashSet(ItemKey), out: *List(u8)) Emit #inline = (
+    program = comp,
+    var_lookup = init(temp()),
+    inlined_return_addr = init(temp()),
+    use = use,
+    out = out,
+);
 
 fn emit_body(self: *Emit, f: FuncId) void #once = {
     func := self.program.get_function(f);
@@ -37,33 +34,59 @@ fn emit_body(self: *Emit, f: FuncId) void #once = {
     ret := func.finished_ret.unwrap();
     @fmt(self.out, "% %(", self.type_name(ret), self.fmt_fn_name(f));
     
+    args := @ref Str.list(temp());
     if func.finished_arg.unwrap() != void {
         each func.arg.bindings { b |
             v := b.var().unwrap();
             name := self.var_name(v);
             @fmt(self.out, "% %, ", self.type_name(b.ty.Finished), name);
-            self.var_lookup&.insert(v.id, name);
+            args.push(name);
         };
+        self.out.len -= 2*int(self.out.items().ends_with(", "));
     }
     @fmt(self.out, ")");
     
     body: *FatExpr = @match(func.body&) {
         fn Normal(body) => body;
         fn NewIntrinsic(op) => {
-            @fmt(self.out, "{ /* TODO: intrinsic % % */ assert(false); }\n", op.ir_op, op.ir_cls);
+            @fmt(self.out, "{\n");
+            indented self {
+                self.statement();
+                result := self.emit_intrinsic(.NewMemory, op, ret, args.items());
+                self.statement();
+                @fmt(self.out, "return %;\n}\n", result);
+            };
             return()
         };
         fn Redirect(fid) => {
             @fmt(self.out, "#define % %\n", self.fmt_fn_name(f), self.fmt_fn_name(fid[]));
-            self.pending.push(fid[]);
+            self.use.insert(FuncId = fid[]);
             return()
         } 
         fn DynamicImport(info) => {
-            @fmt(self.out, ";\n");
+            @fmt(self.out, "{\n");
+            @fmt(self.out, "\treturn %(", self.program.get_string(info.name));
+            for args { it |
+                @fmt(self.out, "%, ", it);
+            };
+            self.out.len -= 2*int(self.out.items().ends_with(", "));
+            @fmt(self.out, ");\n}\n");
             return()
         }
         fn Asm(it) => {
-            @fmt(self.out, "{ /* TODO: asm */ assert(false); }");
+            @fmt(self.out, "{\n");
+            it := bit_cast_unchecked(@type it, *EnumMap(Arch, []u8), it);
+            for_enum Arch { arch |
+                self.statement();
+                @fmt(self.out, "#ifdef __%__\n", arch);
+                @fmt(self.out, "asm(\"");
+                for it[arch] { byte |
+                    @fmt(self.out, ".byte %\\n", byte);
+                };
+                @fmt(self.out, "\");\n");
+                self.statement("#endif\n");
+            };
+            @fmt(self.out, "}\n");
             return()
         }
         @default => @panic("no acceptable impl %", self.program.log(func));
@@ -92,7 +115,9 @@ fn var_name(self: *Emit, v: Var) Str = {
         };
     };
     self.next_var += 1;
-    @tfmt("%__v%", s, self.next_var)
+    name := @tfmt("%__v%", s, self.next_var);
+    _ := self.var_lookup&.insert(v.id, name);
+    name
 }
 
 fn compile_stmt(self: *Emit, stmt: *FatStmt) void = {
@@ -100,16 +125,11 @@ fn compile_stmt(self: *Emit, stmt: *FatStmt) void = {
         fn Eval(expr) => {
             self.compile_expr(expr, .Discard);
         }
-        fn Decl(f) => {
-            v := f[].var().unwrap();
-            name := self.var_name(v);
-            _ := self.compile_expr(f.default&, (Declare = name));
-            _ := self.var_lookup&.insert(v.id, name);
-        }
+        fn Decl(f) => self.decl(f[].var().unwrap(), f.default&);
         fn Set(f) => {
             src := self.compile_expr(f.value&, .NewMemory);
             dest := @match(f.place.expr&) {
-                fn GetVar(it) => self.addr_macro(f.place&, .NewMemory)
+                fn GetVar(it) => self.addr_macro(f.place&, self.program.ptr_ty(f.place.ty), .NewMemory)
                 fn Deref(arg) => self.compile_expr(arg[], .NewMemory);
                 @default => panic("TODO: other `place=e;` :(");
             };
@@ -117,17 +137,29 @@ fn compile_stmt(self: *Emit, stmt: *FatStmt) void = {
             @fmt(self.out, "*% = %;\n", dest, src);
         }
         fn DeclVarPattern(f) => {
+            b := f.binding.bindings.items();
+            @if_let(f.value.expr&) fn Tuple(parts) => if parts.len == b.len {
+                range(0, b.len) { i |
+                    self.decl(b[i]&.var().unwrap(), parts[i]&); 
+                };
+                return();
+            };
+        
             base := self.compile_expr(f.value&, .NewMemory);
-            self.decl_var_pattern(base, f.value.ty, f.binding.bindings.items())
+            self.decl_var_pattern(base, f.value.ty, b)
         };
         fn Noop() => ();
         @default => @panic("ICE: stmt not desugared %", self.program.log(stmt));
     }
 }
 
+fn decl(self: *Emit, v: Var, value: *FatExpr) void = {
+    name := self.var_name(v);
+    _ := self.compile_expr(value, (Declare = name));
+}
+
 fn decl_var_pattern(self: *Emit, parent: Str, ty: Type, bindings: []Binding) void = {
     info := self.program.get_type(ty);
-    @if(bindings.len == 0) return();
     if !info.is(.Struct) || bindings.len == 1 {
         v := bindings[0]&.var().unwrap();
         _ := self.var_lookup&.insert(v.id, parent);
@@ -142,7 +174,6 @@ fn decl_var_pattern(self: *Emit, parent: Str, ty: Type, bindings: []Binding) voi
         name := self.var_name(v);
         self.statement();
         @fmt(self.out, "% % = %._%;\n", self.type_name(b.ty.Finished), name, parent, i);
-        self.var_lookup&.insert(v.id, name);
     };
 }
 
@@ -156,7 +187,7 @@ fn compile_expr(self: *Emit, expr: *FatExpr, p: Placement) Str = {
         fn Value(f)   => return(self.emit_constant(f.bytes&, p, expr.ty, expr.loc));
         fn If(_)      => return(self.emit_call_if(expr, p));
         fn Loop(arg)  => return(self.emit_call_loop(arg[]));
-        fn Addr(arg)  => return(self.addr_macro(arg[], p));
+        fn Addr(arg)  => return(self.addr_macro(arg[], expr.ty, p));
         fn StructLiteralP(pattern) => return(self.construct_aggregate(pattern, expr.ty, p));
         fn Slice(arg) => {
             container_ty := arg.ty;
@@ -187,7 +218,7 @@ fn compile_expr(self: *Emit, expr: *FatExpr, p: Placement) Str = {
         }
         fn Deref(arg) => {
             @if_let(arg.expr&) fn GetVar(v) => {
-                return self.declare_now(p&, expr.ty, => @fmt(self.out, "%", self.var_name(v[])));
+                return self.declare_now(p&, expr.ty, => @fmt(self.out, "%", self.var_lookup&.get(v.id).unwrap()));
             };
             src := self.compile_expr(arg[], .NewMemory); // get the pointer
             self.deref(src, p, expr_ty)
@@ -200,11 +231,11 @@ fn compile_expr(self: *Emit, expr: *FatExpr, p: Placement) Str = {
         fn Unreachable() => {
             _ := self.unify_placement(p&, expr.ty);
             self.statement();
-            @fmt(self.out, "assert(false);\n");
+            @fmt(self.out, "while(1) {};\n");
             ""
         }
         fn Uninitialized() => {
-            self.declare_now(p&, expr.ty, => @fmt(self.out, "/* @uninitialized */"))
+            self.unify_placement(p&, expr.ty)
         };
         fn Tuple(values) => {
             @if(values.len == 0) return("");
@@ -221,9 +252,13 @@ fn compile_expr(self: *Emit, expr: *FatExpr, p: Placement) Str = {
                         fn Struct(f) => enumerate fields { i, value |
                             @fmt(self.out, "._% = %, ", i, value);
                         };
-                        fn Array(f) => enumerate fields { i, value |
-                            @fmt(self.out, "[%] = %, ", i, value);
-                        };
+                        fn Array(f) => {
+                            @fmt(self.out, ".data = {");
+                            enumerate fields { i, value |
+                                @fmt(self.out, "[%] = %, ", i, value);
+                            };
+                            @fmt(self.out, "}");
+                        }
                         @default => unreachable();
                     };
                 };
@@ -233,6 +268,7 @@ fn compile_expr(self: *Emit, expr: *FatExpr, p: Placement) Str = {
         }
         fn PtrOffset(f) => {
             base  := self.compile_expr(f.ptr, .NewMemory);
+            @if(p&.is(.Discard)) return("");
             result := self.declare_now(p&, expr.ty);
             @fmt(self.out, "&%->%;\n", base, self.program.get_string(f.name));
             result
@@ -257,12 +293,13 @@ fn emit_call(self: *Emit, f: *FatExpr, arg: *FatExpr, p: Placement) Str #once = 
             func := self.program.get_function(f_id);
             @debug_assert(!func.get_flag(.Generic) && !func.get_flag(.MayHaveAquiredCaptures));
             f_ty := func.finished_ty().unwrap();  // see tests/todo/wrong_call_type.fr
-            callee_r := self.func_ref(f_id);
             
             @if_let(func.body&) fn NewIntrinsic(op) => {
-                // TODO
+                arg := self.pre_eval_tuple(arg.items());
+                return self.emit_intrinsic(p, op, f_ty.ret, arg);
             };
 
+            callee_r := self.func_ref(f_id);
             (callee_r, f_ty)
         }
         fn FnPtr(f_ty) => (self.compile_expr(f, .NewMemory), f_ty.ty);
@@ -283,35 +320,99 @@ fn emit_call(self: *Emit, f: *FatExpr, arg: *FatExpr, p: Placement) Str #once = 
     output := self.declare_now(p&, f_ty.ret);
     @fmt(self.out, "%(", callee);
     for fields { it |
-        @fmt(self.out, "%, ", it);
+        if it.len != 0 {
+            @fmt(self.out, "%, ", it);
+        };
     };
+    self.out.len -= 2*int(self.out.items().ends_with(", "));
     @fmt(self.out, ");\n");
     output
 }
 
-fn func_ref(self: *Emit, f_id: FuncId) Str #inline = 
-    self.fmt_fn_name(f_id);
+fn emit_intrinsic(self: *Emit, p: Placement, op: *NewIntrinsicPayload, t: Type, arg: []Str) Str = {
+    o, k := (@as(Qbe.O) op.ir_op, @as(Qbe.Cls) op.ir_cls);
+    if o == .copy {
+        return self.declare_now(p&, t, => @fmt(self.out, "(%) %", self.type_name(t), arg[0]));
+    };
+    if @is(o, .extub, .extuh, .extuw, .extsb, .extsh, .extsw) {
+        // TODO
+        return self.declare_now(p&, t, => @fmt(self.out, "(%) %", self.type_name(t), arg[0]));
+    };
+    
+    // TODO: unscale pointer arithmetic
+    bin := @match(o) {
+        fn add() => "+";
+        fn sub() => "-";
+        fn mul() => "*";
+        fn div() => "/";
+        fn udiv() => "/";
+        fn rem() => "%";
+        fn urem() => "%";
+        fn and() => "&";
+        fn or() => "|";
+        fn xor() => "^";
+        fn shl() => "<<";
+        fn shr() => ">>";
+        fn sar() => ">>";
+        @default => {
+            cc: i32 = 0;
+            cmp_cls := Qbe.Cls.zeroed();
+            if iscmp(o, cmp_cls&, cc&) {
+                // TODO: force right signedness
+                @match(@as(Qbe.Cmp) cc) {
+                    fn Cieq() => "==";
+                    fn Cine() => "!=";
+                    fn Cisge() => ">=";
+                    fn Cisgt() => ">";
+                    fn Cisle() => "<=";
+                    fn Cislt() => "<";
+                    fn Ciuge() => ">=";
+                    fn Ciugt() => ">";
+                    fn Ciule() => "<=";
+                    fn Ciult() => "<";
+                    fn Cfeq() => "==";
+                    fn Cfge() => ">=";
+                    fn Cfgt() => ">";
+                    fn Cfle() => "<=";
+                    fn Cflt() => "<";
+                    fn Cfne() => "!=";
+                    fn Cfo() => "todo";
+                    fn Cfuo() => "todo";
+                }
+            } else {
+                @tfmt("/*TODO: % %*/", o, k)
+            }
+        };
+    };
+    T := @match(k) {
+        fn Kw() => "uint32_t";
+        fn Kl() => "uint64_t";
+        fn Ks() => "float";
+        fn Kd() => "double";
+        @default => unreachable();
+    };
+    self.declare_now(p&, t, => @fmt(self.out, "(%) (((%) %) % %)", 
+        self.type_name(t), T, arg[0], bin, @if(arg.len > 1, arg[1], "_")))
+}
+
+fn func_ref(self: *Emit, f_id: FuncId) Str #inline = {
+    self.use.insert(FuncId = f_id);
+    self.fmt_fn_name(f_id)
+}
 
 fn emit_block_expr(self: *Emit, expr: *FatExpr, p: Placement) Str #once = {
     block   := expr.expr.Block&;
-    if block.ret_label.is_none() && block.body.len == 0 {
+    ret_var := or block.ret_label {
+        each block.body& { stmt |
+            self.compile_stmt(stmt);
+        };
         return self.compile_expr(block.result, p);
     };
     
-    // the real ones start at 0 so this wont collide until 2^31 of them
-    self.next_fake_label -= 1;
-    ret_var := block.ret_label 
-        || bit_cast_unchecked(u32, LabelId, self.next_fake_label); 
-    
-    // :block_never_unify_early_return_type
-    // Note: block_ty can be different from value.ty if the fall through is a Never but there's an early return to the block. 
-    block_ty := expr.ty;
-    
-    dest := self.unify_placement(p&, block_ty);
-    out  := self.program.get_info(block_ty);
-
+    dest := self.unify_placement(p&, expr.ty);
+    self.next_blk += 1;
     ret: ReturnTarget = (
-        blk = @tfmt("b__%", ret_var.as_index()),
+        blk = @tfmt("B%", self.next_blk),
         p = p,
         used = false,
     );
@@ -340,16 +441,73 @@ fn emit_constant(self: *Emit, value: *Values, p: Placement, expr_ty: Type, loc: 
         return self.declare_now(p&, expr_ty, => @fmt(self.out, "%", value.Small._0));
     };
     id := self.program.emit_relocatable_constant(expr_ty, value.bytes(), loc).unwrap();
+    
+    // TODO: these should be global
+    name := @tfmt("C%", id.id);
     baked := self.program.get_baked(id);
-    // TODO: actually emit it
-    self.declare_now(p&, expr_ty, => @fmt(self.out, "*(%*) baked__b%", self.type_name(expr_ty), id.id))
+    
+    if baked.relocations.len == 1 && value.len() == 8 {
+        // TODO: shouldn't need the "()"
+        return (declare_now(self, p&, expr_ty) {
+            @fmt(self.out, "(%) ", self.type_name(expr_ty));
+            bake_iter_legacy baked { part |
+                self.emit_baked_part(part);
+            };
+        });
+    };
+    
+    self.use.insert(BakedVarId = id);
+    self.declare_now(p&, expr_ty, => @fmt(self.out, "*(%*) C%", self.type_name(expr_ty), id.id))
 }
 
-fn addr_macro(self: *Emit, arg: *FatExpr, p: Placement) Str #once = {
+fn emit_baked_part(self: *Emit, part: BakedEntry) void = {
+    @match(part) {
+        fn Num(it)      => @fmt(self.out, "(void*) %", it.value);
+        fn FnPtr(it)    => @fmt(self.out, "%", self.func_ref(it));
+        fn AddrOf(it)   => {
+            self.use.insert(BakedVarId = it);
+            @fmt(self.out, "Cb%", it.id);
+        }
+        // TODO: unscale pointers
+        fn AddrOfA(it)  => {
+            self.use.insert(BakedVarId = it.base);
+            @fmt(self.out, "C% + %", it.base.id, it.addend);
+        }
+    };
+}
+
+fn define_baked_var(self: *Emit, id: BakedVarId) void = {
+    // TODO: only const when used as a value
+    name := @tfmt("C%", id.id);
+    baked := self.program.get_baked(id);
+    if baked.relocations.len == 0 {
+        @fmt(self.out, "const static uint8_t %[%] = { ", name, baked.len());
+        @match(baked.template) {
+            fn Bytes(it) => {
+                i := self.out.len;
+                safe_print(it, self.out);
+                if !self.out.items().ends_with("\"") {  // HACK
+                    self.out[i - 1] = "\"".ascii();
+                    self.out.push("\"".ascii());
+                };
+            }
+            fn Zeroes() => @fmt(self.out, "0");
+        };
+    } else {
+        @fmt(self.out, "const static void *%[%] = { ", name, baked.len().ualign_to(8).udiv(8));
+        bake_iter_legacy baked { part |
+            self.emit_baked_part(part);
+            @fmt(self.out, ", ");
+        };
+    };
+    @fmt(self.out, "};\n");
+}
+
+fn addr_macro(self: *Emit, arg: *FatExpr, t: Type, p: Placement) Str #once = {
     var := arg.expr.GetVar;
     @debug_assert(arg.expr&.is(.GetVar) && var.kind != .Const, "took address of r-value");
     ref := self.var_lookup&.get_ptr(var.id).expect("addr runtime var");
-    declare_now(self, p&, self.program.ptr_ty(arg.ty)) {
+    declare_now(self, p&, t) {
         @fmt(self.out, "&%", ref)
     }
 }
@@ -359,19 +517,22 @@ fn emit_call_if(self: *Emit, arg: *FatExpr, p: Placement) Str #once = {
     cond := self.compile_expr(parts.cond, .NewMemory);
     result := self.unify_placement(p&, arg.ty);
     self.statement();
-    @fmt(self.out, "if (%) {\n", cond);
+    invert := parts.if_true.is_empty() && !parts.if_false.is_empty();
+    @fmt(self.out, "if (%%) {\n", @if(invert, "!", ""), cond);
+    parts := @slice(parts.if_true, parts.if_false);
+    @if(invert) parts.swap(0, 1);
     indented self {
-        _ := self.compile_expr(parts.if_true, p);
+        _ := self.compile_expr(parts[0], p);
         if self.last_statement_start == self.out.len {
             @fmt(self.out, "\n");
         };
     };
-    if parts.if_false.is_empty() {
+    if parts[1].is_empty() {
         self.statement("}\n");
     } else {
         self.statement("} else {\n");
         indented self {
-            _ := self.compile_expr(parts.if_false, p);
+            _ := self.compile_expr(parts[1], p);
             if self.last_statement_start == self.out.len {
                 @fmt(self.out, "\n");
             };
@@ -478,7 +639,8 @@ fn is_empty(e: *FatExpr) bool = {
 }
 
 fn type_name(self: *Emit, t: Type) Str = {
-    @tfmt("T__%", t)
+    self.use.insert(Type = t);
+    @tfmt("T%", t)
 }
 
 fn indented(self: *Emit, $body: @Fn() void) void = {
@@ -509,6 +671,11 @@ fn statement(self: *Emit) void = {
 }
 
 fn declare_now(self: *Emit, p: *Placement, t: Type) Str = {
+    t = self.program.raw_type(t);
+    @debug_assert(t != UnknownType);
+    if self.program.get_info(t)[].stride_bytes == 0 {
+        p[] = .Discard;
+    };
     @match(p[]) {
         fn NewMemory() => {
             p[] = (Declare = self.new_tmp_name());
@@ -533,6 +700,11 @@ fn declare_now(self: *Emit, p: *Placement, t: Type) Str = {
     }
 }
 fn unify_placement(self: *Emit, p: *Placement, t: Type) Str = {
+    t = self.program.raw_type(t);
+    @debug_assert(t != UnknownType);
+    if self.program.get_info(t)[].stride_bytes == 0 {
+        p[] = .Discard;
+    };
     @match(p[]) {
         fn NewMemory() => {
             p[] = (Declare = self.new_tmp_name());
@@ -555,60 +727,152 @@ fn unify_placement(self: *Emit, p: *Placement, t: Type) Str = {
     }
 }
 
-// :paste
+fn define_type(self: *Emit, it: Type) void = {
+    // @fmt(self.out, "/* % */\n", self.program.log(it)); 
+    @fmt(self.out, "typedef ");
+    @match(self.program.get_type(it)[]) {
+        fn Struct(it) => {
+            @fmt(self.out, "% {\n", @if(it.is_union, "union", "struct"));
+            each it.fields { it |
+                @fmt(self.out, "\t% %;\n", self.type_name(it.ty), self.program.get_string(it.name));
+            };
+            @fmt(self.out, "}");
+        }
+        fn Tagged(it) => {
+            @fmt(self.out, "struct {\n");
+            @fmt(self.out, "\tint64_t tag;\n");
+            @fmt(self.out, "\tunion {\n");
+            for it.cases { name, type |
+                if type != void {
+                    @fmt(self.out, "\t\t% %;\n", self.type_name(type), self.program.get_string(name));
+                }
+            };
+            @fmt(self.out, "\t};\n}");
+        }
+        fn Array(it) => @fmt(self.out, "struct { % data[%]; }", self.type_name(it.inner), it.len);
+        fn Ptr(it) => @fmt(self.out, "%*", self.type_name(it));
+        fn F32() => @fmt(self.out, "float");
+        fn F64() => @fmt(self.out, "double");
+        fn Int(it) => {
+            bits := it.bit_count;
+            if !(bits == 8 || bits == 16 || bits == 32 || bits == 64) {
+                bits = 64;
+            };
+            @fmt(self.out, "%int%_t", @if(it.signed, "", "u"), bits);
+        };
+        fn Enum(it) => @fmt(self.out, "%", self.type_name(it.raw));
+        fn Named(it) => @fmt(self.out, "%", self.type_name(it._0));
+        fn void() => @fmt(self.out, "void");
+        fn Never() => @fmt(self.out, "void");
+        fn VoidPtr() => @fmt(self.out, "void *");
+        fn FnPtr(f_ty) => {
+            @fmt(self.out, "% ", self.type_name(f_ty.ty.ret));
+            @fmt(self.out, "(*%)(", self.type_name(it));
+            for self.program.arg_types(f_ty.ty.arg) { it |
+                @fmt(self.out, "%, ", self.type_name(it));
+            };
+            self.out.len -= 2*int(self.out.items().ends_with(", "));
+            @fmt(self.out, ");\n");
+            return();  // name goes in the middle
+        }
+        fn Bool() => @fmt(self.out, "uint8_t");
+        fn Placeholder() => @fmt(self.out, "void");  // TODO ???
+        @default => @panic("TODO: /* % */", self.program.log(it)); 
+    };
+    @fmt(self.out, " %;\n", self.type_name(it));
+}
+
 pump :: fn(comp: *SelfHosted, fns: []FuncId) Str = {
     a := comp.get_alloc();
-    self: MainThreadPump = (funcs_done = empty(a), funcs_seen = empty(a), work_stack = list(a), pending = list(a), comp = comp);
-    self.work_stack&.push_all(fns);
+    
+    // TODO: if this is too slow, try EnumMap(Tag(ItemKey), List(ItemData));
+    all_items: HashMap(ItemKey, ItemData) = init(a);
+    pending: List(ItemKey) = list(a);
+    use: HashSet(ItemKey) = init(a);
     out := u8.list(a);
+    out&.reserve(1.shift_left(23));
+    
+    for fns { it |
+        all_items&.insert((FuncId = it), zeroed(ItemData));
+        pending&.push(FuncId = it);
+    };
+    
+    // doing it this way is worse than main_thread_pump at making sure intrinsics are first. 
+    // but i need an extra level of sorting to output them in order and it feels dumb to keep track of it twice. 
+    // Func.callees isn't enough (doesn't have types/data) and also misses some (mutual, shims, etc.). 
+    while => pending&.pop() { key |
+        emit: Emit = init(comp, use&, out&);
+        check_for_new_aot_bake_overloads(comp).unwrap();
+        @match(key) {
+            fn FuncId(fid) => {
+                func := comp.get_function(fid);
+                xx := comp.poll_in_place(void, => comp.compile_body(fid));
+                or xx { err | 
+                    @eprintln("failed compile %", comp.get_string(func.name));
+                    comp.report_error(err)
+                };
+                emit&.emit_body(fid);
+                
+                // HACK: makes complation order more similar to the other one because my overloading is garbage
+                for func.callees& { fid |
+                    comp.poll_in_place(void, => comp.compile_body(fid));
+                };
+            }
+            fn Type(it) => emit&.define_type(it);
+            fn BakedVarId(it) => emit&.define_baked_var(it);
+        };
+        
+        used := @ref ItemKey.list(use.raw.len_including_tombstones, a);
+        each use.raw.arr& { slot |
+            if slot.hash != 0 && slot.key& != key& {
+                @debug_assert(slot.hash != 1);
+                _ := all_items&.get_or_insert(slot.key) {
+                    pending&.push(slot.key);
+                    zeroed(ItemData)
+                };
+                
+                used.push(slot.key);
+            }
+            slot.hash = 0;  // remove without toubstone valid because removing all. 
+        };
+        use.raw.len_including_tombstones = 0;
+        it := all_items&.get_ptr(key).unwrap();
+        @debug_assert(it.use.len == 0 && it.src.len == 0, "double emit");
+        it[] = (use = used.items(), src = out.items().shallow_copy(a), id = -1);
+        out&.clear();
+    };
+    
     @fmt(out&, "/* @generated by franca/examples/emit_c.fr */\n");
-    while => self.work_stack.len != 0 {
-        continue :: local_return;
-        fid := self.work_stack[self.work_stack.len - 1];
-        fid_i: i64 = fid.to_index().zext();
-        if self.funcs_done&.get(fid_i) {
-            // might have been added multiple times
-            self.work_stack&.pop();
-            continue();
-        };
-        
-        first_time := !self.funcs_seen&.get_set(fid_i);
-        comp.report_progress(fid, true, .AotPump);
-        func := comp.get_function(fid);
-        // Note: compile before checking callees!
-        xx := comp.poll_in_place(void, => comp.compile_body(fid));
-        or xx { err | 
-            @println("failed compile %", comp.get_string(func.name));
-            comp.report_error(err)
-        };  // TODO: return error instead
-        if self&.push_callees(func.callees&.items(), first_time) {
-            // no pop
-            continue();
-        };
-        
-        emit_ir(comp, fid, self.pending&, out&);
-        
-        comp.report_progress(fid, false, .AotPump);
-        current := self.work_stack&.pop().unwrap();
-        @debug_assert_eq(current, fid, "order messed up");
-        self&.add_work(self.pending&.items());  // HACK
-        self.pending&.clear();
-        self.funcs_done&.set(fid_i);
-        self&.add_work(func.mutual_callees&.items());
+    @fmt(out&, "#include <stdint.h>\n");
+    
+    // sort to minimize required forward declarations
+    @assert(fns.len == 1, "TODO: fake root for multiple entry points");
+    fillrpo(all_items&, (FuncId = fns[0]));
+    ordered := temp().alloc_zeroed(ItemData, all_items.raw.len_including_tombstones);
+    each all_items& { _, it |
+        @debug_assert(ordered[it.id].src.len == 0 && it.src.len != 0, "stomp");
+        ordered[it.id] = it[];
     };
+    for_rev ordered { it |
+        out&.push_all(it.src);
+    };
+    
+    @fmt(out&, """
+        #ifdef __wasm32__
+        #error "TODO: deal with 32 bit pointers"
+        #endif
+    """);
     @fmt(out&, "\n/* deps:\n");
-    if !DISABLE_IMPORT_FRC {
-        @fmt(out&, " * % %\n", comp.vtable.self_hash, Incr.self_filename);
-    };
+    @fmt(out&, " * % %\n", comp.vtable.self_hash, Incr.self_filename);
     each comp.codemap.files& { it |
         @fmt(out&, " * % %\n", it.hash&, it.name);
     };
     @fmt(out&, " */\n");
     out.items()
-
 }
 
 main :: fn() void = {
+    Incr'set_self_hash();
     driver_vtable_exports;
     vtable := init_driver_vtable(false);
     opts := vtable.default_build_options();
@@ -629,6 +893,31 @@ main :: fn() void = {
     result := pump(self, @slice(fid));
     println(result);
     c'vtable'destroy_compiler(c.data);
+}
+
+ItemKey :: @tagged(Type: Type, FuncId: FuncId, BakedVarId: BakedVarId);
+ItemData :: @struct {
+    use: []ItemKey;
+    src: Str;
+    id: i64;
+};
+
+::AutoEq(ItemKey);  ::AutoHash(ItemKey, TrivialHasher);
+::AutoEq(BakedVarId); ::AutoHash(BakedVarId, TrivialHasher);
+
+fn fillrpo(it: *HashMap(ItemKey, ItemData), start: ItemKey) void = {
+    n := rporec(it, start, it.raw.len_including_tombstones - 1) + 1;
+    @assert_eq(n, 0);
+    rporec :: fn(it: *HashMap(ItemKey, ItemData), i: ItemKey, x: i64) i64 = {
+        self := it.get_ptr(i).unwrap();
+        @if(self.id != -1) return(x);
+        self.id = 1;
+        for self.use { i |
+            x = rporec(it, i, x);
+        };
+        self.id = x;
+        x - 1
+    }
 }
 
 DISABLE_IMPORT_FRC :: true;
