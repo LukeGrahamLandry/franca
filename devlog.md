@@ -1,4 +1,20 @@
 
+## (Feb 4)
+
+- downloading a blob of generated c is probably slightly better than downloading an exe
+
+## (Feb 3) rcg
+
+- squashing bugs: missing vtable fn, bool repr for not, abi_field.
+- unsizing of structs where you have to be able to offset field but keep metadata. 
+- discovered it can pull in generics instantiations from already compiled crates, 
+  so that's a source of functions you can call but shouldn't emit. 
+
+## (Feb 2) rcg
+
+- comments in the ir so don't have to scroll back and forth. 
+- unsizing to `Box<[T]>`: load data from struct. drop. 
+
 ## (Feb 1) rcg
 
 - intrinsics: black_box, write_bytes

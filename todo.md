@@ -621,6 +621,7 @@ convert.fr:
 
 ## backend 
 
+- better error messages for abusing FPad. also for lying about Typ size in frc file (giving too many fields).
 - tests/todo/apple_arm_subword_abi.ssa
 - macho/emit.fr/emplace_fixup() allow negative offset for DataAbsolute of dynamic import in .Exe
 - rm64/emit.fr/fixup_arm64(): offset from dynamic import

@@ -1,0 +1,636 @@
+
+Emit :: @struct(
+    program: *SelfHosted,
+    var_lookup: HashMap(VarId, Str),
+    inlined_return_addr: HashMap(LabelId, ReturnTarget),
+    pending: *List(FuncId), 
+    next_fake_label: u32 = 0,
+    next_var := 0,
+    indent := 0,
+    out: *List(u8),
+    last_statement_start := 0,
+);
+
+ReturnTarget :: @struct(
+    blk: Str,
+    p: Placement,
+    used: bool,
+);
+
+Placement :: @tagged(Assign: Str, Declare: Str, NewMemory, Discard);
+
+emit_ir :: fn(comp: *SelfHosted, f: FuncId, pending: *List(FuncId), out: *List(u8)) void = {
+    self: Emit = (
+        program = comp,
+        var_lookup = init(temp()),
+        inlined_return_addr = init(temp()),
+        pending = pending,
+        out = out,
+    );
+    self&.emit_body(f);
+};
+
+fn emit_body(self: *Emit, f: FuncId) void #once = {
+    func := self.program.get_function(f);
+    arg_ty := func.finished_arg.unwrap();
+    
+    ret := func.finished_ret.unwrap();
+    @fmt(self.out, "% %(", self.type_name(ret), self.fmt_fn_name(f));
+    
+    if func.finished_arg.unwrap() != void {
+        each func.arg.bindings { b |
+            v := b.var().unwrap();
+            name := self.var_name(v);
+            @fmt(self.out, "% %, ", self.type_name(b.ty.Finished), name);
+            self.var_lookup&.insert(v.id, name);
+        };
+    }
+    @fmt(self.out, ")");
+    
+    body: *FatExpr = @match(func.body&) {
+        fn Normal(body) => body;
+        fn NewIntrinsic(op) => {
+            @fmt(self.out, "{ /* TODO: intrinsic % % */ assert(false); }\n", op.ir_op, op.ir_cls);
+            return()
+        };
+        fn Redirect(fid) => {
+            @fmt(self.out, "#define % %\n", self.fmt_fn_name(f), self.fmt_fn_name(fid[]));
+            self.pending.push(fid[]);
+            return()
+        } 
+        fn DynamicImport(info) => {
+            @fmt(self.out, ";\n");
+            return()
+        }
+        fn Asm(it) => {
+            @fmt(self.out, "{ /* TODO: asm */ assert(false); }");
+            return()
+        }
+        @default => @panic("no acceptable impl %", self.program.log(func));
+    };
+    
+    @fmt(self.out, " {\n");
+    indented self {
+        result := self.compile_expr(body, .NewMemory);
+        self.statement();
+        @fmt(self.out, "return %;\n", result);
+    };
+    self.statement();
+    @fmt(self.out, "}\n");
+}
+
+fn new_tmp_name(self: *Emit) Str = {
+    self.next_var += 1;
+    @tfmt("v%", self.next_var)
+}
+
+fn var_name(self: *Emit, v: Var) Str = {
+    s := self.program.get_string(v.name);
+    for s { c |
+        if !(c.is_ascii_alpha() || c.is_ascii_digit() || c == "_".ascii()) {
+            s = "v";
+        };
+    };
+    self.next_var += 1;
+    @tfmt("%__v%", s, self.next_var)
+}
+
+fn compile_stmt(self: *Emit, stmt: *FatStmt) void = {
+    @match(stmt.stmt&) {
+        fn Eval(expr) => {
+            self.compile_expr(expr, .Discard);
+        }
+        fn Decl(f) => {
+            v := f[].var().unwrap();
+            name := self.var_name(v);
+            _ := self.compile_expr(f.default&, (Declare = name));
+            _ := self.var_lookup&.insert(v.id, name);
+        }
+        fn Set(f) => {
+            src := self.compile_expr(f.value&, .NewMemory);
+            dest := @match(f.place.expr&) {
+                fn GetVar(it) => self.addr_macro(f.place&, .NewMemory)
+                fn Deref(arg) => self.compile_expr(arg[], .NewMemory);
+                @default => panic("TODO: other `place=e;` :(");
+            };
+            self.statement();
+            @fmt(self.out, "*% = %;\n", dest, src);
+        }
+        fn DeclVarPattern(f) => {
+            base := self.compile_expr(f.value&, .NewMemory);
+            self.decl_var_pattern(base, f.value.ty, f.binding.bindings.items())
+        };
+        fn Noop() => ();
+        @default => @panic("ICE: stmt not desugared %", self.program.log(stmt));
+    }
+}
+
+fn decl_var_pattern(self: *Emit, parent: Str, ty: Type, bindings: []Binding) void = {
+    info := self.program.get_type(ty);
+    @if(bindings.len == 0) return();
+    if !info.is(.Struct) || bindings.len == 1 {
+        v := bindings[0]&.var().unwrap();
+        _ := self.var_lookup&.insert(v.id, parent);
+        return()
+    };
+    self.program.finish_layout(ty); // :extra
+    fields := info.Struct.fields&;
+    @debug_assert(info.Struct.layout_done && fields.len == bindings.len);
+    enumerate bindings { i, b |
+        f       := fields[i]&;
+        v    := b.var().unwrap();
+        name := self.var_name(v);
+        self.statement();
+        @fmt(self.out, "% % = %._%;\n", self.type_name(b.ty.Finished), name, parent, i);
+        self.var_lookup&.insert(v.id, name);
+    };
+}
+
+fn compile_expr(self: *Emit, expr: *FatExpr, p: Placement) Str = {
+    @debug_assert(!expr.ty.is_unknown() && expr.ty != CVariadicType);
+    expr_ty := expr.ty;
+    (@match(expr.expr&) {
+        fn Cast(v)  => return(self.compile_expr(v[], p));
+        fn Call(f)    => return(self.emit_call(f.f, f.arg, p));
+        fn Block(f)   => return(self.emit_block_expr(expr, p));
+        fn Value(f)   => return(self.emit_constant(f.bytes&, p, expr.ty, expr.loc));
+        fn If(_)      => return(self.emit_call_if(expr, p));
+        fn Loop(arg)  => return(self.emit_call_loop(arg[]));
+        fn Addr(arg)  => return(self.addr_macro(arg[], p));
+        fn StructLiteralP(pattern) => return(self.construct_aggregate(pattern, expr.ty, p));
+        fn Slice(arg) => {
+            container_ty := arg.ty;
+            // Note: number of elements, not size of the whole array value.
+            ty, count := @match(arg.expr) {
+                fn Tuple(parts) Ty(Type, i64) => { 
+                    fst := parts[0];
+                    (fst.ty, parts.len) 
+                };
+                @default => (arg.ty, 1);
+            };
+            ptr  := self.compile_expr(arg[], .NewMemory);
+            declare_now(self, p&, expr_ty) {
+                @fmt(self.out, "(%) { .ptr = (*%) %, .len = %, }", 
+                    self.type_name(expr.ty), self.type_name(ty), ptr, count);
+            }
+        };
+        fn GetVar(it) => {
+            name := self.var_lookup&.get_ptr(it.id).unwrap()[];
+            @match(p) {
+                fn NewMemory() => name;
+                @default => self.declare_now(p&, expr.ty, => @fmt(self.out, "%", name));
+            }
+        }
+        fn DataSymbol(info) => {
+            name := self.program.get_string(info.name);
+            self.declare_now(p&, expr.ty, => @fmt(self.out, "%", name))
+        }
+        fn Deref(arg) => {
+            @if_let(arg.expr&) fn GetVar(v) => {
+                return self.declare_now(p&, expr.ty, => @fmt(self.out, "%", self.var_name(v[])));
+            };
+            src := self.compile_expr(arg[], .NewMemory); // get the pointer
+            self.deref(src, p, expr_ty)
+        };
+        fn FnPtr(arg) => {
+            f := arg[].as_const(FuncId);
+            name := self.func_ref(f);
+            self.declare_now(p&, expr.ty, => @fmt(self.out, "%", name))
+        };
+        fn Unreachable() => {
+            _ := self.unify_placement(p&, expr.ty);
+            self.statement();
+            @fmt(self.out, "assert(false);\n");
+            ""
+        }
+        fn Uninitialized() => {
+            self.declare_now(p&, expr.ty, => @fmt(self.out, "/* @uninitialized */"))
+        };
+        fn Tuple(values) => {
+            @if(values.len == 0) return("");
+            if values.len == 1 {
+                return self.compile_expr(values[0]&, p);
+            };
+            fields := self.pre_eval_tuple(values.items());
+            @if(p&.is(.Discard)) return("");
+            ty := self.program.raw_type(expr.ty);
+            declare_now(self, p&, ty) {
+                @fmt(self.out, "(%) {\n", self.type_name(ty));
+                indented self {
+                    @match(self.program.get_type(ty)) {
+                        fn Struct(f) => enumerate fields { i, value |
+                            @fmt(self.out, "._% = %, ", i, value);
+                        };
+                        fn Array(f) => enumerate fields { i, value |
+                            @fmt(self.out, "[%] = %, ", i, value);
+                        };
+                        @default => unreachable();
+                    };
+                };
+                @fmt(self.out, "\n");
+                self.statement("}");
+            }
+        }
+        fn PtrOffset(f) => {
+            base  := self.compile_expr(f.ptr, .NewMemory);
+            result := self.declare_now(p&, expr.ty);
+            @fmt(self.out, "&%->%;\n", base, self.program.get_string(f.name));
+            result
+        }
+        fn Switch(f) => return(self.emit_switch(expr, p));
+        @default => @panic("ICE: didn't desugar: %", self.program.log(expr));
+    })
+}
+
+fn deref(self: *Emit, src: Str, p: Placement, expr_ty: Type) Str = {
+    value_type := expr_ty;
+    size: i64 = self.program.get_info(value_type)[].stride_bytes.zext();
+    if(size == 0, => return("")); // :NoRuntimeRepr
+    self.declare_now(p&, expr_ty, => @fmt(self.out, "*%", src))
+}
+
+fn emit_call(self: *Emit, f: *FatExpr, arg: *FatExpr, p: Placement) Str #once = {
+    self.program.finish_layout(arg.ty); // :extra
+    callee, f_ty := @match(self.program.get_type(f.ty)) {
+        fn Fn() => {
+            f_id := f.as_const(FuncId);
+            func := self.program.get_function(f_id);
+            @debug_assert(!func.get_flag(.Generic) && !func.get_flag(.MayHaveAquiredCaptures));
+            f_ty := func.finished_ty().unwrap();  // see tests/todo/wrong_call_type.fr
+            callee_r := self.func_ref(f_id);
+            
+            @if_let(func.body&) fn NewIntrinsic(op) => {
+                // TODO
+            };
+
+            (callee_r, f_ty)
+        }
+        fn FnPtr(f_ty) => (self.compile_expr(f, .NewMemory), f_ty.ty);
+        fn Label(_) => {
+            label := f.as_const(LabelId);
+            ret := self.inlined_return_addr&.get_ptr(label);
+            ret := ret || @panic("missing return label. forgot '=>' on function?");
+            ret.used = true;  // note: updating the one in the map! not a copy
+            _ := self.compile_expr(arg, ret.p);
+            self.statement();
+            @fmt(self.out, "goto %;\n", ret.blk);
+            return "";
+        }
+        @default => unreachable();
+    };
+    
+    fields := self.pre_eval_tuple(arg.items());
+    output := self.declare_now(p&, f_ty.ret);
+    @fmt(self.out, "%(", callee);
+    for fields { it |
+        @fmt(self.out, "%, ", it);
+    };
+    @fmt(self.out, ");\n");
+    output
+}
+
+fn func_ref(self: *Emit, f_id: FuncId) Str #inline = 
+    self.fmt_fn_name(f_id);
+
+fn emit_block_expr(self: *Emit, expr: *FatExpr, p: Placement) Str #once = {
+    block   := expr.expr.Block&;
+    if block.ret_label.is_none() && block.body.len == 0 {
+        return self.compile_expr(block.result, p);
+    };
+    
+    // the real ones start at 0 so this wont collide until 2^31 of them
+    self.next_fake_label -= 1;
+    ret_var := block.ret_label 
+        || bit_cast_unchecked(u32, LabelId, self.next_fake_label); 
+    
+    // :block_never_unify_early_return_type
+    // Note: block_ty can be different from value.ty if the fall through is a Never but there's an early return to the block. 
+    block_ty := expr.ty;
+    
+    dest := self.unify_placement(p&, block_ty);
+    out  := self.program.get_info(block_ty);
+
+    ret: ReturnTarget = (
+        blk = @tfmt("b__%", ret_var.as_index()),
+        p = p,
+        used = false,
+    );
+    prev := self.inlined_return_addr&.insert(ret_var, ret);
+    @debug_assert(prev.is_none(), "stomped ret var");
+    self.statement();
+    each block.body& { stmt | 
+        self.compile_stmt(stmt);
+    };
+    _ := self.compile_expr(block.result, p);
+    ret := self.inlined_return_addr&.remove(ret_var).unwrap();
+    if ret.used {
+        self.statement();
+        @fmt(self.out, "%:\n", ret.blk);
+    };
+    dest
+}
+
+stores :: import("@/backend/opt/mem.fr")'store_by_size;
+
+fn emit_constant(self: *Emit, value: *Values, p: Placement, expr_ty: Type, loc: Span) Str #once = {
+    @if(p&.is(.Discard) || expr_ty == void) return("");
+    info := self.program.get_info(expr_ty);
+    use_int_literal := value.is(.Small) && (!info.contains_pointers || value.Small._0 == 0);
+    if use_int_literal {
+        return self.declare_now(p&, expr_ty, => @fmt(self.out, "%", value.Small._0));
+    };
+    id := self.program.emit_relocatable_constant(expr_ty, value.bytes(), loc).unwrap();
+    baked := self.program.get_baked(id);
+    // TODO: actually emit it
+    self.declare_now(p&, expr_ty, => @fmt(self.out, "*(%*) baked__b%", self.type_name(expr_ty), id.id))
+}
+
+fn addr_macro(self: *Emit, arg: *FatExpr, p: Placement) Str #once = {
+    var := arg.expr.GetVar;
+    @debug_assert(arg.expr&.is(.GetVar) && var.kind != .Const, "took address of r-value");
+    ref := self.var_lookup&.get_ptr(var.id).expect("addr runtime var");
+    declare_now(self, p&, self.program.ptr_ty(arg.ty)) {
+        @fmt(self.out, "&%", ref)
+    }
+}
+
+fn emit_call_if(self: *Emit, arg: *FatExpr, p: Placement) Str #once = {
+    parts := arg.expr.If&;
+    cond := self.compile_expr(parts.cond, .NewMemory);
+    result := self.unify_placement(p&, arg.ty);
+    self.statement();
+    @fmt(self.out, "if (%) {\n", cond);
+    indented self {
+        _ := self.compile_expr(parts.if_true, p);
+        if self.last_statement_start == self.out.len {
+            @fmt(self.out, "\n");
+        };
+    };
+    if parts.if_false.is_empty() {
+        self.statement("}\n");
+    } else {
+        self.statement("} else {\n");
+        indented self {
+            _ := self.compile_expr(parts.if_false, p);
+            if self.last_statement_start == self.out.len {
+                @fmt(self.out, "\n");
+            };
+        };
+        self.statement("}\n");
+    };
+    result
+}
+
+fn emit_switch(self: *Emit, arg: *FatExpr, p: Placement) Str #once = {
+    parts := arg.expr.Switch;
+    inspect := self.compile_expr(parts.value, .NewMemory); 
+    result := self.unify_placement(p&, arg.ty);
+    self.statement();
+    @fmt(self.out, "switch (%) {\n", inspect);
+    indented self {
+        each parts.cases { f |
+            value, body := (f._0, f._1&);
+            self.statement();
+            @fmt(self.out, "case %: {\n", value);
+            indented self {
+                _ := self.compile_expr(body, p);
+                self.statement("break;\n");
+            };
+            self.statement("}\n");
+        };
+        self.statement("default: {\n");
+        indented self {
+            _ := self.compile_expr(parts.default, p);
+        };
+        self.statement("}\n");
+    };
+    self.statement("}\n");
+    result
+}
+
+fn emit_call_loop(self: *Emit, arg: *FatExpr) Str #once = {
+    self.statement();
+    @fmt(self.out, "while(1){\n");
+    indented self {
+        _ := self.compile_expr(arg, .Discard);
+    };
+    self.statement();
+    @fmt(self.out, "}\n");
+    ""
+}
+
+fn construct_aggregate(self: *Emit, pattern: *Pattern, requested: Type, p: Placement) Str #once = {
+    raw_container_ty := self.program.raw_type(requested);
+    self.program.finish_layout(raw_container_ty);  // :extra
+    @match(self.program.get_type(raw_container_ty)) {
+        fn Struct(f) => {
+            fields := @ref Str.list(pattern.bindings.len, temp());
+            enumerate pattern.bindings& { i, b | 
+                fields.push(self.compile_expr(b.default&, .NewMemory));
+            };
+            @if(p&.is(.Discard)) return("");
+            self.declare_now(p&, requested) {
+                @fmt(self.out, "(%) {\n", self.type_name(requested));
+                indented self {
+                    enumerate pattern.bindings& { i, b | 
+                        name := self.program.get_string(b.ident().unwrap());
+                        self.statement();
+                        @fmt(self.out, ".% = %,\n", name, fields[i]);
+                    };
+                };
+                self.statement("}");
+            }
+        }
+        fn Tagged(f) => {
+            @debug_assert_eq(pattern.bindings.len, 1, "@tagged must have one active varient");
+            value := pattern.bindings.index(0).get_default().unwrap();
+            name := pattern.bindings[0].name.unwrap();
+            i    := f.cases.index_of(fn(f) => f._0 == name).expect("case name to exist in type");
+            payload := self.compile_expr(value, .NewMemory);
+            @if(p&.is(.Discard)) return("");
+            self.declare_now(p&, requested) {
+                case_name := self.program.get_string(name);
+                @fmt(self.out, "(%) { .tag = %, .% = %, }", self.type_name(requested), i, case_name, payload);
+            }
+        }
+        @default => unreachable();
+    }
+}
+
+fn as_const(self: *FatExpr, $T: Type) T #generic = {
+    @assert(self.expr&.is(.Value), "as_const");
+    T.assume_cast(self.expr.Value.bytes&)[]
+}
+
+fn fmt_fn_name(self: *Emit, f: FuncId) []u8 = 
+    self.program.fmt_fn_name(f);
+
+fn pre_eval_tuple(self: *Emit, values: []FatExpr) []Str = {
+    fields := @ref Str.list(values.len, temp());
+    each values { expr | 
+        fields.push(self.compile_expr(expr, .NewMemory));
+    };
+    fields.items()
+}
+
+fn is_empty(e: *FatExpr) bool = {
+    e.ty == void && e.expr&.is(.Value)
+}
+
+fn type_name(self: *Emit, t: Type) Str = {
+    @tfmt("T__%", t)
+}
+
+fn indented(self: *Emit, $body: @Fn() void) void = {
+    self.indent += 1;
+    self.statement();
+    body();
+    self.indent -= 1;
+}
+
+fn declare_now(self: *Emit, p: *Placement, t: Type, $body: @Fn() void) Str = {
+    self.statement();
+    result := self.declare_now(p, t);
+    body();
+    @fmt(self.out, ";\n");
+    result
+}
+
+fn statement(self: *Emit, s: Str) void = {
+    self.statement();
+    @fmt(self.out, "%", s);
+}
+
+fn statement(self: *Emit) void = {
+    @if(self.last_statement_start == self.out.len) return();
+    @debug_assert(self.out.items().ends_with("\n"));
+    self.out.push_repeated(self.indent, "\t".ascii());
+    self.last_statement_start = self.out.len;
+}
+
+fn declare_now(self: *Emit, p: *Placement, t: Type) Str = {
+    @match(p[]) {
+        fn NewMemory() => {
+            p[] = (Declare = self.new_tmp_name());
+            self.declare_now(p, t)
+        }
+        fn Declare(name) => {
+            self.statement();
+            @fmt(self.out, "% ", self.type_name(t));
+            p[] = (Assign = name);
+            @fmt(self.out, "% = ", name);
+            name
+        }
+        fn Assign(name) => {
+            self.statement();
+            @fmt(self.out, "% = ", name);
+            name
+        }
+        fn Discard() => {
+            self.statement();
+            ""
+        }
+    }
+}
+fn unify_placement(self: *Emit, p: *Placement, t: Type) Str = {
+    @match(p[]) {
+        fn NewMemory() => {
+            p[] = (Declare = self.new_tmp_name());
+            self.unify_placement(p, t)
+        }
+        fn Declare(name) => {
+            self.statement();
+            @fmt(self.out, "% %;\n", self.type_name(t), name);
+            p[] = (Assign = name);
+            name
+        }
+        fn Assign(name) => {
+            self.statement();
+            name
+        };
+        fn Discard() => {
+            self.statement();
+            ""
+        }
+    }
+}
+
+// :paste
+pump :: fn(comp: *SelfHosted, fns: []FuncId) Str = {
+    a := comp.get_alloc();
+    self: MainThreadPump = (funcs_done = empty(a), funcs_seen = empty(a), work_stack = list(a), pending = list(a), comp = comp);
+    self.work_stack&.push_all(fns);
+    out := u8.list(a);
+    @fmt(out&, "/* @generated by franca/examples/emit_c.fr */\n");
+    while => self.work_stack.len != 0 {
+        continue :: local_return;
+        fid := self.work_stack[self.work_stack.len - 1];
+        fid_i: i64 = fid.to_index().zext();
+        if self.funcs_done&.get(fid_i) {
+            // might have been added multiple times
+            self.work_stack&.pop();
+            continue();
+        };
+        
+        first_time := !self.funcs_seen&.get_set(fid_i);
+        comp.report_progress(fid, true, .AotPump);
+        func := comp.get_function(fid);
+        // Note: compile before checking callees!
+        xx := comp.poll_in_place(void, => comp.compile_body(fid));
+        or xx { err | 
+            @println("failed compile %", comp.get_string(func.name));
+            comp.report_error(err)
+        };  // TODO: return error instead
+        if self&.push_callees(func.callees&.items(), first_time) {
+            // no pop
+            continue();
+        };
+        
+        emit_ir(comp, fid, self.pending&, out&);
+        
+        comp.report_progress(fid, false, .AotPump);
+        current := self.work_stack&.pop().unwrap();
+        @debug_assert_eq(current, fid, "order messed up");
+        self&.add_work(self.pending&.items());  // HACK
+        self.pending&.clear();
+        self.funcs_done&.set(fid_i);
+        self&.add_work(func.mutual_callees&.items());
+    };
+    @fmt(out&, "\n/* deps:\n");
+    if !DISABLE_IMPORT_FRC {
+        @fmt(out&, " * % %\n", comp.vtable.self_hash, Incr.self_filename);
+    };
+    each comp.codemap.files& { it |
+        @fmt(out&, " * % %\n", it.hash&, it.name);
+    };
+    @fmt(out&, " */\n");
+    out.items()
+
+}
+
+main :: fn() void = {
+    driver_vtable_exports;
+    vtable := init_driver_vtable(false);
+    opts := vtable.default_build_options();
+    if cli_args().contains(fn(it) => it[] == "-unsafe") {
+        it := opts.safety_checks&;
+        it.insert(.Bounds, false);
+        it.insert(.DebugAssertions, false);
+        it.insert(.InvalidTag, false);
+    };
+    opts.retain_function_names = true;
+    src := """#include_std("lib/core.fr"); #include_std("compiler/main.fr"); """;
+    c := new_with_src(vtable, src, "entry_file", opts);
+    c := vtable.with(c);
+    fid := or c.get_unique_named("main") {
+        panic("expected exactly one function called 'main'")
+    };
+    self := c.data.cast()[][];
+    result := pump(self, @slice(fid));
+    println(result);
+    c'vtable'destroy_compiler(c.data);
+}
+
+DISABLE_IMPORT_FRC :: true;
+DEBUG_SPAM_LOG :: false;
+#include_std("compiler/lib.fr");
