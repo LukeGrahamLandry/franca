@@ -2,6 +2,8 @@
 ## (Feb 4)
 
 - downloading a blob of generated c is probably slightly better than downloading an exe
+- very satisfying to do little things to have fewer intermidiate variables and reduce the bytes output dramatically. 
+  like 12 -> 8 (MB, safe). 6 unsafe. 
 
 ## (Feb 3) rcg
 
