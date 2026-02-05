@@ -1,4 +1,10 @@
 
+## (Feb 5)
+
+- Type id order is close to right for forward declaring because Named from @ref
+  is for the same cycle breaking that c needs, but not quite. need to have two 
+  weights of dependencies so it knows pointers can be delayed. 
+
 ## (Feb 4)
 
 - downloading a blob of generated c is probably slightly better than downloading an exe

@@ -1,4 +1,5 @@
 
+- import_c `typedef void V; void foo(V) {}` Assertion Failed: cls(TY_VOID)
 - this should work on wasm too. 
 ```
 export function w $main() {
