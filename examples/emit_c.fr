@@ -1,4 +1,7 @@
 // THIS IS UNFINISHED
+// currently it can convert compiler/main.fr to a 212k line / 7MB c file
+// which when compiled by clang -O0 can jit examples/toy/hello.fr. 
+// there are many things that are still broken. 
 
 Emit :: @struct(
     program: *SelfHosted,
@@ -96,11 +99,7 @@ fn emit_body(self: *Emit, f: FuncId) void #once = {
 
 fn write_extern(self: *Emit, info: *DynamicImport, f_ty: FnType) void = {
     @fmt(self.out, "extern ");
-    if info.weak {
-        @fmt(self.out, "__attribute__((weak)) ");
-        // doesn't seem to fix apple clang: @fmt(self.out, "__attribute__((weak_import)) ");
-    };
-    self.write_sig(f_ty, @tfmt("%", self.ident(info.name)));
+    self.write_sig(f_ty, @tfmt("%", self.ident(info.name)), info.weak);
 } 
 
 fn write_sig_names(self: *Emit, f: FuncId, name: Str) []Str = {
@@ -278,11 +277,19 @@ fn compile_expr(self: *Emit, expr: *FatExpr, p: Placement) Str = {
         fn Addr(arg)  => return(self.addr_macro(arg[], expr.ty, p));
         fn StructLiteralP(pattern) => return(self.construct_aggregate(pattern, expr.ty, p));
         fn Slice(arg) => {
+            @if(p&.is(.Discard)) return(self.compile_expr(arg[], .Discard));
+            
             container_ty := arg.ty;
             // Note: number of elements, not size of the whole array value.
             parts := arg[].items();
             ty, count := (parts[0].ty, parts.len);
-            ptr  := self.compile_expr(arg[], p.new_or_discard());
+            
+            dest := Placement.NewMemory;
+            if self.is_trivial(arg[]) {
+                dest = (Declare = self.new_tmp_name());  // can't &rvalue
+            };
+            
+            ptr  := self.compile_expr(arg[], dest);
             declare_now(self, p&, expr_ty) {
                 @fmt(self.out, "(%) { .ptr = (%*) &%, .len = %, }", 
                     self.type_name(expr.ty), self.type_name(ty), ptr, count);
@@ -296,7 +303,7 @@ fn compile_expr(self: *Emit, expr: *FatExpr, p: Placement) Str = {
             name := self.ident(info.name);
             @if_let(self.program.get_type(expr.ty)) fn FnPtr(f_ty) => {
                 self.statement();
-                self.write_sig(f_ty.ty, name);
+                self.write_sig(f_ty.ty, name, info.weak);
             };
             self.declare_now(p&, expr.ty, => @fmt(self.out, "%", name))
         }
@@ -437,7 +444,7 @@ fn emit_intrinsic(self: *Emit, p: Placement, op: *NewIntrinsicPayload, t: Type, 
     if o == .copy {
         return self.declare_now(p&, t, => @fmt(self.out, "(%) %", self.type_name(t), arg[0]));
     };
-    if @is(o, .extub, .extuh, .extuw, .extsb, .extsh, .extsw) {
+    if @is(o, .extsb, .extsh, .extsw) {
         // TODO
         return self.declare_now(p&, t, => @fmt(self.out, "(%) %", self.type_name(t), arg[0]));
     };
@@ -459,10 +466,12 @@ fn emit_intrinsic(self: *Emit, p: Placement, op: *NewIntrinsicPayload, t: Type, 
         return self.declare_now(p&, t, => @fmt(self.out, "v%", expected));
     };
     
+    cast_with_suffix :: fn(it) => 
+        return self.declare_now(p&, t, => @fmt(self.out, "(%) (%%)", k_to_type(k), arg[0], it));
+        
     emit_builtin_call :: fn(name) => 
         return self.declare_now(p&, t, => self.write_call(name, arg));
     
-    // TODO: unscale pointer arithmetic
     bin := @match(o) {
         fn add() => "+";
         fn sub() => "-";
@@ -476,19 +485,22 @@ fn emit_intrinsic(self: *Emit, p: Placement, op: *NewIntrinsicPayload, t: Type, 
         fn xor() => "^";
         fn shl() => "<<";
         fn shr() => ">>";
-        fn sar() => ">>";
+        fn sar() => ">>";  // TODO
         fn rotr() => return(emit_builtin_call(@if(k == .Kl, "__builtin_rotateright64", "__builtin_rotateright32"))); 
         fn rotl() => return(emit_builtin_call(@if(k == .Kl, "__builtin_rotateleft64", "__builtin_rotateleft32")));
-        fn byteswap() => return(emit_builtin_call(@if(k == .Kl, "__builtin_byteswap64", "__builtin_byteswap32")));
+        fn byteswap() => return(emit_builtin_call(@if(k == .Kl, "__builtin_bswap64", "__builtin_bswap32")));
         // TODO: are these ub on zero in c?
         fn clz() => return(emit_builtin_call(@if(k == .Kl, "__builtin_clzl", "__builtin_clz")));
         fn ctz() => return(emit_builtin_call(@if(k == .Kl, "__builtin_ctzl", "__builtin_ctz")));
         fn ones() => return(emit_builtin_call(@if(k == .Kl, "__builtin_popcountl", "__builtin_popcount")));
-        fn sltof() => "/*TODO*/";
-        fn cast() => "/*TODO*/";
-        fn exts() => "/*TODO*/";
-        fn dtosi() => "/*TODO*/";
-        fn truncd() => "/*TODO*/";
+        fn sltof()  => cast_with_suffix("");  // TODO
+        fn cast()   => "/*TODO*/"; // TODO
+        fn dtosi()  => cast_with_suffix(""); // TODO
+        fn exts()   => cast_with_suffix("");
+        fn truncd() => cast_with_suffix("");
+        fn extub()  => cast_with_suffix("&0xFF");
+        fn extuh()  => cast_with_suffix("&0xFFFF");
+        fn extuw()  => cast_with_suffix("&0xFFFFFFFF");
         @default => {
             cc: i32 = 0;
             if !iscmp(o, k&, cc&) {
@@ -532,18 +544,20 @@ fn emit_intrinsic(self: *Emit, p: Placement, op: *NewIntrinsicPayload, t: Type, 
 }
 
 fn argument(self: *Emit, k: Qbe.Cls, value: Str, ty: Type) void = {
-    T := @match(k) {
-        fn Kw() => "uint32_t";
-        fn Kl() => "uint64_t";
-        fn Ks() => "float";
-        fn Kd() => "double";
-        @default => unreachable();
-    };
+    T := k_to_type(k);
     if self.program.get_type(ty).is(.Ptr) {
         @fmt(self.out, "(%)", T);
     }
     @fmt(self.out, "%", value);
 }
+
+k_to_type :: fn(k: Qbe.Cls) Str = @match(k) {
+    fn Kw() => "uint32_t";
+    fn Kl() => "uint64_t";
+    fn Ks() => "float";
+    fn Kd() => "double";
+    @default => unreachable();
+};
 
 fn func_ref(self: *Emit, f_id: FuncId) Str #inline = {
     self.use.insert(FuncId = f_id);
@@ -587,16 +601,21 @@ fn emit_constant(self: *Emit, value: *Values, p: Placement, expr_ty: Type, loc: 
     info := self.program.get_info(expr_ty);
     use_int_literal := value.is(.Small) && (!info.contains_pointers || value.Small._0 == 0);
     if use_int_literal && @is(self.program.get_type(expr_ty), .Int, .Enum, .Bool, .VoidPtr, .Ptr) {
-        return self.declare_now(p&, expr_ty, => @fmt(self.out, "%", value.Small._0));
+        // TODO: don't always need a cast. but im afraid of when i want it to wrap to negative
+        //       does the warning mean it won't?
+        //target/a.c:5311:38: warning: result of comparison of constant 4294967292 with expression of type 'int32_t' (aka 'int') is always true [-Wtautological-constant-out-of-range-compare]
+        //5311 |                         uint8_t cond__v14 = (result__v13) != (4294967292);
+        //     |                                             ~~~~~~~~~~~~~ ^  ~~~~~~~~~~~~
+        return self.declare_now(p&, expr_ty, => @fmt(self.out, "(%) %", self.type_name(expr_ty), value.Small._0));
     };
     id := self.program.emit_relocatable_constant(expr_ty, value.bytes(), loc).unwrap();
     
     baked := self.program.get_baked(id);
     
-    if baked.relocations.len == 1 && value.len() == 8 {
+    if baked.relocations.len == 1 && value.len() == 8 && self.program.get_type(expr_ty).is(.Ptr) {
         // TODO: shouldn't need the "()"
         return (declare_now(self, p&, expr_ty) {
-            @fmt(self.out, "(%) ", self.type_name(expr_ty));
+            @fmt(self.out, "(%) &", self.type_name(expr_ty));
             bake_iter_legacy baked { part |
                 self.emit_baked_part(part);
             };
@@ -686,8 +705,10 @@ fn define_baked_var(self: *Emit, id: BakedVarId) void = {
     name := @tfmt("C%", id.id);
     baked := self.program.get_baked(id);
     if baked.relocations.len == 0 {
-        // TODO: __attribute__((aligned(8))) 
-        //      for tls.globals it needs to be able to cas
+        alignment := @if(baked.type == UnknownType, 8, self.program.get_info(baked.type)[].align_bytes.zext());
+        if alignment != 1 {  // for tls.globals it needs to be able to cas
+            @fmt(self.out, "__attribute__((aligned(%))) ", alignment);
+        };
         @fmt(self.out, "static uint8_t %[%] = { ", name, baked.len());
         @match(baked.template) {
             fn Bytes(it) => self.string_literal(it);
@@ -862,12 +883,34 @@ fn is_empty(e: *FatExpr) bool = {
 }
 
 fn type_name(self: *Emit, t: Type) Str = {
-    @if(t == void) return("void");
-    @if_let(self.program.get_type(t)) fn Ptr(inner) => {
-        return @tfmt("%*", self.type_name(inner[]));
+    // TODO: not using the short names is 350k but makes the ordering work out better
+    if self.simple_type(t) { s |
+        return s;
     };
     self.use.insert(Type = t);
     @tfmt("T%", t)
+}
+
+fn simple_type(self: *Emit, t: Type) ?Str = {
+    (Some = @match(self.program.get_type(t)) { 
+        fn F32() => "float";
+        fn F64() => "double";
+        fn Int(it) => {
+            bits := it.bit_count;
+            if !(bits == 8 || bits == 16 || bits == 32 || bits == 64) {
+                bits = 64;
+            };
+            @tfmt("%int%_t", @if(it.signed, "", "u"), bits)
+        };
+        fn Enum(it) => self.type_name(it.raw);
+        fn Named(it) => self.type_name(it._0);
+        fn void() => "void";
+        fn Never() => "void";
+        fn VoidPtr() => "void *";
+        fn Bool() => "uint8_t";
+        fn Ptr(inner) => @tfmt("%*", self.type_name(inner[]));
+        @default => return(.None);
+    })
 }
 
 // franca has @"raw identifiers", fewer keywords, and comptime code can create arbitrary asts. 
@@ -1005,6 +1048,9 @@ fn define_type(self: *Emit, it: Type) void = {
     info := self.program.get_type(it);
     @fmt(self.out, "typedef ");
     name := self.type_name(it);
+    if self.simple_type(it) { s |
+        @fmt(self.out, "%", s);
+    } else {
     @match(info[]) {
         fn Struct(it) => {
             @fmt(self.out, "% % {\n", @if(it.is_union, "union", "struct"), name);
@@ -1026,41 +1072,30 @@ fn define_type(self: *Emit, it: Type) void = {
             };
             @fmt(self.out, "\t};\n}");
         }
-        fn Array(it) => @fmt(self.out, "struct { % data[%]; }", self.type_name(it.inner), it.len);
-        fn Ptr(it) => @fmt(self.out, "%*", self.type_name(it));
-        fn F32() => @fmt(self.out, "float");
-        fn F64() => @fmt(self.out, "double");
-        fn Int(it) => {
-            bits := it.bit_count;
-            if !(bits == 8 || bits == 16 || bits == 32 || bits == 64) {
-                bits = 64;
-            };
-            @fmt(self.out, "%int%_t", @if(it.signed, "", "u"), bits);
-        };
-        fn Enum(it) => @fmt(self.out, "%", self.type_name(it.raw));
-        fn Named(it) => @fmt(self.out, "%", self.type_name(it._0));
-        fn void() => @fmt(self.out, "void");
-        fn Never() => @fmt(self.out, "void");
-        fn VoidPtr() => @fmt(self.out, "void *");
+        fn Array(it) => @fmt(self.out, "struct % { % data[%]; }", name, self.type_name(it.inner), it.len);
         fn FnPtr(f_ty) => {
-            self.write_sig(f_ty.ty, @tfmt("*%", name));
+            self.write_sig(f_ty.ty, @tfmt("*%", name), false);
             return();  // name goes in the middle
         }
-        fn Bool() => @fmt(self.out, "uint8_t");
         fn Placeholder() => @fmt(self.out, "void");  // TODO ???
         @default => @panic("TODO: /* % */", self.program.log(it)); 
+    };
     };
     @fmt(self.out, " %;\n", name);
 }
 
-fn write_sig(self: *Emit, f_ty: FnType, name_string: Str) void = {
+fn write_sig(self: *Emit, f_ty: FnType, name_string: Str, weak: bool) void = {
     @fmt(self.out, "% ", self.type_name(f_ty.ret));
     @fmt(self.out, "(%)(", name_string);
     for self.program.arg_types(f_ty.arg) { it |
         @fmt(self.out, "%, ", self.type_name(it));
     };
     self.out.len -= 2*int(self.out.items().ends_with(", "));
-    @fmt(self.out, ");\n");
+    @fmt(self.out, ")");
+    if weak {
+        @fmt(self.out, " __attribute__((weak))");
+    };
+    @fmt(self.out, ";\n");
 }
 
 pump :: fn(comp: *SelfHosted, fns: []FuncId) Str = {
@@ -1109,6 +1144,8 @@ pump :: fn(comp: *SelfHosted, fns: []FuncId) Str = {
         
         used := @ref ItemKey.list(use.raw.len_including_tombstones, a);
         each use.raw.arr& { slot |
+            // TODO: ugh, this removes info about when a type refers to itself indirectly
+            //       so then need lots of extra typedefs but don't want to count the one for getting its own name. 
             if slot.hash != 0 && slot.key& != key& {
                 @debug_assert(slot.hash != 1);
                 _ := all_items&.get_or_insert(slot.key) {
@@ -1118,7 +1155,7 @@ pump :: fn(comp: *SelfHosted, fns: []FuncId) Str = {
                 
                 used.push(slot.key);
             }
-            slot.hash = 0;  // remove without toubstone valid because removing all. 
+            slot.hash = 0;  // remove without tombstone valid because removing all. 
         };
         use.raw.len_including_tombstones = 0;
         it := all_items&.get_ptr(key).unwrap();
@@ -1136,6 +1173,8 @@ pump :: fn(comp: *SelfHosted, fns: []FuncId) Str = {
         #pragma GCC diagnostic ignored "-Wparentheses-equality"
         #pragma GCC diagnostic ignored "-Wincompatible-library-redeclaration"
         #pragma GCC diagnostic ignored "-Wc23-extensions"
+        #pragma GCC diagnostic ignored "-Wreturn-type"
+        
         static uint64_t __franca_base_address[1] = { % };
         static uint8_t __franca_aot_debug_info[%];
     """, FRHOSTED_MAGIC, size_of(import("@/lib/crash_report.fr").AotDebugInfo));
@@ -1161,6 +1200,35 @@ pump :: fn(comp: *SelfHosted, fns: []FuncId) Str = {
     ordered := temp().alloc_zeroed(*ItemData, all_items.raw.len_including_tombstones);
     each all_items& { _, it |
         ordered[it.id] = it;
+    };
+    
+    // TODO: if this is how i do it, don't include types in the graph
+    //       but i don't like how this gets rid of the locality of the graph way of doing it. 
+    forward: DynamicBitSet = empty(temp());
+    for comp.hack_order_types_were_sized { it |
+        if all_items&.get_ptr(Type = it) { it |
+            maybe_forward :: fn(check) => @if_let(check) fn Type(t) => {
+                check_data := all_items&.get_ptr(check).unwrap();
+                xx := @is(comp.get_type(t), .Struct, .Tagged, .Array);
+                union := comp.get_type(t).is(.Struct) && comp.get_type(t)[].Struct.is_union;
+                if check_data.src.len != 0 && !forward&.get_set(t.as_index()) && xx {
+                    @fmt(out&, "typedef % T% T%;\n", @if(union, "union", "struct"), t, t);
+                };
+            };
+            maybe_forward(it.key);  // TODO: aaa
+            for it.use { check |
+                maybe_forward(check);
+            };
+        
+            out&.push_all(it.src);
+            it.src = "";
+        };
+    };
+    for_rev ordered { it |
+        @if_let(it.key) fn Type(_) => {
+            out&.push_all(it.src);
+            it.src = "";
+        };
     };
     
     defined: HashSet(FuncId) = init(temp());
@@ -1200,18 +1268,21 @@ pump :: fn(comp: *SelfHosted, fns: []FuncId) Str = {
 main :: fn() void = {
     Incr'set_self_hash();
     driver_vtable_exports;
+    
+    #use("@/lib/args.fr");
+    args := parse_args(@struct(i := "", o := "", unsafe := false));
+    @assert(args.i != "" && args.o != "", "USAGE: [emit_c.fr] -i filename.fr -o a.c [-unsafe]");
+    
     vtable := init_driver_vtable(false);
     opts := vtable.default_build_options();
-    if cli_args().contains(fn(it) => it[] == "-unsafe") {
+    if args.unsafe {
         it := opts.safety_checks&;
         it.insert(.Bounds, false);
         it.insert(.DebugAssertions, false);
         it.insert(.InvalidTag, false);
     };
     opts.retain_function_names = true;
-    file := "compiler/main.fr";
-    //file := "examples/toy/hello2.fr";
-    src := @tfmt("""#include_std("lib/core.fr"); #include_std("%"); """, file);
+    src := @tfmt("""#include_std("lib/core.fr"); #include_std("%"); """, args.i);
     c := new_with_src(vtable, src, "entry_file", opts);
     c := vtable.with(c);
     fid := or c.get_unique_named("main") {
@@ -1219,7 +1290,7 @@ main :: fn() void = {
     };
     self := c.data.cast()[][];
     result := pump(self, @slice(fid));
-    println(result);
+    write_entire_file_or_crash(args.o, result);
     c'vtable'destroy_compiler(c.data);
 }
 
@@ -1257,7 +1328,6 @@ DEBUG_SPAM_LOG :: false;
 // - forward declare structs for ArenaHeader.next cycle
 // - stdatomic.h atomic_compare_exchange_weak
 // ---
-// - fix type forward declarations
 // - gcc doesn't have __builtin_rotate_xxx
-// - #redirect needs casts
-// - string literal pointer to CStr struct
+// - get_stack_base_for_tls is probably ub. use asm instead?
+// - lots of signness sketchyness in emit_intrinsic

@@ -1,11 +1,16 @@
 
-## (Feb 5)
+## (Feb 6) emit_c
+
+- don't bother with typedefs for enums/ints. cheated a bit with #redirect. now compiles. 
+
+## (Feb 5) emit_c
 
 - Type id order is close to right for forward declaring because Named from @ref
   is for the same cycle breaking that c needs, but not quite. need to have two 
   weights of dependencies so it knows pointers can be delayed. 
+- revelation: i already know the right order because whatever order i sized them in should also work for the c compiler. 
 
-## (Feb 4)
+## (Feb 4) emit_c
 
 - downloading a blob of generated c is probably slightly better than downloading an exe
 - very satisfying to do little things to have fewer intermidiate variables and reduce the bytes output dramatically. 
