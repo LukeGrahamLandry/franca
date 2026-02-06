@@ -212,6 +212,8 @@ Ctx :: @rec @struct {
     
     macos_framework_path: Str;
     current_framework: RawList(Str);
+    
+    inline_assembly: RawList(u8);
 };
 
 TransformCall :: @FnPtr(c: *Ctx, obj: *Obj, task: *CodegenTask) void;
@@ -2360,13 +2362,26 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
         };
     };
     
-    c.f.set_link_from_rpo();
-    f.f = c.f;
+    if c.inline_assembly.len == 0 {
+        c.f.set_link_from_rpo();
+        f.f = c.f;
+        c.yield(f);
+    } else {
+        // TODO: assert no other code in body until im ready to split it into a call to another function
+        f.yielded = true;
+        @assert(!@is(c.m.goal.type, .Cached, .CachedEarly), "TODO: need to be consistant about how to handle modules like this that don't actually compile anything");
+        enter_task c.emitter { entry | 
+            code := temp().box_zeroed(MultiArchAsm);
+            code[c.m.goal.arch] = c.inline_assembly.items().shallow_copy(temp());
+            entry.task = (Asm = (lnk = c.f.lnk&, code = code));
+            c'transform(c, f, entry.task&);
+        };
+        c.inline_assembly&.clear();
+    };
     
     c.leave_scope();
     c.current_fn = .None;
     c.f = Qbe.Fn.ptr_from_int(0);
-    c.yield(f);
     @debug_assert_eq(depth, c.scope_depth);
     tok
 }
@@ -3645,6 +3660,27 @@ asm :: fn(c, rest, tok) #prefix(.asm, .ND_STMT) = {
     };
     
     rest[] = c.skip(tok, ")");
+    
+    // TODO: use assemble.fr. for now this is just enough to make emit_c.fr work. 
+    if template.starts_with(".byte") && !template.contains("%") && !c.f.is_null() {
+        fail :: local_return;
+        template := template;
+        while => template.len != 0 {
+            @if(!template.starts_with(".byte ")) fail();
+            template = template.slice(6, template.len);
+            i, t := convert_number(template, 10, dec_digit);
+            @if(i > 255 || i < 0 || t.len == template.len) fail();
+            c.inline_assembly&.push(i.trunc(), c.arena);
+            template = t;
+            @if(!template.starts_with("\n")) fail();
+            template = template.slice(1, template.len);
+        };
+        c.b.jmp.type = .hlt;
+        c.b = c.new_block();
+        return(c.new_node(.ND_STMT, tok));
+    };
+    
+    
     if template != "" {
         @warn_tok(c, tok, "asm stmt is not supported");
         if !c.f.is_null() {

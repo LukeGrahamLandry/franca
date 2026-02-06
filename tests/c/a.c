@@ -90,6 +90,8 @@ int main() {
     int nonconstant = 0; nonconstant = 1;
     (nonconstant ? voidexpr() : voidexpr());
     
+    ASSERT(0, ({ void *to_void = 0; to_void == to_void + 1; }));
+    
     enum { value_0 };  // shadowed by a label
     switch(1) {
         value_0: case value_0: break;

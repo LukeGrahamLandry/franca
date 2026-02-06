@@ -5,6 +5,7 @@
 - import_c
   - expose builtins for (ctx, clz, ones, rotr, rotl, byteswap)
   - bug fixes: union init trailing comma, anon union init no fields, return void expression.
+  - ohh right sizeof(void) has to be 1 because math on void pointers has to step by 1. (i tried making it 0 to simplify import_c_type)
 
 ## (Feb 5) emit_c
 

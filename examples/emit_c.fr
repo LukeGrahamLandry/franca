@@ -74,7 +74,7 @@ fn emit_body(self: *Emit, f: FuncId) void #once = {
             it := bit_cast_unchecked(@type it, *EnumMap(Arch, []u8), it);
             for_enum Arch { arch |
                 self.statement();
-                @fmt(self.out, "#ifdef __%__\n", arch);
+                @fmt(self.out, "#if __%__ || __%\n", arch, arch);
                 @fmt(self.out, "\tasm(\"");
                 for it[arch] { byte |
                     @fmt(self.out, ".byte %\\n", byte);
@@ -99,7 +99,10 @@ fn emit_body(self: *Emit, f: FuncId) void #once = {
 
 fn write_extern(self: *Emit, info: *DynamicImport, f_ty: FnType) void = {
     @fmt(self.out, "extern ");
-    self.write_sig(f_ty, @tfmt("%", self.ident(info.name)), info.weak);
+    name := self.ident(info.name);
+    real_name := self.program.get_string(info.name);
+    alias: ?Str = @if(name != real_name, (Some = real_name), .None);
+    self.write_sig(f_ty, name, info.weak, alias);
 } 
 
 fn write_sig_names(self: *Emit, f: FuncId, name: Str) []Str = {
@@ -303,7 +306,7 @@ fn compile_expr(self: *Emit, expr: *FatExpr, p: Placement) Str = {
             name := self.ident(info.name);
             @if_let(self.program.get_type(expr.ty)) fn FnPtr(f_ty) => {
                 self.statement();
-                self.write_sig(f_ty.ty, name, info.weak);
+                self.write_extern(info, f_ty.ty);
             };
             self.declare_now(p&, expr.ty, => @fmt(self.out, "%", name))
         }
@@ -1074,7 +1077,7 @@ fn define_type(self: *Emit, it: Type) void = {
         }
         fn Array(it) => @fmt(self.out, "struct % { % data[%]; }", name, self.type_name(it.inner), it.len);
         fn FnPtr(f_ty) => {
-            self.write_sig(f_ty.ty, @tfmt("*%", name), false);
+            self.write_sig(f_ty.ty, @tfmt("*%", name), false, .None);
             return();  // name goes in the middle
         }
         fn Placeholder() => @fmt(self.out, "void");  // TODO ???
@@ -1084,7 +1087,7 @@ fn define_type(self: *Emit, it: Type) void = {
     @fmt(self.out, " %;\n", name);
 }
 
-fn write_sig(self: *Emit, f_ty: FnType, name_string: Str, weak: bool) void = {
+fn write_sig(self: *Emit, f_ty: FnType, name_string: Str, weak: bool, alias: ?Str) void = {
     @fmt(self.out, "% ", self.type_name(f_ty.ret));
     @fmt(self.out, "(%)(", name_string);
     for self.program.arg_types(f_ty.arg) { it |
@@ -1092,6 +1095,10 @@ fn write_sig(self: *Emit, f_ty: FnType, name_string: Str, weak: bool) void = {
     };
     self.out.len -= 2*int(self.out.items().ends_with(", "));
     @fmt(self.out, ")");
+    if alias { alias |
+        // rn only used for macos-amd FOO$INODE64 so the "_" mangle is always right
+        @fmt(self.out, " asm(\"_%\")", alias);
+    };
     if weak {
         @fmt(self.out, " __attribute__((weak))");
     };
