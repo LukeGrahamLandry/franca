@@ -2,6 +2,9 @@
 ## (Feb 6) emit_c
 
 - don't bother with typedefs for enums/ints. cheated a bit with #redirect. now compiles. 
+- import_c
+  - expose builtins for (ctx, clz, ones, rotr, rotl, byteswap)
+  - bug fixes: union init trailing comma, anon union init no fields, return void expression.
 
 ## (Feb 5) emit_c
 

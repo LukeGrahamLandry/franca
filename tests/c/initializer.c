@@ -279,6 +279,9 @@ int main() {
   ASSERT(16, ({ char *(x[2]) = { "", { "" } }; sizeof(x); }));  // array of pointers
   ASSERT('A', ({ char foo[1][2] = { { "A" } }; foo[0][0]; }));
   
+  ASSERT(123, ({ typedef union { int a; } S; S s = (S) { .a = 123, }; s.a; }));  // trailing comma
+  ASSERT(123, ({ typedef struct { int a; union {}; } S; S s = (S) { .a = 123, }; s.a; }));  // no fields
+
   printf("OK\n");
   return 0;
 }

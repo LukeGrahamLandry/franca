@@ -22,7 +22,8 @@ long __syscall_cp(long a, long b) { return 0; }
 #define __syscall_cp(...) __SYSCALL_DISP(__syscall_cp,__VA_ARGS__)
 #define syscall_cp(...) __syscall_cp(__VA_ARGS__)
 
-void voidexpr() {}
+void voidexpr2() {}
+void voidexpr() { return voidexpr2(); }
 
 int main() {
     make_empty_struct2(); make_empty_struct();
