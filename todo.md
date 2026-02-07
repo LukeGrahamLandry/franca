@@ -1,4 +1,5 @@
 
+- riscv import_wasm tests/ssa/isel5.ssa fails because it calls exit() which in import_wasm/run.fr needs jump.fr/throw
 - import_c `typedef void V; void foo(V) {}` Assertion Failed: cls(TY_VOID)
 - this should work on wasm too. 
 ```

@@ -1,4 +1,8 @@
 
+## (Feb 7)
+
+- import_c: fix builtin suffix. add builtin_cas. 
+
 ## (Feb 6) emit_c
 
 - don't bother with typedefs for enums/ints. cheated a bit with #redirect. now compiles. 

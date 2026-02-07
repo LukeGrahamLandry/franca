@@ -3745,11 +3745,30 @@ fn parse_builtin(c: *Ctx, name: Str, rest: **Token) ?*Node = {
     @if(!name.starts_with(prefix)) return(.None);
     name := name.slice(prefix.len, name.len);
     
+    if name == "cas" {
+        tok := rest[];
+        tok = c.skip(tok, "(");
+        node := c.parse_expr(tok&, tok, .Assign);
+        p := c.gen_expr(node);
+        @if(node.ty.kind != .TY_PTR) @error_tok(c, node.tok, "__builtin_cas requires pointer");
+        ty := node.ty.base;  // TODO: cast old/new to this type
+        tok = c.skip(tok, ",");
+        old := c.gen_expr(c.parse_expr(tok&, tok, .Assign));
+        tok = c.skip(tok, ",");
+        new := c.gen_expr(c.parse_expr(tok&, tok, .Assign));
+        rest[] = c.skip(tok, ")");
+        
+        c.emit(.cas0, .Kw, Qbe.Null, p, Qbe.Null);
+        r := c.emit(.cas1, cls(ty), old, new);
+        return(Some = c.ir_node(ty, r, QbeNull, tok));
+    };
+    
     k: ?Qbe.Cls = .None;
-    if name.ends_with("ll") {| k = (Some = .Kl); name.len -= 2; };
-    if name.ends_with("l")  {| k = (Some = .Kw); name.len -= 1; };
+    if name.ends_with("ll") {| k = (Some = .Kl); name.len -= 2; };  // long long
+    if name.ends_with("l")  {| k = (Some = .Kl); name.len -= 1; };  // long
     if name.ends_with("64") {| k = (Some = .Kl); name.len -= 2; };
     if name.ends_with("32") {| k = (Some = .Kw); name.len -= 2; };
+    k := k || (.Kw);  // no suffix defaults to int
     
     o: Qbe.O = @switch(name) {
         @case("clz") => .clz;
@@ -3770,7 +3789,6 @@ fn parse_builtin(c: *Ctx, name: Str, rest: **Token) ?*Node = {
         a1 = c.gen_expr(c.parse_expr(tok&, tok, .Assign));
     };
     rest[] = c.skip(tok, ")");
-    k := k || node.ty.cls();
     r := c.emit(o, k, a0, a1);
     ty := @if(k == .Kl, c.ty_ulong, c.ty_uint);
     (Some = c.ir_node(ty, r, QbeNull, tok))

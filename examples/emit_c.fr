@@ -1,7 +1,12 @@
 // THIS IS UNFINISHED
 // currently it can convert compiler/main.fr to a 212k line / 7MB c file
-// which when compiled by clang -O0 can jit examples/toy/hello.fr. 
+// which when compiled by clang -O0 (or my import_c/cc.fr) can jit examples/toy/hello.fr. 
 // there are many things that are still broken. 
+// ---
+// - gcc doesn't have __builtin_rotate_xxx
+// - get_stack_base_for_tls is probably ub. use asm instead?
+// - lots of signness sketchyness in emit_intrinsic
+// - signed overflow ub
 
 Emit :: @struct(
     program: *SelfHosted,
@@ -468,6 +473,12 @@ fn emit_intrinsic(self: *Emit, p: Placement, op: *NewIntrinsicPayload, t: Type, 
         self.statement();
         return self.declare_now(p&, t, => @fmt(self.out, "v%", expected));
     };
+    if o == .cast {
+        // int<->float bit cast
+        in, out := (k_to_type(argcls(.cast, k, 0)), k_to_type(k));
+        self.statement();
+        return self.declare_now(p&, t, => @fmt(self.out, "((union { % a; % b; }) {%}).b", in, out, arg[0]));
+    };
     
     cast_with_suffix :: fn(it) => 
         return self.declare_now(p&, t, => @fmt(self.out, "(%) (%%)", k_to_type(k), arg[0], it));
@@ -497,7 +508,6 @@ fn emit_intrinsic(self: *Emit, p: Placement, op: *NewIntrinsicPayload, t: Type, 
         fn ctz() => return(emit_builtin_call(@if(k == .Kl, "__builtin_ctzl", "__builtin_ctz")));
         fn ones() => return(emit_builtin_call(@if(k == .Kl, "__builtin_popcountl", "__builtin_popcount")));
         fn sltof()  => cast_with_suffix("");  // TODO
-        fn cast()   => "/*TODO*/"; // TODO
         fn dtosi()  => cast_with_suffix(""); // TODO
         fn exts()   => cast_with_suffix("");
         fn truncd() => cast_with_suffix("");
@@ -1067,13 +1077,19 @@ fn define_type(self: *Emit, it: Type) void = {
         fn Tagged(it) => {
             @fmt(self.out, "struct % {\n", name);
             @fmt(self.out, "\tint64_t tag;\n");
+            i, count := (self.out.len, 0);
             @fmt(self.out, "\tunion {\n");
             for it.cases { name, type |
                 if type != void {
+                    count += 1;
                     @fmt(self.out, "\t\t% %;\n", self.type_name(type), self.ident(name));
                 }
             };
-            @fmt(self.out, "\t};\n}");
+            @fmt(self.out, "\t};\n");
+            if count == 0 {
+                self.out.len = i;
+            };
+            @fmt(self.out, "}");
         }
         fn Array(it) => @fmt(self.out, "struct % { % data[%]; }", name, self.type_name(it.inner), it.len);
         fn FnPtr(f_ty) => {
@@ -1329,11 +1345,3 @@ fn fillrpo(it: *HashMap(ItemKey, ItemData), start: ItemKey) void = {
 DISABLE_IMPORT_FRC :: true;  // TODO
 DEBUG_SPAM_LOG :: false;
 #include_std("compiler/lib.fr");
-
-//TODO: for hello2.fr to work on import_c
-// - forward declare structs for ArenaHeader.next cycle
-// - stdatomic.h atomic_compare_exchange_weak
-// ---
-// - gcc doesn't have __builtin_rotate_xxx
-// - get_stack_base_for_tls is probably ub. use asm instead?
-// - lots of signness sketchyness in emit_intrinsic
