@@ -2,23 +2,18 @@
 // currently it's just used for tests/external/hare.fr 
 // but i plan to use it for c's inline asm statements eventually. 
 // WIP: only implements a tiny subset of instructions 
-// WIP: only done arm encoding so far
+// WIP: haven't done x86_64 encoding yet
 
 main :: fn() void = {
     #use("@/lib/sys/fs.fr");
     
-    s := @slice(
-        ("target/test_asm_arm.s", Arch.aarch64), 
-        ("target/test_asm_rv.s", .rv64), 
-        ("target/test_asm_amd.s", .x86_64),
-    );
-    for s { path, arch |
+    path, arch := ("target/franca/deps/17661d89d2a04e1c03551dcacf31284159cf7fe398159486fa4725d35775bf2c/.out/test_asm.s", Arch.rv64);
         in := read_entire_file_or_crash(temp(), path);
         
         m := @ref zeroed(Qbe.Module);
         Qbe'backend'init_module(m, (
             arch = arch,
-            os = query_current_os(),
+            os = .linux,
             type = .Relocatable,
         ));
         
@@ -27,9 +22,6 @@ main :: fn() void = {
         m.flush_debug();
         chunks := {m.target.finish_module}(m);
         write_chunks_or_crash("target/a.o", chunks);
-        return(); // TODO: other arches
-        
-    };
 }
 
 // the lex/parse part is mostly shared between the arcitectures. 
@@ -92,13 +84,17 @@ parse_and_emit :: fn(m: *Qbe.Module, in: Str) void = {
     arch := m.goal.arch;
     @match(parse(in, arch)) {
         fn Ok(asm) => {
-            //@print("%", asm&);
-            @assert(arch == .aarch64);
+            @assert(arch == .aarch64 || arch == .rv64);
+            
             insts := u32.list(temp());
             relocs := Ty(Reloc, i64).list(temp());
             each asm.insts { it |
                 reloc: ?Reloc = .None;
-                inst := EncodeArm'encode(it, reloc&);
+                inst := @match(arch) {
+                    fn aarch64() => EncodeArm'encode(it, reloc&);
+                    fn rv64() => EncodeRv'encode(it, reloc&);
+                    @default => @panic("TODO: asm arch %", arch);
+                };
                 if reloc& { it |
                     push(relocs&, (it[], insts.len));
                 };
@@ -107,13 +103,13 @@ parse_and_emit :: fn(m: *Qbe.Module, in: Str) void = {
             
             base_address := m.segments&[.Code]&.len();
             patches := list(SymbolPatch, temp());
-            do_patches(asm&, insts.items(), relocs.items(), patches&);
+            do_patches(asm&, insts.items(), relocs.items(), patches&, m.goal.arch);
             off := 0;
             each asm.stmts { it |
                 @if_let(it) fn Label(it) => {
                     code := zeroed Qbe.MultiArchAsm;
                     @assert_eq(off, it.i, "lost bytes between symbols. reloc offset won't work");
-                    code&[.aarch64] = insts.items().subslice(it.i, it.length).interpret_as_bytes();
+                    code&[arch] = insts.items().subslice(it.i, it.length).interpret_as_bytes();
                     off = it.i + it.length;
                     id := m.intern(it.label);
                     // NOTE: don't insert bti!! it would fuckup the offsets. 
@@ -138,7 +134,7 @@ parse_and_emit :: fn(m: *Qbe.Module, in: Str) void = {
     };
 }
 
-fn do_patches(asm: *Asm, insts: []u32, relocs: []Ty(Reloc, i64), patches: *List(SymbolPatch)) void = {
+fn do_patches(asm: *Asm, insts: []u32, relocs: []Ty(Reloc, i64), patches: *List(SymbolPatch), arch: Arch) void = {
     // TODO: O(^) but n=2 :SLOW :SLOW :SLOW :SLOW :SLOW :SLOW :SLOW
     @assert(relocs.len < 5, "TODO: make this not slow as fuck");
     for relocs { it, patch_at |
@@ -164,7 +160,10 @@ fn do_patches(asm: *Asm, insts: []u32, relocs: []Ty(Reloc, i64), patches: *List(
                 };
                 
                 // TODO: it might be bl
-                @assert(it.width == 26 && it.shift == 0, "TODO: only b can be symbol patch");
+                @match(arch) {
+                    fn aarch64() => @assert(it.width == 26 && it.shift == 0, "TODO: only b can be symbol patch");
+                    @default => ();
+                };
                 push(patches, (i = patch_at, label = it.label, fixup = (Call = (link = false))));
             };
         };
@@ -332,7 +331,7 @@ fn parse_body(self: *Parse, stmts: *List(Directive), insts: *List(Inst)) void = 
             };
             
             imm := false;
-            if self.eat("$") || self.input[self.cursor].is_ascii_digit() || self.eat("-") {
+            if self.eat("$") || self.input[self.cursor].is_ascii_digit() || self.input[self.cursor] == "-".ascii() {
                 if inst.op.starts_with("b") || inst.op.starts_with("j") {
                     inst.label = self.eat_word();
                     break();
@@ -401,8 +400,15 @@ fn parse_reg(self: *Parse) ?Inst.Arg = {
             r := self.parse_number();
             (Some = (r = r, cls = c))
         }
+        // :SLOW
         fn rv64() => {
-            // TODO: RA, SP, GP, TP
+            @if(self.eat("ra")) return(Some = (r = 1, cls = "r".ascii()));
+            @if(self.eat("sp")) return(Some = (r = 2, cls = "r".ascii()));
+            @if(self.eat("gp")) return(Some = (r = 3, cls = "r".ascii()));
+            @if(self.eat("tp")) return(Some = (r = 4, cls = "r".ascii()));
+            @if(self.eat("fp")) return(Some = (r = 8, cls = "r".ascii()));
+            @if(self.eat("s0")) return(Some = (r = 8, cls = "r".ascii()));
+        
             c := self.input[self.cursor];
             f := c == "f".ascii();
             if f && self.cursor + 1 < self.input.len {
@@ -411,13 +417,26 @@ fn parse_reg(self: *Parse) ?Inst.Arg = {
             if !"ats".contains(c) {
                 return(.None);
             };
-            if self.eat("sp") {
-                return(Some = (r = 1, cls = "p".ascii()));
-            };
             self.cursor += 1 + int(f);
-            r := self.parse_number();
-            // TODO: rebase to 32
-            (Some = (r = r, cls = @if(f, "f".ascii(), "r".ascii())))
+            _ := self.parse_number();
+            name := self.input.slice(start, self.cursor);
+            for_enum import("@/backend/rv64/bits.fr")'RvReg { r |
+                continue :: local_return;
+                check := name_str(r);
+                @if(name.len != check.len) continue();
+                range(0, name.len) { i |
+                    if check[i].ascii_to_lower() != name[i].ascii_to_lower() {
+                        continue();
+                    };
+                };
+                r: i64 = r.raw().zext();
+                if f {
+                    r -= 32;
+                };
+                return(Some = (r = r, cls = @if(f, "f".ascii(), "r".ascii())))
+            };
+            self.cursor = start;
+            .None
         }
         // :SLOW
         fn x86_64() => {
@@ -622,6 +641,45 @@ condition :: fn(name: Str) Cond = {
 
 };
 
+EncodeRv :: @struct {
+#use("@/backend/rv64/bits.fr");
+
+encode :: fn(it: *Inst, reloc_out: *?Reloc) u32 = {
+    r0, r1, r2 := (it.arg&[0].r, it.arg&[1].r, it.arg&[2].r);
+    rr0, rr1 := (@as(RvReg) @as(u8) r0.trunc(), @as(RvReg) @as(u8) r1.trunc());
+    @switch(it.op) {
+        @case("ret") => jalr(.RA, 0, .RA);
+        @case("ecall") => ecall;
+        @case("mv") => I(@as(i12) 0, r1, @as(u3) OpI.add, r0, .op_imm);
+        @case("andi") => I(@as(i12) it.imm, r1, @as(u3) OpI.and, r0, .op_imm);
+        @case("ld") => load(rr0, rr1, it.imm, 8, false, false);
+        @case("fld") => load(rr0, rr1, it.imm, 8, false, true);
+        @case("sd") => store(rr0, rr1, it.imm, 8, false);
+        @case("fsd") => store(rr0, rr1, it.imm, 8, true);
+        @case("li") => {
+            @assert(it.imm.fits_sign_ext(12), "TODO: rv asm li %", it.imm);
+            I(@as(i12) it.imm, 0, @as(u3) OpI.add, r0, .op_imm)
+        }
+        @case("add") => R(0, r2, r1, @as(u3) OpI.add, r0, .op);
+        @case("or") => R(0, r2, r1, @as(u3) OpI.or, r0, .op);
+        @case("and") => @if(it.mode == .Imm,
+            I(@as(i12) it.imm, r1, @as(u3) OpI.and, r0, .op_imm),
+            R(0, r2, r1, @as(u3) OpI.and, r0, .op));
+        @case("seqz") => I(1, r1, @as(u3) OpI.sltu, r0, .op_imm);
+        @case("not") => I(@as(i12) -1, r1, @as(u3) OpI.xor, r0, .op_imm);
+        @case("frcsr") => @bits(0x003,    0b00000, 0b010, @as(u5) r0, 0b1110011);
+        @case("fscsr") => @bits(0x003, @as(u5) r0, 0b001,    0b00000, 0b1110011);
+        @case("frrm")  => @bits(0x002,    0b00000, 0b010, @as(u5) r0, 0b1110011);
+        @case("fsrm")  => @bits(0x002, @as(u5) r0, 0b001,    0b00000, 0b1110011);
+        @case("tail") => {
+            reloc_out[] = (Some = (Dist = (scale = 2, label = it.label, width = 21, shift = 12)));
+            jal(0, .Zero)
+        }
+        @default => @panic("TODO: asm rv %", it);
+    }
+};
+
+};
 // fmt junk for debugging
 
 fn display(self: *Asm, out: *List(u8)) void = {

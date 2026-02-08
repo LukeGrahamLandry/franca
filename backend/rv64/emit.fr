@@ -22,7 +22,7 @@ rv64_emitfn :: fn(f: *Qbe.Fn) []Ty(Fixup, Qbe.Sym) = {
     empty()
 }
 
-rv_scratch_int :: TMP(RvReg._T6);
+rv_scratch_int :: TMP(RvReg.T6);
 
 // TODO: stop calling getcon here, it might reallocate when loading a cache file which seems sad  
 emit_the_code :: fn(e: *EmitRv) void = {
@@ -291,7 +291,7 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
         fn swap() => {
             // TODO: this is the only place the reserved _FT11 is used,
             //       is it worth the weirdness over just using cast to int and back to use rv_scratch_int for both cases here?  
-            t := @if(i.cls().is_int(), rv_scratch_int, TMP(RvReg._FT11));
+            t := @if(i.cls().is_int(), rv_scratch_int, TMP(RvReg.FT11));
             e.emit(.copy, i.cls(), t, i.arg&[0], Qbe.Null); 
             e.emit(.copy, i.cls(), i.arg&[0], i.arg&[1], Qbe.Null); 
             e.emit(.copy, i.cls(), i.arg&[1], t, Qbe.Null); 
@@ -601,7 +601,13 @@ fixup_rv64 :: fn(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_r
     local  := symbol.kind == .Local;
     @match(fixup.type&) {
         fn Call(it) => {
-            panic("TODO: rv fixup Call");
+            // currently this is only used for examples/import_c/assemble.fr which is only used for tests/external/hare.fr _start
+            // TODO: do direct calls from emit() like the other arches do, then this would be needed more. 
+            distance := ptr_diff(fixup.patch_at.addr, address);
+            in_range := distance.abs() < 1.shift_left(21);
+            @assert(local && in_range, "TODO: rv fixup Call %", symbol.name);
+            inst := fixup.patch_at.u32;
+            inst[] = jal(s_trunc(distance, 21), @if(it.link, .RA, .Zero));
         }
         fn InReg(it) => {
             inst := fixup.patch_at.u32.slice(2);
