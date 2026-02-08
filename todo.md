@@ -1,5 +1,6 @@
 
-- riscv import_wasm tests/ssa/isel5.ssa fails because it calls exit() which in import_wasm/run.fr needs jump.fr/throw
+- fix the spam from examples/web/build.fr, clearly this isn't true because it builds. 
+  `ambigous overload for void -> void;0 matching options` 
 - import_c `typedef void V; void foo(V) {}` Assertion Failed: cls(TY_VOID)
 - this should work on wasm too. 
 ```
@@ -775,8 +776,7 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - call local symbol directly without producing it in a register first
 - trampolines for imported symbols
 - tests/
-  - exceptional (jump.fr)
-  - multiple_stacks, intrins, inline_asm_jit (AsmFunction)
+  - intrins, inline_asm_jit (AsmFunction)
 - clang's binary does something with `__global_pointer` in start. do i have to do that?
 - ssa test that uses the constant 9223372036854775807
 - `thread backtrace` doesn't work in lldb. is my stack layout wrong? 

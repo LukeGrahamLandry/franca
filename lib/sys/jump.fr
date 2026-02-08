@@ -13,9 +13,9 @@ JumpBuf :: @struct {
     // if you manually poke a function pointer in as lr
     userdata: rawptr;
     // [x19..=x28] or [rbx, r12..=r15]
-    registers: Array(i64, 10);
+    registers: Array(i64, 12);
     // arm64: low 64 bits of [v8..=v15] (amd64 has no callee saved floats)
-    floats: Array(f64, 8);
+    floats: Array(f64, 12);
 };
 
 // The asm hardcodes these values 
@@ -48,10 +48,10 @@ try_impl :: AsmFunction(fn(_: *JumpBuf) Ty(rawptr, WhichJump) = (), @const_slice
     add_im(.X64, x1, sp, @as(u12) 0, 0b0), 
     str_uo(.X64, x1, x0, @as(u12) 2), // idk if st___ can encode sp
     
-    f_stp_so(.D64, x8,  x9,  x0, @as(i7) 14),
-    f_stp_so(.D64, x10, x11, x0, @as(i7) 16),
-    f_stp_so(.D64, x12, x13, x0, @as(i7) 18),
-    f_stp_so(.D64, x14, x15, x0, @as(i7) 14),
+    f_stp_so(.D64, x8,  x9,  x0, @as(i7) 16),
+    f_stp_so(.D64, x10, x11, x0, @as(i7) 18),
+    f_stp_so(.D64, x12, x13, x0, @as(i7) 20),
+    f_stp_so(.D64, x14, x15, x0, @as(i7) 22),
 
     // return (_, WhichJump.Try)
     movz(.X64, x1, 0x0000, .Left0), 
@@ -94,12 +94,14 @@ try_impl :: AsmFunction(fn(_: *JumpBuf) Ty(rawptr, WhichJump) = (), @const_slice
     };
     
     out.push(0x0B);  // end
-}, {
-    @const_slice(
-        // :TodoRiscv
-        I(0, RvReg.Zero.bits(), @as(u3) OpI.add, RvReg.A1.bits(), .op_imm),
-        jalr(.RA, 0, .Zero),
-    )
+}, @run {
+    o := @ref u32.list(32, ast_alloc());
+    iterate_riscv_saved { r, off, float |
+        o.push(store(r, .A0, off, 8, float));
+    };
+    o.push(I(0, RvReg.Zero.bits(), @as(u3) OpI.add, RvReg.A1.bits(), .op_imm));
+    o.push(jalr(.RA, 0, .Zero));
+    o.items()
 });
 
 throw_impl :: AsmFunction(fn(_: *JumpBuf) Never = (), @const_slice(
@@ -113,16 +115,16 @@ throw_impl :: AsmFunction(fn(_: *JumpBuf) Never = (), @const_slice(
     ldp_so(.X64, x25, x26, x0, @as(i7) 10),
     ldp_so(.X64, x27, x28, x0, @as(i7) 12),
     
-    f_ldp_so(.D64, x8,  x9,  x0, @as(i7) 14),
-    f_ldp_so(.D64, x10, x11, x0, @as(i7) 16),
-    f_ldp_so(.D64, x12, x13, x0, @as(i7) 18),
-    f_ldp_so(.D64, x14, x15, x0, @as(i7) 14),
+    f_ldp_so(.D64, x8,  x9,  x0, @as(i7) 16),
+    f_ldp_so(.D64, x10, x11, x0, @as(i7) 18),
+    f_ldp_so(.D64, x12, x13, x0, @as(i7) 20),
+    f_ldp_so(.D64, x14, x15, x0, @as(i7) 22),
     
     // return (userdata, WhichJump.Catch)
     ldr_uo(.X64, x0, x0, @as(u12) 3),
     movz(.X64, x1, 0x0001, .Left0),
     ret(), // we set lr from the jumpbuf so we'll go back to the caller of try. 
-)) { (out: *List(u8)) | @asm_x64(
+), fn(out: *List(u8)) => @asm_x64(
     // Restore integer registers
     encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.rbp, X86Reg.rdi, 0*8),
     // <skip>
@@ -144,8 +146,37 @@ throw_impl :: AsmFunction(fn(_: *JumpBuf) Never = (), @const_slice(
     encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.rdi, X86Reg.rdi, 3*8),  // first **argument**
     encode_imm(PrimaryOp.MovImm32, X86Reg.rdx, 1),  // second return value
     PrimaryOp.Ret,
-) out;};
+) out, (fn(out: *List(u8)) void = out.push_all(@const_slice(0x00, 0x00, 0x0B))), @run {
+    o := @ref u32.list(32, ast_alloc());
+    iterate_riscv_saved { r, off, float |
+        o.push(load(r, .A0, off, 8, false, float));
+    };
+    // return (userdata, WhichJump.Catch)
+    o.push(load(.A0, .A0, 24, 8, false, false));
+    o.push(I(1, RvReg.Zero.bits(), @as(u3) OpI.add, RvReg.A1.bits(), .op_imm));
+    o.push(jalr(.RA, 0, .Zero));
+    o.items()
+});
 
 #use("@/backend/amd64/bits.fr");
 #use("@/backend/arm64/bits.fr");
 #use("@/backend/rv64/bits.fr");
+iterate_riscv_saved :: fn($body: @Fn(r: RvReg, off: i64, float: bool) void #duplicated) = {
+rv64_rclob :: (@const_slice(
+      RvReg.S1,  .S2,   .S3,   .S4,  .S5,  .S6,  .S7,
+     .S8,  .S9,  .S10,  .S11,
+    .FS0, .FS1, .FS2,  .FS3,  .FS4, .FS5, .FS6, .FS7,
+    .FS8, .FS9, .FS10, .FS11,
+));
+    body(.FP, 0, false);
+    body(.RA, 8, false);
+    body(.SP, 16, false);
+    off := 32;
+    enumerate rv64_rclob { i, it |
+        body(it[], off, i > 10);
+        off += 8;
+        if i == 10 {
+            off += 8;
+        };
+    };
+}
