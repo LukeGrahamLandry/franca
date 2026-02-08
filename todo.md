@@ -12,7 +12,6 @@ export function w $main() {
 - qbe_frontend.fr: parse `retc %s.64, :T3`
 - TODO: for the hare urls, they do let you just download a tar file:
   https://git.sr.ht/~lukegrahamlandry/franca/archive/5671fd344d80207427f37d391435fa986839bcb3.tar.gz
-- add a test that reproduces whatever ripemd160.c does to hit a pathological case of my sort in loadopt
 - use peek_cstr everywhere i `s: []u8; s: CStr = (ptr = s.ptr); s := s.str();`
 - find someone who will give me ci that runs on riscv
 - delay evaluating top level code when import()-ing a file?
@@ -160,10 +159,6 @@ main :: fn() void = {
   and keeping track of the tree of types you saw before the error. 
   its a bad sign that every time i make that mistake 
   i have to add spammy logging and recompile the compiler. 
-- make my sort less ass. when collect_with_extension sorted before filtering, 
-  after generating all the extra files for examples/import_wasm/spectest.fr, 
-  the folder has 3262 files and takes 9600ms to sort. 
-  doesn't sound very quick to me. pick random pivot? 
 - wasm: if no stack frame don't load, sub 0, and store sp. test with env.ssa/main. 
 - also, import_wasm of env.ssa/main, wtf are we doing man
 ```
