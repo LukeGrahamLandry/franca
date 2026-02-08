@@ -24,7 +24,6 @@
 // 
 
 // TODO: everywhere i @report_error(_)(_ self.last.span) after just peek not pop will have the error in the wrong place. -- Jun 25
-// TODO: :SLOW im doing so many silly copies and also need to actually enforce tailcalls on llvm (right now i might be preventing them with ccc even on internal functions!).  -- Jun 21
 
 ParseTask :: @tagged(
     Pending: @struct(src: Str, span: Span),
@@ -50,7 +49,6 @@ PrecLevel :: @enum(i64) (
 );
 ParseRes :: Result(*FatExpr, *CompileError);
 
-// TODO: do the clone here instead of (on rust side + scope) so you don't have to remmeber.
 fn finish_pending(self: *Parser, id: WaitingParse) ParseRes = {
     @match(self.tasks[id.id]&) {
         fn Pending(src_span) => {
@@ -64,7 +62,6 @@ fn finish_pending(self: *Parser, id: WaitingParse) ParseRes = {
             self.top_level = prev;
             zone_end(zone);
     
-            // TODO: clone here instead of needing to remember later.
             // TODO: save less often!
             self.tasks[id.id] = (Expr = e);
             e
@@ -404,9 +401,10 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
             loc := self.last.span;
             if(prec.prec != .None, => @report_error("..spread operator cannot be used inside an infix expression") (return, loc));
             ::if(*FatExpr);
-            arg := if self.peek_tag() == .LeftParen || can_start_quick_expr(self.peek()) {
+            arg := if !@is(self.peek_tag(), .RightParen, .Comma) {
                @try(self.parse_expr(Prec_None)) return
             } else {
+                // i.e. `_: Array = (a, b, ..);` if all fields have a default value. 
                 self.raw_unit(loc)
             };
             (Ok = self.expr((Spread = arg), loc))

@@ -1,7 +1,6 @@
 
 - fix the spam from examples/web/build.fr, clearly this isn't true because it builds. 
   `ambigous overload for void -> void;0 matching options` 
-- import_c `typedef void V; void foo(V) {}` Assertion Failed: cls(TY_VOID)
 - this should work on wasm too. 
 ```
 export function w $main() {

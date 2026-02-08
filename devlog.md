@@ -4,6 +4,9 @@
 - import_c: fix builtin suffix. add builtin_cas. 
 - my quicksort wasn't very quick
 - riscv import_wasm needed jump.fr/throw for run.fr/exit().
+- a few easy todos
+  - voidtypedef, coercetobool, vexing
+  - check f_ty.unary when emit_ir args
 
 ## (Feb 6) emit_c
 

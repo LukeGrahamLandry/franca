@@ -297,16 +297,19 @@ fn bind_parameters(self: *EmitIr) CRes(void) #once = {
 
 // :EmitIrCall
 // note: mirrors bind_parameters
-fn compile_for_arg(self: *EmitIr, arg: *FatExpr) CRes([]Qbe.Ins) = {
+fn compile_for_arg(self: *EmitIr, arg: *FatExpr, unary: bool) CRes([]Qbe.Ins) = {
     parts := arg.items();
     out := Qbe.Ins.list(parts.len, temp());
     if self.program.get_info(arg.ty)[].stride_bytes == 0 {  // :NoRuntimeRepr
         _ := @try(self.compile_expr(arg, .Discard)) return;
         return(Ok = empty());
     };
+    if unary && parts.len > 1 {
+        parts = arg.slice(1);
+    };
     info := self.program.get_type(arg.ty);
     f := info.Struct.fields;
-    if info.is(.Struct) && info.Struct.is_tuple {
+    if info.is(.Struct) && info.Struct.is_tuple && !unary {
         @err_assert(f.len == parts.len, "ICE: compile_for_arg arity mismatch") return;
     } else {
         @err_assert(parts.len == 1, "ICE: compile_for_arg arity mismatch!") return;
@@ -1048,7 +1051,7 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
                 @default => ();
             };
             
-            args := @try(self.compile_for_arg(arg)) return;
+            args := @try(self.compile_for_arg(arg, f_ty.unary)) return;
             dbg := @if(func.get_flag(.NoTrace), 3, 0);  // :DebugTag
             self.dbgloc(arg.loc, dbg);
             self.emit_runtime_call(f_ty.ret, args, p, callee_r)
@@ -1064,7 +1067,7 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
         //
         fn FnPtr(f_ty) => {
             callee := @try(self.compile_expr(f, .Scalar)) return;
-            args   := @try(self.compile_for_arg(arg)) return;
+            args   := @try(self.compile_for_arg(arg, f_ty.ty.unary)) return;
             self.dbgloc(arg.loc, 0);
             self.emit_runtime_call(f_ty.ty.ret, args, p, callee)
         }

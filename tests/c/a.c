@@ -25,6 +25,9 @@ long __syscall_cp(long a, long b) { return 0; }
 void voidexpr2() {}
 void voidexpr() { return voidexpr2(); }
 
+typedef void V; 
+void voidtypedef(V) {}
+
 int main() {
     make_empty_struct2(); make_empty_struct();
     
@@ -36,6 +39,11 @@ int main() {
         t_3;  // definitely initialized
     }));
     int unused_undef; (void) unused_undef;
+    
+    // not sure i want to commit to UNDEF having a consistant value like this. 
+    // it's fine if you break this test (and remove it) on purpose, 
+    // just then need to be careful to allow legal cases like the above. 
+    ASSERT(0, ({ int undef; undef ^ undef; }));
     
     ASSERT(9, ({
         typedef struct { char nactvar; } X;
@@ -89,6 +97,7 @@ int main() {
     (1 ? 0 : ({ while (1) 0; }) );
     int nonconstant = 0; nonconstant = 1;
     (nonconstant ? voidexpr() : voidexpr());
+    voidtypedef();
     
     ASSERT(0, ({ void *to_void = 0; to_void == to_void + 1; }));
     
