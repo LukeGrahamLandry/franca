@@ -157,8 +157,6 @@ Ctx :: @rec @struct {
     // while inside a switch statement case/default can be arbitrarily nested inside other statements. 
     current_switch: ?*Qbe.SwitchPayload;
     
-    builtin_alloca: *Obj;
-    
     arena: Alloc;
     arena_storage: Arena.Allocator;
     next_var_id: i64;
@@ -1045,9 +1043,6 @@ fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr, first_decl
         if ty.kind == .TY_VLA {
             if(equal(tok, "="), => @error_tok(c, tok, "variable-sized object must not be initialized"));
 
-            // Variable length arrays (VLAs) are translated to alloca() calls.
-            // For example, `int x[n+2]` is translated to `tmp = n + 2,
-            // x = alloca(tmp)`.
             name := c.get_ident(ty.name);
             var := c.new_lvar(name, ty);
             var.stack_slot = c.f.newtmp(name, .Kl);
@@ -2471,14 +2466,6 @@ fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_d
     tok
 }
 
-fn declare_builtin_functions(c: *Ctx) void = {
-    ty := c.func_type(c.pointer_to(c.ty_void));
-    ty.params = c.arena.alloc_init(*CType, 1, fn(_) => c.ty_int);
-    c.builtin_alloca = c.new_gvar("alloca", ty, zeroed(*Token), false); // TODO: this is trash
-    c.builtin_alloca.is_definition = false;
-    c.builtin_alloca.is_function = true;
-}
-
 discard_static_scope :: fn(c: *Ctx) void = {
     hack := c.scope;
     sc := hack.end_linked();
@@ -2488,8 +2475,6 @@ discard_static_scope :: fn(c: *Ctx) void = {
 }
 
 fn parse(c: *Ctx, tok: *Token) void = {
-    c.declare_builtin_functions();
-    //c.speculate = true;
     ::if(*Token);
     while => tok.kind != .TK_EOF {
         continue :: local_return;
@@ -2522,9 +2507,11 @@ fn parse(c: *Ctx, tok: *Token) void = {
         }
         fn asm() => {
             // :AsmNotYetImplemented
+            @warn_tok(c, tok, "TODO: top level asm");
             c.eat(tok&, "asm");
             tok = c.skip(tok, "(");
             tok = c.skip(tok, "TK_STR");
+            @if(equal(tok, ":")) @error_tok(c, tok, "top level asm statement cannot have register constraints");
             tok = c.skip(tok, ")");
             continue();
         }
@@ -3015,7 +3002,6 @@ parse_ident :: fn(c, rest, tok) #prefix(.TK_IDENT) = {
         if(!sc.enum_ty.is_null(), => return(c.new_num(sc.enum_val, start)));
     };
 
-    // TODO: do alloca this way as well
     tok = rest[];
     if equal(tok, "(") {
         if c.parse_builtin(start.str(), rest) { node |
@@ -3638,8 +3624,10 @@ asm :: fn(c, rest, tok) #prefix(.asm, .ND_STMT) = {
     c.eat(tok&, "TK_STR");
     
     // eat gnu extended assembly 
+    placeholders := 0;
     while => consume(tok&, tok, ":") {
         dowhile {
+            placeholders += 1;
             if tok.string_value() { _constraint |
                 c.eat(tok&, "TK_STR");
                 if consume(tok&, tok, "(") {
@@ -3653,25 +3641,38 @@ asm :: fn(c, rest, tok) #prefix(.asm, .ND_STMT) = {
     
     rest[] = c.skip(tok, ")");
     
-    // TODO: use assemble.fr. for now this is just enough to make emit_c.fr work. 
-    if template.starts_with(".byte") && !template.contains("%") && !c.f.is_null() {
-        fail :: local_return;
-        template := template;
-        while => template.len != 0 {
-            @if(!template.starts_with(".byte ")) fail();
-            template = template.slice(6, template.len);
-            i, t := convert_number(template, 10, dec_digit);
-            @if(i > 255 || i < 0 || t.len == template.len) fail();
-            c.inline_assembly&.push(i.trunc(), c.arena);
-            template = t;
-            @if(!template.starts_with("\n")) fail();
-            template = template.slice(1, template.len);
-        };
+    // for now this is just enough to make emit_c.fr work. 
+    if placeholders == 0 && !c.f.is_null() {
+        Asm :: import("@/examples/import_c/assemble.fr");
+        result := Asm'parse(template, c.m.goal.arch);
+        @match(result) {
+            fn Ok(asm) => {
+                @if(asm.stmts.len != 0) @error_tok(c, tok, "TODO: asm directives\n%", asm&);
+                reloc: ?Asm.Reloc = .None;
+                each asm.insts { it |
+                    continue :: local_return;
+                    inst := @match(c.m.goal.arch) {
+                        fn aarch64() => Asm'EncodeArm'encode(it, reloc&);
+                        fn rv64() => Asm'EncodeRv'encode(it, reloc&);
+                        @default => {
+                            @if(it.op != "raw") @error_tok(c, tok, "TODO: asm amd\n%", asm&);
+                            b := it.imm&.slice(1).interpret_as_bytes().slice(0, it.arg&[0].cls.zext());
+                            c.inline_assembly&.push_all(b, c.arena);
+                            continue()
+                        };
+                    };
+                    b := inst&.slice(1).interpret_as_bytes();
+                    c.inline_assembly&.push_all(b, c.arena);
+                    @if(reloc.is_some()) @error_tok(c, tok, "TODO: asm reloc\n%", asm&);
+                };
+            }
+            // TODO: show correct location. hard because it can be a concatenated string literal. 
+            fn Err(msg) => @error_tok(c, tok, "unsupported inline assembly\n%", msg);
+        };        
         c.b.jmp.type = .hlt;
         c.b = c.new_block();
         return(c.new_node(.ND_STMT, tok));
     };
-    
     
     if template != "" {
         @warn_tok(c, tok, "asm stmt is not supported");
@@ -3736,24 +3737,7 @@ fn parse_builtin(c: *Ctx, name: Str, rest: **Token) ?*Node = {
     prefix := "__builtin_";
     @if(!name.starts_with(prefix)) return(.None);
     name := name.slice(prefix.len, name.len);
-    
-    if name == "cas" {
-        tok := rest[];
-        tok = c.skip(tok, "(");
-        node := c.parse_expr(tok&, tok, .Assign);
-        p := c.gen_expr(node);
-        @if(node.ty.kind != .TY_PTR) @error_tok(c, node.tok, "__builtin_cas requires pointer");
-        ty := node.ty.base;  // TODO: cast old/new to this type
-        tok = c.skip(tok, ",");
-        old := c.gen_expr(c.parse_expr(tok&, tok, .Assign));
-        tok = c.skip(tok, ",");
-        new := c.gen_expr(c.parse_expr(tok&, tok, .Assign));
-        rest[] = c.skip(tok, ")");
-        
-        c.emit(.cas0, .Kw, Qbe.Null, p, Qbe.Null);
-        r := c.emit(.cas1, cls(ty), old, new);
-        return(Some = c.ir_node(ty, r, QbeNull, tok));
-    };
+    tok := rest[];
     
     k: ?Qbe.Cls = .None;
     if name.ends_with("ll") {| k = (Some = .Kl); name.len -= 2; };  // long long
@@ -3769,21 +3753,79 @@ fn parse_builtin(c: *Ctx, name: Str, rest: **Token) ?*Node = {
         @case("bswap") => .byteswap;
         @case("rotateright") => .rotr;
         @case("rotateleft") => .rotl;
+        @case("cas") => {
+            args := c.builtin_args(rest, 3);
+            @if(args&[0].ty.kind != .TY_PTR) @error_tok(c, args&[0].tok, "__builtin_cas requires pointer");
+            ty := args&[0].ty.base;  // TODO: cast old/new to this type
+            c.check_atomic_type(ty, tok, "__builtin_cas");
+            p, old, new := (args&[0].r, args&[1].r, args&[2].r);
+            c.emit(.cas0, .Kw, Qbe.Null, p, Qbe.Null);
+            r := c.emit(.cas1, cls(ty), old, new);
+            return(Some = c.ir_node(ty, r, QbeNull, tok));
+        };
+        @case("expect") => {
+            // a static hint that a0==a1, which i ignore. 
+            args := c.builtin_args(rest, 2);
+            return(Some = args&[0]);
+        };
+        @case("constant_p") => {
+            b, nblk := (c.b, c.f.nblk);
+            c.b = c.new_block();  // :SLOW should just reuse one extra block
+            args := c.builtin_args(rest, 1);
+            c.b = b;
+            const := c.is_const_expr(args&[0]) && !blocks_in_range_have_side_effect(c.f, nblk, c.f.nblk);
+            const := c.getcon(int(const));
+            return(Some = c.ir_node(c.ty_uint, const, QbeNull, tok));
+        };
+        @case("alloca") => {
+            args := c.builtin_args(rest, 1);
+            r := c.emit(.alloc16, .Kl, args&[0].r, QbeNull);
+            ty := c.pointer_to(c.ty_void);
+            return(Some = c.ir_node(ty, r, r, tok));
+        };
         @default => return(.None);
     };
     
-    tok := rest[];
-    tok = c.skip(tok, "(");
-    node := c.parse_expr(tok&, tok, .Assign);
-    a0 := c.gen_expr(node);
-    a1 := Qbe.Null;
-    if consume(tok&, tok, ",") && !equal(tok, ")") {
-        a1 = c.gen_expr(c.parse_expr(tok&, tok, .Assign));
-    };
-    rest[] = c.skip(tok, ")");
+    unary := !@is(o, .rotr, .rotl);
+    args := @if(unary, 
+        items @ref c.builtin_args(rest, 1), 
+        items @ref c.builtin_args(rest, 2));
+    a0, a1 := (args&[0].r, @if(unary, Qbe.Null, args&[1].r));
     r := c.emit(o, k, a0, a1);
     ty := @if(k == .Kl, c.ty_ulong, c.ty_uint);
     (Some = c.ir_node(ty, r, QbeNull, tok))
+}
+
+// __builtin_constant_p has to be careful of nested expressions
+// because "Any expression that has side-effects makes the function return 0" [https://gcc.gnu.org/onlinedocs/gcc/Other-Builtins.html]. 
+// i don't create the whole ast so `(runtime_call(), constant_literal)`
+// will emit instructions for the call but the node with still have a folded constexpr. 
+// (other uses of is_const_expr() have the same problem but less of a big deal because they won't miscompile correct programs.)
+blocks_in_range_have_side_effect :: fn(f: *Qbe.Fn, first: i32, last: i32) bool = {
+    new_blocks := f.rpo.slice(first.intcast(), last.intcast());
+    for new_blocks { b |
+        each b.ins { i |
+            if i.op().is_store() || @is(i.op(), .blit1, .cas1, .call, .vastart) {
+                return true;
+            };
+        };
+    };
+    false
+};
+
+fn builtin_args(c: *Ctx, rest: **Token, $arity: i64) Array(*Node, arity) #generic = {
+    i, out := (0, zeroed Array(*Node, arity));
+    tok := rest[];
+    tok = c.skip(tok, "(");
+    comma_sep(c, tok&, ")") {
+        @if(i >= arity) @error_tok(c, tok, "too many arguments");
+        out&[i] = c.parse_expr(tok&, tok, .Assign);
+        c.assert_gen_expr(out&[i]);
+        i += 1;
+    };
+    @if(i != arity) @error_tok(c, tok, "too few arguments");
+    rest[] = tok;
+    out
 }
 
 fn set_rest_and_gen(c: *Ctx, rest: **Token, tok: *Token, node: *Node) *Node = {
@@ -4053,11 +4095,7 @@ fn to_assign(c: *Ctx, kind: NodeKind, lhs: *Node, rhs: *Node, tok: *Token) *Node
     // n1570#6.5.16.2p3 "If E1 has an atomic type, compound assignment is a read-modify-write operation with memory_order_seq_cst memory order semantics"
     // TODO: extra stuff for float exceptions
     if lhs.ty.is_atomic && !is_bitfield {
-        int := lhs.ty.is_integer() || lhs.ty.kind == .TY_PTR;
-        sized := lhs.ty.size == 4 || lhs.ty.size == 8;
-        if !int || !sized {
-            @error_tok(c, tok, "_Atomic update assignment only supports 32/64 bit integer/pointer");
-        };
+        c.check_atomic_type(lhs.ty, tok, "_Atomic update assignment");
         old_block := c.b;
         b, end := (c.new_block(), c.new_block());
         c.jmp_if_unterminated(b);
@@ -4091,6 +4129,14 @@ fn to_assign(c: *Ctx, kind: NodeKind, lhs: *Node, rhs: *Node, tok: *Token) *Node
     };
     
     c.ir_node(lhs.ty, final, QbeNull, tok)
+}
+
+fn check_atomic_type(c: *Ctx, ty: *CType, tok: *Token, msg: Str) void = {
+    int := ty.is_integer() || ty.kind == .TY_PTR;
+    sized := ty.size == 4 || ty.size == 8;
+    if !int || !sized {
+        @error_tok(c, tok, "% only supports 32/64 bit integer/pointer", msg);
+    };
 }
 
 fn ir_node(c: *Ctx, ty: *CType, r: Qbe.Ref, lvalue: Qbe.Ref, tok: *Token) *Node = {
@@ -4409,16 +4455,6 @@ fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CType, to: *CType, tok: *Token) Qbe.Re
 }
 
 fn gen_call(c: *Ctx, callee: *Node, function_ty: *CType, arg: []*Node, tok: *Token) *Node #once = {
-    // TODO: don't just take random variable names!
-    //       call this __builtin_alloca and provide alloca.h
-    if callee.kind == .ND_VAR && identical(callee.var, c.builtin_alloca) {
-        @if(arg.len != 1) @error_tok(c, tok, "alloca arity error");
-        size := c.gen_expr(arg[0]);
-        r := c.f.newtmp("alloca", .Kl);
-        c.emit(.alloc16, .Kl, r, size, QbeNull);
-        return(c.ir_node(function_ty.return_ty, r, r, tok));
-    };
-    
     while => function_ty.kind == .TY_PTR {
         function_ty = function_ty.base;
     };

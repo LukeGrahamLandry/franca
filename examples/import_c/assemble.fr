@@ -63,6 +63,7 @@ Directive :: @tagged(
         length := MIN_i64; // how many asm.insts until next label
         directive_count := MIN_i64;  // how many directives until next label
     },
+    Raw: @struct(value: i64, size: u8),
 );
 
 Parse :: @struct {
@@ -183,7 +184,19 @@ parse :: fn(in: Str, arch: Arch) Result(Asm, Str) = {
         if self.eat(".") {
             it := self.parse_directive();
             @debug_assert(!it&.is(.Label), "need to update last_label");
-            stmts.push(it);
+            @match(it) {
+                fn Raw(it) => {
+                    // TODO: cope with non-multiples of 4. will have to anyway for amd. 
+                    if it.size == 1 && insts.len > 0 && insts[insts.len - 1].op == "raw" && insts[insts.len - 1].arg&[0].cls < 4 {
+                        prev := insts[insts.len - 1]&;
+                        prev.imm = prev.imm.bit_or(it.value.shift_left(prev.arg&[0].cls.zext() * 8));
+                        prev.arg&[0].cls += 1;
+                    } else {
+                        insts.push(op = "raw", imm = it.value, arg = ((r = 0, cls = it.size), ..zeroed(Inst.Arg)));
+                    };
+                }
+                @default => stmts.push(it);
+            };
         } else {
             self.parse_body(stmts, insts);
         };
@@ -191,6 +204,7 @@ parse :: fn(in: Str, arch: Arch) Result(Asm, Str) = {
         if self.error.len > 0 {
             return(Err = @tfmt("failed to assemble (at line %): %", self.line, self.error&.items()));
         };
+        self.skip_lines();
     };
     if self.last_label { old_i |
         old := stmts[old_i].Label&;
@@ -233,6 +247,14 @@ fn parse_directive(self: *Parse) Directive = {
             self.skip_blanks();
             (Skip = (bytes = self.parse_number()))
         };
+        @case("byte") => {
+            self.skip_blanks();
+            (Raw = (value = self.parse_number(), size = 1))
+        }
+        @case("word") => {
+            self.skip_blanks();
+            (Raw = (value = self.parse_number(), size = 4))
+        }
         @default => {
             if !(name == "global" || name == "globl") {
                 @fmt(self.error&, "found '%' ", name);
@@ -257,14 +279,15 @@ fn add_label(self: *Parse, stmts: *List(Directive), insts: *List(Inst), label: S
 }
 
 fn parse_body(self: *Parse, stmts: *List(Directive), insts: *List(Inst)) void = {
+    // generally it's `name_of_function:\n<body>` but also allow without that for c asm stmt in function body. 
+    start := self.cursor;
     symbol := self.eat_word();
-    if !self.eat(":") {
-        @fmt(self.error&, "expected .directive | ident:");
-        return();
+    if self.eat(":") {
+        self.skip_blanks();
+        self.add_label(stmts, insts, symbol);
+    } else {
+        self.cursor = start;
     };
-    
-    self.skip_blanks();
-    self.add_label(stmts, insts, symbol);
     
     self.skip_lines();
     loop {
@@ -326,7 +349,7 @@ fn parse_body(self: *Parse, stmts: *List(Directive), insts: *List(Inst)) void = 
                 break();
             };
             
-            if self.input[self.cursor] == "\n".ascii() {
+            if self.cursor >= self.input.len || self.input[self.cursor] == "\n".ascii() {
                 break();
             };
             
@@ -369,7 +392,7 @@ fn parse_body(self: *Parse, stmts: *List(Directive), insts: *List(Inst)) void = 
         
         line := self.line;
         self.skip_lines();
-        if self.line == line {
+        if self.line == line && self.cursor < self.input.len {
             @fmt(self.error&, "expected newline after instruction");
             return();
         };
@@ -383,6 +406,7 @@ fn parse_signed_number(self: *Parse) i64 = {
 }
 
 fn parse_reg(self: *Parse) ?Inst.Arg = {
+    @if(self.cursor >= self.input.len) return(.None);
     start := self.cursor;
     @match(self.arch) {
         fn aarch64() => {
@@ -580,7 +604,11 @@ encode :: fn(it: *Inst, reloc_out: *?Reloc) u32 = {
             cc := condition(it.cond);
             b_cond(0, cc)
         };
-        @default => @panic("TODO: %", it.op);
+        @case("raw") => {
+            @assert(it.arg&[0].cls == 4, "TODO: asm arm: non-multiple of 4 raw op");
+            it.imm.trunc()
+        };
+        @default => @panic("TODO: asm arm %", it);
     }
 }
 
@@ -675,6 +703,10 @@ encode :: fn(it: *Inst, reloc_out: *?Reloc) u32 = {
             reloc_out[] = (Some = (Dist = (scale = 2, label = it.label, width = 21, shift = 12)));
             jal(0, .Zero)
         }
+        @case("raw") => {
+            @assert(it.arg&[0].cls == 4, "TODO: asm rv: non-multiple of 4 raw op");
+            it.imm.trunc()
+        };
         @default => @panic("TODO: asm rv %", it);
     }
 };

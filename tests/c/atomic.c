@@ -53,6 +53,9 @@ static int add_millions(void) {
 }
 
 int main() {
+// TODO: this would work on wasm, but only when using a shared memory 
+//       and a runtime that gives you a pthread_create. 
+//       so should enable this when jitted by tests/exe/wasm.fr. 
 #ifndef __wasm32
   ASSERT(6*1000*1000, add_millions());
 

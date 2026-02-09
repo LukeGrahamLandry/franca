@@ -1,10 +1,8 @@
 #include "test.h"
+#include "alloca.h"
 
 void *fn(int x, void *p, int y) { return p; }
 void *alloca_is_not_a_keyword(long a) { return (void *) a; }
-
-// makes this work on other compilers with -Wimplicit-function-declaration
-void *alloca(unsigned long);
 
 int main() {
   int i = 0;

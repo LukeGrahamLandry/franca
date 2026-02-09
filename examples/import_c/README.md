@@ -1,5 +1,13 @@
 A C11 compiler adapted from <https://github.com/rui314/chibicc>.
 
+Compared to chibicc, my changes: 
+- support more target platforms (macos, arm, riscv, wasm).
+- make it a standalone program without depending on binutils' assembler/linker.
+- improve performace (both of the compiler and the generated code).
+- tackle the second 90% of the work to make more real programs build.  
+  see `../../tests/external/*.fr` for various build scripts 
+  that test other people's code with this compiler (and run in github actions on every commit). 
+
 ## Language Support
 
 - core language: functions, variables, structs, unions, arrays, control flow, bit fields, etc.
@@ -15,10 +23,12 @@ A C11 compiler adapted from <https://github.com/rui314/chibicc>.
 - `_Thread_local`
 - `_Complex`, `_Imaginary`
 - `_Alignas`
-- inline assembly
+- gnu extended inline assembly
 - simd intrinsics (immintrin.h, arm_neon.h, etc.)
 - digraphs, trigraphs
 - the builtin standard headers are incomplete
+  > but you can use your system headers instead with a bit of cajoling, 
+  > see ../../tests/external/(raylib, curl, bubblewrap).fr for examples.
 
 ## Changes from Chibicc
 
@@ -39,11 +49,10 @@ A C11 compiler adapted from <https://github.com/rui314/chibicc>.
 - use the franca compiler backend instead of generating amd64 assembly as text and depending on someone else's assembler and linker. 
 - export to the franca compiler's type/function data structures so you don't need to manually write bindings to c libraries. 
 (for demos, see `examples/bf/c_source.fr` and `examples/view_image.fr`). 
-- optionally use the franca calling convention (passing a hidden environment pointer)
 - allow some function attributes
 - show chain of macro declarations in error report
 - declare symbol aliases with the `asm` keyword
-- `__builtin`: clz
+- `__builtin`: clz, ctz, popcount, bswap, rotateleft, rotateright, expect, constant_p
 
 ### Refactors 
 
@@ -56,8 +65,10 @@ A C11 compiler adapted from <https://github.com/rui314/chibicc>.
 
 - (temporarily) removed support for: thread locals, `_Alignas`
 - removed some GNU extensions: labels-as-values, case ranges
-- removed support for inline assembly
+- the asm statement uses my own **very** limited assembler instead of shelling out to an external one
 - removed support for x87 80-bit long doubles
+- i've sacrificed code readability for performance. 
+  chibicc is a much better resource for learning about compilers than mine. 
 
 ## Chibicc License
 

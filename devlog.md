@@ -1,4 +1,11 @@
 
+## (Feb 9)
+
+import_c
+- `_Atomic` update assignment and steal chibicc's test for them
+- add builtin (expect, constant_p). simple test. error on wrong arity. rename alloca to a builtin. 
+- hook up my assembler so very basic asm statements work for real
+
 ## (Feb 8)
 
 - enough riscv assembler for hare
