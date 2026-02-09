@@ -1,13 +1,17 @@
 // THIS IS UNFINISHED
 // currently it can convert compiler/main.fr to a 212k line / 7MB c file
-// which when compiled by clang -O0 (or my import_c/cc.fr) can jit examples/toy/hello.fr. 
+// which when compiled by clang (or my import_c/cc.fr) can jit examples/kaleidoscope.fr. 
 // there are many things that are still broken. 
 // ---
 // - gcc doesn't have __builtin_rotate_xxx
 // - get_stack_base_for_tls is probably ub. use asm instead?
-// - lots of signness sketchyness in emit_intrinsic
-// - signed overflow ub
 // - FuncImpl.FrcImport
+// - CVariadic
+// - sar
+// - copy_bytes_static -> memmove? set_bytes -> memset? because mine do unaligned stores. 
+// - not address sanitizer clean: "load of misaligned address", "applying zero offset to null pointer"
+// - decide if i care about doing things in a way thread sanitizer understands
+// - make it work with tcc `error: incompatible types for redefinition of 'write'`
 
 Emit :: @struct(
     program: *SelfHosted,
@@ -21,6 +25,7 @@ Emit :: @struct(
     last_statement_start := 0,
     current_block_is_dead := false,
     prev_cas0: ?Str = .None,
+    locals: HashMap(Type, List(Str)),
 );
 
 ReturnTarget :: @struct(
@@ -37,6 +42,7 @@ fn init(comp: *SelfHosted, use: *HashSet(ItemKey), out: *List(u8)) Emit #inline 
     inlined_return_addr = init(temp()),
     use = use,
     out = out,
+    locals = init(temp()),
 );
 
 fn emit_body(self: *Emit, f: FuncId) void #once = {
@@ -95,10 +101,33 @@ fn emit_body(self: *Emit, f: FuncId) void #once = {
     };
     
     @fmt(self.out, " {\n");
+    start := self.out.len;
     indented self {
         result := self.compile_expr(body, .Return);
         @debug_assert_eq(result, "");
     };
+    
+    if self.locals.raw.len_including_tombstones != 0 {
+        // :SLOW
+        // see lift_declare_local()
+        body := self.out.items().slice(start, self.out.len).shallow_copy(temp());
+        self.out.len = start;
+        each self.locals& { ty, names |
+            type := self.type_name(ty);
+            if type.ends_with("*") {
+                @fmt(self.out, "\ttypeof(%) ", type);
+            } else {
+                @fmt(self.out, "\t% ", type);
+            };
+            for names { it |
+                @fmt(self.out, "%, ", it);
+            };
+            self.out.len -= 2*int(self.out.items().ends_with(", "));
+            @fmt(self.out, ";\n");
+        };
+        self.out.push_all(body);
+    };
+    
     self.statement();
     @fmt(self.out, "}\n");
 }
@@ -115,7 +144,7 @@ fn write_sig_names(self: *Emit, f: FuncId, name: Str) []Str = {
     func := self.program.get_function(f);
     arg_ty := func.finished_arg.unwrap();
     ret := func.finished_ret.unwrap();
-    @fmt(self.out, "% %(", self.type_name(ret), name);
+    @fmt(self.out, "static % %(", self.type_name(ret), name);
     args := @ref Str.list(temp());
     if func.finished_arg.unwrap() != void {
         each func.arg.bindings { b |
@@ -486,7 +515,13 @@ fn emit_intrinsic(self: *Emit, p: Placement, op: *NewIntrinsicPayload, t: Type, 
         
     emit_builtin_call :: fn(name) => 
         return self.declare_now(p&, t, => self.write_call(name, arg));
+
+    // -fsanitize=undefined avoid ub when passing 0
+    // relies on arg expression not having side effects
+    emit_builtin_call_nonzero :: fn(if_zero, name) => 
+        return self.declare_now(p&, t, => @fmt(self.out, "% == 0 ? % : %(%)", arg[0], if_zero, name, arg[0]));
     
+    unsigned := false;
     bin := @match(o) {
         fn add() => "+";
         fn sub() => "-";
@@ -504,10 +539,9 @@ fn emit_intrinsic(self: *Emit, p: Placement, op: *NewIntrinsicPayload, t: Type, 
         fn rotr() => return(emit_builtin_call(@if(k == .Kl, "__builtin_rotateright64", "__builtin_rotateright32"))); 
         fn rotl() => return(emit_builtin_call(@if(k == .Kl, "__builtin_rotateleft64", "__builtin_rotateleft32")));
         fn byteswap() => return(emit_builtin_call(@if(k == .Kl, "__builtin_bswap64", "__builtin_bswap32")));
-        // TODO: are these ub on zero in c?
-        fn clz() => return(emit_builtin_call(@if(k == .Kl, "__builtin_clzl", "__builtin_clz")));
-        fn ctz() => return(emit_builtin_call(@if(k == .Kl, "__builtin_ctzl", "__builtin_ctz")));
-        fn ones() => return(emit_builtin_call(@if(k == .Kl, "__builtin_popcountl", "__builtin_popcount")));
+        fn clz() => return(emit_builtin_call_nonzero(64, @if(k == .Kl, "__builtin_clzl", "__builtin_clz")));
+        fn ctz() => return(emit_builtin_call_nonzero(64, @if(k == .Kl, "__builtin_ctzl", "__builtin_ctz")));
+        fn ones() => return(emit_builtin_call_nonzero(0, @if(k == .Kl, "__builtin_popcountl", "__builtin_popcount")));
         fn sltof()  => cast_with_suffix("");  // TODO
         fn dtosi()  => cast_with_suffix(""); // TODO
         fn exts()   => cast_with_suffix("");
@@ -520,7 +554,8 @@ fn emit_intrinsic(self: *Emit, p: Placement, op: *NewIntrinsicPayload, t: Type, 
             if !iscmp(o, k&, cc&) {
                 @panic("/*TODO: % %*/", o, k)
             };
-                // TODO: force right signedness
+                // TODO: force right signedness in the other direction as well
+                unsigned = @is(@as(Qbe.Cmp) cc, .Ciuge, .Ciugt, .Ciule, .Ciult);
                 @match(@as(Qbe.Cmp) cc) {
                     fn Cieq() => "==";
                     fn Cine() => "!=";
@@ -543,23 +578,29 @@ fn emit_intrinsic(self: *Emit, p: Placement, op: *NewIntrinsicPayload, t: Type, 
                 }
         };
     };
+    // -fsanitize=undefined avoid ub for signed overflow and when shift distance wraps
+    unsigned := unsigned || @is(o, .add, .sub, .mul, .udiv, .urem, .shl, .shr);
+    shift := @is(o, .shl, .shr, .sar, .rotl, .rotr);
     arg_ty := self.program.arg_types(arg_ty);
     self.declare_now(p&, t) {
         if self.program.get_type(t).is(.Ptr) {
             @fmt(self.out, "(%) (", self.type_name(t));
         }
-        self.argument(k, arg[0], arg_ty[0]);
+        self.argument(k, arg[0], arg_ty[0], unsigned);
         @fmt(self.out, " % ", bin);
-        @if(arg.len > 1) self.argument(k, arg[1], arg_ty[1]);
+        @if(shift) @fmt(self.out, "(");
+        @if(arg.len > 1) self.argument(k, arg[1], arg_ty[1], unsigned);
+        @if(shift) @fmt(self.out, "&%)", @if(k == .Kw, 31, 63));
         if self.program.get_type(t).is(.Ptr) {
             @fmt(self.out, ")");
         }
     }
 }
 
-fn argument(self: *Emit, k: Qbe.Cls, value: Str, ty: Type) void = {
+fn argument(self: *Emit, k: Qbe.Cls, value: Str, ty: Type, unsigned: bool) void = {
     T := k_to_type(k);
-    if self.program.get_type(ty).is(.Ptr) {
+    info := self.program.get_type(ty);
+    if info.is(.Ptr) || (unsigned && info.is(.Int) && info.Int.signed) {
         @fmt(self.out, "(%)", T);
     }
     @fmt(self.out, "%", value);
@@ -1003,10 +1044,8 @@ fn declare_now(self: *Emit, p: *Placement, t: Type) Str = {
             self.declare_now(p, t)
         }
         fn Declare(name) => {
-            self.statement();
-            @fmt(self.out, "% ", self.type_name(t));
+            self.lift_declare_local(t, name, true);
             p[] = (Assign = name);
-            @fmt(self.out, "% = ", name);
             name
         }
         fn Assign(name) => {
@@ -1020,6 +1059,26 @@ fn declare_now(self: *Emit, p: *Placement, t: Type) Str = {
         }
     }
 }
+
+// -fsanitize=address Use of out-of-scope stack memory
+// in c it's ub for a reference to a stack slot to escape it's scope, 
+// but in franca it's only a problem if it escapes the function or loop iteration. 
+// and i rely on that a lot, any time @ref/@slice/#inline/*semantic*/ is used in a nested expression. 
+fn lift_declare_local(self: *Emit, t: Type, name: Str, have_value: bool) void = {
+    lift := self.indent > 1;
+    if lift {
+        @if(have_value) self.statement();
+        names := self.locals&.get_or_insert(t, => list(temp()));
+        names.push(name);
+        @if(have_value) @fmt(self.out, "%", name);
+    } else {
+        self.statement();
+        @fmt(self.out, "% %", self.type_name(t), name);
+    };
+    @if(have_value) @fmt(self.out, " = ");
+    @if(!have_value && !lift) @fmt(self.out, ";\n");
+}
+
 fn unify_placement(self: *Emit, p: *Placement, t: Type) Str = {
     t = self.program.raw_type(t);
     @debug_assert(t != UnknownType);
@@ -1037,8 +1096,7 @@ fn unify_placement(self: *Emit, p: *Placement, t: Type) Str = {
             self.unify_placement(p, t)
         }
         fn Declare(name) => {
-            self.statement();
-            @fmt(self.out, "% %;\n", self.type_name(t), name);
+            self.lift_declare_local(t, name, false);
             p[] = (Assign = name);
             name
         }

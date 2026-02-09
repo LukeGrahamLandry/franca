@@ -1,4 +1,22 @@
 
+## (Feb 8)
+
+- enough riscv assembler for hare
+- emit_c
+  - declare vars at the top because it's ub if a pointer escapes it's scope but not for me. now -O2 works. 
+  - after compiling compiler/main.fr -unsafe, use it to no_cache jit examples/kaleidoscope.fr as normal:
+    - franca: 900ms, `569.1 ms ±   4.2 ms; 986k`
+    - import_c: 990ms, `654.5 ms ±   1.2 ms; 1474k`
+      - interesting, either emit_c is obfuscating something or my c frontend makes dumber ir than my franca one. 
+    - clang-O2: 10500ms, `391.4 ms ±   0.9 ms; 1074k`
+      - so 12x compile time for 31% speed boost.
+      - static on everything matters. without: 9650ms, `402.2 ms ±   1.5 ms; 1427k`
+    - clang-O0 is 1900ms, ` 3.951 s ±  0.008 s; 2541k`
+      - shockingly worse than my import_c
+    > emit_c.fr takes 900ms to run on the compiler (where normally backend is free because it's threaded),
+    > so really all the non-franca options should add that to their time but it feels unfair. 
+  - also be explicit about signed wrapping, shift too far, count zeroes of zero.
+
 ## (Feb 7)
 
 - import_c: fix builtin suffix. add builtin_cas. 
