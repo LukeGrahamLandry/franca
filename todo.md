@@ -1,4 +1,5 @@
 
+- elifdef, elifndef
 - fix the spam from examples/web/build.fr, clearly this isn't true because it builds. 
   `ambigous overload for void -> void;0 matching options` 
 - this should work on wasm too. 

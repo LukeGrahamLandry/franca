@@ -5,14 +5,14 @@ A C11 compiler adapted from <https://github.com/rui314/chibicc>.
 - core language: functions, variables, structs, unions, arrays, control flow, bit fields, etc.
 - preprocessor: include, include_next, define, undef, if, ifdef, ifndef, elif, else, endif, line, pragma once, error, warning
 - C99: `_Bool`, variable length arrays, flexible array members, designated initializers, compound literals, variadic macros
-- C11: `_Generic`, `_Noreturn`, `_Alignof`, `_Static_assert`, anonymous structs/unions
+- C11: `_Generic`, `_Noreturn`, `_Alignof`, `_Static_assert`, anonymous structs/unions, `_Atomic`
 - C23: `__VA_OPT__`, typeof
 - GNU: statement expressions, `a :? b`
 - attributes: packed, aligned
 
 ### NOT IMPLEMENTED
 
-- `_Thread_local`, `_Atomic`
+- `_Thread_local`
 - `_Complex`, `_Imaginary`
 - `_Alignas`
 - inline assembly
@@ -54,7 +54,7 @@ A C11 compiler adapted from <https://github.com/rui314/chibicc>.
 
 ### Regressions
 
-- (temporarily) removed support for: thread locals, atomics, `_Alignas`
+- (temporarily) removed support for: thread locals, `_Alignas`
 - removed some GNU extensions: labels-as-values, case ranges
 - removed support for inline assembly
 - removed support for x87 80-bit long doubles

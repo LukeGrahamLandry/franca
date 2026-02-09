@@ -4,7 +4,6 @@
 //      #153 #141 #138 #110 #107 #99 #86 #84 more...
 //      - https://github.com/fuhsnn/slimcc/issues?q=is%3Aissue+is%3Aclosed+label%3Aupstream-chibicc&page=2
 // _Alignas needs more backend support
-// TODO: __builtin_compare_and_swap, __builtin_atomic_exchange
 // TODO: don't be copying types all the time? 
 
 // TODO: want to let all the state (like Qbe.Fn) be allocated in Ctx.arena
@@ -79,9 +78,6 @@ NodeKind :: @enum(i32) (
     ND_BITNOT,    // ~
     ND_VAR,       // Variable
     ND_CAST,      // Type cast
-    //ND_ASM,       // "asm"
-    //ND_CAS,       // Atomic compare-and-swap
-    //ND_EXCH,      // Atomic exchange
     ND_INVALID,
 );
 
@@ -716,10 +712,9 @@ fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CType = {
     };
 
     if is_atomic {
-        // TODO!!!
-        //panic("TODO :ParamTypeList");
-        //ty = c.copy_type(ty);
-        //ty.is_atomic = true;
+        // note: aliases params[]/param_names[] but that's fine
+        ty = c.copy_type(ty);
+        ty.is_atomic = true;
     };
 
     rest[] = tok;
@@ -4049,40 +4044,39 @@ fn eval_double(c: *Ctx, node: *Node) f64 = {
 // converted to `tmp = &A, (*tmp).x = (*tmp).x op C` to handle assignments
 // to bitfields.
 fn to_assign(c: *Ctx, kind: NodeKind, lhs: *Node, rhs: *Node, tok: *Token) *Node = {
-    if c.speculate {
-        return(lhs);
-    };
+    @if(c.speculate) return(lhs);
     c.check_assignable(lhs, tok);
-    //c.add_type(lhs);
-    //c.add_type(rhs);
-    
     is_bitfield := lhs.kind == .ND_MEMBER && lhs.member.is_bitfield;
-
-    // If A is an atomic type, Convert `A op= B` to
-    //
-    // ({
-    //     T1 *addr = &A; T2 val = (B); T1 old = *addr; T1 new;
-    //     do {
-    //        new = old op val;
-    //     } while (!atomic_compare_exchange_strong(addr, &old, new));
-    //     new;
-    // })
+    addr  := c.gen_addr(lhs);
+    delta := c.gen_cast(c.gen_expr(rhs), rhs.ty, lhs.ty, tok);
+    
+    // n1570#6.5.16.2p3 "If E1 has an atomic type, compound assignment is a read-modify-write operation with memory_order_seq_cst memory order semantics"
+    // TODO: extra stuff for float exceptions
     if lhs.ty.is_atomic && !is_bitfield {
-        @error_tok(c, tok, "TODO: to_assign for _Atomic types");
+        int := lhs.ty.is_integer() || lhs.ty.kind == .TY_PTR;
+        sized := lhs.ty.size == 4 || lhs.ty.size == 8;
+        if !int || !sized {
+            @error_tok(c, tok, "_Atomic update assignment only supports 32/64 bit integer/pointer");
+        };
+        old_block := c.b;
+        b, end := (c.new_block(), c.new_block());
+        c.jmp_if_unterminated(b);
+        c.b = b;
+
+        k := lhs.ty.cls();
+        old := c.gen_load(addr, lhs.ty);
+        new := c.gen_binary(kind, old, delta, lhs.ty, lhs.ty, tok);
+        c.emit(.cas0, .Kw, Qbe.Null, addr, Qbe.Null);
+        prev := c.emit(.cas1, k, old, new);
+        cond := c.emit(k.cmp_base(), .Kw, old, prev);
+        
+        c.jnz_if_unterminated(cond, end, b);
+        c.b = end;
+        return c.ir_node(lhs.ty, new, QbeNull, tok);
     };
 
     // n1570#6.5.16p3: An assignment expression has the value of the left operand after the assignment, but is not an lvalue. 
-    // Convert `A op= B` to ``tmp = &A, *tmp = *tmp op B`.
     // Bitfields need special handling because their address can't be taken. 
-
-    //@match(kind) {
-    //    fn ND_ADD() => c.new_add();
-    //    fn ND_SUB() => c.new_sub();
-    //    @default => ();
-    //};
-    
-    addr  := c.gen_addr(lhs);
-    delta := c.gen_cast(c.gen_expr(rhs), rhs.ty, lhs.ty, tok);
     start := if is_bitfield {
         c.gen_load_bitfield(addr, lhs.member)
     } else {

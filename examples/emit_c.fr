@@ -9,6 +9,7 @@
 // - CVariadic
 // - sar
 // - copy_bytes_static -> memmove? set_bytes -> memset? because mine do unaligned stores. 
+//  - not a perf thing, with -O2, clang notices what im doing either way
 // - not address sanitizer clean: "load of misaligned address", "applying zero offset to null pointer"
 // - decide if i care about doing things in a way thread sanitizer understands
 // - make it work with tcc `error: incompatible types for redefinition of 'write'`
@@ -66,7 +67,7 @@ fn emit_body(self: *Emit, f: FuncId) void #once = {
             @fmt(self.out, "{\n");
             indented self {
                 self.statement();
-                result := self.emit_intrinsic(.NewMemory, op, ret, args, arg_ty);
+                result := self.emit_intrinsic(.NewMemory, op, ret, args, arg_ty, .None);
                 self.statement();
                 @fmt(self.out, "return %;\n}\n", result);
             };
@@ -438,7 +439,7 @@ fn emit_call(self: *Emit, f: *FatExpr, arg: *FatExpr, p: Placement) Str #once = 
             
             @if_let(func.body&) fn NewIntrinsic(op) => {
                 args := self.pre_eval_tuple(arg.items());
-                return self.emit_intrinsic(p, op, f_ty.ret, args, arg.ty);
+                return self.emit_intrinsic(p, op, f_ty.ret, args, arg.ty, (Some = arg));
             };
 
             callee_r := self.func_ref(f_id);
@@ -477,7 +478,7 @@ fn write_call(self: *Emit, callee: Str, fields: []Str) void = {
     @fmt(self.out, ")");
 }
 
-fn emit_intrinsic(self: *Emit, p: Placement, op: *NewIntrinsicPayload, t: Type, arg: []Str, arg_ty: Type) Str = {
+fn emit_intrinsic(self: *Emit, p: Placement, op: *NewIntrinsicPayload, t: Type, arg: []Str, arg_ty: Type, expr: ?*FatExpr) Str = {
     o, k := (@as(Qbe.O) op.ir_op, @as(Qbe.Cls) op.ir_cls);
     if o == .copy {
         return self.declare_now(p&, t, => @fmt(self.out, "(%) %", self.type_name(t), arg[0]));
@@ -581,6 +582,7 @@ fn emit_intrinsic(self: *Emit, p: Placement, op: *NewIntrinsicPayload, t: Type, 
     // -fsanitize=undefined avoid ub for signed overflow and when shift distance wraps
     unsigned := unsigned || @is(o, .add, .sub, .mul, .udiv, .urem, .shl, .shr);
     shift := @is(o, .shl, .shr, .sar, .rotl, .rotr);
+    // shift := shift && (expr.is_none() || !expr.Some.items()[0].expr&.is(.Value));
     arg_ty := self.program.arg_types(arg_ty);
     self.declare_now(p&, t) {
         if self.program.get_type(t).is(.Ptr) {
@@ -693,7 +695,7 @@ fn emit_constant(self: *Emit, value: *Values, p: Placement, expr_ty: Type, loc: 
                 @if_let(baked.template) fn Bytes(string) => if string.len <= 256 {
                     @if_let(parts[1]) fn Num(it) => {
                         return (declare_now(self, p&, expr_ty) {
-                            @fmt(self.out, "(%) { .ptr = (uint8_t*) %, .len = %, }", 
+                            @fmt(self.out, "(%) { .ptr = (u8*) %, .len = %, }", 
                                 self.type_name(expr_ty), => self.string_literal(string), it.value);
                         });
                     }
@@ -729,30 +731,13 @@ fn string_literal(self: *Emit, it: []u8) void = {
     printable :: fn(c) => 
         c >= 32 && c <= 126 && c != "\"".ascii() && c != "\\".ascii();
     
-    first := true;
     self.out.push("\"".ascii());
-    direct := true;
     for it { c |
-        if direct != printable(c) {
-            // when transitioning out of hex escape, the next char can't be a valid hex char or it thinks its part of the escape. 
-            if !direct && c.is_hex_digit() {
-                self.out.push("\"".ascii());
-                self.out.push("\"".ascii());
-            };
-            direct = !direct;
+        @if_else {
+            @if(printable(c)) => self.out.push(c);
+            @if(c == "\n".ascii()) => @fmt(self.out, "\\n");
+            @else => @fmt(self.out, "\\%%%", c / 64, (c / 8).mod(8), c.mod(8));
         };
-        first = false;
-        if direct {
-            self.out.push(c);
-        } else {
-            @switch(c) {
-                @case("\n".ascii()) => @fmt(self.out, "\\n");
-                @default => {
-                    @fmt(self.out, "\\x");
-                    self.out.push_hex_byte(c, false);
-                };
-            };
-        }
     };
     self.out.push("\"".ascii());
 }
@@ -762,12 +747,16 @@ fn define_baked_var(self: *Emit, id: BakedVarId) void = {
     baked := self.program.get_baked(id);
     if baked.relocations.len == 0 {
         alignment := @if(baked.type == UnknownType, 8, self.program.get_info(baked.type)[].align_bytes.zext());
-        if alignment != 1 {  // for tls.globals it needs to be able to cas
-            @fmt(self.out, "__attribute__((aligned(%))) ", alignment);
-        };
-        @fmt(self.out, "static u8 %[%] = { ", name, baked.len());
+        @debug_assert(alignment == 1 || alignment == 2 || alignment == 4 || alignment == 8);
+        @fmt(self.out, "static u% %[%] = { ", alignment * 8, name, baked.len() / alignment);
         @match(baked.template) {
-            fn Bytes(it) => self.string_literal(it);
+            fn Bytes(it) => @switch(alignment) {
+                @case(1) => self.string_literal(it);
+                @case(2) => self.bytes_literal(it, u16);
+                @case(4) => self.bytes_literal(it, u32);
+                @case(8) => self.bytes_literal(it, u64);
+                @default => @panic("TODO: big alignment");
+            }
             fn Zeroes() => @fmt(self.out, "0");
         };
     } else {
@@ -778,6 +767,15 @@ fn define_baked_var(self: *Emit, id: BakedVarId) void = {
         };
     };
     @fmt(self.out, "};\n");
+}
+
+// { 1, 0 } is much more compact than "\x01\x00\x00...etc" for .None
+fn bytes_literal(self: *Emit, bytes: []u8, $T: Type) void = {
+    @debug_assert_eq(bytes.len.umod(size_of(T)), 0);
+    while => bytes.len > 0 {
+        n := bytes&.pop_type(T)[];
+        @fmt(self.out, "%, ", n);
+    }
 }
 
 fn addr_macro(self: *Emit, arg: *FatExpr, t: Type, p: Placement) Str #once = {
