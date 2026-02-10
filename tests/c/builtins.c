@@ -21,6 +21,11 @@ int main(void) {
     ASSERT(0x23456781, __builtin_rotateleft32(0x12345678, 4));
     ASSERT(0x78563412, __builtin_bswap32(0x12345678));
     
+    // this doesn't test that it actually works, just that i supply something. 
+    // (the real test is compiling luajit without using someone else's linker)
+    static char very_important_machine_code[512]; 
+    __builtin___clear_cache(very_important_machine_code, very_important_machine_code + 512);
+    
     printf("OK\n");
     return 0;
 }

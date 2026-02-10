@@ -54,7 +54,6 @@ fn skip_line(c: *Ctx, tok: *Token) *Token = {
     if(tok.at_bol, => return(tok));
     @warn_tok(c, tok, "extra tokens after directive will be discarded");
     while => !tok.at_bol {
-        @warn_tok(c, tok, "% %", tok.kind, tok.str());
         tok = tok.next;
     };
     tok
@@ -760,7 +759,12 @@ fn read_include_filename_no_skip_line(c: *Ctx, rest: **Token, tok: *Token) Ty(St
     // Pattern 3: #include FOO
     // In this case FOO must be macro-expanded to either
     // a single string token or a sequence of "<" ... ">".
+    // also allows `#include FOO >` where FOO contains the opening < but not the closing. 
+    // TODO: which makes it hard to do the newline warning 
     @if(tok.valid_macro_name()) => {
+        if c.find_macro(tok).is_none() {  // don't infinite loop
+            @error_tok(c, tok, "invalid token after #include");
+        };
         rest[] = tok.next;  // doesn't matter but i want to keep the warning for missing new line so can't spam it
         tok2 := c.preprocess2(c.copy_line(tok&, tok));
         c.read_include_filename_no_skip_line(tok2&, tok2)
@@ -1217,6 +1221,33 @@ builtins :: @struct {
         c.new_num_token(0, tok)
             .set_next(tok)
     };
+    
+    // not a standard feature.
+    // like c32's #embed but gives you a string literal instead of a char array. 
+    // i want it so you can #include a .s file by wrapping this in an asm statment. 
+    __include_as_string_literal :: fn(c: *Ctx, tok: *Token) *Token = {
+        parent := tok.file.name;
+        tok = tok.next;
+        tok = c.skip(tok, "(");
+        filename, is_dquote := c.read_include_filename_no_skip_line(tok&, tok);
+        path := c.search_include_paths(filename, is_dquote, parent, @ref "")
+            || @error_tok(c, tok, "missing include %", filename);
+        
+        src := u8.list(c.arena);
+        read_and_push(src&, path) 
+            || @error_tok(c, tok, "failed to read %", path);
+        c.codemap&.add_file((@tfmt("@/%", path)).shallow_copy(c.arena), src.items().shallow_copy(c.arena));
+        
+        c.current_file = tok.file;
+        p := tok.str().as_ptr();
+        s := c.new_token(.TK_STR, p, p);
+        s.ty = c.array_of(c.ty_char, src.len);
+        src&.push(0);
+        s.val.str_buf = src.maybe_uninit.ptr;
+        
+        tok = c.skip(tok, ")");
+        s.set_next(tok)
+    }
 };
 
 fn set_next(rest: *Token, tok: *Token) *Token = {
@@ -1404,6 +1435,7 @@ fn promote_to_wide_string_literal(c: *Ctx, tok: *Token, basety: *Types.CType) *T
     prev := c.current_file;
     c.current_file = tok.file;  
 
+    ::if(*Token);
     t := if basety.size == 2 {
         c.read_utf16_string_literal(tok.str().as_ptr(), tok.str().as_ptr())
     } else {

@@ -100,6 +100,7 @@ int main() {
     voidtypedef();
     
     ASSERT(0, ({ void *to_void = 0; to_void == to_void + 1; }));
+    ASSERT(0, ({ struct { char a; } a = {0}; (0 ? a : a).a; }));  // get_common_type
     
     enum { value_0 };  // shadowed by a label
     switch(1) {

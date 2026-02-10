@@ -1,4 +1,14 @@
 
+## (Feb 10)
+
+- c: test the typechecking thing from yesterday. also just warn on unknown attributes.
+- luajit's buildvm outputs a .s file but it already did all the work.
+  my assembler just needs to handle `.long`/calls and then i can do it all myself
+  - make a thing so you can #include asm() so i don't have to manually mess with the Module
+  - as i've discovered before `__clear_cache` is linker magic on linux, so do that myself too. 
+    - hopefully that's the problem i was having with tcc yesterday but i can't reproduce it either way which is unfortuante. 
+  - little runner for their bench/TEST_md5sum.txt
+
 ## (Feb 9)
 
 import_c

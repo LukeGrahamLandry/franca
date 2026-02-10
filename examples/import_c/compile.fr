@@ -168,6 +168,8 @@ Ctx :: @rec @struct {
     consts: *HashMap(Qbe.Con, Qbe.Ref);
     cache_con01: Array(Qbe.Ref, 2);  // because eval_const_expr does true/false so many times
     strings: RawHashMap([]u8, *Obj);
+    yielded_builtin_clear_cache: bool;
+    have_seen_c_code: bool;  // TODO: remove once top level asm with relocationscan go through CodegenShared
     
     // I'm probably going to regret this. 
     error_buf: List(u8);
@@ -2027,6 +2029,7 @@ Attributes :: @struct {
     constructor := false;
     weak := false;
     hidden := false;  // TODO: do people use internal/protected visibility?
+    noinline := false;
     align: ?i64 = .None;
     alias: ?*Token = .None;
 };
@@ -2055,32 +2058,16 @@ AttrName :: @enum(
     alias,
     visibility,
     constructor,
-    format, 
-    const,
-    noreturn, 
-    deprecated,
-    may_alias,
-    unused,
-    swift_name,
-    warn_unused_result,
-    availability,
-    swift_wrapper,
-    transparent_union,
-    unavailable,
-    swift_attr,
-    naked,
-    always_inline,
-    nothrow,
-    noinline, // TODO: respect this :YYY
+    noinline,
     _,
 );
 
-fn attribute(s: Str) AttrName = {
-    if s.starts_with("__") && s.ends_with("__") && s.len > 4 {
-        s = s.slice(2, s.len - 2); 
-    }
-    contextual_keyword(s, AttrName)
-}
+known_safe_to_ignore :: @const_slice(
+    "nothrow", "noreturn", "always_inline", "transparent_union", "may_alias", "const",
+    "swift_wrapper", "swift_attr", "swift_name", "unavailable", "availability", 
+    "warn_unused_result", "unused", "deprecated", "format", "format_arg", 
+    "naked",  // TODO: only allow asm statements in the body
+);
 
 fn attribute_list(c: *Ctx, rest: **Token, tok: *Token) Attributes = {    
     result: Attributes = ();
@@ -2101,7 +2088,10 @@ fn attribute_list(c: *Ctx, rest: **Token, tok: *Token) Attributes = {
 
 fn one_attribute(c: *Ctx, tok: *Token, result: *Attributes) *Token #once = {
     name := tok.str();
-    kind := name.attribute();
+    if name.starts_with("__") && name.ends_with("__") && name.len > 4 {
+        name = name.slice(2, name.len - 2); 
+    };
+    kind := contextual_keyword(name, AttrName);
     
     str_arg :: fn($yield: @Fn(s: Str) void) => {
         tok = c.skip(tok, "(");
@@ -2112,22 +2102,21 @@ fn one_attribute(c: *Ctx, tok: *Token, result: *Attributes) *Token #once = {
     };
 
     start := tok;
-    //tok = c.skip(tok, "TK_IDENT");
-    // i.e. __attribute__((nothrow,const)) :YYY cleanup? at least test
-    tok = tok.next;  
+    tok = tok.next;  // not skip(TK_IDENT) because it can be a keyword (i.e. const)
     @match(kind) {
         fn _() => {
-            if name == "format_arg" {
-                // TODO: my read_punct takes the shorter one when one is a prefix of another.
-                tok = c.skip_attribute(tok);
-                return(tok);    
-            };
             if name == "weak_import" {  // apple
+                // TODO: my read_punct takes the shorter one when one is a prefix of another.
                 result.weak = true;
                 tok = c.skip_attribute(tok);
                 return(tok);
             };
-            @error_tok(c, start, "unknown attribute: %", start.str());
+            
+            // since some have semantic meaning, it seems friendly to warn you if im going to ignore it. 
+            if !known_safe_to_ignore.contains(name) {  // :SLOW
+                @warn_tok(c, start, "unknown attribute: %", start.str());
+            };
+            tok = c.skip_attribute(tok);
         }
         fn packed() => {
             result.packed = true;
@@ -2151,20 +2140,24 @@ fn one_attribute(c: *Ctx, tok: *Token, result: *Attributes) *Token #once = {
         fn constructor() => {
             // :AttributesNotYetImplemented
             result.constructor = true;
+            @warn_tok(c, tok, "TODO: ((constructor)) not yet implemented");
         }
         fn aligned() => {
-            if equal(tok, ")") {
-                // TODO: what does this mean? :YYY
-                // target/franca/deps/ac2defd1e9b4ab07ac0a52f2403318ffb0d54505b975dff0cfc49a927ab84d90/src/lj_err.c:421:29
+            if equal(tok, ")") || equal(tok, ",") {
+                // without an argument, ((aligned)) defaults to the biggest natural data type. 
+                // 16 is needed for some of the float instructions probably. 
+                result.align = (Some = 16);
+                // i can't do luajit unwinding anyway (which is how i found this) so might take this out if i can't find someone who needs it. 
+                @warn_tok(c, tok, "if you find a program that needs this, add it as a test");
             } else {
                 tok = c.skip(tok, "(");
                 result.align = (Some = c.const_expr(tok&, tok));
                 tok = c.skip(tok, ")");
             }
         }
-        @default => {
-            tok = c.skip_attribute(tok);
-        };
+        fn noinline() => {
+            result.noinline = true;
+        }
     };
     tok
 }
@@ -2204,6 +2197,7 @@ fn parse_symbol_attributes(c: *Ctx, rest: **Token, tok: *Token, obj: *Obj) void 
             @debug_assert(!obj.yielded);
             obj.yielded = true;
             ctx := c.emitter;
+            c.have_seen_c_code = true;
                 enter_task ctx { entry | 
                     lnk := temp().boxed(Qbe.Lnk, (
                         id = obj.global_symbol.unwrap(),
@@ -2212,6 +2206,9 @@ fn parse_symbol_attributes(c: *Ctx, rest: **Token, tok: *Token, obj: *Obj) void 
                     entry.task = (Bounce = (lnk = lnk, target = target.global_symbol.unwrap()));
                 };
         };
+        // TODO: lnk.noinline = it.noinline. 
+        //       currently i only inline single block functions so it won't come up often but should probably still do as instructed. 
+        //       but its a bit wasteful to init the function before knowing if it's a real declaration. 
     };
     
     // :XXXX otherwise linker doesn't get them from the static archive...
@@ -2370,6 +2367,7 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
         // TODO: assert no other code in body until im ready to split it into a call to another function
         f.yielded = true;
         @assert(!@is(c.m.goal.type, .Cached, .CachedEarly), "TODO: need to be consistant about how to handle modules like this that don't actually compile anything");
+        c.have_seen_c_code = true;
         enter_task c.emitter { entry | 
             code := temp().box_zeroed(MultiArchAsm);
             code[c.m.goal.arch] = c.inline_assembly.items().shallow_copy(temp());
@@ -2520,9 +2518,12 @@ fn parse(c: *Ctx, tok: *Token) void = {
         }
         fn asm() => {
             // :AsmNotYetImplemented
-            @warn_tok(c, tok, "TODO: top level asm");
             c.eat(tok&, "asm");
             tok = c.skip(tok, "(");
+            src := tok.string_value().unwrap();  // TODO
+            @if(c.have_seen_c_code && c.emitter.threaded) @error_tok(c, tok, "TODO: top level asm only allowed at the beginning of program (because im lazy!)");
+            // TODO: NOT THREAD SAFE 
+            Asm'parse_and_emit(c.m, src);
             tok = c.skip(tok, "TK_STR");
             @if(equal(tok, ":")) @error_tok(c, tok, "top level asm statement cannot have register constraints");
             tok = c.skip(tok, ")");
@@ -3656,7 +3657,6 @@ asm :: fn(c, rest, tok) #prefix(.asm, .ND_STMT) = {
     
     // for now this is just enough to make emit_c.fr work. 
     if placeholders == 0 && !c.f.is_null() {
-        Asm :: import("@/examples/import_c/assemble.fr");
         result := Asm'parse(template, c.m.goal.arch);
         @match(result) {
             fn Ok(asm) => {
@@ -3795,6 +3795,11 @@ fn parse_builtin(c: *Ctx, name: Str, rest: **Token) ?*Node = {
             r := c.emit(.alloc16, .Kl, args&[0].r, QbeNull);
             ty := c.pointer_to(c.ty_void);
             return(Some = c.ir_node(ty, r, r, tok));
+        };
+        @case("__clear_cache") => {
+            args := c.builtin_args(rest, 2);
+            c.sync_icache(args&[0].r, args&[1].r);
+            return(Some = c.new_node(.ND_NULL_EXPR, tok));
         };
         @default => return(.None);
     };
@@ -4612,3 +4617,48 @@ fn cmp_ne(k: Qbe.Cls) Qbe.O = @match(k) {  // :CmpOrder
     fn Kd() => .cned;
     @default => panic("invalid cls");
 };
+
+Asm :: import("@/examples/import_c/assemble.fr");
+
+// glibc won't give you a dynamic __clear_cache but macos will. 
+// when gcc compiles a program that imports extern __clear_cache, ld always statically links it. 
+// this is a duplicate of the logic in lib/sys/process.fr/clear_instruction_cache()
+fn sync_icache(c: *Ctx, beg: Qbe.Ref, end: Qbe.Ref) void = {
+    //                                                                                               |multi target|
+    id := @if((c.m.goal.arch != .wasm32 && c.m.goal.os == .macos) || @is(c.m.goal.type, .Relocatable, .CachedEarly), {
+        c.yielded_builtin_clear_cache = true;  // imported
+        c.m.intern("__clear_cache")
+    }, {
+        // TODO: this alignment should be in the asm where it can check the cache line size.
+        mask := c.getcon(bit_not(128-1));   // matters for arm, won't hurt riscv. 
+        beg = c.emit(.and, .Kl, beg, mask);
+        end = c.emit(.add, .Kl, end, c.getcon(128));
+        end = c.emit(.add, .Kl, end, mask);
+        
+        c.m.intern("__clear$$$$$")
+    });
+    
+    c.emit(.arg, .Kl, Qbe.Null, beg, Qbe.Null);
+    c.emit(.arg, .Kl, Qbe.Null, end, Qbe.Null);
+    c.emit(.call, .Kw, Qbe.Null, c.getcon(id), Qbe.Null);
+    
+    @if(!c.yielded_builtin_clear_cache)
+    enter_task c.emitter { entry | 
+        code := temp().box_zeroed(MultiArchAsm);
+        code[.aarch64] = import("@/lib/sys/process.fr")'aarch64_clear_instruction_cache.interpret_as_bytes();
+        code[.x86_64] = @const_slice(0xc3);  // nop. coherent
+        code[.wasm32] = @const_slice(0x02, 0x00, 0x0B);  // nop. harvard
+        code[.rv64] = syscall_riscv_flush_icache.interpret_as_bytes();
+        lnk := temp().box_zeroed(Qbe.Lnk);
+        lnk.id = id;
+        entry.task = (Asm = (lnk = lnk, code = code));
+    };
+    c.yielded_builtin_clear_cache = true;
+}
+
+syscall_riscv_flush_icache :: { #use("@/backend/rv64/bits.fr"); @const_slice(
+    I(259, RvReg.Zero.bits(), @as(u3) OpI.add, RvReg.A7.bits(), .op_imm),  // syscall number
+    I(0,   RvReg.Zero.bits(), @as(u3) OpI.add, RvReg.A2.bits(), .op_imm),  // flags
+    ecall,
+    jalr(.RA, 0, .Zero),
+) };

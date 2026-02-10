@@ -52,7 +52,7 @@ Compared to chibicc, my changes:
 - allow some function attributes
 - show chain of macro declarations in error report
 - declare symbol aliases with the `asm` keyword
-- `__builtin`: clz, ctz, popcount, bswap, rotateleft, rotateright, expect, constant_p
+- `__builtin`: clz, ctz, popcount, bswap, rotateleft, rotateright, expect, constant_p, `__clear_cache`
 
 ### Refactors 
 
@@ -69,6 +69,12 @@ Compared to chibicc, my changes:
 - removed support for x87 80-bit long doubles
 - i've sacrificed code readability for performance. 
   chibicc is a much better resource for learning about compilers than mine. 
+
+### Extensions
+
+- `__include_as_string_literal("path")`: same syntax as with `#include` but yields a string literal instead of code. 
+    can be used to include assembly files: `asm(__include_as_string_literal("foo.s"));`
+- `#add_include_path "path"`: equivilent to passing `-Ipath` on the command line. 
 
 ## Chibicc License
 

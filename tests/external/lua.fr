@@ -54,21 +54,12 @@ test_lua :: fn() void = {
    
     @run Sort'default(Str, tests, Sort.order_strings);
     Syscall'chdir(@fmt_cstr("%", tests_folder)).unwrap();
-    run_tests_main(Str, tests, fn(a) => a[]) { file | 
-        a := timestamp();
+
+    run_tests_main_threaded(Str, Str, lua_exe, tests, fn(_, a) = a[], fn(lua_exe, file) = {
         ok, out, err := exec_and_catch(lua_exe, @slice(file[]), temp());
-        b := timestamp();
         ok := ok && (out.items().contains("OK\n") || out.items().contains("ok\n"));
-        (ok, out, err, @tfmt("%ms", b - a))
-    };
-    
-    // TODO: this doesn't seem to work. do their tests just not support 
-    //       running in parallel (maybe they stomp files like some of mine do)
-    //run_tests_main_threaded(Str, Str, lua_exe, tests, fn(_, a) = a[], fn(lua_exe, file) = {
-    //    ok, out, err := exec_and_catch(lua_exe, @slice(file[]), temp());
-    //    ok := ok && (out.items().contains("OK\n") || out.items().contains("ok\n"));
-    //    (ok, out, err, "")
-    //});
+        (ok, out, err, "")
+    });
     
     Syscall'chdir(start.as_cstr()).unwrap();
     println("[ok] finished lua tests");
@@ -76,6 +67,7 @@ test_lua :: fn() void = {
 
 test_luajit :: fn() void = {
     arch, os := (query_current_arch(), query_current_os());
+    have_assembler := arch == .aarch64;
     
     if !@is(arch, .aarch64, .x86_64) {
         @eprintln("SKIP: luajit does not support %", arch);
@@ -94,20 +86,22 @@ test_luajit :: fn() void = {
     src := u8.list(100, temp());
     prelude(src&, arch, os, luajit);
     
+    if have_assembler {
+        @fmt(src&, "asm(__include_as_string_literal(\"lj_vm.S\"))\n");
+    };
+    
     // so you can -j dump
     @fmt(src&, "#define LUA_ROOT \"%\"\n", luajit);
     // TODO: symlink :: fn(target: CStr, linkpath: CStr) i64 #weak #libc; ? but i don't care enough
     path := @tfmt("%/share/luajit-2.1/jit", luajit);
-    //if !dir_exists(path) {  // shouldn't do that because vmdef is generated
         make_dirs_or_crash(path);
         files := collect_with_extension(@tfmt("%/src/jit", luajit), ".lua").unwrap();
         for files { it |
             src := read_entire_file_or_crash(temp(), @tfmt("%/src/jit/%", luajit, it));
             write_entire_file_or_crash(@tfmt("%/%", path, it), src);
         };
-    //};
     
-    @fmt(src&, "void __clear_cache(void* start, void* end);\n");
+    @fmt(src&, "#define __clear_cache __builtin___clear_cache\n");
     @fmt(src&, "#include \"luajit.c\"\n");
     @fmt(src&, "#include \"ljamalg.c\"\n");
     // TODO: don't use the generated minilua, but need CUSTOM_MAIN from genminilua.lua
@@ -116,17 +110,18 @@ test_luajit :: fn() void = {
     host_end := timestamp();
     obj := "target/luajit.o";
     CCC'compile(
-        output_path = obj,
+        output_path = @if(have_assembler, luajit_exe, obj),
         target = (
-            type = .Relocatable, 
-            os = os, 
-            arch = arch,
-            // wrap_entry_for_linux_libc = true,
+            type = @if(have_assembler, .Exe, .Relocatable),
+            os = os, arch = arch,
+            wrap_entry_for_linux_libc = true, exe_debug_symbol_table = true,
         ),
         prelude = src.items(),
     ).or(fn(msg) => @panic("failed compile luajit %", msg));
-    hack := @if(query_current_os() == .macos, Foreign.EXE.cc, Foreign.EXE.clang);
-    sh(@slice(hack, obj, "-lm", "-ldl", "-o", luajit_exe, @tfmt("%/src/lj_vm.S", luajit)));
+    if !have_assembler {
+        hack := @if(query_current_os() == .macos, Foreign.EXE.cc, Foreign.EXE.clang);
+        sh(@slice(hack, obj, "-lm", "-ldl", "-o", luajit_exe, @tfmt("%/src/lj_vm.S", luajit)));
+    }
     println(luajit_exe);
 
     build_end := timestamp();
@@ -139,6 +134,15 @@ test_luajit :: fn() void = {
     repro_buildvm_libbc(luajit, luajit_exe);
     @println("luajit; host: %ms, compile: %ms, test: %ms", host_end - build_start, build_end - host_end, timestamp() - build_end);
     luajit_exe :: "target/luajit.out";
+    
+    if file_exists(Foreign.PATH.bin_sh) {
+        // check output of a few of thier benchmarks
+        file := "target/a.lua";
+        write_entire_file_or_crash(file, @tfmt(SRC, tests, "%"));
+        sh(@slice(luajit_exe, file));
+    } else {
+        @eprintln("SKIP: luajit-tests/bench. popen requires a shell. looks like running in a sandbox.");
+    };
 }
 
 // compile & run (minilua, dynasm, buildvm) to generate code. 
@@ -213,6 +217,7 @@ buildvm :: fn(luajit: Str, target_arch: Arch, target_os: Os) void = {
         fn linux() => "elfasm";
     };
     modes := @slice("bcdef", "ffdef", "libdef", "recdef", "vmdef", LJVM_MODE, "folddef");
+    asm_path := @tfmt("%/src/lj_vm.S", luajit);
     for modes { it |
         if it == "folddef" {  // must be last
             args.len -= luajit_lib_files.len();
@@ -222,12 +227,22 @@ buildvm :: fn(luajit: Str, target_arch: Arch, target_os: Os) void = {
         args[2] = it;
         args[4] = @switch(it) {
             @case("vmdef") => @tfmt("%/src/jit/%.lua", luajit, it);
-            @case(LJVM_MODE) => @tfmt("%/src/lj_vm.S", luajit);
+            @case(LJVM_MODE) => asm_path;
             @default => @tfmt("%/src/lj_%.h", luajit, it);
         };
         sh(args.items());
         @println("[gen] %", it);
     };
+    
+    if target_os == .linux {
+        // HACK: my assembler can't deal with label arithmetic, 
+        //       but i think debug_frame doesn't matter because i don't do unwinding
+        src := read_entire_file_or_crash(temp(), asm_path);
+        while => !src.ends_with(".ident \"DynASM 1.5.0\"\n") {
+            src.len -= 1;
+        };
+        write_entire_file_or_crash(asm_path, src);
+    }
 }
 
 // can only be generated by luajit but needed to bootstrap. so just make sure the committed one repros. 
@@ -275,3 +290,33 @@ luajit_lib_files :: @const_slice("lib_base.c", "lib_math.c", "lib_bit.c", "lib_s
 
 #use("@/examples/testing.fr");
 CCC :: import("@/examples/import_c/cc.fr");
+
+SRC :: """
+local path = "%" .. "/bench/"
+
+function readall(f) 
+    if f == nil then return nil end
+    local out = f:read("*a")
+    f:close()
+    return out
+end
+
+arg[1] = 1 -- small value for md5.lua's test
+-- can't just set package.path and require() because it's a local
+local md5_src = readall(io.open(path .. "md5.lua", "r"))
+local md5 = loadstring(md5_src .. "\nreturn md5")()  
+local answers = readall(io.open(path .. "TEST_md5sum.txt", "r"))
+for it in answers:gmatch"[^\n]+" do
+    local it = it:gmatch"%w+"
+    local name, input, expected = it(), it(), it()
+    -- skip ones with input files
+    if input == "x" then goto continue end  
+    local file = path .. name .. ".lua"
+    -- skip ones where they removed dashes from the file name 
+    if readall(io.open(file, "r")) == nil then goto continue end   
+    local result = md5(assert(readall(io.popen("./target/luajit.out " .. file .. " " .. input))))
+    print((result == expected and "ok" or "fail"), result, input, name)
+    assert(result == expected)
+    ::continue::
+end
+""";

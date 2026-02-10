@@ -1,6 +1,7 @@
 #include "test.h"
 #include "stddef.h"
 
+__attribute__((const)) 
 int foozle(char *a, int b, ...) __attribute__((__format__(__gnu_printf__, 1, 3))) __attribute__((__const__)) {
     return 1;
 }

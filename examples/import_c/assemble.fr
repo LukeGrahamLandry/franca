@@ -7,7 +7,7 @@
 main :: fn() void = {
     #use("@/lib/sys/fs.fr");
     
-    path, arch := ("target/franca/deps/17661d89d2a04e1c03551dcacf31284159cf7fe398159486fa4725d35775bf2c/.out/test_asm.s", Arch.rv64);
+    path, arch := ("target/franca/deps/ac2defd1e9b4ab07ac0a52f2403318ffb0d54505b975dff0cfc49a927ab84d90/src/lj_vm.S", Arch.aarch64);
         in := read_entire_file_or_crash(temp(), path);
         
         m := @ref zeroed(Qbe.Module);
@@ -50,11 +50,10 @@ Inst :: @struct {
 };
 
 Directive :: @tagged(
-    Section: @struct(name: Str, flags: Str),
+    Section: Str,
     Global: @struct(name: Str),
     Type: @struct(name: Str, type: Str),
-    Bss,
-    Text,
+    Size: @struct(name: Str, size: i64),
     Align: @struct(bytes: i64),
     Skip: @struct(bytes: i64),
     Label: @struct {
@@ -63,8 +62,12 @@ Directive :: @tagged(
         length := MIN_i64; // how many asm.insts until next label
         directive_count := MIN_i64;  // how many directives until next label
     },
-    Raw: @struct(value: i64, size: u8),
+    File: @struct(name: Str),
+    SymbolInfo: @struct(name: Str, vis: Visibility),
+    Ascii: Str,
+    Ident: Str,
 );
+Visibility :: @enum(u8) (hidden, private_extern, no_dead_strip);
 
 Parse :: @struct {
     input: Str;
@@ -82,6 +85,7 @@ SymbolPatch :: @struct {
 };
 
 parse_and_emit :: fn(m: *Qbe.Module, in: Str) void = {
+    demangle := m.goal.os == .macos;  // HACK: my backend autoinserts underscore prefix
     arch := m.goal.arch;
     @match(parse(in, arch)) {
         fn Ok(asm) => {
@@ -90,6 +94,9 @@ parse_and_emit :: fn(m: *Qbe.Module, in: Str) void = {
             insts := u32.list(temp());
             relocs := Ty(Reloc, i64).list(temp());
             each asm.insts { it |
+                if demangle && it.label.starts_with("_") {
+                    it.label = it.label.rest(1);
+                };
                 reloc: ?Reloc = .None;
                 inst := @match(arch) {
                     fn aarch64() => EncodeArm'encode(it, reloc&);
@@ -108,6 +115,9 @@ parse_and_emit :: fn(m: *Qbe.Module, in: Str) void = {
             off := 0;
             each asm.stmts { it |
                 @if_let(it) fn Label(it) => {
+                    if demangle && it.label.starts_with("_") {
+                        it.label = it.label.rest(1);
+                    };
                     code := zeroed Qbe.MultiArchAsm;
                     @assert_eq(off, it.i, "lost bytes between symbols. reloc offset won't work");
                     code&[arch] = insts.items().subslice(it.i, it.length).interpret_as_bytes();
@@ -137,7 +147,7 @@ parse_and_emit :: fn(m: *Qbe.Module, in: Str) void = {
 
 fn do_patches(asm: *Asm, insts: []u32, relocs: []Ty(Reloc, i64), patches: *List(SymbolPatch), arch: Arch) void = {
     // TODO: O(^) but n=2 :SLOW :SLOW :SLOW :SLOW :SLOW :SLOW :SLOW
-    @assert(relocs.len < 5, "TODO: make this not slow as fuck");
+    @assert(relocs.len < 500, "TODO: make this not slow as fuck");
     for relocs { it, patch_at |
         continue :: local_return;
         inst := insts[patch_at]&;
@@ -160,12 +170,11 @@ fn do_patches(asm: *Asm, insts: []u32, relocs: []Ty(Reloc, i64), patches: *List(
                     };
                 };
                 
-                // TODO: it might be bl
                 @match(arch) {
                     fn aarch64() => @assert(it.width == 26 && it.shift == 0, "TODO: only b can be symbol patch");
                     @default => ();
                 };
-                push(patches, (i = patch_at, label = it.label, fixup = (Call = (link = false))));
+                push(patches, (i = patch_at, label = it.label, fixup = (Call = (link = it.link))));
             };
         };
     };
@@ -181,22 +190,8 @@ parse :: fn(in: Str, arch: Arch) Result(Asm, Str) = {
     insts := @ref Inst.list(temp());
     while => self.cursor < self.input.len {
         self.skip_lines();
-        if self.eat(".") {
-            it := self.parse_directive();
-            @debug_assert(!it&.is(.Label), "need to update last_label");
-            @match(it) {
-                fn Raw(it) => {
-                    // TODO: cope with non-multiples of 4. will have to anyway for amd. 
-                    if it.size == 1 && insts.len > 0 && insts[insts.len - 1].op == "raw" && insts[insts.len - 1].arg&[0].cls < 4 {
-                        prev := insts[insts.len - 1]&;
-                        prev.imm = prev.imm.bit_or(it.value.shift_left(prev.arg&[0].cls.zext() * 8));
-                        prev.arg&[0].cls += 1;
-                    } else {
-                        insts.push(op = "raw", imm = it.value, arg = ((r = 0, cls = it.size), ..zeroed(Inst.Arg)));
-                    };
-                }
-                @default => stmts.push(it);
-            };
+        if self.eat(".") && self.input[self.cursor] != "L".ascii() {
+            self.parse_directive(stmts, insts);
         } else {
             self.parse_body(stmts, insts);
         };
@@ -215,18 +210,19 @@ parse :: fn(in: Str, arch: Arch) Result(Asm, Str) = {
     (Ok = (stmts = stmts.items(), insts = insts.items()))
 }
 
-fn parse_directive(self: *Parse) Directive = {
+fn parse_directive(self: *Parse, out: *List(Directive), insts: *List(Inst)) void = {
     name := self.eat_word();
-    @switch(name) {
-        @case("section") => {
+    out.push(@switch(name) {
+        @case("file") => {
             n := self.eat_word();
             self.skip_blanks();
-            f := if self.eat(",") {
-                self.eat_word()
-            } else {
-                ""
-            };
-            (Section = (name = n, flags = f))
+            (File = (name = n))
+        };
+        @case("section") => {
+            start := self.cursor;
+            self.eat_line();
+            n := self.input.slice(start, self.cursor);
+            (Section = n)
         };
         @case("type") => {
             n := self.eat_word();
@@ -237,33 +233,85 @@ fn parse_directive(self: *Parse) Directive = {
             t := self.eat_word();
             (Type = (name = n, type = t))
         };
-        @case("text") => .Text;
-        @case("bss") => .Bss;
+        @case("hidden") => self.parse_symbol_metadata(.hidden);
+        @case("private_extern") => self.parse_symbol_metadata(.private_extern);
+        @case("no_dead_strip") => self.parse_symbol_metadata(.no_dead_strip);
+        @case("size") => {
+            n := self.eat_word();
+            self.skip_blanks();
+            if !self.eat(",") {
+                @fmt(self.error&, "expected .size ident, number");
+            };
+            self.skip_blanks();
+            size := self.parse_number();
+            (Size = (name = n, size = size))
+        };
+        @case("text") => (Section = "text");
+        @case("bss") => (Section = "bss");
+        @case("cstring") => (Section = "cstring");
         @case("balign") => {
             self.skip_blanks();
             (Align = (bytes = self.parse_number()))
+        };
+        @case("align") => {
+            self.skip_blanks();
+            (Align = (bytes = self.parse_number()))
+        };
+        @case("p2align") => {
+            self.skip_blanks();
+            align_log2 := self.parse_number();
+            if self.eat(",")  {
+                @fmt(self.error&, "TODO: p2align with fill");
+            };
+            (Align = (bytes = 1.shift_left(align_log2)))
         };
         @case("skip") => {
             self.skip_blanks();
             (Skip = (bytes = self.parse_number()))
         };
-        @case("byte") => {
-            self.skip_blanks();
-            (Raw = (value = self.parse_number(), size = 1))
-        }
-        @case("word") => {
-            self.skip_blanks();
-            (Raw = (value = self.parse_number(), size = 4))
-        }
+        @case("byte") => return(self.parse_raw_numbers(insts, 1));
+        @case("word") => return(self.parse_raw_numbers(insts, 4));
+        @case("long") => return(self.parse_raw_numbers(insts, 4));
+        @case("ascii") => {
+            s := self.eat_word();
+            (Ascii = s)
+        };
+        @case("ident") => {
+            s := self.eat_word();
+            (Ident = s)
+        };
         @default => {
             if !(name == "global" || name == "globl") {
                 @fmt(self.error&, "found '%' ", name);
-                return zeroed(Directive);
+                return();
             };
             n := self.eat_word();
             (Global = (name = n))
         };
-    }
+    });
+}
+
+fn parse_symbol_metadata(self: *Parse, vis: Visibility) Directive = {
+    n := self.eat_word();
+    self.skip_blanks();
+    (SymbolInfo = (name = n, vis = vis))
+};
+
+fn parse_raw_numbers(self: *Parse, insts: *List(Inst), size: u8) void = {
+    dowhile {
+        self.skip_blanks();
+        value := self.parse_number();
+
+        // TODO: cope with non-multiples of 4. will have to anyway for amd. 
+        if size == 1 && insts.len > 0 && insts[insts.len - 1].op == "raw" && insts[insts.len - 1].arg&[0].cls < 4 {
+            prev := insts[insts.len - 1]&;
+            prev.imm = prev.imm.bit_or(value.shift_left(prev.arg&[0].cls.zext() * 8));
+            prev.arg&[0].cls += 1;
+        } else {
+            insts.push(op = "raw", imm = value, arg = ((r = 0, cls = size), ..zeroed(Inst.Arg)));
+        };
+        self.eat(",")
+    };
 }
 
 fn add_label(self: *Parse, stmts: *List(Directive), insts: *List(Inst), label: Str) void = {
@@ -414,12 +462,17 @@ fn parse_reg(self: *Parse) ?Inst.Arg = {
             if self.eat("sp") {
                 return(Some = (r = 31, cls = "p".ascii()));
             };
+            // TODO: fp/lr
             if !"xwsdq".contains(c) {
                 return(.None);
             };
             self.cursor += 1;
             if self.eat("zr") {
                 return(Some = (r = 31, cls = c));
+            };
+            if !self.input[self.cursor].is_ascii_digit() {
+                self.cursor -= 1;
+                return(.None);
             };
             r := self.parse_number();
             (Some = (r = r, cls = c))
@@ -510,7 +563,7 @@ fn parse_reg(self: *Parse) ?Inst.Arg = {
 
 Reloc :: @tagged(
     // (arm/rv) insert a distance in bits [shift..+width] of a u32 instruction
-    Dist: @struct(scale: i64, label: Str, width: i64, shift: i64),
+    Dist: @struct(scale: i64, label: Str, width: i64, shift: i64, link := false),
 );
 
 EncodeArm :: @struct {
@@ -603,6 +656,10 @@ encode :: fn(it: *Inst, reloc_out: *?Reloc) u32 = {
             reloc_out[] = (Some = (Dist = (scale = 4, label = it.label, width = 19, shift = 5)));
             cc := condition(it.cond);
             b_cond(0, cc)
+        };
+        @case("bl") => {
+            reloc_out[] = (Some = (Dist = (scale = 4, label = it.label, width = 26, shift = 0, link = true)));
+            b(0, 1)
         };
         @case("raw") => {
             @assert(it.arg&[0].cls == 4, "TODO: asm arm: non-multiple of 4 raw op");
@@ -738,7 +795,7 @@ fn display(it: *Directive, out: *List(u8)) void = {
     
     @fmt(out, "% ", it.tag());
     if @is(it, .Section, .Global, .Type) {
-        @fmt(out, "%", it.Section.name);
+        @fmt(out, "%", it.Section);
     };
     if @is(it, .Align, .Skip) {
         @fmt(out, "%", it.Align.bytes);

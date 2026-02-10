@@ -1,4 +1,4 @@
-- :YYY
+- finish :AsmNotYetImplemented rn it only works at the beginning of the program if there are relocations 
 - elifdef, elifndef
 - fix the spam from examples/web/build.fr, clearly this isn't true because it builds. 
   `ambigous overload for void -> void;0 matching options` 
@@ -1436,6 +1436,7 @@ needing to go find some data in the right format (and without me including a blo
 - runner for 
   - https://github.com/ertdfgcvb/play.core/tree/master/src/programs/demos
   - https://github.com/bellard/quickjs
+- https://c50.fingswotidun.com https://fingswotidun.com/stackie/
 
 ### assembler
 

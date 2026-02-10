@@ -340,6 +340,8 @@ int main() {
 #include M13
     ASSERT(3, foo);
 
+// TODO: i drop the extra spaces (so does chibicc) but clang/gcc don't. 
+// TODO: fix the warning spam but DO NOT get rid of the warning when it's actually ignoring extra tokens
 // this requires the test folder on the include path
 #define M13 < include4.h
 #include M13 >
@@ -438,6 +440,7 @@ int main() {
     ASSERT(0, strcmp(s, "M32(M32, M32)M32"));
     #include "include5.h"
     
+    ASSERT(0, strcmp(__include_as_string_literal("include5.h"), "/* empty */"));
     printf("OK\n");
     return 0;
 }
