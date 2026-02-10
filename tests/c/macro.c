@@ -441,3 +441,10 @@ int main() {
     printf("OK\n");
     return 0;
 }
+
+#define A  // expands to nothing
+enum {
+#define B() foo
+B() A  // don't stomp this new line
+#undef B
+};

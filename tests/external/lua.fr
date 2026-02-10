@@ -1,27 +1,43 @@
-fn main() void = {
-    #use("@/examples/testing.fr");
-    
+// [lua.org] is just a c program, compile it with my c compiler and run thier tests. 
+// [luajit.org] is more involved. the baseline interpreter is written in dynasm syntax, 
+// which requires a lua to compile .dasc to .h, then those .h are built into buildvm 
+// which generates a .s assembly file (and some more headers) which can then be assembled 
+// with the rest of the luajit c code to finally get a binary. then run thier tests. 
+// note: lua and luajit implement different languages and don't pass each other's test suites. 
+
+main :: fn() void = {
+    test_lua();
+    test_luajit();
+};
+
+test_lua :: fn() void = {    
     start := get_working_directory(temp()).items();
-    cc_path := @tfmt("%/target/cc.out", start);
     
     lua_folder := Foreign'lua();
     tests_folder := Foreign'luatests();
 
     files := collect_with_extension(@tfmt("%/src", lua_folder), ".c") || panic("didn't find tests. run from franca root dir");
     src := u8.list(files.len * 20, temp());
+    @fmt(src&, "#define LUA_USE_POSIX\n");
+    @fmt(src&, "#add_include_path \"%/src\"\n", lua_folder);
     for files { it |
-        @if(it != "all.c" && it != "luac.c")
-        @fmt(src&, "#include \"%/src/%\"\n", lua_folder, it);
+        @if(it != "luac.c")
+        @fmt(src&, "#include \"%\"\n", it);
     };
     //@fmt(src&, "#include \"%/tests/ltests.c\"\n", lua_folder);  // TODO
-    all_path := @tfmt("%/src/all.c", lua_folder); 
-    write_entire_file_or_crash(all_path, src.items());
     lua_exe := @tfmt("%/%/lua.out", start, lua_folder);
+    _ := Syscall'remove(lua_exe.as_cstr());
 
-    ok, out, err := exec_and_catch(cc_path, @slice(all_path, "-o", lua_exe, "-DLUA_USE_POSIX"), temp());  // , "-I."
-    if !ok {
-        @panic("failed compile lua\n%", err.items());
-    };
+    CCC'compile(
+        output_path = lua_exe,
+        target = (
+            type = .Exe, os = query_current_os(), arch = query_current_arch(), 
+            wrap_entry_for_linux_libc = true, exe_debug_symbol_table = true,
+        ),
+        prelude = src.items(),
+    ).or(fn(msg) => @panic("failed compile lua %", msg));
+    
+    println(lua_exe);
     
     // TODO: instead of this just run all.lua but that needs to setup building libs
     // is imported: "bwcoercion.lua", "tracegc.lua", 
@@ -53,4 +69,209 @@ fn main() void = {
     //    ok := ok && (out.items().contains("OK\n") || out.items().contains("ok\n"));
     //    (ok, out, err, "")
     //});
+    
+    Syscall'chdir(start.as_cstr()).unwrap();
+    println("[ok] finished lua tests");
 }
+
+test_luajit :: fn() void = {
+    arch, os := (query_current_arch(), query_current_os());
+    
+    if !@is(arch, .aarch64, .x86_64) {
+        @eprintln("SKIP: luajit does not support %", arch);
+        return();
+    };
+    if arch == .x86_64 && os == .linux {
+        @eprintln("SKIP: TODO: broken on amd-linux");
+        return();
+    };
+    
+    luajit := Foreign'luajit();
+    tests := Foreign'luajit_tests();
+    build_start := timestamp();
+    buildvm(luajit, arch, os);
+    
+    src := u8.list(100, temp());
+    prelude(src&, arch, os, luajit);
+    
+    // so you can -j dump
+    @fmt(src&, "#define LUA_ROOT \"%\"\n", luajit);
+    // TODO: symlink :: fn(target: CStr, linkpath: CStr) i64 #weak #libc; ? but i don't care enough
+    path := @tfmt("%/share/luajit-2.1/jit", luajit);
+    //if !dir_exists(path) {  // shouldn't do that because vmdef is generated
+        make_dirs_or_crash(path);
+        files := collect_with_extension(@tfmt("%/src/jit", luajit), ".lua").unwrap();
+        for files { it |
+            src := read_entire_file_or_crash(temp(), @tfmt("%/src/jit/%", luajit, it));
+            write_entire_file_or_crash(@tfmt("%/%", path, it), src);
+        };
+    //};
+    
+    @fmt(src&, "void __clear_cache(void* start, void* end);\n");
+    @fmt(src&, "#include \"luajit.c\"\n");
+    @fmt(src&, "#include \"ljamalg.c\"\n");
+    // TODO: don't use the generated minilua, but need CUSTOM_MAIN from genminilua.lua
+    
+    strip_failing_tests(tests);
+    host_end := timestamp();
+    obj := "target/luajit.o";
+    CCC'compile(
+        output_path = obj,
+        target = (
+            type = .Relocatable, 
+            os = os, 
+            arch = arch,
+            // wrap_entry_for_linux_libc = true,
+        ),
+        prelude = src.items(),
+    ).or(fn(msg) => @panic("failed compile luajit %", msg));
+    hack := @if(query_current_os() == .macos, Foreign.EXE.cc, Foreign.EXE.clang);
+    sh(@slice(hack, obj, "-lm", "-ldl", "-o", luajit_exe, @tfmt("%/src/lj_vm.S", luajit)));
+    println(luajit_exe);
+
+    build_end := timestamp();
+    arg := @tfmt("%/test/test.lua", tests);
+    ok, out, err := exec_and_catch(luajit_exe, @slice(arg), temp());
+    @assert(ok && err.len == 0 && !out.contains("failed"), 
+        "%%\n\n% %", out.items(), err.items(), luajit_exe, arg);
+    @println("[ok] finished luajit tests: %", out.items().slice(out.len - 11, out.len - 1));
+    
+    repro_buildvm_libbc(luajit, luajit_exe);
+    @println("luajit; host: %ms, compile: %ms, test: %ms", host_end - build_start, build_end - host_end, timestamp() - build_end);
+    luajit_exe :: "target/luajit.out";
+}
+
+// compile & run (minilua, dynasm, buildvm) to generate code. 
+buildvm :: fn(luajit: Str, target_arch: Arch, target_os: Os) void = {
+    host_arch, host_os := (query_current_arch(), query_current_os());
+    sh :: hush;
+    
+    // TODO: repro minilua.c
+    minilua := "target/minilua.out";
+    CCC'compile(
+        output_path = minilua,
+        input_path = @slice(@tfmt("%/src/host/minilua.c", luajit)),
+        target = (type = .Exe, os = host_os, arch = host_arch, wrap_entry_for_linux_libc = true),
+    ).or(fn(msg) => @panic("failed compile luajit/minilua %", msg));
+    
+    DASM_ARCH := @match(target_arch) {
+        fn aarch64() => "arm64";
+        fn x86_64() => "x64";
+        @default => @panic("luajit does not support %", target_arch);
+    };
+    
+    // it puts the file path in the output and i want byte identical to what thier makefile generates. 
+    start := get_working_directory(temp()).items();
+    Syscall'chdir(@fmt_cstr("%/src", luajit)).unwrap();
+    sh(@slice(
+        @tfmt("%/%", start, minilua), @tfmt("%/%/dynasm/dynasm.lua", start, luajit),
+        "-D", "ENDIAN_LE", 
+        "-D", "P64", 
+        "-D", "JIT", 
+        "-D", "FFI", 
+        "-D", "JIT", 
+        "-D", "FPU", 
+        "-D", "HFABI", 
+        "-D", "NO_UNWIND",
+        "-o", "host/buildvm_arch.h", 
+        @tfmt("vm_%.dasc", DASM_ARCH),
+    ));
+    @println("[gen] buildvm_arch");
+    write_entire_file_or_crash("luajit_relver.txt", "nobodycares");
+    sh(@slice(@tfmt("%/%", start, minilua), "host/genversion.lua"));
+    Syscall'chdir(start.as_cstr()).unwrap();
+    
+    // TODO: i want the src dir to be readonly
+    files := @slice("buildvm.c", "buildvm_asm.c", "buildvm_lib.c", "buildvm_fold.c", "buildvm_peobj.c");
+    src := u8.list(100, temp());
+    // TODO: is this wrong? do i need to set LJ_arch etc based on target?
+    prelude(src&, host_arch, host_os, luajit);
+    @fmt(src&, "#include \"lj_assert.c\"\n");
+    for files { it |
+        @fmt(src&, "#include \"%/src/host/%\"\n", luajit, it);
+    };
+    buildvm := "target/buildvm.out";
+    CCC'compile(
+        output_path = buildvm,
+        input_path = empty(),
+        target = (type = .Exe, os = host_os, arch = host_arch, wrap_entry_for_linux_libc = true),
+        prelude = src.items(),
+    ).or(fn(msg) => @panic("failed compile luajit/buildvm %", msg));
+    
+    args := @ref Str.list(temp());
+    args.push(buildvm);
+    args.push("-m");
+    args.push("");   // patch
+    args.push("-o");
+    args.push("");  // patch
+    for luajit_lib_files { it |
+        args.push(@tfmt("%/src/%", luajit, it));
+    };
+    
+    LJVM_MODE := @match(target_os) {
+        fn macos() => "machasm";
+        fn linux() => "elfasm";
+    };
+    modes := @slice("bcdef", "ffdef", "libdef", "recdef", "vmdef", LJVM_MODE, "folddef");
+    for modes { it |
+        if it == "folddef" {  // must be last
+            args.len -= luajit_lib_files.len();
+            args.push(@tfmt("%/src/lj_opt_fold.c", luajit));
+        };
+    
+        args[2] = it;
+        args[4] = @switch(it) {
+            @case("vmdef") => @tfmt("%/src/jit/%.lua", luajit, it);
+            @case(LJVM_MODE) => @tfmt("%/src/lj_vm.S", luajit);
+            @default => @tfmt("%/src/lj_%.h", luajit, it);
+        };
+        sh(args.items());
+        @println("[gen] %", it);
+    };
+}
+
+// can only be generated by luajit but needed to bootstrap. so just make sure the committed one repros. 
+repro_buildvm_libbc :: fn(luajit: Str, luajit_exe: Str) void = {
+    old := read_entire_file_or_crash(temp(), @tfmt("%/src/host/buildvm_libbc.h", luajit));
+    args := @ref Str.list(temp());
+    args.push(@tfmt("%/src/host/genlibbc.lua", luajit));
+    for luajit_lib_files { it |
+        args.push(@tfmt("%/src/%", luajit, it));
+    };
+    ok, out, err := exec_and_catch(luajit_exe, args.items(), temp());
+    @assert(ok && out.items() == old, "%\n%\nfailed to repro buildvm_libbc.h", out.items(), err.items());
+    @println("[ok] repro buildvm_libbc.h");
+};
+
+// (the same) 3 of these don't pass when compiled with clang and thier makefile either. 
+strip_failing_tests :: fn(tests: Str) void = {
+    path := @tfmt("%/test/lib/index", tests);
+    src := read_entire_file_or_crash(temp(), path);
+    s := "contents.lua";
+    if src.ends_with(s) {
+        src.len -= s.len;
+        write_entire_file_or_crash(path, src);
+    };
+};
+
+prelude :: fn(src: *List(u8), arch: Arch, os: Os, luajit: Str) void = {
+    @fmt(src, "#define __clang__ 1\n");  // lie!
+    @fmt(src, "#define __%__ 1\n", arch);
+    @fmt(src, "#define LUAJIT_SECURITY_PRNG 0\n");
+    @assert(@is(arch, .aarch64, .x86_64), "luajit does not support %", arch);
+    @fmt(src, "#define LUAJIT_OS %\n", @match(os) {
+        fn macos() => "LUAJIT_OS_OSX";
+        fn linux() => "LUAJIT_OS_LINUX";
+    });
+    @fmt(src, "#add_include_path \"%/src\"\n", luajit);
+    @fmt(src, "#define ENOMEM 12\n");
+    @fmt(src, "#define LUA_USE_ASSERT 1\n");
+    
+    // i don't generate dwarf unwind tables
+    @fmt(src, "#define LJ_NO_UNWIND 1\n");
+}
+
+luajit_lib_files :: @const_slice("lib_base.c", "lib_math.c", "lib_bit.c", "lib_string.c", "lib_table.c", "lib_io.c", "lib_os.c", "lib_package.c", "lib_debug.c", "lib_jit.c", "lib_ffi.c", "lib_buffer.c");
+
+#use("@/examples/testing.fr");
+CCC :: import("@/examples/import_c/cc.fr");

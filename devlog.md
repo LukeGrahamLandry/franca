@@ -5,6 +5,11 @@ import_c
 - `_Atomic` update assignment and steal chibicc's test for them
 - add builtin (expect, constant_p). simple test. error on wrong arity. rename alloca to a builtin. 
 - hook up my assembler so very basic asm statements work for real
+- compiling lua jit.
+  - lj_ctype.CTTYDEFP revealed preprocessor bug with empty macro at end of line
+  - add to include.fr headers. need to pretend to be clang. 
+    - notably my RTLD_DEFAULT was wrong. 
+      which also mostly fixed tcc abitest on linux-arm, but it still fails occasionally?
 
 ## (Feb 8)
 

@@ -502,7 +502,7 @@ fn new_string_literal(c: *Ctx, p: []u8, ty: *CType, tok: *Token) *Obj = {
 
 fn get_ident(c: *Ctx, tok: *Token) Str = {
     if tok.kind != .TK_IDENT {
-        @error_tok(c, tok, "expected an identifier");
+        @error_tok(c, tok, "expected an identifier: %", tok.str());
     };
     tok.str()  // TODO: make sure we never mutate this (its not a copy!)
 }
@@ -2069,6 +2069,9 @@ AttrName :: @enum(
     unavailable,
     swift_attr,
     naked,
+    always_inline,
+    nothrow,
+    noinline, // TODO: respect this :YYY
     _,
 );
 
@@ -2109,7 +2112,9 @@ fn one_attribute(c: *Ctx, tok: *Token, result: *Attributes) *Token #once = {
     };
 
     start := tok;
-    tok = c.skip(tok, "TK_IDENT");
+    //tok = c.skip(tok, "TK_IDENT");
+    // i.e. __attribute__((nothrow,const)) :YYY cleanup? at least test
+    tok = tok.next;  
     @match(kind) {
         fn _() => {
             if name == "format_arg" {
@@ -2148,9 +2153,14 @@ fn one_attribute(c: *Ctx, tok: *Token, result: *Attributes) *Token #once = {
             result.constructor = true;
         }
         fn aligned() => {
-            tok = c.skip(tok, "(");
-            result.align = (Some = c.const_expr(tok&, tok));
-            tok = c.skip(tok, ")");
+            if equal(tok, ")") {
+                // TODO: what does this mean? :YYY
+                // target/franca/deps/ac2defd1e9b4ab07ac0a52f2403318ffb0d54505b975dff0cfc49a927ab84d90/src/lj_err.c:421:29
+            } else {
+                tok = c.skip(tok, "(");
+                result.align = (Some = c.const_expr(tok&, tok));
+                tok = c.skip(tok, ")");
+            }
         }
         @default => {
             tok = c.skip_attribute(tok);
@@ -2262,7 +2272,10 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     @debug_assert(identical(ty.name, ty.name_pos));  // todo: confusing to have two things
     f := if c.find_func(ty.name) { f |
         if(!f.is_function,                     => @error_tok(c, t, "redeclared as a different kind of symbol"));
-        if(f.is_definition && equal(tok, "{"), => @error_tok(c, t, "redefinition of function '%'", name_str));
+        if(f.is_definition && equal(tok, "{"), => {
+            @warn_tok(c, f.tok, "previously declared here");
+            @error_tok(c, t, "redefinition of function '%'", name_str);
+        });
         // note: the other way around is legal. forward declare as static and then define without saying static again will be treated as static. 
         if(!f.is_static && attr.is_static,     => @error_tok(c, t, "static declaration follows a non-static declaration"));
         f

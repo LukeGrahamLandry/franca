@@ -211,6 +211,7 @@ signal :: """
         int     sa_flags;
     };
             
+    #define SA_RESTART 2
     #define SA_SIGINFO 0x0040  
     
     // TODO
@@ -267,6 +268,7 @@ signal :: """
         void *sa_restorer;
     };
     
+    #define SA_RESTART 0x10000000
     #define SA_SIGINFO 4  
     #define SIG_UNBLOCK 1
     #define SIGBUS  7
@@ -478,6 +480,7 @@ stdio :: """
     FILE *open_memstream(char **bufp, size_t *sizep);
     
     int sscanf(const char *str, const char *format, ...);
+    int fscanf(FILE * f, const char *format, ...);
     double atof (const char* str);
     
     FILE *fmemopen(char *s, long size, char *mode);
@@ -588,6 +591,11 @@ math :: """
     double asin(double x);
     double acos(double x);
     double atan2(double x, double y);
+    double atan(double x);
+    double sinh(double x);
+    double cosh(double x);
+    double tanh(double x);
+    double trunc(double x);
     double ceil(double x);
     double sqrt(double x);
     double log(double x);
@@ -634,13 +642,18 @@ ctype :: """
 dlfcn :: """
     #pragma once
     
-    // TODO: macos specific?
     #define RTLD_LAZY    0x1
     #define RTLD_NOW    0x2
-    #define RTLD_LOCAL    0x4
-    #define RTLD_GLOBAL    0x8
+#if __macos
     #define	RTLD_DEFAULT ((void *) -2)
-    
+    #define RTLD_LOCAL     0x4
+    #define RTLD_GLOBAL    0x8
+#elif __linux
+    #define	RTLD_DEFAULT ((void *) 0)
+    #define RTLD_LOCAL     0
+    #define RTLD_GLOBAL    0x00100
+#endif
+
     void *dlopen(char *file, int mode);
     int dlclose(void *handle);
     char *dlerror();
@@ -677,6 +690,16 @@ time :: """
     };
     
     int gettimeofday(struct timeval *, struct timezone *);
+    
+    struct itimerval {
+        struct timeval it_interval;
+        struct timeval it_value;
+    };
+    
+    int getitimer(int which, struct itimerval *curr_value);
+    int setitimer(int which, const struct itimerval new_value, struct itimerval old_value);
+    
+    #define ITIMER_PROF 1234 // TODO :YYY
 """;
 
 types :: """
@@ -708,7 +731,24 @@ mman :: """
     #define PROT_WRITE  0b010
     #define PROT_EXEC   0b100
     
+    #define MAP_PRIVATE 0b00010
+    #define MAP_FAILED (-1)
+    
+    #if __macos
+    #define MAP_JIT 2048
+    #define MAP_ANON 4096
+    #endif
+    #if __linux
+    #define MAP_ANON 32
+    #endif
+    #define MAP_ANONYMOUS MAP_ANON 
+    
     int mprotect(void *addr, size_t len, int prot);
+    void *mmap(void *addr, size_t length, int prot, int flags, int fd, size_t offset);
+    int munmap(void *addr, size_t len);
+    
+    void *mremap(void *old_address, size_t old_size, size_t new_size, int flags, ...  /* void *new_address */);
+    
 """;
 ucontext :: """
     #pragma once
@@ -968,6 +1008,10 @@ pthread :: """
     typedef void *pthread_t;
     int pthread_create(*pthread_t, void*, void*, void*);
     int pthread_join(*pthread_t, void*);
+    
+    #if __macos
+    void pthread_jit_write_protect_np(int);
+    #endif
 """;
 
 alloca :: """

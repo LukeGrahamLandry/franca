@@ -50,10 +50,11 @@ fn is_hash(tok: *Token) bool #inline =
 
 // Some preprocessor directives such as #include allow extraneous
 // tokens before newline. This function skips such tokens.
-fn skip_line(tok: *Token) *Token = {
+fn skip_line(c: *Ctx, tok: *Token) *Token = {
     if(tok.at_bol, => return(tok));
-    // warn_tok(tok, "extra token");  // TODO
+    @warn_tok(c, tok, "extra tokens after directive will be discarded");
     while => !tok.at_bol {
+        @warn_tok(c, tok, "% %", tok.kind, tok.str());
         tok = tok.next;
     };
     tok
@@ -617,8 +618,11 @@ fn expand_macro(c: *Ctx, rest: **Token, tok: *Token) bool #once = {
         c.check_hide(end);
         m.enabled = true;
     };
-    rest.at_bol = macro_token.at_bol;
-    rest.has_space = macro_token.has_space;
+    if m.body.kind != .TK_EOF {
+        // if the macro expands to nothing, `rest` is just the next token (not a new one), don't stomp these fields
+        rest.at_bol = macro_token.at_bol;
+        rest.has_space = macro_token.has_space;
+    };
     true
 }
 
@@ -721,7 +725,7 @@ fn search_include_next(c: *Ctx, filename: Str) ?Str = {
 // Read an #include argument.
 fn read_include_filename(c: *Ctx, rest: **Token, tok: *Token) Ty(Str, bool) = {
     s, q := read_include_filename_no_skip_line(c, tok&, tok);
-    rest[] = skip_line(tok);
+    rest[] = c.skip_line(tok);
     (s, q)
 }
 
@@ -757,6 +761,7 @@ fn read_include_filename_no_skip_line(c: *Ctx, rest: **Token, tok: *Token) Ty(St
     // In this case FOO must be macro-expanded to either
     // a single string token or a sequence of "<" ... ">".
     @if(tok.valid_macro_name()) => {
+        rest[] = tok.next;  // doesn't matter but i want to keep the warning for missing new line so can't spam it
         tok2 := c.preprocess2(c.copy_line(tok&, tok));
         c.read_include_filename_no_skip_line(tok2&, tok2)
     };
@@ -965,7 +970,7 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
             tok = tok.next;
             if(!tok.valid_macro_name(), => @error_tok(c, tok, "macro name must be an identifier"));
             c.undef_macro(tok.str());
-            tok = skip_line(tok.next);
+            tok = c.skip_line(tok.next);
         };
         fn if() => {
             val := c.eval_const_expr(tok&, tok);
@@ -977,7 +982,7 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
         fn ifdef() => {
             defined := c.find_macro(tok.next).is_some();
             c.push_cond_incl(tok, defined);
-            tok = skip_line(tok.next.next);
+            tok = c.skip_line(tok.next.next);
             if !defined {
                 tok = skip_cond_incl(tok);
             };
@@ -985,7 +990,7 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
         fn ifndef() => {
             defined := c.find_macro(tok.next).is_some();
             c.push_cond_incl(tok, !defined);
-            tok = skip_line(tok.next.next);
+            tok = c.skip_line(tok.next.next);
             if defined {
                 tok = skip_cond_incl(tok);
             };
@@ -1001,7 +1006,7 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
         };
         fn else() => {
             i := c.move_cond_incl(start, true, .Else);
-            tok = skip_line(tok.next);
+            tok = c.skip_line(tok.next);
 
             if c.cond_incl[i].included {
                 tok = skip_cond_incl(tok);
@@ -1009,13 +1014,13 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
         };
         fn endif() => {
             _ := c.cond_incl&.pop() || @error_tok(c, start, "stray #endif");
-            tok = skip_line(tok.next);
+            tok = c.skip_line(tok.next);
         };
         fn line() => c.read_line_marker(tok&, tok.next);
         fn pragma() => {
             if equal(tok.next, "once") {
                 c.pragma_once&.insert(tok.file.name, ());
-                tok = skip_line(tok.next.next);
+                tok = c.skip_line(tok.next.next);
                 continue();
             };
 
@@ -1168,6 +1173,9 @@ builtins :: @struct {
         c.new_str_token(c.macro_base_file, tmpl)
             .set_next(tmpl.next)
     };
+    
+    // by default i set macro_time to all zeroes because i want reproducible builds. 
+    // when using import_c as a library you can set it to whatever you want. 
     
     // expanded to the current date as a string literal, e.g. "May 17 2020".
     __DATE__ :: fn(c: *Ctx, tmpl: *Token) *Token = {
