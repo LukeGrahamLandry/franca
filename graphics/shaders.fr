@@ -48,6 +48,13 @@ fn unpack(self: UByte4) Vec4 #builtin(.u4x8) = ();
 
 fn pack(u: u16, v: u16) UShort2 = 
     (_ = v.zext().shift_left(16).bit_or(u.zext()));
+    
+reach_overloads :: fn() = {
+    // TODO: ugh. this is going to bite me later
+    fn eq(a: FuncId, b: FuncId) bool #redirect(Ty(Symbol, Symbol), bool);
+    fn hash(b: *TrivialHasher, a: *FuncId) void #redirect(Ty(*TrivialHasher, *Symbol), void);
+    ::DerefEq(FuncId);
+};
 
 //
 // Convert a Franca function into my shader IR. 
@@ -57,11 +64,7 @@ DUMP_SHADERS :: false;
 fn choose_shader_impl($backend: RenderBackend, shd_desc: *Sg.ShaderDesc, $data: Type) void = {
     vv, ff, cc := (shd_desc.vertex_func&, shd_desc.fragment_func&, shd_desc.compute_func&);
 
-    // TODO: ugh. this is going to bite me later
-    fn eq(a: FuncId, b: FuncId) bool #redirect(Ty(Symbol, Symbol), bool);
-    fn hash(b: *TrivialHasher, a: *FuncId) void #redirect(Ty(*TrivialHasher, *Symbol), void);
-    ::DerefEq(FuncId);
-                
+    ::reach_overloads();
     @if(is_metal(backend)) {
         vv.entry = "main0";
         ff.entry = "main0";
@@ -81,34 +84,58 @@ fn choose_shader_impl($backend: RenderBackend, shd_desc: *Sg.ShaderDesc, $data: 
     };
 }
 
+init_shader_function :: fn(m: *ShaderModule, stage: Sg.ShaderStage) *Function = {
+    a := m.gpa;
+    f := m.code&.push_uninit();
+    f[] = (
+        input = list(a),
+        body = list(a),
+        locals = init(a),
+        stage = stage,
+        name = zeroed(Symbol),
+        ret = 0,
+        m = m,
+    );
+    f
+}
+
+init_shader_module :: fn(a: Alloc) ShaderModule = {
+    m: ShaderModule = (
+        gpa = a,
+        types = list(a),
+        type_lookup = init(a),
+        strings = init(a),
+        functions = init(a),
+        imports = list(a),
+        code = init(3, a),
+    );
+    m.types&.push(.Void);  // 0=placeholder
+    m.type_lookup&.insert(void, 0);
+    m.types&.push(Scalar = .F32);  // hack for playground TODO: keep the module from comptime?
+    m.type_lookup&.insert(f32, 1);
+    m
+}
+
 // This must be called at comptime!
 #use("@/compiler/ast_external.fr") 
-fn compile_to_shader_source(fid: FuncId, backend: RenderBackend, stage: Sg.ShaderStage) Str = {
+fn translate_to_shader(m: *ShaderModule, fid: FuncId, backend: RenderBackend, stage: Sg.ShaderStage) Function = {
     ::AutoHash(VarId, TrivialHasher); ::AutoEq(VarId);
     fr := current_compiler_context();
     func := get_function_ast(fid, true, true, true, true);
     l := func.loc;
+    ::reach_overloads();
     
-    a := ast_alloc();
-    self: Function = (
-        input = list(a),
-        body = list(a),
-        types = list(a),
-        type_lookup = init(a),
-        locals = init(a),
-        stage = stage,
-        name = @if(SOKOL_BACKEND == .METAL_MACOS, @symbol main0, @symbol main),
-        ret = 0,
-        gpa = a,
-        strings = init(a),
-        functions = init(a),
-        imports = list(a),
-    ); self := self&;
+    self := m.init_shader_function(stage);
+    if stage != .NONE {
+        self.name = @if(SOKOL_BACKEND == .METAL_MACOS, @symbol main0, @symbol main);
+    } else {
+        mangled := @tfmt("%__%", func.name.str(), fid);
+        self.name = fr.intern_string(mangled);
+    };
     self.strings&.insert(self.name, fr.get_string(self.name));
     
     // so we can use 0 as a placeholder 
-    self.types&.push(.Void);
-    self.body&.push(op = .Nop);
+    self.body&.push(op = .Nop);  // 0=placeholder
     
     args := func.arg.bindings&;
     each args { a |
@@ -117,9 +144,12 @@ fn compile_to_shader_source(fid: FuncId, backend: RenderBackend, stage: Sg.Shade
         self.locals&.insert(a.name.Var.id, self.body.len.trunc());
         self.body&.push(op = .Nop); // .Par, type = self.type_name(a.ty.Finished));
         
-        @ct_assert(!a.nullable_tag.is_null(), a.default.loc, "unannotated shader input");
         info: IoField = (name = a.name.Var.name, type = self.type_name(a.ty.Finished));
-        set_annotations(info&, a.nullable_tag.items());
+        if !a.nullable_tag.is_null() {
+            set_annotations(info&, a.nullable_tag.items());
+        } else {
+            @ct_assert(self.stage == .NONE, a.default.loc, "unannotated shader input");
+        };
         self.input&.push(info);
     };
     
@@ -128,7 +158,16 @@ fn compile_to_shader_source(fid: FuncId, backend: RenderBackend, stage: Sg.Shade
     self.ret = self.type_name(e.ty);
     
     self.translate(e);
-    
+    self[]
+}
+
+fn compile_to_shader_source(fid: FuncId, backend: RenderBackend, stage: Sg.ShaderStage) Str = {
+    m := init_shader_module(ast_alloc());
+    self := translate_to_shader(m&, fid, backend, stage);
+    emit_all(m&, backend)
+}
+
+fn emit_all(self: *ShaderModule, backend: Sg.RenderBackend) Str = {
     out := u8.list(self.gpa);
     @match(backend) {
         fn METAL_MACOS() => import("@/graphics/macos/shaders.fr")'emit_all(self, out&);
@@ -181,7 +220,7 @@ fn translate(self: *Function, e: *FatExpr) void = {
     result := self.msl_expr(e);
     @if(e.ty != void) self.body&.push(op = .Return, a = result);
     self.body&.push(op = .End);
-    @debug_assert(self.body.len < MAX_u32 && self.types.len < MAX_u16, "index overflow in shader ir");
+    @debug_assert(self.body.len < MAX_u32 && self.types.len < @as(i64) MAX_u16, "index overflow in shader ir");
 }
 
 #use("@/lib/collections/map.fr");
@@ -285,8 +324,8 @@ fn msl_expr2(self: *Function, e: *FatExpr) u32 = {
             mangled := fr.get_string(s);
             self.strings&.insert(s, mangled);
             new := self.functions&.insert(fid, mangled).is_none();
-            if func.body&.is(.Empty) {
-                if new {
+            // TODO: collect reachable functions and compile them
+            if func.body&.is(.Empty) && new {
                     args := func.arg.bindings&;
                     import: Signature = (
                         name = s, 
@@ -302,10 +341,6 @@ fn msl_expr2(self: *Function, e: *FatExpr) u32 = {
                         import.input&.push(info);
                     };
                     self.imports&.push(import);
-                };
-            } else {
-                debug_log_func(func);
-                panic("TODO: implement user functions in shader translation.");
             };
             
             for args { a |
@@ -679,11 +714,13 @@ AstOp :: @enum(u16) (
     GetVarField,
     AddrOf,  // (var)
     Index,
+    Select,  // (cond, t, f)
 
     neg, not, bit_not, 
     sin, cos, floor, sqrt, log, round,
     fract, abs,
-    addr_of, load,
+    f32_to_i32, i32_to_f32,
+    addr_of, load, trunc, 
     u2x16, u4x8,
     
     vec2, 
@@ -693,6 +730,7 @@ AstOp :: @enum(u16) (
     eq, ne, lt, gt, le, ge, 
     min, max,
     pow, atan2,
+    shift_right_arithmetic, bit_xor, shift_left, shift_right_logical, fmod, 
     
     vec3, 
     sample, mix, clamp, 
@@ -733,23 +771,14 @@ IoField :: @struct(
 Scalar :: @enum(u8) (I32, U32, F32, Bool);
 
 // TODO: don't be lazy used typed indices
-Function :: @struct(
+Function :: @rec @struct(
     input: List(IoField),
     body: List(Ast),  // 0 is nop // S
-    types: List(SType),  // 0 is void // T
-    type_lookup: HashMap(Type, u16),
     locals: HashMap(VarId, u32), // V -> S
     stage: Sg.ShaderStage,
     name: Symbol,
     ret: u16, // T
-    gpa: Alloc,
-    // these mirror fr.pool/fr.functions so it can be used at runtime as well 
-    // TODO: use them for wgpu emit as well
-    // TODO: move these out of each function and put them on a new Module struct?
-    strings: HashMap(Symbol, Str),
-    functions: HashMap(FuncId, Str),
-    // 
-    imports: List(Signature),
+    m: *ShaderModule #use,
 );
 
 Signature :: @struct {
@@ -758,7 +787,21 @@ Signature :: @struct {
     ret: u16;
 };
 
-fn string(self: *Function, s: Symbol) Str = {
+#use("@/lib/collections/bucket_array.fr");
+ShaderModule :: @struct {
+    gpa: Alloc;
+    imports: List(Signature);
+    code: BucketArray(Function);
+    // these mirror fr.pool/fr.functions so it can be used at runtime as well 
+    // TODO: use them for wgpu emit as well
+    strings: HashMap(Symbol, Str);
+    functions: HashMap(FuncId, Str);
+    types: List(SType);  // 0 is void // T
+    type_lookup: HashMap(Type, u16);
+};
+
+fn string(self: *Function, s: Symbol) Str = self.m.string(s);
+fn string(self: *ShaderModule, s: Symbol) Str = {
     self.strings&.get(s).expect("Function.strings")
 }
 
@@ -772,7 +815,7 @@ fn display(self: *Function, out: *List(u8)) void = {
     enumerate self.body { i, it |
         depth -= int(@is(it.op, .Else, .End));
         @if(it.op != .Nop) out.push_repeated(depth, " ".ascii());
-        @if(it.type != 0) @fmt(out, "v%: t% = ", i, it.type);
+        @if(it.type != 0 && it.op != .Arg) @fmt(out, "v%: t% = ", i, it.type);
         @match(it.op) {
             fn Nop() => ();
             fn If() => @fmt(out, "if v% {\n", it.a);
@@ -783,6 +826,7 @@ fn display(self: *Function, out: *List(u8)) void = {
             fn Constant() => @fmt(out, "Constant(%);\n", it.a);
             fn GetVarField() => @fmt(out, "v%.%;\n", it.a, it.b);
             fn SetVarField() => @fmt(out, "v%.% = v%;\n", it.a, it.c, it.b);
+            fn Call() => @fmt(out, "Call(\"%\");\n", self.functions&.get(@as(FuncId) from_index(it.a.zext())) || "?");
             @default => {
                 @fmt(out, "%(", it.op);
                 @if(it.a != 0) @fmt(out, "v%, ", it.a);

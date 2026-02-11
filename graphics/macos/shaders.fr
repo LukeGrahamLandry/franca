@@ -4,7 +4,7 @@
 
 Counters :: @struct(user: u16, sampler: u16, texture: u16);
 
-emit_all :: fn(self: *Function, out: *List(u8)) void = {
+emit_prelude :: fn(self: *ShaderModule, out: *List(u8)) Counters = {
     @fmt(out, MSL_PRELUDE);
     n := zeroed Counters;
     enumerate self.types& { i, info |
@@ -44,11 +44,17 @@ emit_all :: fn(self: *Function, out: *List(u8)) void = {
         emit_signature(self, out, n&, .NONE, it[]);
         @fmt(out, ";\n");
     };
-    // TODO: the stuff above should be done once per module
-    emit_function(self, out, n&);
+    n
 }
 
-emit_signature :: fn(self: *Function, out: *List(u8), n: *Counters, stage: Sg.ShaderStage, sig: Signature) void = {
+emit_all :: fn(m: *ShaderModule, out: *List(u8)) void = {
+    n := emit_prelude(m, out);
+    each m.code& { self |
+        emit_function(self, out, n&);
+    };
+}
+
+emit_signature :: fn(self: *ShaderModule, out: *List(u8), n: *Counters, stage: Sg.ShaderStage, sig: Signature) void = {
     stage_name := @match(stage) {
         fn VERTEX() => "vertex";
         fn FRAGMENT() => "fragment";
@@ -72,7 +78,7 @@ emit_signature :: fn(self: *Function, out: *List(u8), n: *Counters, stage: Sg.Sh
 }
 
 emit_function :: fn(self: *Function, out: *List(u8), n: *Counters) void = {
-    emit_signature(self, out, n, self.stage, (
+    emit_signature(self.m, out, n, self.stage, (
         // TODO: Function should just have a signature fields
         name = self.name, 
         ret = self.ret,
@@ -82,7 +88,7 @@ emit_function :: fn(self: *Function, out: *List(u8), n: *Counters) void = {
     emit_body(self, out);
 }
 
-ann_field :: fn(self: *Function, it: *IoField, out: *List(u8), name: Str, n: *Counters) void = {
+ann_field :: fn(self: *ShaderModule, it: *IoField, out: *List(u8), name: Str, n: *Counters) void = {
     if it.uniform {
         @fmt(out, "constant ");
     }
@@ -264,13 +270,13 @@ emit_body :: fn(self: *Function, out: *List(u8)) void = {
                     }
                 };
             }
+            fn Select() => {
+                @fmt(out, "v% ? v% : v%", inst.a, inst.b, inst.c);
+            }
             @default => @panic("todo: msl %", inst.op);
         };
         
         if first_arg != -1 {
-            //for self.body.items().slice(0, i) { it |
-            //    @println("% % % %", it.op, it.a, it.b, it.c);
-            //};
             @panic("loose args in shader translation. inst %", i);
         }
     };
@@ -313,6 +319,13 @@ msl_operator :: fn(op: AstOp) Str = @match(op) {
     fn le() => "<=";
     fn ge() => ">=";
     fn Index() => "+";
+    // TODO
+    fn shift_right_arithmetic() => ">>";
+    fn shift_right_logical() => ">>";
+    fn shift_left() => "<<";
+    fn bit_xor() => "^";
+    fn f32_to_i32() => "(int)";
+    fn i32_to_f32() => "(float)";
     @default => "";
 };
 
@@ -325,6 +338,7 @@ msl_function :: fn(op: AstOp) Str = @match(op) {
         same := @is(op, 
             .min, .max, .clamp, .mix, .atan2, .pow, .sin, .cos, 
             .abs, .fract, .floor, .sqrt, .log, .round, 
+            .fmod, .trunc, 
         );
         @if(same, op.name_str(), "")
     };

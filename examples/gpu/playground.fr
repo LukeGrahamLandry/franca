@@ -1,46 +1,57 @@
 // THIS IS UNFINISHED
 // shadertoy for masochists. 
-// the original implementation of this language is: https://c50.fingswotidun.com
+// the original implementation of this language is: https://c50.fingswotidun.com and https://fingswotidun.com/stackie
 // esoteric stack based expression language that maps (x, y, z, t, u, v) -> _ -> (r, g, b). 
 // the expression is compiled into my shader ir, then to msl or wgsl, and evaulated on your gpu.
-// each command is one character, here's an example (recompile to see your changes after editing it)
-example_program :: "yt*sxt2**c+"; // "|xy2*1-*C"
-// TODO: zpwWeEr%?oPd:;           colour expression
+// each command is one character, here's the starting example.
+example_program :: "txp";
+// programs output 1 value but we need 3 colour channels. another program defines the colour palette. 
+// the palette is invoked 3 times with (x = output of first program, y = (0, 0.5, 1) for (r, g, b) respectively).
+// if the program contains a '|', the characters after it replace this default palette. 
+default_palette :: "xy2*1-*C";
+// CONTROLS: 
+//     type to edit the program (backspace to delete a char. copy/paste affect the whole program). 
+//     it auto recompiles. press enter to reset t=0. hold control to show ir.
+
+// TODO: cli mode where you pass program+t and it outputs a png
+// TODO: loop t
+// TODO: r
 // TODO: generate random programs
 // TODO: test this somehow
 // TODO: wgpu
-// TODO: allow changing the program while running
 // TODO: add other languages in this style? like https://susam.net/fxyt.html
-// TODO: ui for editing the program
 
-compile_c50 :: fn(src: Str, name: Ty(Symbol, Str)) Result(Function, Str) = {
-    f := zeroed Function;  // TODO: init() Function
-    f.body = list(temp());
-    f.types = list(temp());
-    f.input = list(temp());
-    f.strings = init(temp());
+valid_commands :: "xyztuvXYZTUV0123456789pwWeE%o!?Pd:;*/-+sc!<>$ql#^aC|r";
+compile_c50 :: fn(m: *ShaderModule, src: Str, name: Ty(Symbol, Str)) Result(*Function, Str) = {
+    f := m.init_shader_function(.NONE);
     vars := "xyztuv";
     stack := @ref u32.list(temp());
-    f.types&.push(.Void);
-    // HACK: need a module thing so they share the type numbers
-    f.types&.push(.Void); f.types&.push(.Void);  
-    f.ret = f.types.len().trunc();
-    ty_f32 := f.ret;
-    f.types&.push(Scalar = .F32);
-    f.body&.push(op = .Nop);
+    // HACK: has to be the same as rest of fragment. rn i do that by preinterning in module init
+    ty_f32 := f.type_lookup&.get(f32).unwrap();  
+    f.ret = ty_f32;
+    f.body&.push(op = .Nop);  // 0=placeholder TODO: do this in init?
     
     // TODO: have a sane api for linking imports
     f.name = name._0;
-    f.strings&.insert(f.name, name._1);
-    
-    f.gpa = temp();
+    f.strings&.insert(f.name, name._1);  // TODO: do this in init?
     
     range(0, vars.len) { _ |
         f.body&.push(op = .Nop);  // TODO: par
         f.input&.push(type = ty_f32, name = zeroed(Symbol));
     };
-    for src { it |
+    
+    zero: u32 = f.body.len.trunc();
+    f.body&.push(op = .Constant, type = ty_f32, a = 0.0.cast().bitcast());
+    one: u32 = f.body.len.trunc();
+    f.body&.push(op = .Constant, type = ty_f32, a = 1.0.cast().bitcast());
+    pi: u32 = f.body.len.trunc();
+    f.body&.push(op = .Constant, type = ty_f32, a = PI.cast().bitcast());
+    
+    enumerate src { i, it |
         continue :: local_return;
+        it := it[];
+        ::display_slice(u32);
+        get :: fn() => stack.pop() || return(Err = @tfmt("stack underflow at operation[%]", i));
         
         range(0, vars.len) { i |
             if vars[i] == it {  // get
@@ -48,7 +59,7 @@ compile_c50 :: fn(src: Str, name: Ty(Symbol, Str)) Result(Function, Str) = {
                 continue();
             };
             if vars[i] == it.ascii_to_lower() {  // set
-                v := stack.pop() || return(Err = "stack underflow");
+                v := get();
                 stack.push(f.body.len.trunc());
                 f.body&.push(op = .SetVar, a = i.trunc() + 1, b = v);
                 continue();
@@ -63,6 +74,74 @@ compile_c50 :: fn(src: Str, name: Ty(Symbol, Str)) Result(Function, Str) = {
             continue();
         };
         
+        if true {
+            break :: local_return;
+            mangle :: fn($fid: FuncId) Ty(FuncId, Symbol, Str, i64) = {
+                arity := get_function_ast(fid, false, false, false, false)[].arg.bindings.len;
+                s, n := mangle_name(fid);
+                (fid, s, n, arity)
+            };
+            func := @switch(it) {
+                @case("p".ascii()) => mangle(Stolen.perlin2);
+                @case("w".ascii()) => mangle(Stolen.wrapPerlin3);
+                @case("W".ascii()) => mangle(Stolen.wrapPerlin);
+                @case("e".ascii()) => mangle(Stolen.smoothStep1);
+                @case("E".ascii()) => mangle(Stolen.ss);
+                @case("%".ascii()) => mangle(Stolen.positiveMod);
+                @case("o".ascii()) => mangle(Stolen.xorScaled);
+                // it has state but since you know statically how many times it will be called
+                // each pixel, can have a closed form of the index variable and just step forward offset in uniforms. 
+                // (if i care about getting same random as the original)
+                @case("r".ascii()) => return(Err = "TODO: implement r");
+                @default => break();
+            };
+            arity := func._3;
+
+            args := zeroed(Array(u32, 4));
+            range_rev(0, arity) { i |
+                args&[i] = get();
+            };
+            range(0, arity) { i |
+                f.body&.push(op = .Arg, type = ty_f32, a = args&[i]);
+            };
+            f.functions&.insert(func._0, func._2);
+            stack.push(f.body.len.trunc());
+            f.body&.push(op = .Call, type = ty_f32, a = func._0.as_index().trunc());
+            continue();
+        };
+        if true {
+            break :: local_return;
+            @switch(it) {
+                @case("!".ascii()) => {
+                    a := get();
+                    stack.push(f.body.len.trunc());
+                    f.body&.push(op = .sub, type = ty_f32, a = one, b = a);
+                };
+                @case("?".ascii()) => {
+                    a := get();
+                    cond: u32 = f.body.len.trunc();
+                    f.body&.push(op = .le, type = ty_f32, a = a, b = zero);  // TODO: type should be bool
+                    stack.push(f.body.len.trunc());
+                    f.body&.push(op = .Select, type = ty_f32, a = cond, b = zero, c = one);
+                };  
+                @case("P".ascii()) => stack.push(pi);
+                @case("d".ascii()) => {
+                    @if(stack.len < 1) return(Err = "underflow 'd'");
+                    stack.push(stack[stack.len - 1]);
+                };
+                @case(":".ascii()) => {
+                    @if(stack.len < 2) return(Err = "underflow ':'");
+                    stack.items().swap(stack.len - 1, stack.len - 2);
+                };
+                @case(";".ascii()) => {
+                    @if(stack.len < 3) return(Err = "underflow ';'");
+                    stack.items().swap(stack.len - 1, stack.len - 3);
+                };
+                @default => break();
+            };
+            continue();
+        };
+      
         //      vvv TODO: this type should be optional :compilerbug
         (arity: i64, op: AstOp) := @switch(it) {
             @case("*".ascii()) => (2, .mul);
@@ -81,30 +160,25 @@ compile_c50 :: fn(src: Str, name: Ty(Symbol, Str)) Result(Function, Str) = {
             @case("^".ascii()) => (2, .pow);
             @case("a".ascii()) => (2, .atan2);
             @case("C".ascii()) => {
-                f.body&.push(op = .Constant, type = ty_f32, a = 1.0.cast().bitcast());
-                f.body&.push(op = .Constant, type = ty_f32, a = 0.0.cast().bitcast());
+                stack.push(zero);
+                stack.push(one);
                 (3, .clamp)
             }
             @default => return(Err = @tfmt("TODO: unknown operation %", it));
         };
         args := zeroed(Array(u32, 3));
         range_rev(0, arity) { i |
-            args&[i] = stack.pop() || return(Err = "stack underflow");
+            args&[i] = get();
         };
         stack.push(f.body.len.trunc());
         f.body&.push(op = op, type = ty_f32, a = args&[0], b = args&[1], c = args&[2]);
     };
-    v := stack.pop() || return(Err = "stack underflow");
+    v := stack.pop() || return(Err = "stack underflow for return value");
     f.body&.push(op = .Return, a = v);
     f.body&.push(op = .End);
     
     (Ok = f)
 }
-
-#include_std("graphics/lib.fr");
-
-driver :: fn(vtable: *ImportVTable) void = 
-    Easy'build_for_graphics(vtable, @source_file_name());
 
 Shaders :: @struct {
     OutV :: @struct(pos: Vec4 #position);
@@ -122,83 +196,223 @@ Shaders :: @struct {
     OutF :: @struct(frag_color: Vec4 #colour);
     UniF :: @struct(time: f32 = 0, _pad: f32 = 0, scale: Vec2);
     fs   :: fn(in: OutV #input, uni: UniF #uniform(0)) Shaders.OutF = {
+        palette :: fn(value: f32, component: f32, z: f32, t: f32, u: f32, v: f32) f32;
+        program :: fn(x: f32, y: f32, z: f32, t: f32, u: f32, v: f32) f32;
+        C :: fn(x, y: f32) => {
+            u, v := (x*2 - 1, y*2 - 1);
+            z := sqrt(u*u + v*v);
+            palette(x, y, z, t, u, v)
+        };
+        
         xy := (@swizzle in.pos.xy) * uni.scale;
         x, y := (@swizzle xy.x, @swizzle xy.y);
         t := uni.time;
-        u, v := ((x * 2) - 1, (y * 2) - 1);
-        colour :: fn(value: f32, component: f32, z: f32, t: f32, u: f32, v: f32) f32 #inline = 
-            clamp(value * ((component * 2) - 1), 0, 1);
-        
-        program :: fn(x: f32, y: f32, z: f32, t: f32, u: f32, v: f32) f32;
-        
-        o := program(x, y, 0.0, t, y, v);
-        r := colour(o, 0.0, 0.0, t, 0.0, 0.0);
-        g := colour(o, 0.5, 0.0, t, 0.0, 0.0);
-        b := colour(o, 1.0, 0.0, t, 0.0, 0.0);
+        u, v := (x*2 - 1, y*2 - 1);
+        z := sqrt(u*u + v*v);
+        o := program(x, y, z, t, u, v);
+        r := C(o, 0.0);
+        g := C(o, 0.5);
+        b := C(o, 1.0);
         
         (frag_color = @vec(r, g, b, 1.0))
     }
 };
+
+// https://github.com/Lerc/stackie/blob/93fc42770059b192e65f3baf0b42ccf5b69e42d2/stackie.js
+// i want exactly their magic numbers so the pretty pictures look the same as the website. 
+// crimes because no license but the readme implies they wouldn't sad if people to use it. 
+// also they've commented that someone else can use it https://news.ycombinator.com/item?id=42039296 
+// so maybe it's socially acceptable to steal. 
+Stolen :: @struct {
+    intHash :: fn(x: i32) i32 = {
+        x *= @run 0xed5ad4bb.bitcast();
+        x = x.bit_xor(x.shift_right_arithmetic(11));
+        x *= @run 0xac4c1b51.bitcast();
+        x = x.bit_xor(x.shift_right_arithmetic(15));
+        x *= @run 0x31848bab.bitcast();
+        x = x.bit_xor(x.shift_right_arithmetic(14));
+        x
+    };
+    
+    random :: fn(x: f32) f32 = {
+        seed: i32 = 42;
+        x := x.f32_to_i32();
+        h :: fn(it: i32) i32 => intHash((x + it).bit_and(0x7fffffff));
+        pattern := h(seed);
+        intValue := h(pattern);
+        intValue.i32_to_f32() / 0x7fffffff.i32_to_f32()
+    };
+    
+    ss :: fn(v: f32, a: f32, b: f32) f32 = {
+        w := v*v*v*(v*(v*6-15)+10);
+        (1.0-w)*a+(w*b)
+    }
+    
+    positiveMod :: fn(v: f32, size: f32) f32 = {
+        q := fmod(v, size);
+        @if(q < 0, size - q, q)
+    }
+    
+    perlin :: fn(x: f32, y: f32, wrapX: f32, wrapY: f32) f32 = {
+        dg :: fn(ix: f32, iy: f32) f32 => {
+            pi: f32 = PI;
+            gi := random(positiveMod(iy,wrapY)*wrapX+positiveMod(ix,wrapX)*2)*pi*2;
+            ((x-ix)*sin(gi)) + ((y-iy)*cos(gi))
+        };
+        
+        u, v := (x.ftrunc(), y.ftrunc());
+        sx, sy := (x-u, y-v);
+        u1, v1 := (u+1, v+1);
+        ss(sy,ss(sx,dg(u,v),dg(u1,v)),ss(sx,dg(u,v1),dg(u1,v1)))
+    }
+
+    wrapPerlin :: fn(x: f32, y: f32, wrapX: f32, wrapY: f32) f32 = 
+        perlin(x*wrapX,y*wrapY,wrapX,wrapY);
+        
+    perlin2 :: fn(x: f32, y: f32) f32 = 
+        perlin(x, y, 256, 256);
+    wrapPerlin3 :: fn(x: f32, y: f32, wrapX: f32) f32 = 
+        wrapPerlin(x, y, wrapX, wrapX);
+    smoothStep1 :: fn(v: f32) f32 = 
+        ss(v, 0, 1);
+    xorScaled :: fn(a: f32, b: f32, c: f32) f32 = {
+        c := pow(2, c);
+        result := bit_xor(f32_to_i32(a*c), f32_to_i32(b*c));
+        i32_to_f32(result) / c
+    }
+};
+
+// TODO: wrong place for these
+ftrunc :: fn(x: f32) f32 #builtin(.trunc);
+i32_to_f32 :: fn(x: i32) f32 #builtin(.i32_to_f32);
+f32_to_i32 :: fn(x: f32) i32 #builtin(.f32_to_i32);
+fmod :: fn(a: f32, b: f32) f32 #builtin(.fmod);
+fn pow(a: f32, b: f32) f32 #builtin(.pow);
+fn sqrt(x: f32) f32 #builtin(.sqrt) = ();
 
 main :: fn() void = 
     Easy'start(State);
 
 State :: @struct {
     pipe: Sg.Pipeline;
+    shd: ?Sg.Shader;
     params: Shaders.UniF;
     dirty: bool;
     program_contains_t: bool;
     start_time: f64;
+    text: Sdtx.Self;
+    src: List(u8);
+    error: List(u8);
+    need_recompile: bool;
+    input_dirty: bool;
+    code: List(u8);
+    show_generate_code: bool;
 };
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     src := example_program;
+    state.shd = .None;
+    sapp.clipboard.enabled = true;
+    state.src = list(general_allocator());
+    state.error = list(general_allocator());
+    state.code = list(general_allocator());
+    state.src&.push_all(src);
+    state.need_recompile = true;
+    state.input_dirty = true;
     state.dirty = true;
-    fid :: FuncId.scope_of(Shaders.fs).program;  // SKEAK
-    
-    shader := @match(compile_c50(src, @run mangle_name(fid))) {
-        fn Ok(f) => {
-            @println("%\n%", src, f&);
+    fix_scale(state, sapp);
+    state.text&.setup(
+        sg = sg,
+        allocator = general_allocator(),
+        fonts = @slice(Sdtx.font.cpc),
+    );
+}
+
+recompile :: fn(state: *State, sg: *Sg.Self) void = {
+    state.need_recompile = false;
+    state.dirty = true;
+    state.start_time = timestamp_s();
+    @if(!state.input_dirty) return();  // pressed enter just to reset the time. keep the same shader. 
+    state.input_dirty = false;
+
+    fid1 :: FuncId.scope_of(Shaders.fs).program;  // SKEAK
+    fid2 :: FuncId.scope_of(Shaders.fs).palette;  // SKEAK
+    m := init_shader_module(temp());
+    state.error&.clear();
+    src := state.src.items();
+    program_src, palette_src := (src, default_palette);
+    if src.index_of("|".ascii()) { i |
+        program_src = src.slice(0, i);
+        palette_src = src.rest(i + 1);
+    };
+    program_f := or compile_c50(m&, program_src, @run mangle_name(fid1)) { msg |
+        state.error&.push_all(msg);
+        return()
+    };
+    palette_f := or compile_c50(m&, palette_src, @run mangle_name(fid2)) { msg |
+        state.error&.push_all(msg);
+        return()
+    };
+    @println("run: %", src);
+
+    state.input_dirty = false;
+    state.code&.clear();
+    f := @slice(program_f, palette_f);
+    out := @ref u8.list(temp());
+    for f { f |
+            @fmt(state.code&, "%", f);
         
-            shader := @match(SOKOL_BACKEND) {
+            @match(SOKOL_BACKEND) {
                 fn METAL_MACOS() => {
                     Msl :: import("@/graphics/macos/shaders.fr");
                     n := zeroed Msl.Counters;
-                    out := @ref u8.list(temp());
-                    Msl'emit_function(f&, out, n&);
-                    out.items()
+                    Msl'emit_function(f, out, n&);
                 }
                 fn WGPU() => {
                     todo();
                     W :: import("@/graphics/web/shaders.fr");
                     out := @ref u8.list(temp());
-                    W'emit_function(f&, out);
-                    out.items()
+                    W'emit_function(f, out);
                 }
                 @default => @panic("TODO: gpu/playground.fr new target");
             };
-            
-            // if it's not animated, don't bother redrawing the screen every frame. 
-            state.program_contains_t = src.contains("t");
-            shader
-        }
-        fn Err(msg) => {
-             if true {  // TODO: without htis if its "TODO: resolve_in_overload_set display"
-                panic(msg);
-             }
-            ""  // TODO: default to something sane?
-        }
+    };
+    shader := out.items();
+    
+    // if it's not animated, don't bother redrawing the screen every frame. 
+    state.program_contains_t = src.contains("t");
+    
+    vertex, fragment := @run {
+        backend := SOKOL_BACKEND;
+        vertex := {
+            m := init_shader_module(ast_alloc());
+            self := translate_to_shader(m&, Shaders.vs, backend, .VERTEX);
+            emit_all(m&, backend)
+        };
+        
+        m := init_shader_module(general_allocator());
+        translate_to_shader(m&, Shaders.fs, backend, .FRAGMENT);
+        
+        s := Type.scope_of(Stolen);
+        src := @ref u8.list(ast_alloc());
+        for get_constants(s) { name |
+            fid := get_constant(FuncId, s, name).unwrap();
+            func := get_function_ast(fid, true, true, true, true);
+            translate_to_shader(m&, fid, backend, .NONE);
+        };
+        
+        fragment := emit_all(m&, backend);
+        (vertex, fragment)
     };
     
-    fix_scale(state, sapp);
-    state.start_time = timestamp_s();
-    state.program_contains_t = true;
-    
-    shd_desc := Sg.ShaderDesc.zeroed();
-    choose_shader_impl(SOKOL_BACKEND, shd_desc&, Shaders);
     // TODO: more direct way of it handling linking stuff together
-    s := shd_desc.fragment_func.source&;
-    s[] = @fmt_cstr("%\n%", s[].str(), shader);
+    shd_desc := Sg.ShaderDesc.zeroed();
+    shd_desc.vertex_func.source = vertex.as_cstr();
+    shd_desc.fragment_func.source = @fmt_cstr("%\n%", fragment, shader);
+    @if(is_metal(SOKOL_BACKEND)) {
+        shd_desc.vertex_func.entry = "main0";
+        shd_desc.fragment_func.entry = "main0";
+    };
     
     shd_desc.uniform_blocks&[0] = (
         stage = .FRAGMENT,
@@ -206,10 +420,21 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         msl_buffer_n = 0,
         wgsl_group0_binding_n = 0,
     );
+
+    if state.shd { shd |
+        state.shd = .None;
+        sg.destroy(shd);
+        // TODO: let you change shader of a pipeline without destroying and recreating it?
+        sg.destroy(state.pipe);
+    };
+    // TODO: don't crash if the gpu abi doesn't like the code i generated 
+    //       (this should never generate invalid ir but should show internal error if there's a bug)
+    shd := sg.make(shd_desc);
+    state.shd = (Some = shd);
+    // TODO: destroy the old ones if not the first time
     state.pipe = sg.make(
-        shader = sg.make(shd_desc),
+        shader = shd,
     );
-    state.dirty = true;
 }
 
 // #position is in pixels, rescale 
@@ -221,22 +446,47 @@ fix_scale :: fn(state: *State, sapp: *Sapp.Self) void = {
 }
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    state.show_generate_code = event.modifiers.get(.control) != 0;
     @match(event.type) {
-        fn RESIZED() => {
-            fix_scale(state, sapp);
-            state.dirty = true;
-        }
+        fn RESIZED() => fix_scale(state, sapp);
         fn KEY_DOWN() => {
             if event.key_code == .ENTER {
-                state.start_time = timestamp_s();
-                state.dirty = true;
+                state.need_recompile = true;
+            };
+            if event.key_code == .BACKSPACE && state.src.len > 0 {
+                state.input_dirty = true;
+                state.src.len -= 1;
+                state.need_recompile = true;
+            };
+            if event.key_code == .C && event.modifiers.get(.super) != 0 {
+                sapp.set_clipboard_string(state.src.items().as_cstr()); 
             };
         }
-        @default => ();
-    }
+        fn CLIPBOARD_PASTED() => {
+            @println("before paste: %", state.src.items());
+            state.src&.clear();
+            state.src&.push_all(sapp.get_clipboard_string().items());
+            state.input_dirty = true;
+            state.need_recompile = true;
+            state.need_recompile = true;
+        }
+        fn CHAR() => if event.modifiers.get(.super) == 0 {
+            c: u8 = event.char_code.trunc();
+            if event.char_code < 128 && valid_commands.contains(c) {
+                state.input_dirty = true;
+                state.src&.push(c);
+                state.need_recompile = true;
+            };
+        }
+        @default => return();
+    };
+    state.dirty = true;
 }
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    if state.need_recompile {
+        recompile(state, sg);
+    };
     if state.program_contains_t  {
         state.dirty = true;
         time := timestamp_s() - state.start_time;
@@ -244,12 +494,33 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
     
+    sdtx := state.text.default_context&;
+    sdtx.canvas(sapp.width().float().div(1.75).cast(), sapp.height().float().div(1.75).cast());
+    sdtx.color = @if(state.input_dirty, 0xFF00FFFF, 0xFF005555);
+    sdtx.put(state.src.items());
+    sdtx.pos.y += 2;
+    sdtx.pos.x = 0;
+    // toggle colour so it's more likely to be visible (unless the last shader happens to toggle at the same rate)
+    sdtx.color = @if(state.params.time.mul(3).cast().int().mod(2) == 0, 0xFFFFFFFF, 0xFF000000);
+    sdtx.put(state.error.items());
+    
+    if state.show_generate_code {
+        scale := 1.2;
+        sdtx.canvas(sapp.width().float().div(scale).cast(), sapp.height().float().div(scale).cast());
+        sdtx.pos.y += cast(2 * scale * 1.75);
+        sdtx.color = 0xFFFFFFFF;
+        sdtx.put(state.code.items());
+    };
+    
     Easy'glue_begin_pass(sapp, sg, zeroed Sg.PassAction);
     ::[]Shaders.UniF;
 
-    sg.apply_pipeline(state.pipe);
-    sg.apply_uniforms(0, state.params&.slice(1).interpret_as_bytes());
-    draw(sg = sg, base = 0, elements = 6, instances = 1);
+    if state.shd { _ |
+        sg.apply_pipeline(state.pipe);
+        sg.apply_uniforms(0, state.params&.slice(1).interpret_as_bytes());
+        draw(sg = sg, base = 0, elements = 6, instances = 1);
+    };
+    sdtx.draw_layer(0);
     sg.end_pass();
     sg.commit();
 };
@@ -259,3 +530,8 @@ mangle_name :: fn(fid: FuncId) Ty(Symbol, Str) #fold = {
     name := sym(@tfmt("%__F%", name.str(), fid.as_index())); // TODO: mangle in a consistant place
     (name, name.str())
 }
+
+#include_std("graphics/lib.fr");
+
+driver :: fn(vtable: *ImportVTable) void = 
+    Easy'build_for_graphics(vtable, @source_file_name());

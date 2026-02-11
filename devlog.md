@@ -1,4 +1,12 @@
 
+## (Feb 11)
+
+more playing with shaders
+- seperate shared ir state into a module that can contain multiple functions
+- steal builtins from stackie. accept colour program as well. 
+- ui to edit the program and recompile the shader. 
+  implement destroy(Shader) so you don't run out of pool slots.
+
 ## (Feb 10)
 
 - c: test the typechecking thing from yesterday. also just warn on unknown attributes.
