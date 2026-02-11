@@ -168,9 +168,23 @@ export const imports = {
                     dest.set(new Uint8Array(result));
                     return BigInt(result.byteLength);
                 }
-                default:
-                    console.log(get_wasm_string(ptr, len));
+                default: {
+                    // this is convoluted! 
+                    // ex. paste event passes franca a handle the pasted string and it can then ask for the bytes here. 
+                    let G = get_G();
+                    if (G && Number(id) > 0 && Number(id) < G.objects.length) {
+                        let result = G.objects[Number(id)];
+                        if (result instanceof Uint8Array) {
+                            if (result.byteLength > Number(len)) return BigInt(result.byteLength);
+                            const dest = new Uint8Array(Franca.memory.buffer, Number(ptr), result.byteLength);
+                            dest.set(new Uint8Array(result));
+                            return BigInt(result.byteLength);
+                        }
+                    }
+                    
+                    console.log(id, ptr, len, get_wasm_string(ptr, len));
                     return -1n;
+                }
             }
         },
         js_performace_now: () => performance.now(),
@@ -266,8 +280,11 @@ function handle(_msg) {
                 canvas.width = clientWidth * devicePixelRatio;
                 canvas.height = clientHeight * devicePixelRatio;
             }
+            if (msg.handler == "paste_event") msg.args[2] = G.push(msg.args[2]); // array buffer
 
             Franca[msg.handler].apply(Franca, msg.args);
+            
+            if (msg.handler == "paste_event") G.release(msg.args[2]);
             break;
         }
         case "ready": break

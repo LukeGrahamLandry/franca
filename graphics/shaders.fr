@@ -681,6 +681,30 @@ fn swizzle_bits(s: Symbol) u32 = {
     res.trunc()
 }
 
+
+fn emit_bits(m: *ShaderModule, inst: *Ast, out: *List(u8)) void = {
+    @debug_assert_eq(inst.op, .Constant);
+    info := m.types[inst.type.zext()]&;
+    @debug_assert(info.is(.Scalar));
+    emit_bits(out, inst.a, info.Scalar);
+}
+
+// same syntax on msl/wgsl
+fn emit_bits(out: *List(u8), v: u32, type: Scalar) void = @match(type) {
+    fn F32() => {
+        v: f32 = v.bitcast();
+        if v.cast().int().float().cast() == v {
+            @fmt(out, "%.0", v);
+        } else {
+            @fmt(out, "(%.0/10000.0)", v*10000);  // TODO: correct fractional part
+        }
+    }
+    // wgsl requires '-' if high bit is set (msl just warns)
+    fn I32()  => @fmt(out, "%", @as(i32) v.bitcast());
+    fn U32()  => @fmt(out, "%", v);
+    fn Bool() => @fmt(out, "%", v != 0 );
+};
+
 // 
 // Flat IR that can be rendered into shader programs for each backend. 
 //
@@ -823,7 +847,10 @@ fn display(self: *Function, out: *List(u8)) void = {
             fn End() => @fmt(out, "};\n");
             fn Join() => @fmt(out, "join;\n");
             fn SetVar() => @fmt(out, "v% = v%;\n", it.a, it.b);
-            fn Constant() => @fmt(out, "Constant(%);\n", it.a);
+            fn Constant() => {
+                emit_bits(self.m, it, out);
+                @fmt(out, ";\n");
+            }
             fn GetVarField() => @fmt(out, "v%.%;\n", it.a, it.b);
             fn SetVarField() => @fmt(out, "v%.% = v%;\n", it.a, it.c, it.b);
             fn Call() => @fmt(out, "Call(\"%\");\n", self.functions&.get(@as(FuncId) from_index(it.a.zext())) || "?");

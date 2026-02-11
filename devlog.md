@@ -6,6 +6,7 @@ more playing with shaders
 - steal builtins from stackie. accept colour program as well. 
 - ui to edit the program and recompile the shader. 
   implement destroy(Shader) so you don't run out of pool slots.
+- web: a few more keys. paste. 
 
 ## (Feb 10)
 

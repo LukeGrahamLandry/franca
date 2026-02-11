@@ -269,8 +269,8 @@ fn set_window_title(web: *Impl, title: CStr) void = {
 }
 
 fn get_clipboard_string(web: *Impl) *RawList(u8) = {
-    eprintln("TODO: get_clipboard_string");
-    zeroed(*RawList(u8))
+    sapp := web.common();
+    sapp.clipboard.buffer&
 }
 
 fn set_clipboard_string(web: *Impl, str: CStr) void = {
@@ -327,22 +327,26 @@ fn key_event(web: *Impl, type: Sapp.EventType, key: u32, alt: bool, ctrl: bool, 
     if(!sapp.events_enabled(), => return());
     sapp.init_event(type);
     sapp.event.key_code = @as(Sapp.Keycode) @as(u16) key.trunc();
-    if key == 13 {
-        sapp.event.key_code = .ENTER;
+    sapp.event.key_code = @switch(key) {
+        @case(13) => .ENTER;
+        @case(8) => .BACKSPACE;
+        @case(91) => .LEFT_SUPER;
+        @case(16) => .LEFT_SHIFT;
+        @case(17) => .LEFT_CONTROL;
+        @case(18) => .LEFT_ALT;
+        @default => @as(Sapp.Keycode) @as(u16) key.trunc();
     };
     sapp.event.key_repeat = repeat;
     if type == .CHAR {
         sapp.event.char_code = key;
     };
-    
-    // TODO: alt, ctrl, meta, shift, repeat
-    sapp.event.modifiers = web.modifiers;
+    m := web.modifiers&;
+    m.set(.super, meta.int());
+    m.set(.shift, shift.int());
+    m.set(.control, ctrl.int());
+    m.set(.alt, alt.int());
+    sapp.event.modifiers = m[];
     sapp.call_event(sapp.event&);
-    // TODO: modifiers
-    //shift        := 1,
-    //control      := 1,
-    //alt          := 1,
-    //super        := 1,  // command
 }
 
 // TODO: respect app.desc.high_dpi somehow
@@ -370,6 +374,24 @@ fn scroll_event(web: *Impl, dx: f64, dy: f64) void = {
     sapp.init_event(.MOUSE_SCROLL);
     sapp.event.scroll_x = dx.cast();
     sapp.event.scroll_y = dy.cast();
+    sapp.event.modifiers = web.modifiers;
+    sapp.call_event(sapp.event&);
+}
+
+#export 
+fn paste_event(web: *Impl, length: f64, handle: rawptr) void = {
+    sapp := web.common();
+    @if(!sapp.clipboard.enabled) return();
+    length := length.int();
+    js_write :: fn(id: rawptr, ptr: *u8, len: i64) i64 #weak #import("libc");
+    buf := sapp.clipboard.buffer&;
+    buf.len = 0;
+    buf.reserve(length, sapp.desc.allocator);
+    // :SLOW really should just copy in get_clipboard_string but this way don't have to keep the handle and free it later (js frees it after this function returns)
+    result := js_write(handle, buf.ptr, length);
+    @if(result != length) return();
+    buf.len = length;
+    sapp.init_event(.CLIPBOARD_PASTED);
     sapp.event.modifiers = web.modifiers;
     sapp.call_event(sapp.event&);
 }

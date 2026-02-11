@@ -1,11 +1,11 @@
 // Shader IR -> WebGPU Shader Language / WGSL source code.
 // TODO: _ is an invalid identifier as is anything that starts with __
 
-Counters :: @struct(user: u16, sampler: u16, texture: u16);
+Counters :: @struct(user: u16, sampler: u16, texture: u16, junk_types: List(u16));
 
-emit_all :: fn(self: *ShaderModule, out: *List(u8)) void = {
+emit_prelude :: fn(self: *ShaderModule, out: *List(u8)) Counters = {
     n := zeroed Counters;
-    junk_types := u16.list(temp());
+    n.junk_types = u16.list(temp());
     enumerate self.types& { i, info |
         if !info.is(.Void) && !info.is(.Struct) {
             @fmt(out, "alias T% = ", i);
@@ -29,14 +29,14 @@ emit_all :: fn(self: *ShaderModule, out: *List(u8)) void = {
                 @fmt(out, "struct T% {\n", i);
                 enumerate it.fields { j, it |
                     @fmt(out, "    ");
-                    ok := self.ann_field(it, out, it.name.str(), n&);
+                    ok := self.ann_field(it, out, self.string(it.name), n&);
                     @if(ok) @fmt(out, ",\n");
                     count += int(ok);
                 };
                 @fmt(out, "}");
                 if count == 0 {
                     out.len = prev_len;
-                    junk_types&.push(i.trunc());
+                    n.junk_types&.push(i.trunc());
                 };
             };
             // TODO: this is wrong and Index needs to produce a pointer
@@ -46,8 +46,11 @@ emit_all :: fn(self: *ShaderModule, out: *List(u8)) void = {
             @fmt(out, ";\n");
         }
     };
+    n
+}
+
+emit_function :: fn(self: *Function, out: *List(u8), n: *Counters) void = {
     #use("@/lib/collections/bit_set.fr");
-    todo();
     was_var: DynamicBitSet = empty(temp());
     next_id := self.body.len;
     resource_fields: HashMap(Ty(i64, Symbol), u16) = init(temp());
@@ -56,7 +59,7 @@ emit_all :: fn(self: *ShaderModule, out: *List(u8)) void = {
     
     enumerate self.input { i, it |
         v := @tfmt("v%", i+1);
-        if self.ann_var(it, out, v, n&) {
+        if self.m.ann_var(it, out, v, n) {
             was_var&.set(i);
             @fmt(out, ";\n");
         }
@@ -65,7 +68,7 @@ emit_all :: fn(self: *ShaderModule, out: *List(u8)) void = {
             info := self.types[it.type.zext()]&;
             if @is(info, .Texture, .Sampler) {
                 resource_fields&.insert((i+1, it.name), next_id.trunc());
-                @assert self.ann_var(it, out, @tfmt("v%", next_id), n&);
+                @assert self.m.ann_var(it, out, @tfmt("v%", next_id), n);
                 @fmt(out, ";\n");
                 next_id += 1;
             }
@@ -75,12 +78,16 @@ emit_all :: fn(self: *ShaderModule, out: *List(u8)) void = {
         fn VERTEX() => "@vertex";
         fn FRAGMENT() => "@fragment";
         fn COMPUTE() => "@compute";
-        fn NONE() => unreachable();
+        fn NONE() => "";
     };
-    @fmt(out, "\n% fn %(", stage, self.name.str());
+    @fmt(out, "\n% fn %(", stage, self.string(self.name));
+    rebind := i64.list(temp());
     enumerate self.input { i, it |
-        if !was_var&.get(i) && !junk_types.items().contains(it.type) {
-            ok := self.ann_field(it, out, @tfmt("v%", i+1), n&);
+        if !was_var&.get(i) && !n.junk_types.items().contains(it.type) {
+            ok := self.m.ann_field(it, out, @tfmt("par%", i+1), n);
+            if ok { 
+                rebind&.push(i);
+            };
             if i != self.input.len - 1 && ok {
                 @fmt(out, ", ")
             }
@@ -91,8 +98,20 @@ emit_all :: fn(self: *ShaderModule, out: *List(u8)) void = {
     } else {
         @fmt(out, ") -> T% {\n", self.ret);
     };
-    emit_body(self, out, junk_types.items(), resource_fields&);
+    // make parameters mutable
+    for rebind { i |
+        @fmt(out, "    var v%: T% = par%;\n", i+1, self.input[i].type, i+1);
+    };  
+    emit_body(self, out, n.junk_types.items(), resource_fields&);
 }
+
+// TODO: share this
+emit_all :: fn(m: *ShaderModule, out: *List(u8)) void = {
+    n := emit_prelude(m, out);
+    each m.code& { self |
+        emit_function(self, out, n&);
+    };
+};
 
 ann_field :: fn(self: *ShaderModule, it: *IoField, out: *List(u8), name: Str, n: *Counters) bool = {
     info := self.types[it.type.zext()]&;
@@ -116,7 +135,7 @@ ann_field :: fn(self: *ShaderModule, it: *IoField, out: *List(u8), name: Str, n:
     true
 }
 
-ann_var :: fn(self: *Function, it: *IoField, out: *List(u8), name: Str, n: *Counters) bool = {
+ann_var :: fn(self: *ShaderModule, it: *IoField, out: *List(u8), name: Str, n: *Counters) bool = {
     info := self.types[it.type.zext()]&;
     success := false;
     // TODO: share the magic number offsets with ./gfx.fr
@@ -160,8 +179,6 @@ ann_var :: fn(self: *Function, it: *IoField, out: *List(u8), name: Str, n: *Coun
 //       but it feels better to me if they look like normal types in your code and you can group them like msl lets you. 
 //       maybe this whole operation is stupid and i should force you to make your code look like the lowest common denominator api.
 emit_body :: fn(self: *Function, out: *List(u8), junk_types: []u16, resource_fields: *HashMap(Ty(i64, Symbol), u16)) void = {
-    fr := current_compiler_context();
-    
     enumerate self.body { i, inst |
         info := self.types[inst.type.zext()]&;
         if inst.type != 0 && !junk_types.contains(inst.type) && !@is(info, .Texture, .Sampler) {
@@ -251,8 +268,8 @@ emit_body :: fn(self: *Function, out: *List(u8), junk_types: []u16, resource_fie
                 args := self.body.items().slice(first_arg, i);
                 
                 fid: FuncId = from_index(inst.a.zext());
-                func := fr.get_function(fid);
-                @fmt(out, "%(", fr.get_string(func.name));
+                name := self.functions&.get(fid).expect("Function.functions");
+                @fmt(out, "%(", name);
                 for args { a |
                     @fmt(out, "v%, ", a.a);
                 };
@@ -260,11 +277,7 @@ emit_body :: fn(self: *Function, out: *List(u8), junk_types: []u16, resource_fie
                 
                 first_arg = -1;
             }
-            fn Constant() => {
-                info := self.types[inst.type.zext()]&;
-                @debug_assert(info.is(.Scalar));
-                emit_bits(out, inst.a, info.Scalar);
-            }
+            fn Constant() => emit_bits(self.m, inst&, out);
             fn sample() => {
                 @fmt(out, "textureSample(v%, v%, v%)", fix inst.a, fix inst.b, inst.c);
             }
@@ -281,16 +294,16 @@ emit_body :: fn(self: *Function, out: *List(u8), junk_types: []u16, resource_fie
                     }
                 };
                 
-                @fmt(out, "v%.% = v%", inst.a, name.str(), inst.b);
+                @fmt(out, "v%.% = v%", inst.a, self.string(name), inst.b);
             }
             fn SetDeref() => @fmt(out, "*v% = v%", inst.a, inst.b);
             fn AddrField() => {
                 name: Symbol = inst.b.symbol_from_id();
-                @fmt(out, "&v%.%", inst.a, name.str());
+                @fmt(out, "&v%.%", inst.a, self.string(name));
             }
             fn GetField() => {
                 name: Symbol = inst.b.symbol_from_id();
-                @fmt(out, "v%.%", inst.a, name.str());
+                @fmt(out, "v%.%", inst.a, self.string(name));
             }
             fn GetVarField() => {
                 name: Symbol = inst.b.symbol_from_id();
@@ -298,7 +311,7 @@ emit_body :: fn(self: *Function, out: *List(u8), junk_types: []u16, resource_fie
                     out.len = prev_len;
                     replacements[i] = alias;
                 } else {
-                    @fmt(out, "v%.%", inst.a, name.str());
+                    @fmt(out, "v%.%", inst.a, self.string(name));
                 };
             }
             fn Swizzle() => {
@@ -313,6 +326,7 @@ emit_body :: fn(self: *Function, out: *List(u8), junk_types: []u16, resource_fie
                 };
             }
             fn Index() => @fmt(out, "v%[v%]", inst.a, inst.b);
+            fn shift_right_arithmetic() => @fmt(out, "i32(v%) >> u32(v%)", inst.a, inst.b);
             @default => @panic("todo: wgsl %", inst.op);
         };
         
@@ -321,16 +335,6 @@ emit_body :: fn(self: *Function, out: *List(u8), junk_types: []u16, resource_fie
         }
     };
 }
-
-emit_bits :: fn(out: *List(u8), v: u32, type: Scalar) void = @match(type) {
-    fn F32() => {
-        v: f32 = v.bitcast();
-        @fmt(out, "%.0/100.0", v*100);  // TODO: correct fractional part
-    }
-    fn I32()  => @fmt(out, "%", v);
-    fn U32()  => @fmt(out, "%", v);
-    fn Bool() => @fmt(out, "%", v != 0 );
-};
 
 wgsl_operator :: fn(op: AstOp) Str = @match(op) {
     fn AddrOf() => "&";
@@ -352,17 +356,24 @@ wgsl_operator :: fn(op: AstOp) Str = @match(op) {
     fn gt() => ">";
     fn le() => "<=";
     fn ge() => ">=";
+    fn fmod() => "%";
+    fn shift_right_logical() => ">>";
+    fn shift_left() => "<<";
+    fn bit_xor() => "^";
     @default => "";
 };
 
 wgsl_function :: fn(op: AstOp) Str = @match(op) {
     fn u2x16() => "unpack2x16unorm";
     fn u4x8() => "unpack4x8unorm";
+    fn f32_to_i32() => "i32";
+    fn i32_to_f32() => "f32";
     @default => {
         same := @is(op, 
             .vec2, .vec3,
             .min, .max, .clamp, .mix, .atan2, .pow, .sin, .cos, 
             .abs, .fract, .floor, .sqrt, .log, .round, 
+            .trunc, 
         );
         @if(same, op.name_str(), "")
     };

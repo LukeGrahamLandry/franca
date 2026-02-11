@@ -46,6 +46,12 @@ export const add_events = (I, canvas, send) => {
     event("wheel", (e) => {
         send("scroll_event", I, e.deltaX, e.deltaY);
     });
+    event("paste", (e) => {
+        e.preventDefault();
+        let s = (e.clipboardData || window.clipboardData).getData("text");
+        s = new TextEncoder().encode(s);
+        send("paste_event", I, s.byteLength, s);
+    });
     
     // TODO
     // MOUSE_ENTER, MOUSE_LEAVE,
