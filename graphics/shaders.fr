@@ -1,7 +1,11 @@
 //! Warning: This is extremely limited to the point of being mostly useless!
 //! Eventually I want to make this a more serious target that supports a useful subset of the language. 
-//! But for now I just need trivial math for debugtext/gl. 
+//! But for now I just need trivial math for my little example programs. 
 //  (can't even do casts, loops, or function definitions)
+//
+// this file defines the shader ir and translates franca asts into it. 
+// each target has a backend that translates the ir into its prefered shader language 
+// (currently only metal's msl or webgpu's wgsl). 
 //
 // :UGLY this is not something i would be proud of if it was the only thing i was doing. 
 //       seems like a problem. 
@@ -25,6 +29,8 @@ fract :: fn(a: Vec3) Vec3 = ();
 fn abs(a: Vec3) Vec3 = ();
 fn mix(a: Vec3, b: Vec3, c: f32) Vec3 = ();
 fn clamp(a: Vec3, b: Vec3, c: Vec3) Vec3 = ();
+fn sin(a: f32) f32 = ();
+fn cos(a: f32) f32 = ();
 
 fn Buf($T: Type) Type = {
     Self :: @struct(_: *T, ShaderBufferElement :: T);
@@ -50,6 +56,12 @@ fn pack(u: u16, v: u16) UShort2 =
 DUMP_SHADERS :: false;
 fn choose_shader_impl($backend: RenderBackend, shd_desc: *Sg.ShaderDesc, $data: Type) void = {
     vv, ff, cc := (shd_desc.vertex_func&, shd_desc.fragment_func&, shd_desc.compute_func&);
+
+    // TODO: ugh. this is going to bite me later
+    fn eq(a: FuncId, b: FuncId) bool #redirect(Ty(Symbol, Symbol), bool);
+    fn hash(b: *TrivialHasher, a: *FuncId) void #redirect(Ty(*TrivialHasher, *Symbol), void);
+    ::DerefEq(FuncId);
+                
     @if(is_metal(backend)) {
         vv.entry = "main0";
         ff.entry = "main0";
@@ -88,7 +100,11 @@ fn compile_to_shader_source(fid: FuncId, backend: RenderBackend, stage: Sg.Shade
         name = @if(SOKOL_BACKEND == .METAL_MACOS, @symbol main0, @symbol main),
         ret = 0,
         gpa = a,
+        strings = init(a),
+        functions = init(a),
+        imports = list(a),
     ); self := self&;
+    self.strings&.insert(self.name, fr.get_string(self.name));
     
     // so we can use 0 as a placeholder 
     self.types&.push(.Void);
@@ -251,17 +267,6 @@ fn msl_expr2(self: *Function, e: *FatExpr) u32 = {
             fid := fr.assert_get_func_id(it.f);
             func := fr.get_function(fid);
 
-            // TODO: need to be more structured about this because what if you have user declared overloads of these. 
-            names := @const_slice(
-                "vec2", "vec3", "vec4", "neg", "add", "sub", "mul", "div", 
-                "eq", "ne", "lt", "gt", "le", "ge", "index", "bit_or", "bit_and", "bit_not",
-                "not", "sample", "clamp", "min", "max", "fract", "abs", "mix",
-            );
-            if names.contains(func.name.str()) {
-                op := AstOp.from_name(func.name.str());
-                return(self.emit_builtin(op.unwrap(), args, e_type));
-            }
-
             each func.annotations { a |
                 if a.name == @symbol builtin {
                     op := const_eval(AstOp)(a.args);
@@ -269,9 +274,40 @@ fn msl_expr2(self: *Function, e: *FatExpr) u32 = {
                 }
             }
             
+            // TODO: need to be more structured about this because what if you have user declared overloads of these. 
+            if AstOp.from_name(func.name.str()) { op |
+                return(self.emit_builtin(op, args, e_type));
+            }
+
             // not a builtin -> user defined function
-            debug_log_func(func);
-            panic("TODO: implement user functions in shader translation.");
+            mangled := @tfmt("%__%", func.name.str(), fid);
+            s := fr.intern_string(mangled);
+            mangled := fr.get_string(s);
+            self.strings&.insert(s, mangled);
+            new := self.functions&.insert(fid, mangled).is_none();
+            if func.body&.is(.Empty) {
+                if new {
+                    args := func.arg.bindings&;
+                    import: Signature = (
+                        name = s, 
+                        input = list(args.len, self.gpa),
+                        ret = self.type_name(func.finished_ret.unwrap()),
+                    );
+                    each args { a |
+                        ty := a.unwrap_ty();
+                        info: IoField = (name = zeroed(Symbol), type = self.type_name(ty));
+                        if !a.nullable_tag.is_null() {
+                            set_annotations(info&, a.nullable_tag.items());
+                        };
+                        import.input&.push(info);
+                    };
+                    self.imports&.push(import);
+                };
+            } else {
+                debug_log_func(func);
+                panic("TODO: implement user functions in shader translation.");
+            };
+            
             for args { a |
                 self.body&.push(op = .Arg, a = a);
             };
@@ -363,6 +399,7 @@ fn is_vec(t: Type) bool =
     t == *Vec2 || t == *Vec3 || t == *Vec4 || t == Vec2 || t == Vec3 || t == Vec4;
 
 fn field_access(self: *Function, e: *FatExpr, f_type: Type, name: Symbol) u32 = {
+    self.strings&.insert(name, name.str());
     if is_vec(e.ty) {
         place := self.msl_expr(e);
         self.body&.push(op = .Swizzle, a = place, b = swizzle_bits(name), type = self.type_name(f_type));
@@ -467,7 +504,7 @@ fn msl_stmt(self: *Function, e: *FatStmt) void = {
 fn assert_get_func_id(fr: CompCtx, e: *FatExpr) FuncId = {
     @ct_assert(e.expr&.is(.Value), e.loc, "Callee must be const-known in shader translation");
     info := fr.get_type(e.ty);
-    @ct_assert(e.ty == FuncId || info.is(.Fn), e.loc, "invalid callee type");
+    @ct_assert(e.ty == FuncId || info.is(.Fn), e.loc, "invalid callee type: %", typename(e.ty));
     fid: FuncId = e.expr.Value.bytes.Small._0.from_index();
     fid
 }
@@ -572,6 +609,7 @@ fn type_name(self: *Function, type: Type) u16 = {
                     fs := info.Struct.fields;
                     out := IoField.list(fs.len, self.gpa);
                     each fs { f |
+                        self.strings&.insert(f.name, str(f.name));
                         info: IoField = (name = f.name, type = self.type_name(f.ty));
                         if !f.nullable_tag.is_null() {
                             set_annotations(info&, f.nullable_tag.items());
@@ -643,6 +681,7 @@ AstOp :: @enum(u16) (
     Index,
 
     neg, not, bit_not, 
+    sin, cos, floor, sqrt, log, round,
     fract, abs,
     addr_of, load,
     u2x16, u4x8,
@@ -653,6 +692,7 @@ AstOp :: @enum(u16) (
     bit_and, bit_or,
     eq, ne, lt, gt, le, ge, 
     min, max,
+    pow, atan2,
     
     vec3, 
     sample, mix, clamp, 
@@ -703,7 +743,59 @@ Function :: @struct(
     name: Symbol,
     ret: u16, // T
     gpa: Alloc,
+    // these mirror fr.pool/fr.functions so it can be used at runtime as well 
+    // TODO: use them for wgpu emit as well
+    // TODO: move these out of each function and put them on a new Module struct?
+    strings: HashMap(Symbol, Str),
+    functions: HashMap(FuncId, Str),
+    // 
+    imports: List(Signature),
 );
+
+Signature :: @struct {
+    name: Symbol;
+    input: List(IoField);
+    ret: u16;
+};
+
+fn string(self: *Function, s: Symbol) Str = {
+    self.strings&.get(s).expect("Function.strings")
+}
+
+fn display(self: *Function, out: *List(u8)) void = {
+    @fmt(out, "% :: fn(", self.string(self.name));
+    enumerate self.input { i, t |
+        @fmt(out, "v%: t%, ", i + 1, t.type);
+    };
+    @fmt(out, ") t% = {\n", self.ret);
+    depth := 1;
+    enumerate self.body { i, it |
+        depth -= int(@is(it.op, .Else, .End));
+        @if(it.op != .Nop) out.push_repeated(depth, " ".ascii());
+        @if(it.type != 0) @fmt(out, "v%: t% = ", i, it.type);
+        @match(it.op) {
+            fn Nop() => ();
+            fn If() => @fmt(out, "if v% {\n", it.a);
+            fn Else() => @fmt(out, "} else {\n");
+            fn End() => @fmt(out, "};\n");
+            fn Join() => @fmt(out, "join;\n");
+            fn SetVar() => @fmt(out, "v% = v%;\n", it.a, it.b);
+            fn Constant() => @fmt(out, "Constant(%);\n", it.a);
+            fn GetVarField() => @fmt(out, "v%.%;\n", it.a, it.b);
+            fn SetVarField() => @fmt(out, "v%.% = v%;\n", it.a, it.c, it.b);
+            @default => {
+                @fmt(out, "%(", it.op);
+                @if(it.a != 0) @fmt(out, "v%, ", it.a);
+                @if(it.b != 0) @fmt(out, "v%, ", it.b);
+                @if(it.c != 0) @fmt(out, "v%, ", it.c);
+                out.len -= int(out.items().ends_with(", ")) * 2;
+                @fmt(out, ");\n");
+            };
+        };
+        depth += int(@is(it.op, .Else, .If));
+    };
+    @if(depth != 0) @fmt(out, "// ERROR: bad nesting depth=%\n", depth);
+}
 
 //
 // - bindings are an apply_bindings call. no repr as bytes. texture/sampler/buffer resources

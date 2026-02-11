@@ -28,7 +28,7 @@ emit_all :: fn(self: *Function, out: *List(u8)) void = {
                 @fmt(out, "struct {\n");
                 enumerate it.fields { j, it |
                     @fmt(out, "    ");
-                    self.ann_field(it, out, it.name.str(), n&);
+                    self.ann_field(it, out, self.string(it.name), n&);
                     @fmt(out, ";\n");
                 };
                 @fmt(out, "}");
@@ -40,24 +40,45 @@ emit_all :: fn(self: *Function, out: *List(u8)) void = {
         }
     };
     
-    stage := @match(self.stage) {
+    each self.imports { it |
+        emit_signature(self, out, n&, .NONE, it[]);
+        @fmt(out, ";\n");
+    };
+    // TODO: the stuff above should be done once per module
+    emit_function(self, out, n&);
+}
+
+emit_signature :: fn(self: *Function, out: *List(u8), n: *Counters, stage: Sg.ShaderStage, sig: Signature) void = {
+    stage_name := @match(stage) {
         fn VERTEX() => "vertex";
         fn FRAGMENT() => "fragment";
         fn COMPUTE() => "kernel";
-        fn NONE() => unreachable();
+        fn NONE() => "";  // not an entry point
     };
-    if self.stage == .COMPUTE {
-        @fmt(out, "\n% void %(", stage, "main0");
+    name := @if(stage == .NONE, self.string(sig.name), "main0");
+    if stage == .COMPUTE {
+        @fmt(out, "\n% void %(", stage_name, name);
     } else {
-        @fmt(out, "\n% T% %(", stage, self.ret, "main0");
+        @fmt(out, "\n% T% %(", stage_name, sig.ret, name);
     };
-    enumerate self.input { i, it |
-        self.ann_field(it, out, @tfmt("v%", i+1), n&);
-        if i != self.input.len - 1 {
-            @fmt(out, ", ")
-        }
+    // @debug_assert_eq(self.body[0].op, .Nop);
+    enumerate sig.input { i, it |
+        self.ann_field(it, out, @tfmt("v%", i+1), n);
+        @fmt(out, ", ");
+        // @debug_assert_eq(self.body[i+1].op, .Nop);
     };
-    @fmt(out, ") {\n");
+    out.len -= out.items().ends_with(", ").int() * 2;
+    @fmt(out, ")");
+}
+
+emit_function :: fn(self: *Function, out: *List(u8), n: *Counters) void = {
+    emit_signature(self, out, n, self.stage, (
+        // TODO: Function should just have a signature fields
+        name = self.name, 
+        ret = self.ret,
+        input = self.input,
+    ));
+    @fmt(out, " {\n");
     emit_body(self, out);
 }
 
@@ -102,8 +123,6 @@ ann_field :: fn(self: *Function, it: *IoField, out: *List(u8), name: Str, n: *Co
 }
 
 emit_body :: fn(self: *Function, out: *List(u8)) void = {
-    fr := current_compiler_context();
-    
     by_type := temp().alloc_zeroed(RawList(u32), self.types.len);
     enumerate self.body { i, inst |
         if inst.type != 0 {
@@ -200,11 +219,12 @@ emit_body :: fn(self: *Function, out: *List(u8)) void = {
                 args := self.body.items().slice(first_arg, i);
                 
                 fid: FuncId = from_index(inst.a.zext());
-                func := fr.get_function(fid);
-                @fmt(out, "%(", fr.get_string(func.name));
+                name := self.functions&.get(fid).unwrap();
+                @fmt(out, "%(", name);
                 for args { a |
                     @fmt(out, "v%, ", a.a);
                 };
+                out.len -= int(out.items().ends_with(", ")) * 2;
                 @fmt(out, ")");
                 
                 first_arg = -1;
@@ -218,20 +238,20 @@ emit_body :: fn(self: *Function, out: *List(u8)) void = {
             fn SetVar() => @fmt(out, "v% = v%", inst.a, inst.b);
             fn SetVarField() => {
                 name: Symbol = inst.c.symbol_from_id();
-                @fmt(out, "v%.% = v%", inst.a, name.str(), inst.b);
+                @fmt(out, "v%.% = v%", inst.a, self.string(name), inst.b);
             }
             fn SetDeref() => @fmt(out, "*v% = v%", inst.a, inst.b);
             fn AddrField() => {
                 name: Symbol = inst.b.symbol_from_id();
-                @fmt(out, "&v%->%", inst.a, name.str());
+                @fmt(out, "&v%->%", inst.a, self.string(name));
             }
             fn GetField() => {
                 name: Symbol = inst.b.symbol_from_id();
-                @fmt(out, "v%->%", inst.a, name.str());
+                @fmt(out, "v%->%", inst.a, self.string(name));
             }
             fn GetVarField() => {
                 name: Symbol = inst.b.symbol_from_id();
-                @fmt(out, "v%.%", inst.a, name.str());
+                @fmt(out, "v%.%", inst.a, self.string(name));
             }
             fn Swizzle() => {
                 @fmt(out, "v%.", inst.a);
@@ -256,17 +276,23 @@ emit_body :: fn(self: *Function, out: *List(u8)) void = {
     };
 }
 
+// TODO: same in both
 fn emit_bits(out: *List(u8), v: u32, type: Scalar) void = @match(type) {
     fn F32() => {
         v: f32 = v.bitcast();
-        @fmt(out, "%.0", v);  // TODO: correct fractional part
+        if v.cast().int().float().cast() == v {
+            @fmt(out, "%.0", v);
+        } else {
+            @fmt(out, "(%.0/10000.0)", v*10000);  // TODO: correct fractional part
+        }
     }
     fn I32()  => @fmt(out, "%", v);
     fn U32()  => @fmt(out, "%", v);
     fn Bool() => @fmt(out, "%", v != 0 );
 };
 
-fn msl_operator(op: AstOp) Str = @match(op) {
+// TODO: mostly same in both
+msl_operator :: fn(op: AstOp) Str = @match(op) {
     fn AddrOf() => "&";
     fn Deref() => "*";
     fn add() => "+";
@@ -290,21 +316,21 @@ fn msl_operator(op: AstOp) Str = @match(op) {
     @default => "";
 };
 
-fn msl_function(op: AstOp) Str = @match(op) {
-    fn min() => "min";
-    fn max() => "max";
-    fn abs() => "abs";
-    fn fract() => "fract";
+msl_function :: fn(op: AstOp) Str = @match(op) {
     fn u2x16() => "unpack_unorm2x16_to_float";
     fn u4x8() => "unpack_unorm4x8_to_float";
     fn vec2() => "float2";
-    fn clamp() => "clamp";
-    fn mix() => "mix";
     fn vec3() => "float3";
-    @default => "";
+    @default => {
+        same := @is(op, 
+            .min, .max, .clamp, .mix, .atan2, .pow, .sin, .cos, 
+            .abs, .fract, .floor, .sqrt, .log, .round, 
+        );
+        @if(same, op.name_str(), "")
+    };
 };
 
-fn msl_function_multi(op: AstOp) Str = @match(op) {
+msl_function_multi :: fn(op: AstOp) Str = @match(op) {
     fn vec4() => "float4";
     @default => "";
 };

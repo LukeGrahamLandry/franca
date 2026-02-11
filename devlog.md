@@ -8,6 +8,10 @@
   - as i've discovered before `__clear_cache` is linker magic on linux, so do that myself too. 
     - hopefully that's the problem i was having with tcc yesterday but i can't reproduce it either way which is unfortuante. 
   - little runner for their bench/TEST_md5sum.txt
+- i want incentive to make my shader compiler better. 
+  copying someone's esolang that makes pretty pictures. 
+  - add more builtins
+  - very hacky linking so you can have part done aot from franca and part your own ir at runtime
 
 ## (Feb 9)
 

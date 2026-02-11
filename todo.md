@@ -1436,7 +1436,6 @@ needing to go find some data in the right format (and without me including a blo
 - runner for 
   - https://github.com/ertdfgcvb/play.core/tree/master/src/programs/demos
   - https://github.com/bellard/quickjs
-- https://c50.fingswotidun.com https://fingswotidun.com/stackie/
 
 ### assembler
 
