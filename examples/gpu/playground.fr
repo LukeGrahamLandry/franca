@@ -22,12 +22,13 @@ optional_examples_path :: "target/c50.txt";
 //   example: "y99^*s" (should have lines on whole screen but mine only does the top before running out of precision)
 // - mine is higher resolution so the random index increments faster
 // - TODO: i print floats in a dumb way so my pi is only 5 digits
+// - TODO: some look different on metal and webgpu.
+//         example: "ztzpetyl3^lzCop" metal is too smooth and webgpu is too noisy
 
 // TODO: cli mode where you pass program+t and it outputs a png
 // TODO: generate random programs
 // TODO: test this somehow
 // TODO: ui for changing resolution
-// TODO: circular ones have a discontinuity on mine. is it just a resolution difference? 
 
 valid_commands :: "xyztuvXYZTUV0123456789pwWeE%o!?Pd:;*/-+sc!<>$ql#^aC|r";
 compile_c50 :: fn(m: *ShaderModule, src: Str, name: Ty(Symbol, Str)) Result(*Function, Str) = {
@@ -36,20 +37,20 @@ compile_c50 :: fn(m: *ShaderModule, src: Str, name: Ty(Symbol, Str)) Result(*Fun
     stack := @ref u32.list(temp());
     // HACK: has to be the same as rest of fragment. rn i do that by preinterning in module init
     ty_f32 := f.type_lookup&.get(f32).unwrap();  
+    ty_bool := f.type_lookup&.get(bool).unwrap();  
     f.ret = ty_f32;
-    f.body&.push(op = .Nop);  // 0=placeholder TODO: do this in init?
     
     // TODO: have a sane api for linking imports
     f.name = name._0;
     f.strings&.insert(f.name, name._1);  // TODO: do this in init?
     
     range(0, vars.len) { _ |
-        f.body&.push(op = .Nop);  // TODO: par
+        f.body&.push(op = .Par);
         f.input&.push(type = ty_f32, name = zeroed(Symbol));
     };
     // starting rand index for this pixel
     rand_i: u32 = 1 + vars.len.trunc();
-    f.body&.push(op = .Nop);  // TODO: par
+    f.body&.push(op = .Par);
     f.input&.push(type = ty_f32, name = zeroed(Symbol));
     
     zero: u32 = f.body.len.trunc();
@@ -88,7 +89,11 @@ compile_c50 :: fn(m: *ShaderModule, src: Str, name: Ty(Symbol, Str)) Result(*Fun
         
         if true {
             break :: local_return;
-            mangle :: fn($fid: FuncId) Ty(FuncId, Symbol, Str, i64) = {
+            // TODO: without this #fold it still tries to bake a Stmt and dies because the padding isn't zeroed.
+            //       that's kinda correct because there's no @run on [...].len expression 
+            //       so it doesn't know it's constant but if that's the policy, need to somehow 
+            //       give a sane error if i want other people to be able to write programs at all. 
+            mangle :: fn($fid: FuncId) Ty(FuncId, Symbol, Str, i64) #fold = {
                 arity := get_function_ast(fid, false, false, false, false)[].arg.bindings.len;
                 s, n := mangle_name(fid);
                 (fid, s, n, arity)
@@ -135,7 +140,7 @@ compile_c50 :: fn(m: *ShaderModule, src: Str, name: Ty(Symbol, Str)) Result(*Fun
                 @case("?".ascii()) => {
                     a := get();
                     cond: u32 = f.body.len.trunc();
-                    f.body&.push(op = .le, type = ty_f32, a = a, b = zero);  // TODO: type should be bool
+                    f.body&.push(op = .le, type = ty_bool, a = a, b = zero);
                     stack.push(f.body.len.trunc());
                     f.body&.push(op = .Select, type = ty_f32, a = cond, b = zero, c = one);
                 };  
@@ -324,16 +329,6 @@ Stolen :: @struct {
         i32_to_f32(result) / c
     }
 };
-
-// TODO: wrong place for these
-// TODO: cpu impl as well
-ftrunc :: fn(x: f32) f32 #builtin(.trunc);
-i32_to_f32 :: fn(x: i32) f32 #builtin(.i32_to_f32);
-f32_to_i32 :: fn(x: f32) i32 #builtin(.f32_to_i32);
-fmod :: fn(a: f32, b: f32) f32 #builtin(.fmod);
-fn pow(a: f32, b: f32) f32 #builtin(.pow);
-fn sqrt(x: f32) f32 #builtin(.sqrt);
-fn floor(a: f32) f32 #builtin(.floor);
 
 main :: fn() void = 
     Easy'start(State);

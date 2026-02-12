@@ -1,8 +1,6 @@
 // Shader IR -> WebGPU Shader Language / WGSL source code.
 // TODO: _ is an invalid identifier as is anything that starts with __
 
-Counters :: @struct(user: u16, sampler: u16, texture: u16, junk_types: List(u16));
-
 emit_prelude :: fn(self: *ShaderModule, out: *List(u8)) Counters = {
     n := zeroed Counters;
     n.junk_types = u16.list(temp());
@@ -105,14 +103,6 @@ emit_function :: fn(self: *Function, out: *List(u8), n: *Counters) void = {
     emit_body(self, out, n.junk_types.items(), resource_fields&);
 }
 
-// TODO: share this
-emit_all :: fn(m: *ShaderModule, out: *List(u8)) void = {
-    n := emit_prelude(m, out);
-    each m.code& { self |
-        emit_function(self, out, n&);
-    };
-};
-
 ann_field :: fn(self: *ShaderModule, it: *IoField, out: *List(u8), name: Str, n: *Counters) bool = {
     info := self.types[it.type.zext()]&;
     if @is(info, .Texture, .Sampler) {
@@ -209,6 +199,7 @@ emit_body :: fn(self: *Function, out: *List(u8), junk_types: []u16, resource_fie
             if(inst.type != 0, => @fmt(out, "v% = ", i));
         }
         
+        ty := self.types[inst.type.zext()]&;
         name := wgsl_operator(inst.op);
         if name != "" {
             if inst.b != 0 {
@@ -326,7 +317,9 @@ emit_body :: fn(self: *Function, out: *List(u8), junk_types: []u16, resource_fie
                 };
             }
             fn Index() => @fmt(out, "v%[v%]", inst.a, inst.b);
-            fn shift_right_arithmetic() => @fmt(out, "i32(v%) >> u32(v%)", inst.a, inst.b);
+            fn shift_right_arithmetic() => @fmt(out, "%(i32(v%) >> u32(v%))", cast_name(ty), inst.a, inst.b);
+            fn shift_right_logical() => @fmt(out, "%(u32(v%) >> u32(v%))", cast_name(ty), inst.a, inst.b);
+            fn Select() => @fmt(out, "select(v%, v%, v%)", inst.c, inst.b, inst.a);
             @default => @panic("todo: wgsl %", inst.op);
         };
         
@@ -336,31 +329,19 @@ emit_body :: fn(self: *Function, out: *List(u8), junk_types: []u16, resource_fie
     };
 }
 
+cast_name :: fn(ty: *SType) Str = {
+    @debug_assert(ty.is(.Scalar), "invalid cast_name");
+    @match(ty.Scalar) {
+        fn U32() => "u32";
+        fn I32() => "i32";
+        fn F32() => "f32";
+        @default => panic("invalid cast_name");
+    }
+}
+
 wgsl_operator :: fn(op: AstOp) Str = @match(op) {
-    fn AddrOf() => "&";
-    fn Deref() => "*";
-    fn add() => "+";
-    fn sub() => "-";
-    fn mul() => "*";
-    fn div() => "/";
-    fn neg() => "-";
-    fn not() => "~";
-    fn and() => "&&";
-    fn or() => "||";
-    fn bit_and() => "&";
-    fn bit_or() => "|";
-    fn bit_not() => "~";
-    fn eq() => "==";
-    fn ne() => "!=";
-    fn lt() => "<";
-    fn gt() => ">";
-    fn le() => "<=";
-    fn ge() => ">=";
     fn fmod() => "%";
-    fn shift_right_logical() => ">>";
-    fn shift_left() => "<<";
-    fn bit_xor() => "^";
-    @default => "";
+    @default => common_shader_operator(op);
 };
 
 wgsl_function :: fn(op: AstOp) Str = @match(op) {

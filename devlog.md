@@ -1,4 +1,8 @@
 
+## (Feb 12)
+
+- deduplicate some of the shader code. stop pasting libc math imports around. 
+
 ## (Feb 11)
 
 more playing with shaders

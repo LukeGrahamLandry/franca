@@ -26,11 +26,6 @@ fn sample(t: ShaderTexture2f, s: ShaderSampler, uv: Vec2) Vec4 #metal_method = (
 fn mul(m: Sgl.Matrix, v: Vec4) Vec4 = ();
 
 fract :: fn(a: Vec3) Vec3 = (); 
-fn abs(a: Vec3) Vec3 = ();
-fn mix(a: Vec3, b: Vec3, c: f32) Vec3 = ();
-fn clamp(a: Vec3, b: Vec3, c: Vec3) Vec3 = ();
-fn sin(a: f32) f32 = ();
-fn cos(a: f32) f32 = ();
 
 fn Buf($T: Type) Type = {
     Self :: @struct(_: *T, ShaderBufferElement :: T);
@@ -96,6 +91,7 @@ init_shader_function :: fn(m: *ShaderModule, stage: Sg.ShaderStage) *Function = 
         ret = 0,
         m = m,
     );
+    f.body&.push(op = .Nop);  // 0=placeholder
     f
 }
 
@@ -113,7 +109,44 @@ init_shader_module :: fn(a: Alloc) ShaderModule = {
     m.type_lookup&.insert(void, 0);
     m.types&.push(Scalar = .F32);  // hack for playground TODO: keep the module from comptime?
     m.type_lookup&.insert(f32, 1);
+    m.types&.push(Scalar = .Bool);
+    m.type_lookup&.insert(bool, 2);
     m
+}
+
+// TODO: start at the entry and compile reachable fuctions as well. 
+compile_to_shader_source :: fn(fid: FuncId, backend: Sg.RenderBackend, stage: Sg.ShaderStage) Str = {
+    m := init_shader_module(ast_alloc());
+    self := translate_to_shader(m&, fid, backend, stage);
+    emit_all(m&, backend)
+}
+
+Counters :: @struct(user: u16, sampler: u16, texture: u16, junk_types := zeroed(List(u16)));
+ShaderTarget :: @struct {
+    prelude: @FnPtr(self: *ShaderModule, out: *List(u8)) Counters;
+    function: @FnPtr(self: *Function, out: *List(u8), n: *Counters) void;
+    
+    impl :: fn(b: Sg.RenderBackend) *ShaderTarget = {
+        new :: fn($s: ScopeId) = @static(ShaderTarget) (
+            prelude = s.emit_prelude,
+            function = s.emit_function,
+        );
+        @match(b) {
+            fn METAL_MACOS() => new(import("@/graphics/macos/shaders.fr"));
+            fn WGPU() => new(import("@/graphics/web/shaders.fr"));
+            @default => @panic("TODO: support non-metal shader languages");
+        }
+    }
+};
+
+fn emit_all(m: *ShaderModule, backend: Sg.RenderBackend) Str = {
+    t := ShaderTarget'impl(backend);
+    out := @ref u8.list(m.gpa);
+    n := t'prelude(m, out);
+    each m.code& { self |
+        t'function(self, out, n&);
+    };
+    out.items()
 }
 
 // This must be called at comptime!
@@ -133,16 +166,13 @@ fn translate_to_shader(m: *ShaderModule, fid: FuncId, backend: RenderBackend, st
         self.name = fr.intern_string(mangled);
     };
     self.strings&.insert(self.name, fr.get_string(self.name));
-    
-    // so we can use 0 as a placeholder 
-    self.body&.push(op = .Nop);  // 0=placeholder
-    
+        
     args := func.arg.bindings&;
     each args { a |
         @debug_assert(a.ty&.is(.Finished));
         @debug_assert(a.name&.is(.Var));
         self.locals&.insert(a.name.Var.id, self.body.len.trunc());
-        self.body&.push(op = .Nop); // .Par, type = self.type_name(a.ty.Finished));
+        self.body&.push(op = .Par);
         
         info: IoField = (name = a.name.Var.name, type = self.type_name(a.ty.Finished));
         if !a.nullable_tag.is_null() {
@@ -159,23 +189,6 @@ fn translate_to_shader(m: *ShaderModule, fid: FuncId, backend: RenderBackend, st
     
     self.translate(e);
     self[]
-}
-
-fn compile_to_shader_source(fid: FuncId, backend: RenderBackend, stage: Sg.ShaderStage) Str = {
-    m := init_shader_module(ast_alloc());
-    self := translate_to_shader(m&, fid, backend, stage);
-    emit_all(m&, backend)
-}
-
-fn emit_all(self: *ShaderModule, backend: Sg.RenderBackend) Str = {
-    out := u8.list(self.gpa);
-    @match(backend) {
-        fn METAL_MACOS() => import("@/graphics/macos/shaders.fr")'emit_all(self, out&);
-        fn WGPU() => import("@/graphics/web/shaders.fr")'emit_all(self, out&);
-        @default => @panic("TODO: support non-metal shader languages");
-    }
-    
-    out.items()
 }
 
 fn set_annotations(info: *IoField, annotations: []Annotation) void = {
@@ -704,6 +717,30 @@ fn emit_bits(out: *List(u8), v: u32, type: Scalar) void = @match(type) {
     fn U32()  => @fmt(out, "%", v);
     fn Bool() => @fmt(out, "%", v != 0 );
 };
+common_shader_operator :: fn(op: AstOp) Str = @match(op) {
+    fn AddrOf() => "&";
+    fn Deref() => "*";
+    fn add() => "+";
+    fn sub() => "-";
+    fn mul() => "*";
+    fn div() => "/";
+    fn neg() => "-";
+    fn not() => "~";
+    fn and() => "&&";
+    fn or() => "||";
+    fn bit_and() => "&";
+    fn bit_or() => "|";
+    fn bit_not() => "~";
+    fn eq() => "==";
+    fn ne() => "!=";
+    fn lt() => "<";
+    fn gt() => ">";
+    fn le() => "<=";
+    fn ge() => ">=";
+    fn shift_left() => "<<";
+    fn bit_xor() => "^";
+    @default => "";
+};
 
 // 
 // Flat IR that can be rendered into shader programs for each backend. 
@@ -842,6 +879,7 @@ fn display(self: *Function, out: *List(u8)) void = {
         @if(it.type != 0 && it.op != .Arg) @fmt(out, "v%: t% = ", i, it.type);
         @match(it.op) {
             fn Nop() => ();
+            fn Par() => ();
             fn If() => @fmt(out, "if v% {\n", it.a);
             fn Else() => @fmt(out, "} else {\n");
             fn End() => @fmt(out, "};\n");

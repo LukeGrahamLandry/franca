@@ -1,3 +1,7 @@
+// most of these functions are recognised as intrinsics by my shader compiler. 
+// the implementations here are only used when running as normal franca code on the cpu. 
+// TODO: lots of these aren't tested on cpu side, just used as signetures for the shader builtins. 
+
 Vec2 :: Vec(f32, 2);
 Vec3 :: Vec(f32, 3);
 Vec4 :: Vec(f32, 4);
@@ -24,7 +28,7 @@ fn Vec($T: Type, $N: i64) Type = {
     fn vec(v: *Raw) *Self   #ir(.copy, .Kl);
     fn array(v: *Self) *Raw #ir(.copy, .Kl);
     
-    bin_op :: fn(aa, bb, $op) => {
+    bin_op :: fn(aa, bb, $op #duplicated) => {
         out := @uninitialized Self;
         a, b, c := (aa&.array(), bb&.array(), out&.array());
         inline_range(0, N) { $i | 
@@ -42,40 +46,48 @@ fn Vec($T: Type, $N: i64) Type = {
     
     fn dot(a: Self, b: Self) T = {
         v := a * b;
-        res: T = 0.0;
+        res: T = 0;
         inline_range(0, N) { $i | 
             res += v&[i]; 
         };
         res
     }
     
-    fn splat(a: T) Self = {
-        res := zeroed Self;
-        inline_range(0, N) { $i | 
-            res&[i] = a;
-        };
-        res
-    }
+    fn splat(a: T) Self #fold = 
+        un_op(@uninitialized Self, fn(_) => a);
     
-    fn norm(a: Self) f32 =
-        a.dot(a).sqrtf();
+    fn norm(a: Self) T =
+        a.dot(a).sqrt();
     
     fn normalize(a: Self) Self = 
-        a / @as(Self) splat(a.norm());
+        a / a.norm();
     
     fn neg(a: Self) Self = 
-        Self.zeroed() - a;
-    
-    fn mul(a: Self, b: f32) Self = {
+        un_op(a, fn(a) => -a);
+
+    un_op :: fn(aa, $op #duplicated) => {
+        a := aa&.array();
         inline_range(0, N) { $i | 
-            a&[i] = a&[i] * b; 
+            a[i] = op(a[i]); 
         };
-        a
-    }
+        aa
+    };
     
-    fn div(a: Self, b: f32) Self = {
+    fn mul(a: Self, b: T) Self = 
+        un_op(a, fn(a) => a * b);
+    
+    fn div(a: Self, b: T) Self = 
+        un_op(a, fn(a) => a / b);
+    
+    fn abs(a: Self) Self = 
+        un_op(a, abs);
+    
+    fn mix(x: Self, y: Self, a: T) Self = 
+        bin_op(x, y, fn(x, y) => x*(1 - a) + y*a);
+    
+    fn clamp(a: Self, b: Self, c: Self) Self = {
         inline_range(0, N) { $i | 
-            a&[i] = a&[i] / b; 
+            a&[i] = clamp(a&[i], b&[i], c&[i]);
         };
         a
     }
@@ -83,7 +95,8 @@ fn Vec($T: Type, $N: i64) Type = {
     fn items(v: *Self) []T =
         v.v&.items()
     
-    fn index(v: *Self, i: i64) *T =  // TODO: this should work #redirect(Ty(*Self, i64), *T); 
+    // TODO: fn index(v: *Self, i: i64) *T #redirect(Ty(*Raw, i64), *T); 
+    fn index(v: *Self, i: i64) *T =
         v.v&.index(i);
     
     Self

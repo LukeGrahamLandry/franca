@@ -40,6 +40,7 @@ fn emit_relocatable_constant(c: *SelfHosted, ty: Type, value: []u8, loc: Span) C
 
 // since pointers might have cycles, forced_id is used so you can add a cache entry for and address before it's been emitted. 
 fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type, loc: Span, forced_id: ?BakedVarId) Result(Ty(BakedVarId, i64), *CompileError) = {
+    c.last_loc = @if(loc.is_null(), c.last_loc, loc);
     to_zero: ReadBytes = (bytes = value, i = 0);
     c.zero_padding(type, to_zero&);  // Needed for reproducible builds!
     
@@ -214,7 +215,8 @@ fn bake_relocatable_body(c: *SelfHosted, value: []u8, type: Type, out: *List(Bak
             @try(c.bake_relocatable_body(payload, inner, out, reloc_off + tag_size, false)) return;
             
             padding := value.rest(tag_size + payload_size);
-            @debug_assert(is_all_zeroes(padding), "ICE: zero_padding() didn't work on a @tagged constant. This is required for reproducibility.");
+            @debug_assert(is_all_zeroes(padding), "ICE: zero_padding() didn't work on a @tagged constant. This is required for reproducibility.\n%\n%", 
+                c.log_type(type), fmt_loc(c, c.last_loc));
         }
         fn Enum(f)  => return(c.bake_relocatable_body(value, f.raw, out, reloc_off, false));
         fn Named(f) => return(c.bake_relocatable_body(value, f._0, out, reloc_off, force_default_handling));

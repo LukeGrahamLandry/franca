@@ -36,10 +36,6 @@ fn trunc(v: u64) u8   #ir(.copy, .Kw);  // Nobody uses this it seems?
 fn trunc(v: u32) u8   #ir(.copy, .Kw);  // Nobody uses this it seems? 
 fn trunc(v: i64) i32 #ir(.copy, .Kw);
 
-// TODO: if you typo copy paste this conflicting overload, you try to call an uncompiled function! -- Jul 25 :FUCKED
-// TODO: bring back system for testing that things fail with the right error message. 
-// fn zext(v: u32) u64 #intrinsic(.ZeroExtend32To64);
-
 fn ne(a: bool, b: bool) bool = !(a == b);
 
 fn uext(v: u32) u64 #ir(.extuw, .Kl);
@@ -77,11 +73,8 @@ fn abs(val: f64) f64 = @if(val < 0.0, -val, val);
 fn abs(val: f32) f32 = @if(val < 0.0, -val, val);
 
 fn eq(lhs: Symbol, rhs: Symbol) bool #redirect(Ty(u32, u32), bool);
-fn to_bool(b: i64) bool = 
-    b != 0;
 
-// TODO: this gets a bit silly if I have to define this stuff all again but with different types. 
-//       it would be cool if it could be done with traits. like anything with an ordering could have a fn max (bad example for floats i guess)
+// technically not the same as (0 - a) because of -0.0
 fn neg(a: f64) f64 #ir(.neg, .Kd);
 fn neg(a: f32) f32 #ir(.neg, .Ks);
 
@@ -420,6 +413,7 @@ NS_PER_US :: 1000;
 US_PER_S  :: 1000 * 1000;
 US_PER_MS :: 1000;
 
+fn sqrt(x: f32) f32 #ir(.sqrt, .Ks);
 fn sqrt(x: f64) f64 #fold = {  // :UpdateBoot
     slow :: fn(x: f64) f64 = newton_root(x, 2);
     fast :: fn(x: f64) f64 #ir(.sqrt, .Kd);
@@ -444,10 +438,9 @@ fn newton_root(x: f64, $p: i64) f64 = {
     guess
 }
 
+// TODO: this is wrong because floats can hold bigger numbers than fit i64
 fn floor(x: f64) f64 =
     x.int().float();
-
-fn fmodf(a: f32, b: f32) f32 #libc;
 
 PI :: 3.1415926535897932;
 
@@ -477,10 +470,6 @@ fn div_mod(a: u8, b: i64) Ty(u8, u8) = {
     xxx: i64 = a.zext();
     aa, bb := xxx.div_mod(b);
     (aa.trunc(), bb.trunc())
-}
-
-fn sin_cos(rad: f32) Ty(f32, f32) = {
-    (rad.sinf(), rad.cosf())
 }
 
 fn max(a: f64, b: f64) f64 #ir(.max, .Kd);
@@ -542,4 +531,22 @@ fn sub(a: TimeSpec, b: TimeSpec) TimeSpec = {
     a&.add_ns(-b.nanoseconds);
     a.seconds -= b.seconds;
     a
+}
+
+// value preserving
+fn i32_to_f32(x: i32) f32 #ir(.swtof, .Ks);
+fn f32_to_i32(x: f32) i32 #ir(.stosi, .Kw);
+
+// TODO: don't depend on libc for these! 
+//       but they're mostly for the graphics demos which im less obsessive about. 
+
+fn fmod(a: f64, b: f64) f64 #libc;
+fn fmod(a: f32, b: f32) f32 = { fmodf :: fn(a: f32, b: f32) f32 #libc; fmod(a, b) };
+fn ftrunc(x: f32) f32 #builtin(.trunc) = { truncf :: fn(x: f32) f32 #libc; truncf(x) };
+fn floor(x: f32) f32 = { floorf :: fn(x: f32) f32 #libc; floorf(x) };
+fn pow(a: f32, b: f32) f32 = { powf :: fn(a: f32, b: f32) f32 #libc; powf(a, b) };
+fn sin(rad: f32) f32 = { sinf :: fn(rad: f32) f32 #libc; sinf(rad) };
+fn cos(rad: f32) f32 = { cosf :: fn(rad: f32) f32 #libc; cosf(rad) };
+fn sin_cos(rad: f32) Ty(f32, f32) = {
+    (rad.sin(), rad.cos())
 }
