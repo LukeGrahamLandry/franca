@@ -451,3 +451,13 @@ enum {
 B() A  // don't stomp this new line
 #undef B
 };
+
+// TODO: if __has_builtin isn't defined, this becomes `#if 0 && 0(0)` which i can't compile. 
+//       am i supposed to short circuit earlier and not even check that the parse makes sense? i don't think so. 
+//       notably clang errors on this if you change the __has_builtin to an undefined macro, 
+//       so i think some versions of apple's AvailabilityInternal.h are just dumb and aren't testing anything because they only use real compilers that work.  
+//       foozle:46:33: error: function-like macro '__has_builtinxx' is not defined
+//          46 | #if defined(__has_builtinxx) && __has_builtinxx(__is_target_os)
+#if defined(__has_builtin) && __has_builtin(__is_target_os)
+#error "thats not my department"
+#endif
