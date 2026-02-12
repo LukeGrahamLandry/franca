@@ -33,6 +33,7 @@ you can choose to embed any information you want.
 - generating cli help messages (lib/args.fr used by backend/meta/test.fr)
 - adding extra metadata for translating to MSL (graphics/shaders.fr used by graphics/debug_text.fr)
 - creating a table for a parser that calls a function depending which token it sees (examples/import_c/compile.fr)
+- marking a function for special treatment by an aot driver (#export for examples/default_driver.fr or #builtin for graphics/shaders.fr)
 
 ## Syntax Example 
 

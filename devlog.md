@@ -7,6 +7,7 @@ more playing with shaders
 - ui to edit the program and recompile the shader. 
   implement destroy(Shader) so you don't run out of pool slots.
 - web: a few more keys. paste. 
+- closed form of the index state for random. 
 
 ## (Feb 10)
 

@@ -1,4 +1,3 @@
-// THIS IS UNFINISHED
 // shadertoy for masochists. 
 // the original implementation of this language is: https://c50.fingswotidun.com and https://fingswotidun.com/stackie
 // esoteric stack based expression language that maps (x, y, z, t, u, v) -> _ -> (r, g, b). 
@@ -13,12 +12,22 @@ default_palette :: "xy2*1-*C";
 //     type to edit the program (backspace to delete a char. copy/paste affect the whole program). 
 //     it auto recompiles. press enter to reset t=0. hold control to show ir.
 
+// each line is a program. 
+// you can find a bunch at https://c50.fingswotidun.com/api/?top=200
+// (cycle with left/right arrow)
+optional_examples_path :: "target/c50.txt";
+
+// images won't exactly match the original:
+// - i use f32, they use f64. 
+//   example: "y99^*s" (should have lines on whole screen but mine only does the top before running out of precision)
+// - mine is higher resolution so the random index increments faster
+// - TODO: i print floats in a dumb way so my pi is only 5 digits
+
 // TODO: cli mode where you pass program+t and it outputs a png
-// TODO: loop t
-// TODO: r
 // TODO: generate random programs
 // TODO: test this somehow
-// TODO: add other languages in this style? like https://susam.net/fxyt.html
+// TODO: ui for changing resolution
+// TODO: circular ones have a discontinuity on mine. is it just a resolution difference? 
 
 valid_commands :: "xyztuvXYZTUV0123456789pwWeE%o!?Pd:;*/-+sc!<>$ql#^aC|r";
 compile_c50 :: fn(m: *ShaderModule, src: Str, name: Ty(Symbol, Str)) Result(*Function, Str) = {
@@ -38,6 +47,10 @@ compile_c50 :: fn(m: *ShaderModule, src: Str, name: Ty(Symbol, Str)) Result(*Fun
         f.body&.push(op = .Nop);  // TODO: par
         f.input&.push(type = ty_f32, name = zeroed(Symbol));
     };
+    // starting rand index for this pixel
+    rand_i: u32 = 1 + vars.len.trunc();
+    f.body&.push(op = .Nop);  // TODO: par
+    f.input&.push(type = ty_f32, name = zeroed(Symbol));
     
     zero: u32 = f.body.len.trunc();
     f.body&.push(op = .Constant, type = ty_f32, a = 0.0.cast().bitcast());
@@ -50,7 +63,8 @@ compile_c50 :: fn(m: *ShaderModule, src: Str, name: Ty(Symbol, Str)) Result(*Fun
         continue :: local_return;
         it := it[];
         ::display_slice(u32);
-        get :: fn() => stack.pop() || return(Err = @tfmt("stack underflow at operation[%]", i));
+        get :: fn() => stack.pop() 
+            || return(Err = @tfmt("stack underflow at operation[%]=%", i, src.subslice(i, 1)));
         
         range(0, vars.len) { i |
             if vars[i] == it {  // get
@@ -59,7 +73,6 @@ compile_c50 :: fn(m: *ShaderModule, src: Str, name: Ty(Symbol, Str)) Result(*Fun
             };
             if vars[i] == it.ascii_to_lower() {  // set
                 v := get();
-                stack.push(f.body.len.trunc());
                 f.body&.push(op = .SetVar, a = i.trunc() + 1, b = v);
                 continue();
             };
@@ -88,10 +101,13 @@ compile_c50 :: fn(m: *ShaderModule, src: Str, name: Ty(Symbol, Str)) Result(*Fun
                 @case("E".ascii()) => mangle(Stolen.ss);
                 @case("%".ascii()) => mangle(Stolen.positiveMod);
                 @case("o".ascii()) => mangle(Stolen.xorScaled);
-                // it has state but since you know statically how many times it will be called
-                // each pixel, can have a closed form of the index variable and just step forward offset in uniforms. 
-                // (if i care about getting same random as the original)
-                @case("r".ascii()) => return(Err = "TODO: implement r");
+                @case("r".ascii()) => {
+                    new: u32 = f.body.len.trunc();
+                    f.body&.push(op = .add, type = ty_f32, a = rand_i, b = one);
+                    f.body&.push(op = .SetVar, a = rand_i, b = new);
+                    stack.push(new);
+                    mangle(Stolen.random)
+                }
                 @default => break();
             };
             arity := func._3;
@@ -193,22 +209,49 @@ Shaders :: @struct {
         (pos = @vec(xy, 0.0, 1.0))
     }
     OutF :: @struct(frag_color: Vec4 #colour);
-    UniF :: @struct(time: f32 = 0, _pad: f32 = 0, scale: Vec2);
+    UniF :: @struct {
+        // pixel coordinate -> normalized
+        scale: Vec2;
+        time: f32;
+        // moves forward by total number of rand calls each frame. 
+        rand_index: f32;
+        // number of rand calls per pixel for (program, palette)
+        rand_calls: Vec2;
+        // the random kinda looks worse with high resolution (like a colour instead of a pattern)
+        // so allow controling that seperately. so you can have smooth lines with a blocky pattern. 
+        rand_scale: Vec2;
+    };
+    // TODO: my @swizzle syntax is super ugly
     fs   :: fn(in: OutV #input, uni: UniF #uniform(0)) Shaders.OutF = {
-        palette :: fn(value: f32, component: f32, z: f32, t: f32, u: f32, v: f32) f32;
-        program :: fn(x: f32, y: f32, z: f32, t: f32, u: f32, v: f32) f32;
+        // the random function is indexed. compute the position of this pixel 
+        // so each pixel gets new random numbers. since the programs don't have 
+        // loops, the number of rand calls required is known statically. 
+        // each random() call's argument is as though it were a global counter. 
+        step := (@swizzle uni.rand_calls.x) + (@swizzle uni.rand_calls.y) * 3;
+        width := 1.0.cast() / @swizzle uni.scale.y;
+        rand_xy := (@swizzle in.pos.xy) * uni.rand_scale;
+        pixel_index := floor((@swizzle rand_xy.y) * width) + floor((@swizzle rand_xy.x));
+        rand_i := uni.rand_index + (step * pixel_index) - 1/* because compiled "r" increments first */;
+    
+        palette :: fn(value: f32, component: f32, z: f32, t: f32, u: f32, v: f32, i: f32) f32;
+        program :: fn(x: f32, y: f32, z: f32, t: f32, u: f32, v: f32, i: f32) f32;
         C :: fn(x, y: f32) => {
             u, v := (x*2 - 1, y*2 - 1);
             z := sqrt(u*u + v*v);
-            palette(x, y, z, t, u, v)
+            c := palette(x, y, z, t, u, v, rand_i);
+            rand_i += @swizzle uni.rand_calls.y;
+            clamp(c, 0, 1)  // matters if custom palette misbehaves
         };
         
+        // TODO: can't factor out `uvz :: fn(x, y) Ty(f32, f32, f32) => {};`
+        //       because my shader compiler can't deal with nontrivial destructuring assignment yet. 
         xy := (@swizzle in.pos.xy) * uni.scale;
         x, y := (@swizzle xy.x, @swizzle xy.y);
-        t := uni.time;
+        t := fmod(uni.time, 256);
         u, v := (x*2 - 1, y*2 - 1);
         z := sqrt(u*u + v*v);
-        o := program(x, y, z, t, u, v);
+        o := program(x, y, z, t, u, v, rand_i);
+        rand_i += @swizzle uni.rand_calls.x;
         r := C(o, 0.0);
         g := C(o, 0.5);
         b := C(o, 1.0);
@@ -216,6 +259,7 @@ Shaders :: @struct {
         (frag_color = @vec(r, g, b, 1.0))
     }
 };
+// TODO: i32 literal with high bit set shouldn't be this painful :compiler
 
 // https://github.com/Lerc/stackie/blob/93fc42770059b192e65f3baf0b42ccf5b69e42d2/stackie.js
 // i want exactly their magic numbers so the pretty pictures look the same as the website. 
@@ -282,20 +326,23 @@ Stolen :: @struct {
 };
 
 // TODO: wrong place for these
+// TODO: cpu impl as well
 ftrunc :: fn(x: f32) f32 #builtin(.trunc);
 i32_to_f32 :: fn(x: i32) f32 #builtin(.i32_to_f32);
 f32_to_i32 :: fn(x: f32) i32 #builtin(.f32_to_i32);
 fmod :: fn(a: f32, b: f32) f32 #builtin(.fmod);
 fn pow(a: f32, b: f32) f32 #builtin(.pow);
-fn sqrt(x: f32) f32 #builtin(.sqrt) = ();
+fn sqrt(x: f32) f32 #builtin(.sqrt);
+fn floor(a: f32) f32 #builtin(.floor);
 
 main :: fn() void = 
     Easy'start(State);
 
 State :: @struct {
+    WIDTH :: 500; HEIGHT :: 500;
     pipe: Sg.Pipeline;
     shd: ?Sg.Shader;
-    params: Shaders.UniF;
+    uni: Shaders.UniF;
     dirty: bool;
     program_contains_t: bool;
     start_time: f64;
@@ -306,20 +353,37 @@ State :: @struct {
     input_dirty: bool;
     code: List(u8);
     show_generate_code: bool;
+    rand_index: i64;
+    i: i64;
+    examples: []Str;
 };
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     src := example_program;
     state.shd = .None;
     sapp.clipboard.enabled = true;
-    state.src = list(general_allocator());
-    state.error = list(general_allocator());
-    state.code = list(general_allocator());
+    a := general_allocator();
+    state.src = list(a);
+    state.error = list(a);
+    state.code = list(a);
     state.src&.push_all(src);
     state.need_recompile = true;
     state.input_dirty = true;
     state.dirty = true;
+    state.uni.rand_scale.v = (0.2, 0.2);
     fix_scale(state, sapp);
+    
+    p := optional_examples_path;
+    if import("@/lib/sys/fs.fr")'read_entire_file(a, p) { it |
+        it.len -= int(it.ends_with("\n"));
+        it := it.split("\n", a);
+        it&.shrink_to_fit();
+        state.examples = it.items();
+        @println("loaded % examples from %", it.len, p);
+    } else {
+        @eprintln("missing examples file %", p);
+    };
+    
     state.text&.setup(
         sg = sg,
         allocator = general_allocator(),
@@ -331,6 +395,7 @@ recompile :: fn(state: *State, sg: *Sg.Self) void = {
     state.need_recompile = false;
     state.dirty = true;
     state.start_time = timestamp_s();
+    state.rand_index = 0;
     @if(!state.input_dirty) return();  // pressed enter just to reset the time. keep the same shader. 
     state.input_dirty = false;
 
@@ -352,35 +417,37 @@ recompile :: fn(state: *State, sg: *Sg.Self) void = {
         state.error&.push_all(msg);
         return()
     };
+    state.uni.rand_calls.v = (0, 0);
+    for program_src { c |
+        state.uni.rand_calls&[0] += int(c == "r".ascii()).float().cast();
+    };
+    for palette_src { c |
+        state.uni.rand_calls&[1] += int(c == "r".ascii()).float().cast();
+    };
     @println("run: %", src);
 
+    vertex, fragment := base_shaders();
     state.input_dirty = false;
     state.code&.clear();
     f := @slice(program_f, palette_f);
     out := @ref u8.list(temp());
+    out.push_all(fragment);
+    ::reach_overloads();
     for f { f |
-            @fmt(state.code&, "%", f);
-        
-            @match(SOKOL_BACKEND) {
-                fn METAL_MACOS() => {
-                    Msl :: import("@/graphics/macos/shaders.fr");
-                    n := zeroed Msl.Counters;
-                    Msl'emit_function(f, out, n&);
-                }
-                fn WGPU() => {
-                    W :: import("@/graphics/web/shaders.fr");
-                    n := zeroed W.Counters;
-                    W'emit_function(f, out, n&);
-                }
-                @default => @panic("TODO: gpu/playground.fr new target");
-            };
+        @fmt(state.code&, "%", f);
+        c :: fn($s) => { S :: import(s); S'emit_function(f, out, @ref zeroed(S.Counters)); };
+        @match(SOKOL_BACKEND) {
+            fn METAL_MACOS() => c("@/graphics/macos/shaders.fr");
+            fn WGPU() => c("@/graphics/web/shaders.fr");
+            @default => @panic("TODO: gpu/playground.fr new target");
+        };
     };
     shader := out.items();
     
     // if it's not animated, don't bother redrawing the screen every frame. 
-    state.program_contains_t = src.contains("t");
+    state.program_contains_t = src.contains("t") || src.contains("r");
     
-    vertex, fragment := @run {
+    base_shaders :: fn() Ty(Str, Str) = @run {
         backend := SOKOL_BACKEND;
         vertex := {
             m := init_shader_module(ast_alloc());
@@ -404,9 +471,10 @@ recompile :: fn(state: *State, sg: *Sg.Self) void = {
     };
     
     // TODO: more direct way of it handling linking stuff together
+    // TODO: don't reallocate just to null terminate :SLOW
     shd_desc := Sg.ShaderDesc.zeroed();
     shd_desc.vertex_func.source = vertex.as_cstr();
-    shd_desc.fragment_func.source = @fmt_cstr("%\n%", fragment, shader);
+    shd_desc.fragment_func.source = out.items().as_cstr();
     @if(is_metal(SOKOL_BACKEND)) {
         shd_desc.vertex_func.entry = "main0";
         shd_desc.fragment_func.entry = "main0";
@@ -429,15 +497,12 @@ recompile :: fn(state: *State, sg: *Sg.Self) void = {
     //       (this should never generate invalid ir but should show internal error if there's a bug)
     shd := sg.make(shd_desc);
     state.shd = (Some = shd);
-    // TODO: destroy the old ones if not the first time
-    state.pipe = sg.make(
-        shader = shd,
-    );
+    state.pipe = sg.make(shader = shd);
 }
 
 // #position is in pixels, rescale 
 fix_scale :: fn(state: *State, sapp: *Sapp.Self) void = {
-    state.params.scale.v = (
+    state.uni.scale.v = (
         1.0 / sapp.width().float().cast(),
         1.0 / sapp.height().float().cast(),
     );
@@ -447,33 +512,33 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     state.show_generate_code = event.modifiers.get(.control) != 0;
     @match(event.type) {
         fn RESIZED() => fix_scale(state, sapp);
-        fn KEY_DOWN() => {
-            if event.key_code == .ENTER {
+        fn KEY_DOWN() => @match(event.key_code) {
+            fn LEFT() => state.next_example(-1);
+            fn RIGHT() => state.next_example(1);
+            fn ENTER() => {
                 state.need_recompile = true;
-            };
-            if event.key_code == .BACKSPACE && state.src.len > 0 {
-                state.input_dirty = true;
+            }
+            fn BACKSPACE() => if state.src.len > 0 {
                 state.src.len -= 1;
                 state.need_recompile = true;
+                state.input_dirty = true;
             };
-            if event.key_code == .C && event.modifiers.get(.super) != 0 {
+            fn C() => if event.modifiers.get(.super) != 0 {
                 sapp.set_clipboard_string(state.src.items().as_cstr()); 
             };
-        }
+            // need to still mark dirty if it's CTRL and program_contains_t=false
+            // TODO: the thing where modifiers is still set on the event where you release the key
+            @default => ();
+        };
         fn CLIPBOARD_PASTED() => {
-            @println("before paste: %", state.src.items());
-            state.src&.clear();
-            state.src&.push_all(sapp.get_clipboard_string().items());
-            state.input_dirty = true;
-            state.need_recompile = true;
-            state.need_recompile = true;
+            state.set_src(sapp.get_clipboard_string().items());
         }
         fn CHAR() => if event.modifiers.get(.super) == 0 {
             c: u8 = event.char_code.trunc();
             if event.char_code < 128 && valid_commands.contains(c) {
-                state.input_dirty = true;
                 state.src&.push(c);
                 state.need_recompile = true;
+                state.input_dirty = true;
             };
         }
         @default => return();
@@ -481,25 +546,51 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     state.dirty = true;
 }
 
+fn next_example(state: *State, delta: i64) void = {
+    @if(state.examples.len == 0) return();
+    state.i += delta;
+    state.i += state.examples.len * int(state.i < 0);
+    state.i -= state.examples.len * int(state.i >= state.examples.len);
+    state.set_src(state.examples[state.i]);
+}
+
+fn set_src(state: *State, src: Str) void = {
+    state.src&.clear();
+    state.src&.push_all(src);
+    state.need_recompile = true;
+    state.input_dirty = true;
+    state.dirty = true;
+}
+
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     if state.need_recompile {
         recompile(state, sg);
     };
-    if state.program_contains_t  {
+    w, h := (sapp.width().float().cast(), sapp.height().float().cast());
+    uni := state.uni&;
+    if state.program_contains_t {
         state.dirty = true;
         time := timestamp_s() - state.start_time;
-        state.params.time = time.cast();
+        uni.time = time.cast();
+        
+        step := int(cast(uni.rand_calls.x + uni.rand_calls.y * 3));
+        rand_i := state.rand_index&;
+        rand_i[] += step * int(cast(w * h));
+        // wrap when out of mantissa bits
+        rand_i[] -= int(rand_i[] > 1.shift_left(23)) * 1.shift_left(23);
+        uni.rand_index = rand_i[].float().cast();
     };
     @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
     
     sdtx := state.text.default_context&;
-    sdtx.canvas(sapp.width().float().div(1.75).cast(), sapp.height().float().div(1.75).cast());
-    sdtx.color = @if(state.input_dirty, 0xFF00FFFF, 0xFF005555);
+    sdtx.canvas(w.div(1.75), h.div(1.75));
+    sdtx.color = 0xFF005555;
     sdtx.put(state.src.items());
     sdtx.pos.y += 2;
     sdtx.pos.x = 0;
     // toggle colour so it's more likely to be visible (unless the last shader happens to toggle at the same rate)
-    sdtx.color = @if(state.params.time.mul(3).cast().int().mod(2) == 0, 0xFFFFFFFF, 0xFF000000);
+    // (meh: only if the last shader had program_contains_t)
+    sdtx.color = @if(state.uni.time.mul(3).cast().int().mod(2) == 0, 0xFFFFFFFF, 0xFF000000);
     sdtx.put(state.error.items());
     
     if state.show_generate_code {
@@ -507,6 +598,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sdtx.canvas(sapp.width().float().div(scale).cast(), sapp.height().float().div(scale).cast());
         sdtx.pos.y += cast(2 * scale * 1.75);
         sdtx.color = 0xFFFFFFFF;
+        sdtx.put(@tfmt("// t=%.%\n", uni.time, uni.time.mul(10).cast().int().mod(10)));
         sdtx.put(state.code.items());
     };
     
@@ -515,7 +607,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 
     if state.shd { _ |
         sg.apply_pipeline(state.pipe);
-        sg.apply_uniforms(0, state.params&.slice(1).interpret_as_bytes());
+        sg.apply_uniforms(0, state.uni&.slice(1).interpret_as_bytes());
         draw(sg = sg, base = 0, elements = 6, instances = 1);
     };
     sdtx.draw_layer(0);
