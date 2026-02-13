@@ -403,6 +403,7 @@ bufs: [][]u8 = (ptr = bit_cast_unchecked(i64, @run(*[]u8), buf_ptr), len = buf_l
 
 ## import_c
 
+- test `__attribute__((alias(foo)))`
 - the line numbers in my error messages are wrong sometimes!
   shows the right text tho so its not a massive deal but kinda cringe 
 - make sure my detect_include_guard is working on all the system headers 
@@ -446,6 +447,16 @@ as different types even when they're the same size.
   to put some code on either side to translate that to the normal abi. 
   probably have to deal with more types of relocations. 
   are you allowed to jmp between asm blocks? 
+
+```
+// // when trying to do "nvalid cast" in gen_cast because that happens for assignment/?: too. 
+// // means i can't add checks for using wrong struct anywhere 
+// adding the check for these breaks tests/external/raylibf.fr  
+// because i use it through `#include "[].frc"` so it doesn't know that 
+// the Color needed by the functions in the cached module is the same one redefined in the headers. 
+// and i can't just define the guard macro to make the headers do nothing 
+// because then it doesn't get the macros either. 
+```
 
 ### !! BROKEN !!
 

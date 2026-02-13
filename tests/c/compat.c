@@ -1,6 +1,6 @@
 #include "test.h"
 
-_Noreturn noreturn_fn(int restrict x) {
+_Noreturn noreturn_fn(int x) {
   exit(0);
 }
 

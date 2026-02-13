@@ -84,7 +84,7 @@ int main() {
   0x10.1p0;
   .1E4f;
 
-  ASSERT(4, sizeof(8f)); // TODO: are you supposed to allow float suffix without decimal? clang doesn't like it. 
+  ASSERT(4, sizeof(8.f));
   ASSERT(4, sizeof(0.3F));
   ASSERT(8, sizeof(0.));
   ASSERT(8, sizeof(.0));

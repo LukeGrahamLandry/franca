@@ -1,0 +1,119 @@
+
+// these tests are annoying because i don't care about the specific wording of 
+// the error message but i do have to check it because it matters that 
+// it's erroring for the right reason, not just that i messed up the test. 
+// so it's fine to update the tests if they break just for phrasing changes. 
+// also there's nothing special about which cases i choose,
+// i just went down the list of callsites for @error_tok. 
+
+invalid_c :: @const_slice(
+("too many", "#define A(a)\nA(1, 2);"),
+("too few", "#define B(a, b)\nB();"),
+("invalid pointer dereference", "void f() { int a; *a; }"),
+("dereferencing a void", "void f() { void *a = 0; *a; }"),
+("expected lvalue", "void f() { &0; }"),
+("expected lvalue", "void f() { int a; long *b = &(long) a; }"),
+("incomplete type", "void f() { struct S a; }"),
+("specifier is not allowed", "int f(extern int a);"),
+("typedef may not", "typedef static int a;"),
+("is not allowed", "int f(_Alignas(long) int a);"),
+("invalid type", "int float a;"),
+("after '...'", "int f(int a, ..., int b);"),
+("array length must be integer", "int x[1.0];"),
+("array length must be integer", "int x[(int*)0+2];"),
+("not an enum tag", "struct S { int a; }; enum S a;"),
+("declared void", "void f() { void a; }"),
+("name omitted", "void f() { int = 0; }"),
+("must not be initialized", "void f() { int x = 1; int a[x] = {0}; }"),
+("expected string literal", "void f() { asm(123); }"),
+("expected string literal", "asm(123);"),
+("cannot have register constraints", "asm(\"\" ::: \"memory\");"),
+("array bounds", "int a[2] = { [5] = 1, };"),
+("array bounds", "int a[2] = { [0 ... 3] = 1, };"),
+("is empty", "int a[2] = { [1 ... 0] = 1, };"),
+("expected a field designator", "struct { int a; } a = { .+ = 0 };"),
+("no such member", "struct { int a; } a = { .b = 0, };"),
+("unexpected", "struct { int a; } a = { [0] = 1 };"),
+("unexpected", "int a[1] = { .a = 0 };"),
+("field must be function pointer", "struct { int (a)(int); } b;"),
+("backing a bitfield cannot be _Atomic", "struct { _Atomic(int) a:1; } b;"),
+("typedef name omitted", "typedef 0 a;"),
+("invalid type after", "typedef a 0;"),
+("expected a string", "int f() asm(123);"),
+("name omitted", "int ();"),
+("name omitted", "int ()();"),
+("name omitted", "int a, *;"),
+("redeclared as a different kind of symbol", "int a; int a();"),
+("redefinition", "int a() {}; int a() {};"),
+("static declaration follows a non-static declaration", "int a(); static int a() {}"),
+("with a value", "extern int a = 0;"),
+("static assertion failed", "_Static_assert(0);"),
+("assign to const", "void a() { const int b = 0; b = 1; }"),
+("label", "void a() { 0:; }"),
+("implicit declaration of a function", "void a() { abc(); }"),
+("undefined", "void a() { abc; }"),
+("cannot take address of bit", "void a() { struct { int a:1; } a; &a.a; }"),
+("type not compatible with any generic", "void a() { _Generic(0.0, int*: 1, int: 2); }"),
+("sizeof(bitfield)", "void a() { struct { int a:1; } a; sizeof(a.a); }"),
+("sizeof(incomplete type)", "void a() { sizeof(struct S); }"),
+("labels-as-values is not supported", "void a() { b:; void *c = &&b; }"),
+("labels-as-values is not supported", "void a() { void *c; goto *c; }"),
+("not a function", "void a() { int b = 0; b(); }"),
+("too many", "int a(void); void b() { a(1); }"),
+("too few", "int a(int a); void b() { a(); }"),
+("stray return", "int a = return 0;"),
+("stray case", "void a() { case 0:; }"),
+("stray default", "void a() { default:; }"),
+("stray break", "void a() { break; }"),
+("stray continue", "void a() { continue; }"),
+("Case ranges are not supported", "void a() { switch(0) { case 0 ... 1:; } }"),
+("requires pointer", "void a() { __builtin_cas(0, 0, 0); }"),
+("too many", "void a() { __builtin_bswap(0, 0); }"),
+("too few", "void a() { __builtin_bswap(); }"),
+("incompatible", "void a() { struct { int a; } a; &a + a; }"),
+("neither side of subscript is a pointer", "void a() { struct { int a; } a; a + a; }"),
+("invalid operands", "void a() { int a; &a + &a; }"),
+("invalid operands", "void a() { int a; a - &a; }"),
+("not a struct", "void a() { int a; a.b; }"),
+("no such member", "void a() { struct { int a; } a; a.b; }"),
+("expected a numeric constant", "_Static_assert(\"\");"),
+("expected a constant", "void a(int a) { _Static_assert(a); }"),
+("only supports 32/64 bit", "void a(_Atomic(_Bool) *a) { __builtin_cas(a, 0, 1); }"),  // backend limitation
+// TODO: should error ("", "void a() { struct { int a; } a; a / a; }"),
+("invalid cast", "void a() { (struct { int a; }) 123; }"),
+("invalid cast", "void a() { struct { int a; } a; (short) a; }"),
+("invalid cast", "void a() { (float) a(); }"),
+);
+
+main :: fn() void = {
+    C :: import("@/examples/import_c/lib.fr");
+    Qbe :: C.Compile.Qbe;
+    
+    c := @ref zeroed(C.Compile.Ctx);
+    m := @ref zeroed(Qbe.Module);
+    Qbe'backend'init_module(m, (arch = .aarch64, os = .macos, type = .CachedEarly));
+    ctx := init_codegen_worker(m, false);
+    C'init_ctx(c, m, ctx);
+    for invalid_c { error, src |
+        c.arena_storage&.reset_retaining_capacity();
+        C'reset_ctx(c, m, ctx, c.arena_storage);
+        c.do_warnings = false;
+    
+        result := C'catch_call(c, void) {
+            tok := c.tokenize_string("", src);
+            tok  = c.C'Preprocess'preprocess(tok);
+            c.C'Compile'parse(tok);
+        };
+        @match(result) {
+            fn Ok() => @panic("expected error but succeeded\nWANT: %\n--- src\n%\n", error, src);
+            fn Err(msg) => {
+                ok := msg.contains(error);
+                @assert(ok, "failed for wrong reason or changed error message\nWANT: %\n--- found\n%\n--- src\n%\n", 
+                    error, msg, src);
+            }
+        };
+    };
+    @print("[ok] c: checked % errors\n", invalid_c.len());
+    drop(m);
+    c.arena_storage&.deinit();
+}

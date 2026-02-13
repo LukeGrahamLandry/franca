@@ -1,7 +1,16 @@
 
+## (Feb 13)
+
+- take out some things that clang and gcc both don't accept
+  - f suffix on literal without decimal
+  - restrict on non-pointer
+- add tests for c programs that should error
+  - caught a few crashes: int-ptr, not initilizing current_switch
+
 ## (Feb 12)
 
 - deduplicate some of the shader code. stop pasting libc math imports around. 
+- c: fix fault when skip_line hits eof
 
 ## (Feb 11)
 

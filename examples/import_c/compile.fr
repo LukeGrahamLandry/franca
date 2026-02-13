@@ -210,6 +210,8 @@ Ctx :: @rec @struct {
     current_framework: RawList(Str);
     
     inline_assembly: RawList(u8);
+    
+    do_warnings: bool;  // can manually disable when using as a library
 };
 
 TransformCall :: @FnPtr(c: *Ctx, obj: *Obj, task: *CodegenTask) void;
@@ -802,6 +804,7 @@ fn array_dimensions(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType #onc
     tok   = c.skip(tok, "]");
     ty    = c.type_suffix(rest, tok, ty);
 
+    @if(!expr.ty.is_integer()) @error_tok(c, tok, "array length must be integer");
     ::if(*CType);
     if ty.kind == .TY_VLA || !c.is_const_expr(expr) {
         c.vla_of(ty, expr)
@@ -1083,7 +1086,7 @@ fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr, first_decl
             @if(var.ty.size.ule(8)) c.gen_zero_var(var, tok);  
         };
         if(var.ty.size < 0,         => @error_tok(c, ty.name, "variable '%' has incomplete type", name));
-        if(var.ty.kind == .TY_VOID, => @error_tok(c, ty.name, "variable declared void"));
+        @debug_assert(var.ty.kind != .TY_VOID);
     };
     
     tok  // already ate the semicolon
@@ -1158,7 +1161,7 @@ fn array_designator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType, is_flexible
     if consume(tok&, tok, "...") {
         end = c.const_expr(tok&, tok);
         if(end >= ty.array_len.intcast() && !is_flexible, => @error_tok(c, tok, "array designator index exceeds array bounds"));
-        if(end < begin, => @error_tok(c, tok, "array designator range [%d, %d] is empty", begin, end));
+        if(end < begin, => @error_tok(c, tok, "array designator range [%, %] is empty", begin, end));
     };
 
     rest[] = c.skip(tok, "]");
@@ -1194,7 +1197,7 @@ fn struct_designator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *Member = 
 
 fn designation(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = @match(tok.kind) {
     fn @"["() => {
-        if(init.ty.kind != .TY_ARRAY, => @error_tok(c, tok, "array index in non-array initializer"));
+        @debug_assert(init.ty.kind == .TY_ARRAY, "unreachable: array index in non-array initializer");
 
         begin, end := c.array_designator(tok&, tok, init.ty, init.is_flexible);
 
@@ -1225,7 +1228,7 @@ fn designation(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = @
             init.mem = mem;
             c.designation(rest, tok, init.children[mem.idx.intcast()]);
         }
-        @default => @error_tok(c, tok, "field name not in struct or union initializer"); 
+        @default => panic("unreachable: field name not in struct or union initializer"); 
     };
     @default => {
         _ := consume(tok&, tok, "=");
@@ -2520,7 +2523,8 @@ fn parse(c: *Ctx, tok: *Token) void = {
             // :AsmNotYetImplemented
             c.eat(tok&, "asm");
             tok = c.skip(tok, "(");
-            src := tok.string_value().unwrap();  // TODO
+            src := tok.string_value()
+                || @error_tok(c, tok, "expected string literal for global asm");
             @if(c.have_seen_c_code && c.emitter.threaded) @error_tok(c, tok, "TODO: top level asm only allowed at the beginning of program (because im lazy!)");
             // TODO: NOT THREAD SAFE 
             Asm'parse_and_emit(c.m, src);
@@ -2955,6 +2959,13 @@ parse_bracketed :: fn(c, rest, tok) #prefix(.@"(") = {
             }
         } else {  // type cast
             node := parse_expr(c, rest, tok, .Unary);
+
+            c.add_type(node);
+            if !node.ty.identical(ty) && ty.kind != .TY_VOID {
+                @if(@is(ty.kind, .TY_STRUCT, .TY_UNION)) @error_tok(c, tok, "invalid cast dest");
+                @if(@is(node.ty.kind, .TY_STRUCT, .TY_UNION, .TY_VOID)) @error_tok(c, tok, "invalid cast source");
+            };
+            
             node := c.new_cast_force(node, ty);
             node.tok = start;
             node
@@ -3874,8 +3885,6 @@ fn stmt(c: *Ctx, rest: **Token, tok: *Token) *Node = {
 // 
 // This coerces the arguments. You still have to actually create the add later. 
 fn new_add(c: *Ctx, lhs: **Node, rhs: **Node, tok: *Token) void = {
-    //c.add_type(lhs);
-    //c.add_type(rhs);
     c.gen_expr(lhs[]);
     c.gen_expr(rhs[]);
 
@@ -3932,7 +3941,7 @@ fn new_sub(c: *Ctx, lhs: *Node, rhs: *Node, tok: *Token) *Node = {
             node
         };
         // VLA - num
-        @if(lhs.ty.base.kind == .TY_VLA) => {
+        @if(!lhs.ty.base.is_null() && lhs.ty.base.kind == .TY_VLA) => {
             vla_size := c.ir_node(c.ty_ulong, lhs.ty.base.vla_size, QbeNull, tok);
             rhs = c.new_binary2(.ND_MUL, rhs, vla_size, tok);
             node := c.new_binary(.ND_SUB, lhs, rhs, tok);
@@ -4207,6 +4216,7 @@ fn emit(c: *Ctx, op: Qbe.O, k: Qbe.Cls, to: Qbe.Ref, arg0: Qbe.Ref, arg1: Qbe.Re
 fn gen_par(c: *Ctx, ty: *CType) void = {
     obj := c.current_fn.expect("gen_par() in function context");
     if ty.params.len > ty.param_names.len {    
+        // TODO: unreachable? should be ICE
         // TODO: this is probably at the wrong place now since we alias types?
         @error_tok(c, ty.params[ty.param_names.len].name_pos, "parameter name omitted")
     }
@@ -4284,6 +4294,7 @@ fn gen_expr_inner(c: *Ctx, node: *Node) Qbe.Ref = {
         }
         @default => {
             if node.lhs.is_null() || node.rhs.is_null() || node.ty.is_null() {
+                // TODO: unreachable? should be ICE
                 @error_tok(c, node.tok, "gen_binary invalid arg for %", node.kind);
             };
             lhs_r := c.gen_expr(node.lhs);

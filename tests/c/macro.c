@@ -25,6 +25,8 @@ int ends_with(char* haystack, char* needle) {
     return strlen(haystack) >= strlen(needle) && strcmp(haystack + strlen(haystack) - strlen(needle), needle) == 0;
 }
 
+// TODO
+// int defined(int a) { return a; }
 
 // sure hope you don't loop on this
 const int FOO = 0;
@@ -256,6 +258,8 @@ int main() {
     ASSERT('"', M11( a!b    `""c)[6]);
     ASSERT('c', M11( a!b    `""c)[7]);
     ASSERT(0, M11( a!b    `""c)[8]);
+    ASSERT(4, sizeof(M11(abc)));  // 3 chars + null terminator = 4
+    ASSERT(1, sizeof(M11()));  // legal to pass no tokens to one parameter
 
 #define paste(x,y) x##y
     ASSERT(15, paste(1,5));
@@ -306,6 +310,12 @@ int main() {
     m = 4;
 #endif
     ASSERT(4, m);
+
+// TODO: is this supposed to work?
+// #define IsDefined(name) defined(name)
+// #if !IsDefined(M12)
+// #error "a"
+// #endif
 
 #if no_such_symbol == 0
     m = 5;
@@ -458,6 +468,9 @@ B() A  // don't stomp this new line
 //       so i think some versions of apple's AvailabilityInternal.h are just dumb and aren't testing anything because they only use real compilers that work.  
 //       foozle:46:33: error: function-like macro '__has_builtinxx' is not defined
 //          46 | #if defined(__has_builtinxx) && __has_builtinxx(__is_target_os)
-#if defined(__has_builtin) && __has_builtin(__is_target_os)
+#if defined(__has_builtin) && __has_builtin(__is_target_os_XXX)
 #error "thats not my department"
 #endif
+
+#if 1
+#endif  // no trailing new line at the end of this file!

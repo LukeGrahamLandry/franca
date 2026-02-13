@@ -53,7 +53,7 @@ fn is_hash(tok: *Token) bool #inline =
 fn skip_line(c: *Ctx, tok: *Token) *Token = {
     if(tok.at_bol, => return(tok));
     @warn_tok(c, tok, "extra tokens after directive will be discarded");
-    while => !tok.at_bol {
+    while => !tok.at_bol && tok.kind != .TK_EOF {
         tok = tok.next;
     };
     tok
@@ -201,7 +201,7 @@ replace_defined :: fn(c: *Ctx, tok: **Token) *Token = {
     @debug_assert(equal(start, "defined"));
     has_paren := consume(tok, tok.next, "(");
     
-    if(!tok[].valid_macro_name(), => @error_tok(c, start, "macro name must be an identifier"));
+    if(!tok[].valid_macro_name(), => @error_tok(c, start, "macro name must be an identifier (for defined)"));
     m := c.find_macro(tok[]);
     tok[] = tok[].next;
     if has_paren {
@@ -347,11 +347,11 @@ fn read_macro_args(c: *Ctx, rest: **Token, tok: *Token, m: *Macro) []MacroArg = 
     args  := MacroArg.list(params.len + int(va_args_name.is_some()), c.arena);
     first := true;
     for params { name | 
-        if !first {
-            tok = c.skip(tok, ",");
+        if !first && !consume(tok&, tok, ",") {
+            @if(equal(tok, ")")) @error_tok(c, tok, "too few arguments (% expected %)", m.name, m.params.len);
+            @error_tok(c, tok, "expected , after macro arg");
         };
         first = false;
-        // TODO: catch `too few arguments`
         args&.push(c.read_macro_arg_one(tok&, tok, false, name));
     };
 
@@ -360,17 +360,12 @@ fn read_macro_args(c: *Ctx, rest: **Token, tok: *Token, m: *Macro) []MacroArg = 
         args&.push(if equal(tok, ")") {
             (name = va_args_name, is_va_args = true, tok = c.new_eof(tok))  // :VaArgsSentinal
         } else {
-            //if (pp != params) :Audit
             if params.len > 0 {
                 tok = c.skip(tok, ",");
             };
             c.read_macro_arg_one(tok&, tok, true, va_args_name)
         });
     } else {
-        // TODO: they had: `else if (pp) error_tok(start, "too many arguments");`
-        //       but i don't understand how that could happen since the loop above 
-        //       was `for (; pp; pp = pp->next) {`, so you can't get out until pp is null? 
-        //       im confused
         if !equal(tok, ")") {
             @warn_tok(c, m.defined_at, "macro expected % args", params.len);
             @error_tok(c, start, "too many arguments")
@@ -823,7 +818,8 @@ fn include_file(c: *Ctx, tok: *Token, path: Str, filename_tok: *Token, fw: Str) 
         if(c.macros&.get(guard_name).is_some(), => return(Some = tok));
     };
 
-    tok2, end := c.tokenize_file(path, filename_tok) || return(.None);
+    tok2, end := c.tokenize_file(path) 
+        || return(.None);
 
     if detect_include_guard(c, tok2) { guard_name | 
         // detect_include_guard returns a borrow of the token but we need it to live past this file. 
