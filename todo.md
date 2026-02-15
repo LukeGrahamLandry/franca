@@ -1,3 +1,4 @@
+- emit_c doesn't work with FRANCA_MORE_CACHE=1
 - finish :AsmNotYetImplemented rn it only works at the beginning of the program if there are relocations 
 - elifdef, elifndef
 - fix the spam from examples/web/build.fr, clearly this isn't true because it builds. 
