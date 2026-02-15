@@ -1,7 +1,6 @@
 //! Warning: This is extremely limited to the point of being mostly useless!
 //! Eventually I want to make this a more serious target that supports a useful subset of the language. 
 //! But for now I just need trivial math for my little example programs. 
-//  (can't even do casts, loops, or function definitions)
 //
 // this file defines the shader ir and translates franca asts into it. 
 // each target has a backend that translates the ir into its prefered shader language 
@@ -10,6 +9,13 @@
 // :UGLY this is not something i would be proud of if it was the only thing i was doing. 
 //       seems like a problem. 
 // - my @swizzle syntax is garbage
+// - f64/i64 silently become f32/i32!
+// 
+// :ShaderLimitation things that i don't check yet but will fail compilation in the backend
+// - float2 has 8 byte alignment but mine doesn't so you have to pack your structs manually
+// - webgpu doesn't allow bool fields in uniforms
+// - webgpu requires 16 byte alignment for structs in uniforms.
+//   that seems garbage? am i doing something wrong?
 //
 
 //
@@ -23,9 +29,7 @@
 ShaderTexture2f :: @struct();
 ShaderSampler :: @struct();
 fn sample(t: ShaderTexture2f, s: ShaderSampler, uv: Vec2) Vec4 #metal_method = ();
-fn mul(m: Sgl.Matrix, v: Vec4) Vec4 = ();
-
-fract :: fn(a: Vec3) Vec3 = (); 
+fn mul(m: Sgl.Matrix, v: Vec4) Vec4 #builtin(.mul);
 
 fn Buf($T: Type) Type = {
     Self :: @struct(_: *T, ShaderBufferElement :: T);
@@ -76,6 +80,7 @@ fn choose_shader_impl($backend: RenderBackend, shd_desc: *Sg.ShaderDesc, $data: 
     };
 }
 
+// stage is NONE except for the one entry point function of each stage. 
 init_shader_function :: fn(m: *ShaderModule, stage: Sg.ShaderStage) *Function = {
     a := m.gpa;
     f := m.code&.push_uninit();
@@ -101,6 +106,8 @@ init_shader_module :: fn(a: Alloc) ShaderModule = {
         functions = init(a),
         imports = list(a),
         code = init(3, a),
+        loop_stack = list(a),
+        work = list(a),
     );
     m.types&.push(.Void);  // 0=placeholder
     m.type_lookup&.insert(void, 0);
@@ -111,10 +118,12 @@ init_shader_module :: fn(a: Alloc) ShaderModule = {
     m
 }
 
-// TODO: start at the entry and compile reachable fuctions as well. 
 compile_to_shader_source :: fn(fid: FuncId, backend: Sg.RenderBackend, stage: Sg.ShaderStage) Str = {
     m := init_shader_module(ast_alloc());
-    self := translate_to_shader(m&, fid, backend, stage);
+    translate_to_shader(m&, fid, backend, stage);
+    while => m.work&.pop() { fid |
+        translate_to_shader(m&, fid, backend, .NONE);
+    };
     emit_all(m&, backend)
 }
 
@@ -137,6 +146,7 @@ ShaderTarget :: @struct {
 };
 
 fn emit_all(m: *ShaderModule, backend: Sg.RenderBackend) Str = {
+    @debug_assert_eq(m.work.len, 0, "emit_all before compiled all reachable functions");
     t := ShaderTarget'impl(backend);
     out := @ref u8.list(m.gpa);
     n := t'prelude(m, out);
@@ -148,7 +158,7 @@ fn emit_all(m: *ShaderModule, backend: Sg.RenderBackend) Str = {
 
 // This must be called at comptime!
 #use("@/compiler/ast_external.fr") 
-fn translate_to_shader(m: *ShaderModule, fid: FuncId, backend: RenderBackend, stage: Sg.ShaderStage) Function = {
+fn translate_to_shader(m: *ShaderModule, fid: FuncId, backend: RenderBackend, stage: Sg.ShaderStage) void = {
     ::AutoHash(VarId, TrivialHasher); ::AutoEq(VarId);
     fr := current_compiler_context();
     func := get_function_ast(fid, true, true, true, true);
@@ -159,7 +169,7 @@ fn translate_to_shader(m: *ShaderModule, fid: FuncId, backend: RenderBackend, st
     if stage != .NONE {
         self.name = @if(SOKOL_BACKEND == .METAL_MACOS, @symbol main0, @symbol main);
     } else {
-        mangled := @tfmt("%__%", func.name.str(), fid);
+        mangled := fr'vtable'mangle_name(fr.data, fid); 
         self.name = fr.intern_string(mangled);
     };
     self.strings&.insert(self.name, fr.get_string(self.name));
@@ -185,7 +195,6 @@ fn translate_to_shader(m: *ShaderModule, fid: FuncId, backend: RenderBackend, st
     self.ret = self.type_name(e.ty);
     
     self.translate(e);
-    self[]
 }
 
 fn set_annotations(info: *IoField, annotations: []Annotation) void = {
@@ -230,6 +239,7 @@ fn translate(self: *Function, e: *FatExpr) void = {
     result := self.msl_expr(e);
     @if(e.ty != void) self.body&.push(op = .Return, a = result);
     self.body&.push(op = .End);
+    @debug_assert_eq(self.loop_stack.len, 0);
     @debug_assert(self.body.len < MAX_u32 && self.types.len < @as(i64) MAX_u16, "index overflow in shader ir");
 }
 
@@ -258,7 +268,6 @@ fn msl_expr2(self: *Function, e: *FatExpr) u32 = {
             place
         }
         fn Value(it) => {
-            op := AstOp.Constant;
             bits: u32 = @if_else {
                 @if(e.ty == f64) => {
                     // TODO: maybe trying to use doubles should be a hard error
@@ -270,18 +279,17 @@ fn msl_expr2(self: *Function, e: *FatExpr) u32 = {
                 @if(get_type_info_ref(e.ty).is(.Int) || e.ty == bool) => {
                     it.bytes.Small._0.trunc()
                 };
-                @if(e.ty == void) => {
-                    // TODO: avoid getting here
-                    op = .Nop;
-                    0
-                }
+                @if(e.ty == void) => return(0);  // TODO: avoid getting here?
+                @if(e.ty == Vec2) => return(self.const_vec(it.bytes&.bytes(), 2, .vec2, e.ty));
+                @if(e.ty == Vec3) => return(self.const_vec(it.bytes&.bytes(), 3, .vec3, e.ty));
+                @if(e.ty == Vec4) => return(self.const_vec(it.bytes&.bytes(), 4, .vec4, e.ty));
                 @else => {
                     debug_log_type(e.ty);
                     compile_error("unhandled expression value type in shader", e.loc)
                 };
             }; 
             
-            self.body&.push(op = op, a = bits, type = e_type);
+            self.body&.push(op = .Constant, a = bits, type = e_type);
             trunc(self.body.len - 1)
         }
         fn GetVar(it)      => self.locals&.get(it.id).unwrap();
@@ -301,11 +309,17 @@ fn msl_expr2(self: *Function, e: *FatExpr) u32 = {
             self.field_access(ptr, e.ty, name)
         }
         fn Block(it) => {
-            // TODO: ret_label
+            if it.ret_label { it |
+                self.m.loop_stack&.push(label = it);
+            };
             each it.body { e |
                 self.msl_stmt(e);
             };
-            self.msl_expr(it.result)
+            result := self.msl_expr(it.result);
+            if it.ret_label { _ |
+                self.m.loop_stack&.pop();
+            };
+            result
         }
         fn Call(it) => {
             args_e := it.arg.items();
@@ -313,8 +327,29 @@ fn msl_expr2(self: *Function, e: *FatExpr) u32 = {
                 self.msl_expr(args_e.index(i))
             };
             
+            // TODO: support more shapes of control flow
+            if it.f.ty == LabelId || @is(fr.get_type(it.f.ty), .Label) {
+                @assert(it.f.expr&.is(.Value) && args.len == 1);
+                id: LabelId = it.f.expr.Value.bytes.Small._0.from_index();
+                
+                if it.arg.ty != void {
+                    @assert(self.m.loop_stack[0].label == id, "label call with value should have been desugared");
+                    self.body&.push(op = .Return, a = args[0]);
+                    return(0);
+                };
+                
+                each_rev self.m.loop_stack& { it |
+                    if it.outside_loop {
+                        @ct_assert(id == it.label, e.loc, "shaders: can't break out of nested loop. TODO: continue");
+                        self.body&.push(op = .Break);
+                        return(0);
+                    };
+                };
+                @ct_assert(false, e.loc, "shaders: can't break without loop");
+            };
+            
             fid := fr.assert_get_func_id(it.f);
-            func := fr.get_function(fid);
+            func := get_function_ast(fid, true, false, false, false);
 
             each func.annotations { a |
                 if a.name == @symbol builtin {
@@ -323,36 +358,23 @@ fn msl_expr2(self: *Function, e: *FatExpr) u32 = {
                 }
             }
             
+            // no 64 bit ints in shader land but most of my stuff defaults to i64 
+            // and its convenient to just reuse code by silently falling back to i32
+            // so i sometimes need to insert these to satisfy the type checker. 
+            if func.name == (@symbol intcast) && func.body&.is(.NewIntrinsic) {
+                return args[0];
+            };
+            
             // TODO: need to be more structured about this because what if you have user declared overloads of these. 
+            builtin_type :: fn(t: Type) bool =>
+                t == ShaderTexture2f || t.is_vec() || @is(fr.get_type(t), .Int, .F32, .F64, .Bool, .Ptr);
+            @if(builtin_type(args_e[0].ty) && builtin_type(func.ret.Finished))
             if AstOp.from_name(func.name.str()) { op |
                 return(self.emit_builtin(op, args, e_type));
             }
 
             // not a builtin -> user defined function
-            mangled := @tfmt("%__%", func.name.str(), fid);
-            s := fr.intern_string(mangled);
-            mangled := fr.get_string(s);
-            self.strings&.insert(s, mangled);
-            new := self.functions&.insert(fid, mangled).is_none();
-            // TODO: collect reachable functions and compile them
-            if func.body&.is(.Empty) && new {
-                    args := func.arg.bindings&;
-                    import: Signature = (
-                        name = s, 
-                        input = list(args.len, self.gpa),
-                        ret = self.type_name(func.finished_ret.unwrap()),
-                    );
-                    each args { a |
-                        ty := a.unwrap_ty();
-                        info: IoField = (name = zeroed(Symbol), type = self.type_name(ty));
-                        if !a.nullable_tag.is_null() {
-                            set_annotations(info&, a.nullable_tag.items());
-                        };
-                        import.input&.push(info);
-                    };
-                    self.imports&.push(import);
-            };
-            
+            self.m.ref_func(fr, fid);
             for args { a |
                 self.body&.push(op = .Arg, a = a);
             };
@@ -381,21 +403,66 @@ fn msl_expr2(self: *Function, e: *FatExpr) u32 = {
             
             return join;
         }
-        fn Addr(it) => {
-            panic("Addr expor")
-        }
         fn Loop(it) => {
-            println("TODO: this isn't going to work because i can't call labels yet");
+            if self.loop_stack&.last() { it |
+                it.outside_loop = true;
+            };
             self.body&.push(op = .Loop);
             self.msl_expr(it[]);
             self.body&.push(op = .End);
             0
         }
+        fn Unreachable() => 0;  // TODO: something that will typecheck in the output code if this isn't for a statement
         @default => {
             debug_log_ast(e[]);
             compile_error("unhandled expression type in shader", e.loc)
         };
     }
+}
+
+fn ref_func(self: *ShaderModule, fr: CompCtx, fid: FuncId) void = {
+    func := get_function_ast(fid, true, false, true, false);
+    mangled := fr'vtable'mangle_name(fr.data, fid); 
+    s := fr.intern_string(mangled);
+    mangled := fr.get_string(s);
+    self.strings&.insert(s, mangled);
+    new := self.functions&.insert(fid, mangled).is_none();
+    if new {
+        args := func.arg.bindings&;
+        import: Signature = (
+            name = s, 
+            input = list(args.len, self.gpa),
+            ret = self.type_name(func.finished_ret.unwrap()),
+        );
+        each args { a |
+            ty := a.unwrap_ty();
+            info: IoField = (name = zeroed(Symbol), type = self.type_name(ty));
+            if !a.nullable_tag.is_null() {
+                set_annotations(info&, a.nullable_tag.items());
+            };
+            import.input&.push(info);
+        };
+        // msl needs forward declarations
+        self.imports&.push(import);
+    };
+    if new && func.body&.is(.Normal) {
+        self.work&.push(fid);
+    };
+}
+
+fn const_vec(self: *Function, bytes: []u8, n: i64, op: AstOp, t: Type) u32 = {
+    f32_ty := self.type_name(f32);
+    t := self.type_name(t);
+    a := @ref zeroed(Array(u32, 4));
+    range(0, n) { i |
+        a[i] = self.body.len.trunc();
+        self.body&.push(op = .Constant, type = f32_ty, a = bytes&.pop_type(f32)[].bitcast());
+    };
+    @if(n > 3) range(0, n) { i |
+        self.body&.push(op = .Arg, a = a[i]);
+    };
+    self.body&.push(op = op, type = t, a = a[0], b = a[1], c = a[2]);
+    self.body.len.trunc() - 1
 }
 
 fn flat(e: *FatExpr) void = {
@@ -494,10 +561,6 @@ fn msl_stmt(self: *Function, e: *FatStmt) void = {
         fn Set(it) => {
         // THIS IS ALL A GARBAGE WASTE OF TIME
             if it.place&.as_field_access() { ptr, name |
-                if is_vec(ptr.ty) {
-                    //panic("Aa");
-                    //ptr = ptr.
-                }
                 if ptr.as_var_place() { place |
                     place := self.msl_expr(place);
                     value := self.msl_expr(it.value&);
@@ -623,7 +686,8 @@ fn as_var_place(e: *FatExpr) ?*FatExpr = {
     (Some = e)
 }
 
-fn type_name(self: *Function, type: Type) u16 = {
+fn type_name(self: *Function, type: Type) u16 = self.m.type_name(type);
+fn type_name(self: *ShaderModule, type: Type) u16 = {
     if self.type_lookup&.get(type) { it |
         return(it);
     };
@@ -695,7 +759,7 @@ fn swizzle_bits(s: Symbol) u32 = {
 fn emit_bits(m: *ShaderModule, inst: *Ast, out: *List(u8)) void = {
     @debug_assert_eq(inst.op, .Constant);
     info := m.types[inst.type.zext()]&;
-    @debug_assert(info.is(.Scalar));
+    @debug_assert(info.is(.Scalar), "%", info.tag());
     emit_bits(out, inst.a, info.Scalar);
 }
 
@@ -736,6 +800,7 @@ common_shader_operator :: fn(op: AstOp) Str = @match(op) {
     fn ge() => ">=";
     fn shift_left() => "<<";
     fn bit_xor() => "^";
+    fn mod() => "%";
     @default => "";
 };
 
@@ -789,6 +854,7 @@ AstOp :: @enum(u16) (
     min, max,
     pow, atan2,
     shift_right_arithmetic, bit_xor, shift_left, shift_right_logical, fmod, 
+    mod,
     
     vec3, 
     sample, mix, clamp, 
@@ -850,12 +916,16 @@ ShaderModule :: @struct {
     gpa: Alloc;
     imports: List(Signature);
     code: BucketArray(Function);
+    work: List(FuncId);
     // these mirror fr.pool/fr.functions so it can be used at runtime as well 
-    // TODO: use them for wgpu emit as well
     strings: HashMap(Symbol, Str);
     functions: HashMap(FuncId, Str);
     types: List(SType);  // 0 is void // T
     type_lookup: HashMap(Type, u16);
+    
+    // scratch space used while building a single function
+    loop_stack: List(Loop);
+    Loop :: @struct(label: LabelId, outside_loop := false);
 };
 
 fn string(self: *Function, s: Symbol) Str = self.m.string(s);

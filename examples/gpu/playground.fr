@@ -335,6 +335,7 @@ main :: fn() void =
 
 State :: @struct {
     WIDTH :: 500; HEIGHT :: 500;
+    HIGH_DPI :: true;
     pipe: Sg.Pipeline;
     shd: ?Sg.Shader;
     uni: Shaders.UniF;
@@ -444,23 +445,22 @@ recompile :: fn(state: *State, sg: *Sg.Self) void = {
     
     base_shaders :: fn() Ty(Str, Str) = @run {
         backend := SOKOL_BACKEND;
-        vertex := {
-            m := init_shader_module(ast_alloc());
-            self := translate_to_shader(m&, Shaders.vs, backend, .VERTEX);
-            emit_all(m&, backend)
-        };
+        vertex := compile_to_shader_source(Shaders.vs, backend, .VERTEX);
         
         m := init_shader_module(general_allocator());
-        translate_to_shader(m&, Shaders.fs, backend, .FRAGMENT);
         
         s := Type.scope_of(Stolen);
         src := @ref u8.list(ast_alloc());
+        // can't rely on normal reachibility because these are called from the code generated at runtime. 
         for get_constants(s) { name |
             fid := get_constant(FuncId, s, name).unwrap();
-            func := get_function_ast(fid, true, true, true, true);
-            translate_to_shader(m&, fid, backend, .NONE);
+            m&.ref_func(current_compiler_context(), fid);
         };
         
+        translate_to_shader(m&, Shaders.fs, backend, .FRAGMENT);
+        while => m.work&.pop() { fid |
+            translate_to_shader(m&, fid, backend, .NONE);
+        };
         fragment := emit_all(m&, backend);
         (vertex, fragment)
     };
@@ -612,7 +612,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 
 mangle_name :: fn(fid: FuncId) Ty(Symbol, Str) #fold = {
     name := get_function_ast(fid, false, false, false, false)[].name;
-    name := sym(@tfmt("%__F%", name.str(), fid.as_index())); // TODO: mangle in a consistant place
+    fr := current_compiler_context();
+    name := fr'vtable'mangle_name(fr.data, fid).sym(); 
     (name, name.str())
 }
 

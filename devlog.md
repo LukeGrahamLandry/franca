@@ -1,4 +1,12 @@
 
+
+## (Feb 15)
+
+- fr: fix tracy assertion, don't log discarded overload error
+- shaders: break, compile reachable functions, Values(Vec), early return
+- now that i have stuff, make mandelbrot do the float-float precision thing. 
+  - spent so long on metal defaulting to fastmath and fucking it up. 
+
 ## (Feb 13)
 
 - take out some things that clang and gcc both don't accept

@@ -1,8 +1,6 @@
 - emit_c doesn't work with FRANCA_MORE_CACHE=1
 - finish :AsmNotYetImplemented rn it only works at the beginning of the program if there are relocations 
 - elifdef, elifndef
-- fix the spam from examples/web/build.fr, clearly this isn't true because it builds. 
-  `ambigous overload for void -> void;0 matching options` 
 - this should work on wasm too. 
 ```
 export function w $main() {
@@ -11,7 +9,6 @@ export function w $main() {
     ret 0
 }
 ```
-- qbe_frontend.fr: parse `retc %s.64, :T3`
 - TODO: for the hare urls, they do let you just download a tar file:
   https://git.sr.ht/~lukegrahamlandry/franca/archive/5671fd344d80207427f37d391435fa986839bcb3.tar.gz
 - use peek_cstr everywhere i `s: []u8; s: CStr = (ptr = s.ptr); s := s.str();`

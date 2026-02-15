@@ -1,9 +1,10 @@
 // - a rectangle without using a buffer
 // - fragment shader to draw mandelbrot set
 // - controls: scroll to zoom, click and drag to pan
+//             up/down arrow to change max steps
+// - switches to f32 pairs to get more precision when you zoom deep enough
 
-// TODO: float-float for more zoom
-// TODO: real loops for dynamic step limit
+// TODO: adaptive resolution. scale down while you're moving around
 
 #use("@/graphics/lib.fr");
 
@@ -23,54 +24,80 @@ Shaders :: @struct {
         (pos = @vec(xy, 0.0, 1.0))
     }
     OutF :: @struct(frag_color: Vec4 #colour);
-    // TODO: float2 has 8 byte alignment in msl but not for me
-    UniF :: @struct(scale: f32, _msl_pad: f32 = 0.0, offset: Vec2);
-    // FIXME PLEASE. it works tho :)
+    UniF :: @struct {
+        scale: F64;
+        offset: V64; 
+        limit: i32;   // how many iterations before defaulting to black
+        wrap: i32;   // how many colours in the pattern
+        high_prec: i32;  // bool :ShaderLimitation
+    };
     fs   :: fn(in: OutV #input, uni: UniF #uniform(0)) Shaders.OutF = {
         c := @swizzle in.pos.xy;
+        c: V64 = vec2(c.x, c.y);
         c = c * vec2(uni.scale);
         c += uni.offset;
-        z := vec2(0.0);
         
-        zSq := z * z;
-        i :f32= 0.0;
-        zy :f32= 0.0;
-        zx :f32= 0.0;
-        one :f32= 1.0;
-        inline_range(0, 100) { _ |
-            z.y = z.x * 2.0 * z.y;
-            z.x = zSq.x - zSq.y;
-            z = z + c;
-            zSq = z * z;
-            
-            i = i + @if(zSq.x + zSq.y < 4.0, 0.0, one / 10.0);
+        i := if uni.high_prec == 1 {
+            // much slower so only do it once zoomed in too far
+            mandel(F64, c.x, c.y, new(0), new(4), uni.limit.intcast())
+        } else {
+            mandel(f32, c.x.float(), c.y.float(), 0, 4, uni.limit.intcast())
         };
+        if i >= uni.limit.intcast() {
+            return(frag_color = splat(0));
+        }
         
-        cc := @vec(i, 1.0, 1.0, 1.0); 
-        K := @vec(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
-        six := vec3(6.0);
-        p := abs(fract((@swizzle cc.xxx) + (@swizzle K.xyz)) * six - (@swizzle K.www));
-        out := mix(@swizzle K.xxx, clamp(p - (@swizzle K.xxx), vec3(0.0), vec3(1.0)), cc.y) * (@swizzle cc.zzz);
-        out2 := @if(zSq.x + zSq.y < 4.0, vec3(0.0), out);
-        (frag_color = @vec(out2, 1.0))
-        //(frag_color = @vec(uni.scale, uni.offset, 1.0))
-        //(frag_color = @vec((@swizzle in.pos.xy) / vec2(10.0), 0.0, 1.0))
+        i := i.intcast().mod(uni.wrap).i32_to_f32() / uni.wrap.i32_to_f32();
+        out := hsv2rgb(@vec(i, 1.0, 1.0)); 
+        (frag_color = @vec(out, 1.0))
     }
 };
+
+mandel :: fn($F: Type, cx: F, cy: F, zero: F, four: F, limit: i64) i64 #generic = {
+    i := 0;
+    z, zSq := (vec2(zero), vec2(zero));
+    
+    while => i < limit && zSq.x + zSq.y < four {
+        z.y = (z.x + z.x) * z.y;
+        z.x = zSq.x - zSq.y;
+        z.x += cx;
+        z.y += cy;
+        zSq = z * z;
+        i += 1;
+    };
+    
+    i
+}
+
+// TODO: this is the third paste of this. deduplicate them. 
+hsv2rgb :: fn(cc: Vec3) Vec3 = {
+    K := @vec(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    p := abs(fract((@swizzle cc.xxx) + (@swizzle K.xyz)) * 6 - vec3(3));
+    mix(vec3(1), clamp(p - vec3(1), vec3(0), vec3(1)), cc.y) * (@swizzle cc.zzz)
+}
 
 main :: fn() void = 
     Easy'start(State);
 
 State :: @struct {
+    HIGH_DPI :: true;
     pipe: Sg.Pipeline;
     params: Shaders.UniF;
     dirty: bool;
+    did_fastmath_warning: bool;
 };
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
-    state.params = (scale = 1.0 / 300.0, offset = (v = (-3.0, -1.0)));
+    state.params = (
+        scale = new(@as(f32) (1.0 / 300.0 / sapp.dpi_scale)), 
+        offset = vec2(@as(f32)-3.0, -1.0), 
+        limit = 500,
+        wrap = 30,
+        high_prec = 0,
+    );
     shd_desc := Sg.ShaderDesc.zeroed();
     choose_shader_impl(SOKOL_BACKEND, shd_desc&, Shaders);
+    shd_desc.fragment_func.metal_disable_fast_math = true;
     shd_desc.uniform_blocks&[0] = (
         stage = .FRAGMENT,
         size = size_of(Shaders.UniF),
@@ -84,40 +111,55 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 }
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    // the scale/offset computations here use F64 instead of f64 
+    // because that's the form that needs to be given to the gpu. 
+    // could do real f64 here but that seems like more hassle
+    // and this isn't a hot path so doesn't matter.
     @match(event.type) {
         fn MOUSE_SCROLL() => {
-            min_scale: f32 = 0.00000001;
-            max_scale: f32 = 0.2;
+            min_scale := double(1.0 / 1.shift_left(50).float());
+            max_scale := double(0.2);
             if(state.params.scale < min_scale && event.scroll_y > 0, => return());
             if(state.params.scale > max_scale && event.scroll_y < 0, => return());
             // center the zoom on the mouse pointer instead of at (0, 0)
             // by calculating how much the offset at the mouse position would change between the zoom levels, 
             // and counteract that by applying translation 
-            delta := event.scroll_y * state.params.scale / -100.0;
+            delta := new(event.scroll_y) * state.params.scale / new(@as(f32) -100.0);
             if state.params.scale + delta < min_scale {
-                delta = (min_scale - state.params.scale) / 3.0;
+                delta = (min_scale - state.params.scale) / new(3.0);
             };
             if state.params.scale + delta > max_scale {
-                delta = (max_scale - state.params.scale) / 3.0;
+                delta = (max_scale - state.params.scale) / new(3.0);
             };
-            pos: Vec2 = (v = (event.mouse_x, event.mouse_y));
+            pos: V64 = vec2(event.mouse_x, event.mouse_y);
             pos0 := pos * vec2(state.params.scale);
             pos1 := pos * vec2(state.params.scale + delta);
             state.params.offset -= (pos1 - pos0);
             state.params.scale += delta;
-            state.dirty = true;
+            state.params.high_prec = int((1.0 / state.params.scale.double()) > 1.shift_left(23).float()).intcast();
+            if state.params.high_prec == 1 && !state.did_fastmath_warning && SOKOL_BACKEND == .WGPU {
+                state.did_fastmath_warning = true;
+                @eprintln("webgpu doesn't let me turn off fast math,\nso if this looks like garbage it's not my fault :(");
+            };
         }
-        fn MOUSE_MOVE() => if event.modifiers.get(.left_mouse) != 0 {
+        fn MOUSE_MOVE() => {
+            @if(event.modifiers.get(.left_mouse) == 0) return();
             speed := -state.params.scale;
-            delta := vec2(event.mouse_dx, event.mouse_dy);
+            delta: V64 = vec2(event.mouse_dx, event.mouse_dy);
             state.params.offset += delta * vec2(speed);
-            state.dirty = true;
         }
-        fn RESIZED() => {
-            state.dirty = true;
+        fn RESIZED() => ()
+        fn KEY_DOWN() => {
+            delta: i32 = @match(event.key_code) {
+                fn UP() => 1;
+                fn DOWN() => -1;
+                @default => return();
+            }
+            state.params.limit = clamp(state.params.limit + delta, 1, 1000);
         }
-        @default => ();
-    }
+        @default => return();
+    };
+    state.dirty = true;
 }
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -134,3 +176,101 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sg.commit();
 };
 
+// Extended-Precision Floating-Point Numbers for GPU Computation, Andrew Thall
+// https://andrewthall.org/papers/df64_qf128.pdf
+F64 :: @struct {
+    v: Vec2;
+    _a: f32 = 0; _b: f32 = 0;   // :ShaderLimitation
+
+    twoSumComp :: fn(ari: Vec2, bri: Vec2) Vec4 = {
+        s := ari+bri;
+        v := s-ari;
+        e := (ari-(s-v))+(bri-v);
+        vec4(s.x, e.x, s.y, e.y)
+    }
+    
+    quickTwoSum :: fn(a: f32, b: f32) Vec2 = {
+        s := a+b;
+        e := b-(s-a);
+        vec2(s, e)
+    }
+    
+    df64_add :: fn(a: Vec2, b: Vec2) Vec2 = {
+        st := twoSumComp(a, b);
+        st.y += st.z;
+        st_xy := quickTwoSum(st.x, st.y);
+        st_xy.y += st.w;
+        st_xy := quickTwoSum(st_xy.x, st_xy.y);
+        st_xy
+    }
+    
+    df64_diff :: fn(a: Vec2, b: Vec2) Vec2 = df64_add(a, -b);
+
+    split2 :: fn(a: f64) Vec2 = {  // cpu only
+        t := a * float(1.shift_left(29) - 1);
+        ahi := t-(t-a);
+        alo := a-ahi;
+        vec2(cast(ahi), cast(alo))
+    }
+    
+    split :: fn(a: f32) Vec2 = {
+        t := a * 4097.0;
+        ahi := t-(t-a);
+        alo := a-ahi;
+        vec2(ahi, alo)
+    }
+    
+    twoProd :: fn(a: f32, b: f32) Vec2 = {
+        p := a*b;
+        aS := split(a);
+        bS := split(b);
+        err := ((aS.x*bS.x - p) + aS.x*bS.y + aS.y*bS.x) + aS.y*bS.y;
+        vec2(p, err)
+    }
+    
+    df64_mult :: fn(a: Vec2, b: Vec2) Vec2 = {
+        p := twoProd(a.x, b.x);
+        p.y += a.x * b.y;
+        p.y += a.y * b.x;
+        quickTwoSum(p.x, p.y)
+    }
+    
+    df64_div :: fn(b: Vec2, a: Vec2) Vec2 = {
+        xn := (@as(f32)1.0)/a.x;
+        yn := vec2(b.x*xn);
+        diff := df64_diff(b, df64_mult(a, yn));
+        diff := diff.x;
+        prod := twoProd(xn, diff);
+        df64_add(yn, prod)
+    }
+    
+    df64_lt :: fn(a: Vec2, b: Vec2) bool = {
+        a.x < b.x || (a.x == b.x && a.y < b.y)
+    }
+    
+    df64_eq :: fn(a: Vec2, b: Vec2) bool = {
+        a.x == b.x && a.y == b.y
+    }
+};
+
+fn new(a: f32) F64 = (v = vec2(a, 0));
+fn add(a: F64, b: F64) F64 = (v = F64'df64_add(a.v, b.v));
+fn sub(a: F64, b: F64) F64 = (v = F64'df64_diff(a.v, b.v));
+fn mul(a: F64, b: F64) F64 = (v = F64'df64_mult(a.v, b.v));
+fn div(a: F64, b: F64) F64 = (v = F64'df64_div(a.v, b.v));
+fn neg(a: F64) F64 = new(0) - a;
+fn lt(a: F64, b: F64) bool = F64'df64_lt(a.v, b.v);
+fn eq(a: F64, b: F64) bool = F64'df64_eq(a.v, b.v);
+fn gt(a: F64, b: F64) bool = !(a < b) && !(a == b);
+fn vec2(a: F64) V64 = (x = a, y = a);
+fn vec2(a: F64, b: F64) V64 = (x = a, y = b);
+fn vec2(a: f32, b: f32) V64 = (x = new(a), y = new(b));
+// would be nice if this was Vec(F64, 2) but rn not worth the hassle of faking unions for gpu :ShaderLimitation
+V64 :: @struct(x: F64, y: F64);  
+fn add(a: V64, b: V64) V64 = (x = a.x + b.x, y = a.y + b.y);
+fn sub(a: V64, b: V64) V64 = (x = a.x - b.x, y = a.y - b.y);
+fn mul(a: V64, b: V64) V64 = (x = a.x * b.x, y = a.y * b.y);
+fn double(a: f64) F64 = (v = F64'split2(a));
+// TODO: make this work as a.v.x :ShaderLimitation
+fn double(a: F64) f64 = { a := a.v; a.x.cast() + a.y.cast() }
+fn float(a: F64) f32 = { a := a.v; a.x }

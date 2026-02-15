@@ -107,6 +107,7 @@ export const imports = {
             let G = get_G();
             if (status == 0n) throw "called exit 0";
             cancelAnimationFrame(G.animation_id);
+            console.trace();
             throw new Error("called exit " + Number(status));
         },
         jit_instantiate_module: (ptr, len, first_export, table_index) => {
