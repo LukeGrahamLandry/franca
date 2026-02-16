@@ -43,16 +43,15 @@ function, native code should also let you do that.
 - float: trunc, ceil, floor, nearest, copysign
 - saturating conversions
 - memory.copy: allow non-constant size. allow overlapping where you need to copy backwards. 
-- br_table
-- memory ops: size/fill/drop
+- memory ops: fill/drop
 - more atomic ops
 - atomic wait with timeout
-- more table ops: size/fill/copy/init/drop
-- 0x1B version of select
+- more table ops: fill/copy/init/drop
 - multivalue returns
 - simd
-- externref
+- externref as a first class value (rn only allowed in table for call_indirect)
 - reference types: null/is_null/func/as_non_null/br_on_null/eq/br_on_non_null
 - gc
 - exception handling
 - reference typed strings
+- atomic.notify: return number woken (mine always says 0)

@@ -3448,7 +3448,7 @@ if_ :: fn(c, rest, tok) #prefix(.if, .ND_STMT) = {
 };
 switch_ :: fn(c, rest, tok) #prefix(.switch, .ND_STMT) = {
     c.enter_scope();  // :WackyConstScope
-    payload := temp().box_zeroed(Qbe.SwitchPayload);
+    payload := @ref zeroed(Qbe.SwitchPayload);
     c.eat(tok&, "switch");
     tok = c.skip(tok, "(");
     cond := c.parse_expr(tok&, tok, .None);
@@ -3465,10 +3465,6 @@ switch_ :: fn(c, rest, tok) #prefix(.switch, .ND_STMT) = {
     };
     payload.src = c.b;
     payload.cases = new(0);
-    
-    if payload.src.jmp.type == .Jxxx && !c.speculate {
-        payload.src.jmp.type = .switch;
-    };
 
     sw := c.current_switch;
     c.current_switch = (Some = payload);
@@ -3476,7 +3472,7 @@ switch_ :: fn(c, rest, tok) #prefix(.switch, .ND_STMT) = {
     brk_label := c.new_block(); 
     c.brk_label = (Some = brk_label);
 
-    c.b = c.new_block();  // TODO: should be redundant
+    c.b = c.new_block();
     c.stmt(rest, tok);
     c.jmp_if_unterminated(brk_label);
     c.current_switch = sw;
@@ -3487,12 +3483,10 @@ switch_ :: fn(c, rest, tok) #prefix(.switch, .ND_STMT) = {
         payload.default = brk_label;
     };
     
-    if payload.src.jmp.type == .switch {
-        payload.src.jmp.arg = INT(c.f.switch_count.zext());
-        if c.f.switch_count == 0 {
-            c.f.switches = new(1);
-        };
-        push(c.f.switches&, c.f.switch_count&, payload[]);
+    if payload.src.jmp.type == .Jxxx && !c.speculate {
+        n := c.f.new_switch(payload.case_count, payload.src, payload.inspect, payload.default);
+        c.f.switches[n].cases = payload.cases;
+        c.f.switches[n].case_count = payload.case_count;
     };
     c.leave_scope();
     c.new_node(.ND_STMT, tok)

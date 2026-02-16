@@ -6,6 +6,11 @@
 - shaders: break, compile reachable functions, Values(Vec), early return
 - now that i have stuff, make mandelbrot do the float-float precision thing. 
   - spent so long on metal defaulting to fastmath and fucking it up. 
+- import_wasm pass more spec test
+  - Inst.Else switches out of unreachable mode.
+    also i wasn't doing the stack right, Else reuse the phis from If.
+  - SelectK, BrTable, (memory/table).size
+  - allow br to implicit block around function. 
 
 ## (Feb 13)
 

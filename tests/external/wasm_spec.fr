@@ -14,6 +14,8 @@ main :: fn() void = {
         !skip.contains(raw_name)
     };
     any_fails := false;
+    a: Arena.Allocator = init(general_allocator(), 20);
+    verbose := cli_args().contains(fn(it) => it[] == "-v");
     enumerate wast_files { i, name |
         mark := temp().mark();
         name := name[];
@@ -45,16 +47,16 @@ main :: fn() void = {
             @panic("error at byte % of %/%:%:%%", json.current, tests_dir, json_name, line, col, json.error);
         };
         
-        @println("=== % (%/%) ===", raw_name, i, wast_files.len);
-        @println("%/%", tests_dir, name);
-        rt: Rt.Engine = init_for_jit(temp(), ""); rt := rt&;
+        @if(verbose) @println("=== % (%/%) ===", raw_name, i, wast_files.len);
+        @if(verbose) @println("%/%", tests_dir, name);
+        rt: Rt.Engine = init_for_jit(a&.borrow(), ""); rt := rt&;
         instance: ?*Rt.Instance = .None;
         passed, total := (0, 0);
         each it.commands { it |
             continue :: local_return;
             @match(it.type) {
                 fn module() => {
-                    @println("module %/%", tests_dir, it.filename.unwrap());
+                    @if(verbose) @println("module %/%", tests_dir, it.filename.unwrap());
                     wasm := read_entire_file_or_crash(temp(), it.filename.unwrap());
                     mod := rt.compile(wasm);
                     exports: Rt.ExportsEnv = (_ = init(temp()));
@@ -88,7 +90,9 @@ main :: fn() void = {
         };
         drop(rt);
         temp().reset(mark);
+        a&.reset_retaining_capacity();
     };
+    a&.deinit();
     Syscall'chdir(start.as_cstr()).unwrap();
     @assert(!any_fails, "didn't pass all tests");
 }
@@ -137,16 +141,12 @@ skip :: @const_slice(
     "names", 
     // multiple return values
     "br", "if", "fac", "call", "func",
-    // if without else
-    "if", "stack", "labels", "local_get",
+    "loop", "block", "call_indirect", 
     // more instructions. ceil, etc.
     "f32", "f64", "float_misc", "f32_bitwise", "f64_bitwise", 
-    // 0x1B select
-    "nop", "loop", "block", "left-to-right", 
+    "left-to-right", 
     // complex constant expressions
     "data",
-    // br_table
-    "load", "store", "return", "switch", "unwind", 
     // idk. it wants me to change the bits of infinities/subnormals from what strtod gives me?
     "const",
     // might be the same as "const" but maybe i do it wrong, idk
@@ -157,6 +157,7 @@ skip :: @const_slice(
     "token", "func_ptrs", 
     // parse more Element kinds. currently only flags=0 is supported.
     "binary", "ref_func", "table_get", "table_set", "return_call_indirect",
+    "binary-leb128", 
     // i spam "skipping custom section"
     "custom",
     // no point since i don't run assert_trap/assert_malformed/etc. anyway also  don't parse the wast myself. 
@@ -165,28 +166,22 @@ skip :: @const_slice(
     "utf8-invalid-encoding", "utf8-custom-section-id", "utf8-import-module", "utf8-import-field", 
     // keep multiple modules around in the host
     "exports",
-    // !! i crash
-    "forward",
+    "memory_grow",
     // exceptions
     "imports",
-    // zero init undefined local
-    "local_set",
-    // "invalid instruction output type Kl in storeh" my "this being Kl is subtle" hack
-    "endianness",
-    // externref table.size
-    "table_grow", "table_size",
+    // externref
+    "table_grow",  // arg/ret
+    "table_size",  // ref.null
     // saturating
     "conversions", 
-    // memory.size
-    "memory_grow", "memory_size", "memory_trap", 
     // tail call
     "return_call", 
-    // float globals
-    "unreachable", "call_indirect", 
-    // !! safety check
-    "binary-leb128", 
     // !! fails
     "memory_redundancy", "float_literals", "float_memory", "address", 
+    "local_get",  // 0x43d010599999999a_Kd vs 0x43d0029999a9999a_Kd
+    "unreachable",  // panic! Expected Else only inside If
+    "return",       //        problem is `return; if(a) b; else c;` doesn't get skipped properly
+    "local_set",  // 56_Kl vs 4614613358185179136_Kl
 );
 
 Wast :: @struct {

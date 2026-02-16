@@ -130,17 +130,19 @@ fn declare_functions(m: *Qbe.Module, w: *WasmModule, a: Alloc) Ty([]Qbe.Sym, []W
 
 fn const_eval_wasm_expr(expr: []u8) Ty(i64, Qbe.Cls) = {
     o := @as(Wasm.Inst) expr[0];
-    @assert(@is(o, .I32_Const, .I64_Const), "TODO: complex expr");
-    v, _, ok := read_leb128_signed(expr.rest(1));
-    @debug_assert(ok, "bad constant expression");
-    (v, @match(o) {
-        fn I32_Const() => .Kw;
-        fn I64_Const() => .Kl;
-        fn F32_Const() => .Ks;
-        fn F64_Const() => .Kd;
-        @default => @panic("unhandled op in const_eval_wasm_expr");
-    })
-} 
+    v, n, k := @match(o) {
+        fn F32_Const() => (u32.cast_front_unaligned(expr.rest(1)).zext(), 4, .Ks);
+        fn F64_Const() => (i64.cast_front_unaligned(expr.rest(1)), 8, .Kd)
+        @default => {
+            @assert(@is(o, .I32_Const, .I64_Const), "TODO: complex expr %", o);
+            v, r, ok := read_leb128_signed(expr.rest(1));
+            @debug_assert(ok, "bad constant expression");
+            (v, expr.len - r.len - 1, @if(o == .I32_Const, Qbe.Cls.Kw, .Kl))
+        };
+    };
+    @debug_assert_eq(expr[1 + n], Wasm.Inst.End.raw(), "TODO: complex expr (expected End after %)", o);
+    (v, k)
+}
 
 // the rest of this file handles compiling one wasm function body to one Qbe.Fn. 
 // stack -> ssa, locals -> mutable temporaries, structured control flow -> cfg, block params -> phi nodes. 
@@ -216,6 +218,9 @@ fn translate_func(self: *LoadWasm, code: *Wasm.Func, signature: *Wasm.FuncType) 
             k := local.type.cls();
             range(0, local.count) { _ |
                 self.locals[i] = self.f.newtmp(@tfmt("L%", i), k);
+                // zero if undefined. sad that this adds a bunch of junk for the backend to remove. 
+                // TODO: profile self-compile to make sure it's not a big deal
+                self.f.emit(.copy, k, self.locals[i], Qbe.ConZero, QbeNull);
                 i += 1;
             };
         };
@@ -223,9 +228,10 @@ fn translate_func(self: *LoadWasm, code: *Wasm.Func, signature: *Wasm.FuncType) 
     };
     // note: more alloc8 instructions are added to f.start as needed
     
-    // you can't br targtting the outer scope of the function so only `current` matters. 
+    // there's an implicit block around the body of the function
+    // which you can br with the same effect as Return.
     self.blocks&.push(current = self.link_new_block(), continue = Qbe.Blk.ptr_from_int(0), break = Qbe.Blk.ptr_from_int(0), loop = false);
-    self.push_block(preleb(.EmptyBlock).intcast(), false);
+    self.push_block(empty(), self.return_types, false);
     
     self.emit_the_code();
     
@@ -246,7 +252,7 @@ BlockEntry :: @struct(continue: *Qbe.Blk, break: *Qbe.Blk, current: *Qbe.Blk, lo
 // doing this iteratively instead of recursively is cute because you can't run out of callstack 
 // on pathological functions but the BlockEntry/IfNode bookkeeping is super confusing :(
 fn emit_the_code(self: *LoadWasm) void = {
-    IfNode :: @struct(src: *Qbe.Blk, block_type: i64 /* needed for op else */, stack: []Qbe.Ref);
+    IfNode :: @struct(src: *Qbe.Blk, block_type: i64 /* needed for op else */);
     if_stack := list(IfNode, temp());
     while => self.cursor < self.src.len {
         continue :: local_return;
@@ -256,7 +262,7 @@ fn emit_the_code(self: *LoadWasm) void = {
         self.cursor += 1;
         inst := @as(Wasm.Inst) b;
         
-        if self.get_blk()[].jmp.type != .Jxxx && !@is(inst, .End, .Unreachable, .Nop) {
+        if self.get_blk()[].jmp.type != .Jxxx && !@is(inst, .End, .Unreachable, .Nop, .Else) {
             // the block has unreachable code
             self.cursor -= 1;
             self.skip_current_instruction();
@@ -306,6 +312,7 @@ fn emit_the_code(self: *LoadWasm) void = {
                     value := self.stack&.pop().expect("stack for store value");
                     addr := self.stack&.pop().expect("stack for store addr");
                     addr := self.compute_address(addr, offset.bitcast());
+                    encoding.cls = .Kw;  // HACK: undo "this being Kl is subtle"
                     a0 = value; a1 = addr; r = QbeNull; 
                 };
             };
@@ -396,16 +403,21 @@ fn emit_the_code(self: *LoadWasm) void = {
                 block_type := self.read_s();
                 old := self.get_blk();
                 old.jmp = (type = .jnz, arg = self.stack&.pop().expect("arg on stack for If"));
-                stack := self.stack.items().clone(temp()).items();
-                if_stack&.push(src = old, block_type = block_type, stack = stack); 
+                if_stack&.push(src = old, block_type = block_type); 
                 self.push_block(block_type, false);
+                continuation := self.blocks[self.blocks.len - 1].break;
                 old.s1 = self.get_blk();
+                old.s2 = continuation; // used if no else
             }
             fn Else() => {
-                self.end_block(false);
-                if_node := if_stack&.pop().expect("Else only inside If");
-                self.stack = assume_owned(if_node.stack, temp());
-                self.push_block(if_node.block_type, false);   // TODO: feels like this wont work. i just don't generate if/else yet
+                break := self.blocks[self.blocks.len - 1].break;
+                self.end_block(true);
+                if_node := if_stack&.pop()
+                    || @panic("else outside if (in $%)", self.f.name());
+                self.phi_to_stack(if_node.src);
+                new := self.link_new_block();
+                self.blocks&.push(continue = new, break = break, current = new, loop = false);
+                @debug_assert_eq(if_node.src.jmp.type, .jnz);
                 if_node.src.s2 = self.get_blk();
             }
             fn Br() => {
@@ -430,23 +442,50 @@ fn emit_the_code(self: *LoadWasm) void = {
                 current[] = src.s2;
                 self.stack = stack;
             }
+            fn BrTable() => {
+                src := self.get_blk();
+                inspect := self.stack&.pop().expect("arg for br_table");
+                r := self.f.newtmp("switch", .Kl);
+                self.f.emit(.extuw, .Kl, r, inspect, Qbe.Null);
+                n: i64 = self.read_u().bitcast();
+                b := temp().alloc_init(*Qbe.Blk, n + 1, fn(_) => self.parse_branch_target());
+                
+                case := self.f.new_switch(n, src, r, b[b.len - 1]);
+                ss := self.f.switches[case]&;
+                
+                // TODO: only clone the part that gets popped. 
+                stack := self.stack.items().clone(temp());
+                enumerate b.slice(0, b.len - 1) { i, s |
+                    s := s[];
+                    // careful not to call stack_to_phi multiple times if default used explicitly
+                    // TODO: same applies to other labels being reused
+                    if !identical(s, ss.default) {
+                        self.stack_to_phi(src, s);
+                        self.stack = stack;
+                        push(ss.cases&, ss.case_count&, (s, i));
+                    }
+                };
+                self.stack_to_phi(src, ss.default);
+            }
             fn Drop() => {
                 self.stack&.pop().expect("stack for store drop");
+            }
+            fn SelectK() => {
+                a := @slice(self.stack[self.stack.len - 2], self.stack[self.stack.len - 3]);
+                k := Qbe.Cls.Kl;
+                for a { a |
+                    if self.f.get_tmp(a) { t |
+                        k = t.cls;
+                    };
+                };
+                self.do_select(k);
             }
             fn Select() => {
                 count := self.read_u();
                 @assert_eq(count, 1, "TODO: multi-value");
                 k := cls(@as(Wasm.ValType) @as(u8) self.src[self.cursor]);
                 self.cursor += 1;
-                @assert(k.is_int(), "TODO: select on floats");
-
-                result := self.f.newtmp("select", k);
-                cond := self.stack&.pop().expect("stack for sel-cond");
-                f := self.stack&.pop().expect("stack for sel-false");
-                t := self.stack&.pop().expect("stack for sel-true");
-                self.f.emit(.sel0, .Kw, QbeNull, cond, QbeNull);
-                self.f.emit(.sel1, k, result, t, f);
-                self.stack&.push(result);
+                self.do_select(k);
             }
             fn AtomicPrefix() => {
                 opcode := self.read_u();
@@ -498,6 +537,17 @@ fn emit_the_code(self: *LoadWasm) void = {
             @default => self.choose_runtime_call(start_cursor);
         }
     }
+}
+
+fn do_select(self: *LoadWasm, k: Qbe.Cls) void = {
+    @assert(k.is_int(), "TODO: select on floats");
+    result := self.f.newtmp("select", k);
+    cond := self.stack&.pop().expect("stack for sel-cond");
+    f := self.stack&.pop().expect("stack for sel-false");
+    t := self.stack&.pop().expect("stack for sel-true");
+    self.f.emit(.sel0, .Kw, QbeNull, cond, QbeNull);
+    self.f.emit(.sel1, k, result, t, f);
+    self.stack&.push(result);
 }
 
 fn choose_runtime_call(self: *LoadWasm, start: i64) void = {
@@ -747,8 +797,11 @@ fn get_blk(self: *LoadWasm) *Qbe.Blk =
 
 fn push_block(self: *LoadWasm, block_type: i64, loop: bool) void = {
     arg, ret := self.decode_block_type(block_type);
+    push_block(self, arg, ret, loop)
+}
+
+fn push_block(self: *LoadWasm, arg: []Wasm.ValType, ret: []Wasm.ValType, loop: bool) void = {
     ::DerefEq(Wasm.ValType);
-    
     old := self.blocks[self.blocks.len - 1]&;
     new := self.link_new_block();
     init_empty_phis(self.f, new, arg);
@@ -928,7 +981,7 @@ fn skip_current_instruction(self: *LoadWasm) void = {
         return();
     };
     
-    if @is(inst, .Return, .Nop, .Unreachable, .End, .Else, .Drop, .I32_EqZero, .I64_EqZero) {
+    if @is(inst, .Return, .Nop, .Unreachable, .End, .Else, .Drop, .I32_EqZero, .I64_EqZero, .SelectK) {
         return();
     }
     
@@ -953,6 +1006,12 @@ fn skip_current_instruction(self: *LoadWasm) void = {
             self.cursor += 2;
             return();
         };
+        fn BrTable() => {
+            range(0, self.read_u().bitcast() + 1) { _ |
+                self.read_u();
+            };
+            return();
+        }
         @default => ();
     };
     self.match_runtime_call(start)
