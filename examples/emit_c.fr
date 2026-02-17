@@ -13,7 +13,6 @@
 //```
 // - gcc: stack smashing detected
 // - CVariadic
-// - sar
 // - copy_bytes_static -> memmove? set_bytes -> memset? because mine do unaligned stores. 
 //  - not a perf thing, with -O2, clang notices what im doing either way
 // - not address sanitizer clean: "load of misaligned address", "applying zero offset to null pointer"
@@ -109,6 +108,7 @@ fn emit_body(self: *Emit, f: FuncId) void #once = {
             return()
         }
         fn FrcImport(it) => {
+            @assert(!DISABLE_IMPORT_FRC, "% requires !DISABLE_IMPORT_FRC (edit examples/emit_c.fr)", fmt_func(self.program, f));
             @fmt(self.out, " {\n");
             start := self.out.len;
             indented self {
@@ -681,7 +681,6 @@ fn emit_intrinsic(self: *Emit, p: Placement, op: *NewIntrinsicPayload, t: Type, 
         fn xor() => "^";
         fn shl() => "<<";
         fn shr() => ">>";
-        fn sar() => ">>";  // TODO
         fn byteswap() => return(emit_builtin_call(@if(k == .Kl, "__builtin_bswap64", "__builtin_bswap32")));
         fn clz() => return(emit_builtin_call_nonzero(64, @if(k == .Kl, "__builtin_clzl", "__builtin_clz")));
         fn ctz() => return(emit_builtin_call_nonzero(64, @if(k == .Kl, "__builtin_ctzl", "__builtin_ctz")));
@@ -706,7 +705,7 @@ fn emit_intrinsic(self: *Emit, p: Placement, op: *NewIntrinsicPayload, t: Type, 
         @default => {
             cc: i32 = 0;
             if !iscmp(o, k&, cc&) {
-                if @is(o, .rotr, .rotl) {
+                if @is(o, .rotr, .rotl, .sar) {
                     return emit_builtin_call(@tfmt("%%", o, k)); 
                 };
                 @panic("/*TODO: % %*/", o, k)
@@ -737,7 +736,7 @@ fn emit_intrinsic(self: *Emit, p: Placement, op: *NewIntrinsicPayload, t: Type, 
     };
     // -fsanitize=undefined avoid ub for signed overflow and when shift distance wraps
     unsigned := unsigned || @is(o, .add, .sub, .mul, .udiv, .urem, .shl, .shr);
-    shift := @is(o, .shl, .shr, .sar);
+    shift := @is(o, .shl, .shr);
     // shift := shift && (expr.is_none() || !expr.Some.items()[0].expr&.is(.Value));
     arg_ty := self.program.arg_types(arg_ty);
     self.declare_now(p&, t) {
@@ -1427,6 +1426,9 @@ pump :: fn(comp: *SelfHosted, fns: []FuncId) Str = {
         static u32 rotrKw(u32 a, u32 n) { n=n&31; return (a >> n) | (a << (32 - n)); }
         static u64 rotlKl(u64 a, u32 n) { n=n&63; return (a << n) | (a >> (64 - n)); }
         static u64 rotrKl(u64 a, u32 n) { n=n&63; return (a >> n) | (a << (64 - n)); }
+        
+        static u32 sarKw(u32 a, u32 n) { n=n&31; return ((i32)a) >> n; }
+        static u64 sarKl(u64 a, u32 n) { n=n&63; return ((i64)a) >> n; }
     """);
     @fmt(out&, "\n");
     

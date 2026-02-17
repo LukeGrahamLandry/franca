@@ -19,11 +19,13 @@
 AstExternal :: import("@/compiler/ast_external.fr");
 #use("@/backend/lib.fr");
 
-ENABLE_JIT :: true;
+FEAT_JIT :: true;
+FEAT_THREADS :: true;
+FEAT_PNG :: false;  // true adds dependency on stb_image_write
 
 fn main() void = {
     vtable := ImportVTable.zeroed();
-    @if(ENABLE_JIT) AstExternal'fill_backend_vtable(vtable&);
+    @if(FEAT_JIT) AstExternal'fill_backend_vtable(vtable&);
     import("@/lib/crash_report.fr")'hook_backtrace();
     impl(vtable&);
 }
@@ -61,6 +63,7 @@ fn impl(v: *ImportVTable) void = {
     
     if !args.hush {
         out := u8.list(temp());
+        draw :: @if(FEAT_PNG, draw_png, draw_ppm);
         draw(out&, pixels, args.width);
         if args.o == "" {
             print(out.items());
@@ -71,10 +74,33 @@ fn impl(v: *ImportVTable) void = {
 }
 
 render :: fn(p: *Program, width: i64, v: *ImportVTable) Ty(Qbe.BSet, i64, i64) = {
-    N := max(log(width, 2) - 3, 1);
+    i: Interval = (min = -1.0, max = 1.0);
+    i: Interval2 = (x = i, y = i);
+    w: Work = (
+        p = p, width = width, v = v, i = i, 
+        pixels = init_bitset(width * width),
+        depth = max(log(width, 2) - 3, 1) - 1,
+        yes = @ref 0, no = @ref 0, 
+    );
+    if FEAT_THREADS {
+        threads := list(*Thread, 4, temp());
+        for_quads(i) { i |
+            w := temp().boxed(Work, w);
+            w.i = i;
+            threads&.push(start_thread_data(Work, w, render2));
+        };
+        for(threads, join);
+    } else {
+        render2(w&);
+    };
+    (w.pixels, w.yes[], w.no[])
+}
+
+render2 :: fn(a: *Work) void = {
+    p, N, v := (a.p, a.depth, a.v);
 
     m := zeroed QbeModule;
-    if ENABLE_JIT {
+    if FEAT_JIT {
         init_default_module_dyn(m&, v, (type = .JitOnly, os = query_current_os(), arch = query_current_arch()));
         do_imports(m&);
     } else {
@@ -86,12 +112,11 @@ render :: fn(p: *Program, width: i64, v: *ImportVTable) Ty(Qbe.BSet, i64, i64) =
         f = temp().alloc_uninit(Qbe.Fn, N+2),
         vals = temp().alloc_uninit(f32, n),
         ints = temp().alloc_uninit(Interval, n),
-        pixels = init_bitset(width * width),
+        w = a,
         top = zeroed F,
         copy = temp().alloc_zeroed(Qbe.Ref, n),
         jit_at = max(0, N - 3),
-        width = width, 
-        enable_jit = ENABLE_JIT,
+        enable_jit = FEAT_JIT,
     );
     each s.f { f |
         f.start = temp().box_zeroed(Qbe.Blk);
@@ -101,11 +126,8 @@ render :: fn(p: *Program, width: i64, v: *ImportVTable) Ty(Qbe.BSet, i64, i64) =
     default_init(f, m&);
     compile_program(f, p);
     
-    i: Interval = (min = -1.0, max = 1.0);
-    quad_rec(s&, (x = i, y = i), N);
-    @if(ENABLE_JIT)
-    v'drop_qbe_module(QbeModule.raw_from_ptr(m&));
-    (s.pixels, s.yes, s.no)
+    quad_rec(s&, a.i, N);
+    @if(FEAT_JIT, v'drop_qbe_module(QbeModule.raw_from_ptr(m&)), drop(m&))
 }
 
 Interval2 :: @struct {
@@ -115,17 +137,25 @@ Interval2 :: @struct {
 
 RecState :: @struct {
     f: []Qbe.Fn;
-    pixels: Qbe.BSet;
     vals: []f32;
     ints: []Interval;
-    yes := 0;
-    no := 0;
     top: F;
     copy: []Qbe.Ref;
     jit_at: i64;
     n := 0;
-    width: i64;
     enable_jit: bool;
+    w: *Work #use;
+}
+
+Work :: @struct {
+    p: *Program;
+    width: i64;
+    depth: i64;
+    v: *ImportVTable;
+    i: Interval2;
+    pixels: Qbe.BSet;
+    yes: *i64;
+    no: *i64;
 }
 
 fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
@@ -148,7 +178,7 @@ fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
             }
         };
         if (known.max < 0.0 || known.min > 0.0) {
-            s.yes += 1;
+            s.yes[] += 1;
             return();
         };
     }
@@ -156,7 +186,7 @@ fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
     dead_code(s, f);
     renumber(f);
 
-    @if(ENABLE_JIT)
+    @if(FEAT_JIT)
     if s.enable_jit && depth == s.jit_at {
         mark := mark_temporary_storage();
         f := dup(f);
@@ -166,7 +196,7 @@ fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
     }
     
     if depth == 0 {
-        s.no += 1;
+        s.no[] += 1;
         if !s.enable_jit {
             iter_intervals(s.width, int.x, int.y) { x, y, i |
                 hit := interpret(f, s.vals, x, y) > 0.0;
@@ -175,7 +205,7 @@ fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
                 };
             };
         } else {
-            @if(!ENABLE_JIT) unreachable();
+            @if(!FEAT_JIT) unreachable();
             draw(s.width, s.pixels, s.top, int.x, int.y);
         }
         return();
@@ -258,18 +288,6 @@ fn compile(f: *Qbe.Fn, name: Str) F = {
     f
 }
 
-fn maybe_fill(f: *Qbe.Fn, int: Interval2, pixels: Qbe.BSet) bool = {
-    r := f.start.jmp.arg;
-    if(r.rtype() != .RCon, => return(false));
-    hit := f.get_constant(r)[].bits.d > 0.0;
-    if hit {
-        iter_intervals(int.x, int.y) { x, y, i |
-            pixels&.bsset(i);
-        }
-    };
-    true
-}
-
 // since i only append to con/tmp and they don't have any useful information, 
 // the functions can just share and i don't need to spend time copying them. 
 fn dup(dest: *Qbe.Fn, src: *Qbe.Fn) void = {
@@ -299,21 +317,24 @@ fn dup(f0: *Qbe.Fn) *Qbe.Fn = {
 fn interpret(f: *Qbe.Fn, vals: []f32, x: f64, y: f64) f32 = {
     vals[64+0] = x.cast();
     vals[64+1] = y.cast();
+    
+    GET :: fn(r: Qbe.Ref) f32 => @match(rtype(r)) {
+        fn RTmp() => { vals[r.val()] }
+        fn RCon() => { f.get_constant(r).bits().bitcast().cast() }
+        fn RNull() => NaN;
+        @default => unreachable();
+    };
     for_insts_forward f.start { i |
         @match(i.op()) {
-            fn copy() => @match(rtype(i.arg&[0])) {
-                fn RTmp() => { vals[i.to.val()] = vals[i.arg&[0].val()]; }
-                fn RCon() => { vals[i.to.val()] = f.get_constant(i.arg&[0]).bits().bitcast().cast(); }
-                @default => ();
-            };
+            fn copy() => { vals[i.to.val()] = GET(i.arg&[0]); }
             fn par() => ();
             fn nop() => ();
             @default => {
                 if @is(i.op(), .arg, .call) {
                     @panic("TODO: abs, exp, ln, cos, sin");
                 };
-                a: u32 = vals[i.arg&[0].val()].bitcast();
-                b: u32 = vals[i.arg&[1].val()].bitcast();
+                a: u32 = GET(i.arg&[0]).bitcast();
+                b: u32 = GET(i.arg&[1]).bitcast();
                 fold :: import("@/backend/opt/fold.fr").do_fold;
                 r := fold(i.op(), .Ks, a.zext(), b.zext());
                 vals[i.to.val()] = (@as(u32) r.trunc()).bitcast();
@@ -345,7 +366,7 @@ fn draw(width: i64, out: Qbe.BSet, f: @FnPtr(x: f64, y: f64, z: f64) f64, x_int:
     };
 }
 
-fn draw(out: *List(u8), pixels: Qbe.BSet, width: i64) void = {
+fn draw_ppm(out: *List(u8), pixels: Qbe.BSet, width: i64) void = {
     out.reserve(width*width*12+width+15);
     @fmt(out, "P3 % % 255\n", width, width);
     range_rev(0, width) { y |
@@ -353,10 +374,16 @@ fn draw(out: *List(u8), pixels: Qbe.BSet, width: i64) void = {
             i := y * width + x;
             hit := bshas(pixels&, i);
             c := @if(hit, 0, 255);
-            @fmt(out, "% % % ", c, c, c);
+            out.len += write_int_to_buffer(out.maybe_uninit.rest(out.len), c);
+            out.push_assume_capacity(" ".ascii());
+            out.len += write_int_to_buffer(out.maybe_uninit.rest(out.len), c);
+            out.push_assume_capacity(" ".ascii());
+            out.len += write_int_to_buffer(out.maybe_uninit.rest(out.len), c);
+            out.push_assume_capacity(" ".ascii());
         };
-        @fmt(out, "\n");
+        out.push_assume_capacity("\n".ascii());
     };
+    @assert_le(out.len, out.maybe_uninit.len);
 }
 
 fn do_imports(m: *QbeModule) void = {
@@ -663,3 +690,35 @@ fn OptMap($T: Type) Type = {
 }
 
 #use("@/lib/sys/fs.fr");
+#use("@/lib/sys/threads.fr");
+
+fn draw_png(out: *List(u8), pixels: Qbe.BSet, width: i64) void = {
+    data := temp().alloc_uninit(u8, width*width);
+    range(0, width) { y |
+        range(0, width) { x |
+            i := y * width + x;
+            hit := bshas(pixels&, i);
+            i := (width - y - 1) * width + x;
+            data[i] = @if(hit, 0, 255);
+        };
+    };
+    
+    #use(Stb);
+    callback: stbi_write_func : fn(context, data, size) = {
+        data := u8.ptr_from_raw(data).slice(size.zext());
+        List(u8).ptr_from_raw(context).push_all(data);
+    };
+    res := stbi_write_png_to_func(callback, List(u8).raw_from_ptr(out), intcast width, intcast width, 1, u8.raw_from_ptr(data.ptr), intcast width);
+    @assert(res != 0, "failed to write image");
+}
+
+Stb :: {
+    @assert(FEAT_PNG);
+    root := Foreign'stb();
+    Ffi  :: import("@/examples/import_c/ffi.fr");
+    c_source := @tfmt("""
+        #define STB_IMAGE_WRITE_IMPLEMENTATION
+        #include "%/stb_image_write.h"
+    """, root);
+    Ffi'include(current_compiler_context(), c_source)
+}
