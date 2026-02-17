@@ -1,4 +1,11 @@
 
+## (Feb 16)
+
+- emit_c: attempt simple cases of FuncImpl.FrcImport 
+  so can turn off DISABLE_IMPORT_FRC and build the whole compiler. 
+- prospero: renumber with a packed array and simplify the copy elide logic. 
+  surprising improvement: 230 -> 190. 
+  also better to compile another level down the tree so do it more often but with smaller functions. 170. 
 
 ## (Feb 15)
 

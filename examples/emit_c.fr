@@ -3,9 +3,15 @@
 // which when compiled by clang (or my import_c/cc.fr) can jit examples/kaleidoscope.fr. 
 // there are many things that are still broken. 
 // ---
-// - gcc doesn't have __builtin_rotate_xxx
+// - clang -O2 works on macos but not linux
 // - get_stack_base_for_tls is probably ub. use asm instead?
-// - FuncImpl.FrcImport
+//```
+//__attribute__((naked))
+//static i64 get_stack_base_for_tls__920() {
+//    asm("sub x0, sp, 8\nand x0, x0, -16777216\nret");
+//}
+//```
+// - gcc: stack smashing detected
 // - CVariadic
 // - sar
 // - copy_bytes_static -> memmove? set_bytes -> memset? because mine do unaligned stores. 
@@ -13,6 +19,8 @@
 // - not address sanitizer clean: "load of misaligned address", "applying zero offset to null pointer"
 // - decide if i care about doing things in a way thread sanitizer understands
 // - make it work with tcc `error: incompatible types for redefinition of 'write'`
+// - import_c aot works but -r faults: 
+//   franca examples/emit_c.fr -i examples/toy/hello2.fr -o target/a.c && franca examples/import_c/cc.fr target/a.c -r
 
 Emit :: @struct(
     program: *SelfHosted,
@@ -27,6 +35,7 @@ Emit :: @struct(
     current_block_is_dead := false,
     prev_cas0: ?Str = .None,
     locals: HashMap(Type, List(Str)),
+    need_math_h: *bool,
 );
 
 ReturnTarget :: @struct(
@@ -37,13 +46,14 @@ ReturnTarget :: @struct(
 
 Placement :: @tagged(Assign: Str, Declare: Str, NewMemory, Discard, Trivial, Return);
 
-fn init(comp: *SelfHosted, use: *HashSet(ItemKey), out: *List(u8)) Emit #inline = (
+fn init(comp: *SelfHosted, use: *HashSet(ItemKey), out: *List(u8), need_math_h: *bool) Emit #inline = (
     program = comp,
     var_lookup = init(temp()),
     inlined_return_addr = init(temp()),
     use = use,
     out = out,
     locals = init(temp()),
+    need_math_h = need_math_h,
 );
 
 fn emit_body(self: *Emit, f: FuncId) void #once = {
@@ -98,6 +108,15 @@ fn emit_body(self: *Emit, f: FuncId) void #once = {
             @fmt(self.out, "}\n");
             return()
         }
+        fn FrcImport(it) => {
+            @fmt(self.out, " {\n");
+            start := self.out.len;
+            indented self {
+                self.import_frc(it, args);
+            };
+            self.seal_locals(start);
+            return();
+        }
         @default => @panic("no acceptable impl %", self.program.log(func));
     };
     
@@ -107,7 +126,10 @@ fn emit_body(self: *Emit, f: FuncId) void #once = {
         result := self.compile_expr(body, .Return);
         @debug_assert_eq(result, "");
     };
-    
+    self.seal_locals(start);
+}
+
+fn seal_locals(self: *Emit, start: i64) void = {
     if self.locals.raw.len_including_tombstones != 0 {
         // :SLOW
         // see lift_declare_local()
@@ -143,22 +165,27 @@ fn write_extern(self: *Emit, info: *DynamicImport, f_ty: FnType) void = {
 
 fn write_sig_names(self: *Emit, f: FuncId, name: Str) []Str = {
     func := self.program.get_function(f);
-    arg_ty := func.finished_arg.unwrap();
-    ret := func.finished_ret.unwrap();
-    @fmt(self.out, "static % %(", self.type_name(ret), name);
+    f_ty := func.finished_ty() 
+        || @panic("uncompiled %", fmt_func(self.program, f));
+    @fmt(self.out, "static % %(", self.type_name(f_ty.ret), name);
     args := @ref Str.list(temp());
-    if func.finished_arg.unwrap() != void {
-        each func.arg.bindings { b |
+    if f_ty.arg != void {
+        enumerate func.arg.bindings { i, b |
             ty := b.ty&.unwrap();
-            v := b.var().unwrap();
-            //if self.program.get_info(ty)[].stride_bytes != 0 {
+            // TODO: allowing it to be None here is kinda dumb. only happens for import_frc
+            name := @match(b.var()) {
+                fn Some(v) => {
+                    if ty == void {
+                        self.var_lookup&.insert(v.id, "");
+                    };
+                    self.var_name(v)
+                }
+                fn None() => @tfmt("_%", i);
+            };
             if ty != void {
-                name := self.var_name(v);
                 @fmt(self.out, "% %, ", self.type_name(ty), name);
                 args.push(name);
-            } else {
-                self.var_lookup&.insert(v.id, "");
-            };
+            }
         };
         self.out.len -= 2*int(self.out.items().ends_with(", "));
     }
@@ -478,6 +505,118 @@ fn write_call(self: *Emit, callee: Str, fields: []Str) void = {
     @fmt(self.out, ")");
 }
 
+// TODO: load, store, alloc, call, sel, blit
+// required for building the backend with constant folding enabled. 
+fn import_frc(self: *Emit, import: *FrcImport, arg_names: []Str) void = {
+    m := Incr'FrcModule.ptr_from_int(import.module);
+    h := m.header;
+    i := import.get_sym();
+    it := h.get(i);
+    @assert(it.segment == .Code, "TODO: import_frc non code");
+    f := it.fnc&;
+    
+    show_ref :: fn(r: Qbe.Ref) Str => @match(rtype(r)) {
+        fn RTmp() => @tfmt("r%", r.val());
+        fn RCon() => @if_else {
+            @if(r == Qbe.Undef) => "0";
+            @if(r == Qbe.ConZero) => "0";
+            @else => {
+                c := h.get(f.con)[r.val() - 2]&;
+                @if(c.sym == Qbe.no_symbol_S, @tfmt("%", c.bits()), {
+                    @panic("TODO: this is wrong. need to mangle");
+                    s: *Qbe.Incremental.Sym = h.get(off = c.sym.id);
+                    name := h.get(s.name);
+                    @tfmt("%+%", name, c.bits())
+                })
+            };
+        };
+        fn RNull() => "";
+        @default => @panic("TODO: ref %", r);
+    };
+    k_to_type :: fn(k: Qbe.Cls) Type = @match(k) {
+        fn Kw() => u32;
+        fn Kl() => i64;
+        fn Ks() => f32;
+        fn Kd() => f64;
+        @default => unreachable();
+    };
+    
+    @fmt(self.out, "\n");
+    par_i := 0;
+    blocks := h.get(f.blk);
+    enumerate blocks { source_block, b |
+        @fmt(self.out, "b%:\n", source_block);
+        jump :: fn(s) void => {
+            dest: *Qbe.Incremental.Blk = h.get(off = s);
+            Incremental'decode_phis(h, b) { to, k, data |
+                for data { blk_i, arg |
+                    if blk_i == source_block.trunc() {
+                        self.statement();
+                        @fmt(self.out, "% = %;\n", show_ref(to), show_ref(arg));
+                    };
+                };
+            };
+            if source_block + 1 != s.zext() {
+                self.statement();
+                @fmt(self.out, "goto b%;\n", s);
+            }
+        };
+        
+        Incremental'decode_phis(h, b) { to, k, _ |
+            t := k_to_type(k);
+            names := self.locals&.get_or_insert(t, => list(temp()));
+            names.push(show_ref(to));
+        };
+        
+        // :SLOW
+        for(h, b.ins) { _, i |
+            args := @slice(show_ref(i.arg&[0]), show_ref(i.arg&[1]));
+            t := k_to_type(i.cls());
+            if i.to != Qbe.Null {
+                names := self.locals&.get_or_insert(t, => list(temp()));
+                names.push(show_ref(i.to));
+            };
+            arg_ty := @if_else {
+                @if(i.arg&[0] == Qbe.Null) => void;
+                @if(i.arg&[1] == Qbe.Null) => k_to_type(argcls(i, 0));
+                @else => self.program.tuple_of(@slice(k_to_type(argcls(i, 0)), k_to_type(argcls(i, 1))));
+            };
+            o: NewIntrinsicPayload = (ir_op = i.op().raw(), ir_cls = i.cls().raw());
+            @match(i.op()) {
+                fn par() => {
+                    @fmt(self.out, "\t% = %;\n", show_ref(i.to), arg_names[par_i]);
+                    par_i += 1;
+                }
+                @default => {
+                    self.emit_intrinsic((Assign = show_ref(i.to)), o&, t, args, arg_ty, .None);
+                };
+            };
+        };
+        
+        if b.jmp.type.is_ret() {
+            self.statement();
+            @fmt(self.out, "return %;\n", show_ref(b.jmp.arg));
+        } else {
+            @match(b.jmp.type) {
+                fn jnz() => {
+                    if blocks[b.s1.zext()].phi == Qbe.no_symbol && blocks[b.s2.zext()].phi == Qbe.no_symbol {
+                        @fmt(self.out, "\tif (%) goto b%; else goto b%;\n", show_ref(b.jmp.arg), b.s1, b.s2);
+                    } else {
+                        @fmt(self.out, "\tif (%) {\n", show_ref(b.jmp.arg));
+                        indented(self, => jump(b.s1));
+                        @fmt(self.out, "\t} else {\n");
+                        indented(self, => jump(b.s2));
+                        @fmt(self.out, "\t}\n");
+                    }
+                }
+                fn jmp() => jump(b.s1);
+                fn hlt() => @fmt(self.out, "\twhile(1){};\n");
+                @default => @panic("TODO: import_frc b.jmp = %", b.jmp.type);
+            };
+        };
+    };
+}
+
 fn emit_intrinsic(self: *Emit, p: Placement, op: *NewIntrinsicPayload, t: Type, arg: []Str, arg_ty: Type, expr: ?*FatExpr) Str = {
     o, k := (@as(Qbe.O) op.ir_op, @as(Qbe.Cls) op.ir_cls);
     if o == .copy {
@@ -513,10 +652,16 @@ fn emit_intrinsic(self: *Emit, p: Placement, op: *NewIntrinsicPayload, t: Type, 
     
     cast_with_suffix :: fn(it) => 
         return self.declare_now(p&, t, => @fmt(self.out, "(%) (%%)", k_to_type(k), arg[0], it));
+    
+    prefix :: fn(it) => 
+        return self.declare_now(p&, t, => @fmt(self.out, "(%)% (%)", k_to_type(k), it, arg[0]));
         
     emit_builtin_call :: fn(name) => 
         return self.declare_now(p&, t, => self.write_call(name, arg));
-
+    emit_math_call :: fn(name) => {
+        self.need_math_h[] = true;
+        emit_builtin_call(name)
+    };
     // -fsanitize=undefined avoid ub when passing 0
     // relies on arg expression not having side effects
     emit_builtin_call_nonzero :: fn(if_zero, name) => 
@@ -537,22 +682,33 @@ fn emit_intrinsic(self: *Emit, p: Placement, op: *NewIntrinsicPayload, t: Type, 
         fn shl() => "<<";
         fn shr() => ">>";
         fn sar() => ">>";  // TODO
-        fn rotr() => return(emit_builtin_call(@if(k == .Kl, "__builtin_rotateright64", "__builtin_rotateright32"))); 
-        fn rotl() => return(emit_builtin_call(@if(k == .Kl, "__builtin_rotateleft64", "__builtin_rotateleft32")));
         fn byteswap() => return(emit_builtin_call(@if(k == .Kl, "__builtin_bswap64", "__builtin_bswap32")));
         fn clz() => return(emit_builtin_call_nonzero(64, @if(k == .Kl, "__builtin_clzl", "__builtin_clz")));
         fn ctz() => return(emit_builtin_call_nonzero(64, @if(k == .Kl, "__builtin_ctzl", "__builtin_ctz")));
         fn ones() => return(emit_builtin_call_nonzero(0, @if(k == .Kl, "__builtin_popcountl", "__builtin_popcount")));
         fn sltof()  => cast_with_suffix("");  // TODO
         fn dtosi()  => cast_with_suffix(""); // TODO
+        fn ultof()  => cast_with_suffix(""); // TODO
+        fn uwtof()  => cast_with_suffix(""); // TODO
+        fn dtoui()  => cast_with_suffix(""); // TODO
+        fn stoui()  => cast_with_suffix(""); // TODO
+        fn swtof()  => cast_with_suffix(""); // TODO
+        fn stosi()  => cast_with_suffix(""); // TODO
         fn exts()   => cast_with_suffix("");
         fn truncd() => cast_with_suffix("");
-        fn extub()  => cast_with_suffix("&0xFF");
-        fn extuh()  => cast_with_suffix("&0xFFFF");
-        fn extuw()  => cast_with_suffix("&0xFFFFFFFF");
+        fn extub()  => prefix("(u8)");
+        fn extuh()  => prefix("(u16)");
+        fn extuw()  => prefix("(u32)");
+        fn neg()  => prefix("-");
+        fn sqrt() => return(emit_math_call(@if(k == .Kd, "sqrt", "sqrtf")));
+        fn min() => return(emit_math_call(@if(k == .Kd, "fmin", "fminf")));
+        fn max() => return(emit_math_call(@if(k == .Kd, "fmax", "fmaxf")));
         @default => {
             cc: i32 = 0;
             if !iscmp(o, k&, cc&) {
+                if @is(o, .rotr, .rotl) {
+                    return emit_builtin_call(@tfmt("%%", o, k)); 
+                };
                 @panic("/*TODO: % %*/", o, k)
             };
                 // TODO: force right signedness in the other direction as well
@@ -574,14 +730,14 @@ fn emit_intrinsic(self: *Emit, p: Placement, op: *NewIntrinsicPayload, t: Type, 
                     fn Cfle() => "<=";
                     fn Cflt() => "<";
                     fn Cfne() => "!=";
-                    fn Cfo() => "todo";
-                    fn Cfuo() => "todo";
+                    fn Cfo() => "/*todo*/!=";
+                    fn Cfuo() => "/*todo*/!=";
                 }
         };
     };
     // -fsanitize=undefined avoid ub for signed overflow and when shift distance wraps
     unsigned := unsigned || @is(o, .add, .sub, .mul, .udiv, .urem, .shl, .shr);
-    shift := @is(o, .shl, .shr, .sar, .rotl, .rotr);
+    shift := @is(o, .shl, .shr, .sar);
     // shift := shift && (expr.is_none() || !expr.Some.items()[0].expr&.is(.Value));
     arg_ty := self.program.arg_types(arg_ty);
     self.declare_now(p&, t) {
@@ -1181,6 +1337,7 @@ pump :: fn(comp: *SelfHosted, fns: []FuncId) Str = {
     use: HashSet(ItemKey) = init(a);
     out := u8.list(a);
     out&.reserve(1.shift_left(23));
+    need_math_h := false;
     
     for fns { it |
         all_items&.insert((FuncId = it), zeroed(ItemData));
@@ -1196,7 +1353,7 @@ pump :: fn(comp: *SelfHosted, fns: []FuncId) Str = {
     // but i need an extra level of sorting to output them in order and it feels dumb to keep track of it twice. 
     // Func.callees isn't enough (doesn't have types/data) and also misses some (mutual, shims, etc.). 
     while => pending&.pop() { key |
-        emit: Emit = init(comp, use&, out&);
+        emit: Emit = init(comp, use&, out&, need_math_h&);
         check_for_new_aot_bake_overloads(comp).unwrap();
         @match(key) {
             fn FuncId(fid) => {
@@ -1263,6 +1420,16 @@ pump :: fn(comp: *SelfHosted, fns: []FuncId) Str = {
     @fmt(out&, "typedef float f32;\n");
     @fmt(out&, "typedef double f64;\n");
     
+    @if(need_math_h) @fmt(out&, "#include <math.h>\n");
+    // clang and i have a builtin for rot but gcc doesn't. trivial to idiom recognise tho so whatever. 
+    @fmt(out&, """
+        static u32 rotlKw(u32 a, u32 n) { n=n&31; return (a << n) | (a >> (32 - n)); }
+        static u32 rotrKw(u32 a, u32 n) { n=n&31; return (a >> n) | (a << (32 - n)); }
+        static u64 rotlKl(u64 a, u32 n) { n=n&63; return (a << n) | (a >> (64 - n)); }
+        static u64 rotrKl(u64 a, u32 n) { n=n&63; return (a >> n) | (a << (64 - n)); }
+    """);
+    @fmt(out&, "\n");
+    
     @assert(fns.len == 1, "TODO: wrap exports");
     wrapped_main := @tfmt("""
         int main(int argc, char **argv, char **envp) { 
@@ -1309,7 +1476,7 @@ pump :: fn(comp: *SelfHosted, fns: []FuncId) Str = {
     };
     
     defined: HashSet(FuncId) = init(temp());
-    emit: Emit = init(comp, use&, out&);
+    emit: Emit = init(comp, use&, out&, @ref false);
     for_rev ordered { it |
         @if_let(it.key) fn FuncId(it) => {
             defined&.insert(it);
@@ -1397,6 +1564,6 @@ fn fillrpo(it: *HashMap(ItemKey, ItemData), start: ItemKey) void = {
     }
 }
 
-DISABLE_IMPORT_FRC :: true;  // TODO
+DISABLE_IMPORT_FRC :: true;  // TODO: still doesn't work!
 DEBUG_SPAM_LOG :: false;
 #include_std("compiler/lib.fr");

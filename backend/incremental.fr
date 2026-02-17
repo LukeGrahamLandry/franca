@@ -561,7 +561,7 @@ fn load(h: *Header, f: *Qbe.Fn, it: One(Sym), syms: []Qbe.Sym) bool /*did_regall
             blks[i].link = blks.index(i + 1);
         }
         
-        read_phi(h, blks, b, i, f.tmp.slice(0, f.ntmp.zext()));
+        read_phi(h, blks, b, i);
     };
     f.start = blks.index(0);
     f.nblk = fnc.blk.count.bitcast();
@@ -699,22 +699,34 @@ read_tmp :: fn(header: *Header, f: *Qbe.Fn, ntmp: u32) void #once = {
     };
 };
 
-read_phi :: fn(header: *Header, blks: []Qbe.Blk, b: *Blk, i: i64, tmp: []Qbe.Tmp) void #once = {
+read_phi :: fn(header: *Header, blks: []Qbe.Blk, b: *Blk, i: i64) void #once = {
+    decode_phis(header, b) { to, k, data |
+        p := new_phi(blks[i]&, k, data.len, to);
+        for data { blk_i, arg |
+            p.push(blks[blk_i.zext()]&, arg);
+        };
+    };
+};
+
+decode_phis :: fn(header: *Header, b: *Blk, $body: @Fn(to: Qbe.Ref, k: Qbe.Cls, data: []Ty(u32, Qbe.Ref)) void) void #once = {
     if(b.phi == Qbe.no_symbol, => return());
     idx: u32 = b.phi;
     nphi: u32 = header.get(idx)[]; idx += 1;
-    range(0, nphi.zext()) { i_phi | 
-        narg: u32 = header.get(idx)[]; idx += 1;
-        to: u32 = header.get(idx)[]; idx += 1;
-        k := @as(Qbe.Cls) @as(u32) narg.shift_right_logical(30);
-        narg = narg.bit_and(1.shift_left(30) - 1);
-        p := new_phi(blks[i]&, k, narg.zext(), TMP(to.zext()));
-        range(0, narg.zext()) { _ |
-            blk_i: u32 = header.get(idx)[]; idx += 1;
-            arg_i: u32 = header.get(idx)[]; idx += 1;
-            p.push(blks[blk_i.zext()]&, (type3_val29 = arg_i));
-        };
+    range(0, nphi.zext()) { _ | 
+        to, k, data := decode_phi(header, idx);
+        idx += 2 + data.len.trunc() * 2;
+        body(to, k, data);
     };
+};
+
+decode_phi :: fn(header: *Header, idx: u32) Ty(Qbe.Ref, Qbe.Cls, []Ty(u32, Qbe.Ref)) = {
+    narg: u32 = header.get(idx)[]; idx += 1;
+    to: u32 = header.get(idx)[]; idx += 1;
+    k := @as(Qbe.Cls) @as(u32) narg.shift_right_logical(30);
+    narg = narg.bit_and(1.shift_left(30) - 1);
+    data: []u32 = header.get(off = idx, count = narg * 2);
+    data := Ty(u32, Qbe.Ref).reinterpret_bytes(data.interpret_as_bytes());
+    (TMP(to.zext()), k, data)
 };
 
 write_phi :: fn(self: *Writer, b: *Qbe.Blk, nblk: i32) u32 #once = {

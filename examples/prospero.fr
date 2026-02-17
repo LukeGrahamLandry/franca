@@ -19,9 +19,11 @@
 AstExternal :: import("@/compiler/ast_external.fr");
 #use("@/backend/lib.fr");
 
+ENABLE_JIT :: true;
+
 fn main() void = {
     vtable := ImportVTable.zeroed();
-    AstExternal'fill_backend_vtable(vtable&);
+    @if(ENABLE_JIT) AstExternal'fill_backend_vtable(vtable&);
     import("@/lib/crash_report.fr")'hook_backtrace();
     impl(vtable&);
 }
@@ -38,13 +40,10 @@ fn impl(v: *ImportVTable) void = {
     }
     args := parse_args(Args);
     
-    programs := :: collect_examples(ast_alloc());
-    s := "prospero";  // TODO: take this as input (or a file path) or as stdin
-    p := programs.find(fn(it) => it.name == s)
-        || @panic("missing model '%'", s);
+    // remove this @run to not bake the prospero.vm code into the executable. 
+    p := @run collect_examples(general_allocator());
     
-    //programs := collect_examples(temp());
-    pixels, yes, no := render(p, args.width, v);
+    pixels, yes, no := render(p&, args.width, v);
     
     if args.hush || args.o != "" {
         set := bscount(pixels&);
@@ -75,8 +74,12 @@ render :: fn(p: *Program, width: i64, v: *ImportVTable) Ty(Qbe.BSet, i64, i64) =
     N := max(log(width, 2) - 3, 1);
 
     m := zeroed QbeModule;
-    init_default_module_dyn(m&, v, (type = .JitOnly, os = query_current_os(), arch = query_current_arch()));
-    do_imports(m&);
+    if ENABLE_JIT {
+        init_default_module_dyn(m&, v, (type = .JitOnly, os = query_current_os(), arch = query_current_arch()));
+        do_imports(m&);
+    } else {
+        init_empty_for_template_only(m&, general_allocator());
+    };
     f0 := temp().box_uninit(Qbe.Fn);
     n := 64+3+p.o.len;
     s: RecState = (
@@ -85,11 +88,10 @@ render :: fn(p: *Program, width: i64, v: *ImportVTable) Ty(Qbe.BSet, i64, i64) =
         ints = temp().alloc_uninit(Interval, n),
         pixels = init_bitset(width * width),
         top = zeroed F,
-        needed = init_bitset(n),
         copy = temp().alloc_zeroed(Qbe.Ref, n),
-        jit_at = max(0, N - 2),
+        jit_at = max(0, N - 3),
         width = width, 
-        enable_jit = true,
+        enable_jit = ENABLE_JIT,
     );
     each s.f { f |
         f.start = temp().box_zeroed(Qbe.Blk);
@@ -101,6 +103,7 @@ render :: fn(p: *Program, width: i64, v: *ImportVTable) Ty(Qbe.BSet, i64, i64) =
     
     i: Interval = (min = -1.0, max = 1.0);
     quad_rec(s&, (x = i, y = i), N);
+    @if(ENABLE_JIT)
     v'drop_qbe_module(QbeModule.raw_from_ptr(m&));
     (s.pixels, s.yes, s.no)
 }
@@ -118,7 +121,6 @@ RecState :: @struct {
     yes := 0;
     no := 0;
     top: F;
-    needed: Qbe.BSet;
     copy: []Qbe.Ref;
     jit_at: i64;
     n := 0;
@@ -154,6 +156,7 @@ fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
     dead_code(s, f);
     renumber(f);
 
+    @if(ENABLE_JIT)
     if s.enable_jit && depth == s.jit_at {
         mark := mark_temporary_storage();
         f := dup(f);
@@ -172,6 +175,7 @@ fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
                 };
             };
         } else {
+            @if(!ENABLE_JIT) unreachable();
             draw(s.width, s.pixels, s.top, int.x, int.y);
         }
         return();
@@ -184,14 +188,20 @@ fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
 
 // remove instructions with unused results
 fn dead_code(s: *RecState, f: *Qbe.Fn) void = {
-    bszero(s.needed&);
-    s.needed&.bsset(f.start.jmp.arg.val());
+    needed := @ref init_bitset(f.ntmp.zext());
+    needed.bsset(f.start.jmp.arg.val());
     f.reset_scratch();
+    
+    // never change signeture (matters on wasm even if just removing the last par)
+    range(0, 3) { i |  // :ThreePar
+        needed.bsset(f.start.ins[i].to.val());
+    };
+    
     for_insts_rev f.start { i |
-        if i.to == QbeNull || s.needed&.bshas(i.to.val()) || i[].op() == .par {
+        if needed.bshas(i.to.val()) {
             each i.arg& { a |
                 if rtype(a[]) == .RTmp {
-                    s.needed&.bsset(a[].val());
+                    needed.bsset(a[].val());
                 }
             };
             f.emit(i[][]);
@@ -204,22 +214,23 @@ fn dead_code(s: *RecState, f: *Qbe.Fn) void = {
 // shrink the tmp array
 fn renumber(f: *Qbe.Fn) void = {
     j := Qbe.Tmp0;
+    // cfg is flat and always def before use so don't need to init this. 
+    map := temp().alloc_uninit(Qbe.Ref, f.ntmp.zext());
     for_insts_forward f.start { i |
         each i.arg& { a |
             if rtype(a[]) == .RTmp {
-                a[] = TMP(f.get_temporary(a[])[].visit);
+                a[] = map[a[].val()];
             }
         };
         
-        if i.to != QbeNull {
-            f.get_temporary(i.to)[].visit = j.trunc();
-            i.to = TMP(j);
-        }
-        
+        @debug_assert(i.to != Qbe.Null);
+        map[i.to.val()] = TMP(j);
+        i.to = TMP(j);
         j += 1;
     };
     a := f.start.jmp.arg&;
-    a[] = TMP(f.get_temporary(a[])[].visit);
+    @debug_assert(rtype(a[]) == .RTmp);
+    a[] = map[a[].val()];
     f.ntmp = j.trunc();
 }
 
@@ -379,15 +390,12 @@ fn optimise_intervals(f: *Qbe.Fn, input: *Interval2, s: *RecState) Interval = {
 
     k := 0;
     j := f.start.ins.ptr;
+    j = j.offset(3); // :ThreePar
     
     ints: OptMap(Interval) = init(s.ints);
     ints&.insert(64+0, input.x);
     ints&.insert(64+1, input.y);
     copy: OptMap(Qbe.Ref) = init(s.copy);
-    
-    while => j.op() == .par {
-        j = j.offset(1);
-    }
     
     GET :: fn(r: Qbe.Ref) Interval => {
         ::?Interval;
@@ -416,10 +424,6 @@ fn optimise_intervals(f: *Qbe.Fn, input: *Interval2, s: *RecState) Interval = {
                     };
                 }
             };
-            
-            if i.op() == .copy && rtype(i.arg&[0]) == .RTmp {
-                copy&.insert(i.to.val(), i.arg&[0]);
-            };
         };
         
         xx := a.is_nan() && rtype(i.arg&[0]) == .RTmp;
@@ -427,22 +431,15 @@ fn optimise_intervals(f: *Qbe.Fn, input: *Interval2, s: *RecState) Interval = {
             continue(); 
         };
         
-        sqrt :: fn(x: f32) f32 #ir(.sqrt, .Ks);
-        min :: fn(x: f32, y: f32) f32 #ir(.min, .Ks);
-        max :: fn(x: f32, y: f32) f32 #ir(.max, .Ks);
-        
         // when min/max args have intervals that don't overlap, only care about one side. 
         only :: fn(n) => {
-            {
-                copy&.insert(i.to.val(), i.arg&[n]);
-                // TODO: i don't understand why this doesn't work
-                //i[] = make_ins(.copy, .Kd, i.to, i.arg&[n], QbeNull);
-            };
+            copy&.insert(i.to.val(), i.arg&[n]);
+            i[] = make_ins(.copy, .Kd, i.to, i.arg&[n], QbeNull);
             @if(n == 0, a, b)
         }
         
         new: Interval = @match(i.op()) {
-            fn copy() => GET(i.arg&[0]);
+            fn copy() => only(0);
             fn add() => (min = a.min + b.min, max = a.max + b.max);
             fn sub() => (min = a.min - b.max, max = a.max - b.min);
             fn mul() => {
@@ -461,7 +458,6 @@ fn optimise_intervals(f: *Qbe.Fn, input: *Interval2, s: *RecState) Interval = {
                 v0, v1 := (-a.min, -a.max);
                 (min = v1, max = v0)
             }
-            fn div() => continue();  // TODO: steal from wikipedia
             fn min() => @if_else { 
                 @if(a.max < b.min) => only(0);
                 @if(b.max < a.min) => only(1);
@@ -499,7 +495,7 @@ fn compile_program(f: *Qbe.Fn, p: *Program) void = {
     f.lnk.id = f.globals.intern(p.name);
     f.lnk.export = true;
     
-    for vars { v |
+    for vars { v |  // :ThreePar
         f.emit(.par, .Kd, v, QbeNull, QbeNull);
     };
     f.start.jmp = (type = .retd, arg = vals[vals.len - 1]);
@@ -554,13 +550,13 @@ Program :: @struct {
     b: []u16;
 }
 
-fn collect_examples(a: Alloc) []Program = {
+fn collect_examples(a: Alloc) Program = {
     m := mark_temporary_storage();  // TODO: if not temp()
     s := Foreign'fidget();
     n := "prospero";
     p := parse_program(a, n, s);
     reset_temporary_storage(m);
-    a.alloc_init(Program, 1, fn(_) => p)
+    p
 }
 
 // a list of instructions like `out op arg0 arg1`
@@ -665,3 +661,5 @@ fn OptMap($T: Type) Type = {
     
     Self
 }
+
+#use("@/lib/sys/fs.fr");
