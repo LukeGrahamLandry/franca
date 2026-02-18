@@ -1,5 +1,5 @@
+- would be great if a zeroed ?T was None. 
 - auto mirror eveything in deps.fr when building in ci
-- emit_c doesn't work with FRANCA_MORE_CACHE=1
 - finish :AsmNotYetImplemented rn it only works at the beginning of the program if there are relocations 
 - elifdef, elifndef
 - this should work on wasm too. 

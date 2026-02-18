@@ -7,6 +7,8 @@ prospero
 - parse_float: support e syntax. 
 - examples/os/user/libc: finish static realloc so FEAT_PNG works in browser. 
 - encode base64 so i can print a data url for the browser instead of mangled raw png bytes
+- emit_c: import_frc was looking at phis on the wrong block.
+  - that fixes self-compile by emit_c as well. so that works as a bootstrap path now. 
 
 ## (Feb 16)
 

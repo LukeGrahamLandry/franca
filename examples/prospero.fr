@@ -21,18 +21,19 @@
 AstExternal :: import("@/compiler/ast_external.fr");
 #use("@/backend/lib.fr");
 
-FEAT_JIT :: true;
+FEAT_JIT :: true;  // true is slower but more fun
 FEAT_THREADS :: true;
 FEAT_PNG :: false;  // true adds dependency on stb_image_write
+FEAT_BAKE_IR :: true;  // true removes runtime dependency on prospero.vm file and makes the -i cli arg optional. 
 
-fn main() void = {
+main :: fn() void = {
     vtable := ImportVTable.zeroed();
     @if(FEAT_JIT) AstExternal'fill_backend_vtable(vtable&);
     import("@/lib/crash_report.fr")'hook_backtrace();
     impl(vtable&);
 }
 
-fn driver(vtable: *ImportVTable) void = 
+driver :: fn(vtable: *ImportVTable) void = 
     impl(vtable);
 
 fn impl(v: *ImportVTable) void = {
@@ -40,12 +41,19 @@ fn impl(v: *ImportVTable) void = {
     Args :: @struct {
         hush: bool = false;
         o: Str = "";
+        i := "";
         width: i64 = 1024;
     }
     args := parse_args(Args);
     
-    // remove this @run to not bake the prospero.vm code into the executable. 
-    p := @run collect_examples(general_allocator());
+    p := @if(FEAT_BAKE_IR, @run parse_program(ast_alloc(), Foreign'fidget()), zeroed(Program));
+    
+    if args.i != "" {
+        s := read_entire_file_or_crash(temp(), args.i);
+        p = parse_program(temp(), s);
+    } else {
+        @assert(FEAT_BAKE_IR, "missing -i path/to/.vm");
+    };
     
     pixels, yes, no := render(p&, args.width, v);
     
@@ -324,36 +332,31 @@ fn dup(f0: *Qbe.Fn) *Qbe.Fn = {
 }
 
 fn interpret(f: *Qbe.Fn, vals: []f32, x: f64, y: f64) f32 = {
+    // vals is uninit. always def before use so it's fine. 
     vals[64+0] = x.cast();
     vals[64+1] = y.cast();
     
     GET :: fn(r: Qbe.Ref) f32 => @match(rtype(r)) {
         fn RTmp() => { vals[r.val()] }
+        // the jit one uses Kd so that's how they're stored in .con, but this uses Ks. 
         fn RCon() => { f.get_constant(r).bits().bitcast().cast() }
         fn RNull() => NaN;
         @default => unreachable();
     };
-    for_insts_forward f.start { i |
-        @match(i.op()) {
-            fn copy() => { vals[i.to.val()] = GET(i.arg&[0]); }
-            fn par() => ();
-            fn nop() => ();
-            @default => {
-                if @is(i.op(), .arg, .call) {
-                    @panic("TODO: abs, exp, ln, cos, sin");
-                };
-                a: u32 = GET(i.arg&[0]).bitcast();
-                b: u32 = GET(i.arg&[1]).bitcast();
-                fold :: import("@/backend/opt/fold.fr").do_fold;
-                r := fold(i.op(), .Ks, a.zext(), b.zext());
-                vals[i.to.val()] = (@as(u32) r.trunc()).bitcast();
-            };
-        }
+    each f.start.ins.items().rest(3) { i | // :ThreePar
+        // tiny bit faster than calling the normal do_fold
+        gen :: import("@/backend/opt/fold.fr").gen_do_fold_impl;
+        impl :: gen(fn(o) = @is(o, .neg, .add, .sub, .mul, .div, .sqrt, .max, .min));
+        a: u32 = GET(i.arg&[0]).bitcast();
+        b: u32 = GET(i.arg&[1]).bitcast();
+        r := impl'Ks(i.op().raw().zext(), a.zext(), b.zext());
+        vals[i.to.val()] = r;
     };
     
     vals[f.start.jmp.arg.val()]
 }
 
+// TODO: im a bit concerned this might be able to miss pixels?
 fn iter_intervals(width: i64, x_int: Interval, y_int: Interval, $body: @Fn(x: f64, y: f64, i: i64) void) void = {
     back :: fn(n) => int((n.cast() + 1.0) / 2.0 * width.float());
     range_rev(back(y_int.min), back(y_int.max)) { y |
@@ -376,23 +379,19 @@ fn draw(width: i64, out: Qbe.BSet, f: @FnPtr(x: f64, y: f64, z: f64) f64, x_int:
 }
 
 fn draw_ppm(out: *List(u8), pixels: Qbe.BSet, width: i64) void = {
-    out.reserve(width*width*12+width+15);
-    @fmt(out, "P3 % % 255\n", width, width);
+    @fmt(out, "P5 % % 255\n", width, width);
+    n := width * width;
+    out.reserve(n);
+    p := out.maybe_uninit.subslice(out.len, n);
     range_rev(0, width) { y |
         range(0, width) { x |
             i := y * width + x;
             hit := bshas(pixels&, i);
-            c := @if(hit, 0, 255);
-            out.len += write_int_to_buffer(out.maybe_uninit.rest(out.len), c);
-            out.push_assume_capacity(" ".ascii());
-            out.len += write_int_to_buffer(out.maybe_uninit.rest(out.len), c);
-            out.push_assume_capacity(" ".ascii());
-            out.len += write_int_to_buffer(out.maybe_uninit.rest(out.len), c);
-            out.push_assume_capacity(" ".ascii());
+            i := (width - y - 1) * width + x;
+            p[i] = @if(hit, 0, 255);
         };
-        out.push_assume_capacity("\n".ascii());
     };
-    @assert_le(out.len, out.maybe_uninit.len);
+    out.len += n;
 }
 
 fn do_imports(m: *QbeModule) void = {
@@ -506,7 +505,7 @@ fn optimise_intervals(f: *Qbe.Fn, input: *Interval2, s: *RecState) Interval = {
             };
             // we're not doing complex numbers so if it could be negative, who knows man just skip it
             fn sqrt() => {
-                @debug_assert(!(a.max < 0.0) || a.min < 0, "% %", a.min, a.max);
+                @debug_assert(a.max >= 0.0, "proved complex: % %", a.min, a.max);
                 if(a.min < 0.0 || a.max < 0.0 || a.is_nan(), => continue());
                 (min = a.min.sqrt(), max = a.max.sqrt())
             }
@@ -514,6 +513,11 @@ fn optimise_intervals(f: *Qbe.Fn, input: *Interval2, s: *RecState) Interval = {
         };
         @debug_assert_le(new.min, new.max, "thats not in order %", i.op());
         ints&.insert(i.to.val(), new);
+    };
+    
+    a := f.start.jmp.arg&;
+    if copy&.get(a[].val()) { r |
+        a[] = r;
     };
     
     @debug_assert_eq(rtype(r[]), .RTmp);
@@ -528,7 +532,7 @@ fn compile_program(f: *Qbe.Fn, p: *Program) void = {
     f.start = temp().box_zeroed(Qbe.Blk);
     f.start.ins = init(temp(), vals.len+3);
     f.nblk = 1;
-    f.lnk.id = f.globals.intern(p.name);
+    f.lnk.id = f.globals.intern("sdf");
     f.lnk.export = true;
     
     for vars { v |  // :ThreePar
@@ -568,6 +572,7 @@ fn compile_program(f: *Qbe.Fn, p: *Program) void = {
         };
         f.emit(.call, .Kd, r, f.symcon(s), QbeNull);
         @assert(is_linking_libc(), "TODO: need my own version of %", name);
+        @assert(FEAT_JIT, "TODO: abs, exp, ln, cos, sin");
     }
 }
 
@@ -579,24 +584,14 @@ Operation :: @enum(u8) (
 );
 
 Program :: @struct {
-    name: Str;
     consts: []f64;
     o: []Operation;
     a: []u16;
     b: []u16;
 }
 
-fn collect_examples(a: Alloc) Program = {
-    m := mark_temporary_storage();  // TODO: if not temp()
-    s := Foreign'fidget();
-    n := "prospero";
-    p := parse_program(a, n, s);
-    reset_temporary_storage(m);
-    p
-}
-
 // a list of instructions like `out op arg0 arg1`
-fn parse_program(al: Alloc, name: Str, s: Str) Program = {
+fn parse_program(al: Alloc, s: Str) Program = {
     #use("@/lib/collections/map.fr");
     consts, o, a, b := (f64.list(temp()), Operation.list(temp()), u16.list(temp()), u16.list(temp()));
     names: HashMap(Str, u16) = init(temp());
@@ -671,7 +666,6 @@ fn parse_program(al: Alloc, name: Str, s: Str) Program = {
     };
     
     (
-        name = name.shallow_copy(al), 
         consts = consts.items().shallow_copy(al),
         o = o.items().shallow_copy(al),
         a = a.items().shallow_copy(al),
@@ -718,7 +712,8 @@ fn draw_png(out: *List(u8), pixels: Qbe.BSet, width: i64) void = {
         data := u8.ptr_from_raw(data).slice(size.zext());
         List(u8).ptr_from_raw(context).push_all(data);
     };
-    res := stbi_write_png_to_func(callback, List(u8).raw_from_ptr(out), intcast width, intcast width, 1, u8.raw_from_ptr(data.ptr), intcast width);
+    width: i32 = intcast(width);
+    res := stbi_write_png_to_func(callback, List(u8).raw_from_ptr(out), width, width, 1, u8.raw_from_ptr(data.ptr), width);
     @assert(res != 0, "failed to write image");
 }
 
