@@ -10,12 +10,32 @@ calloc :: fn(n: i64, m: i64) rawptr #inline =
     realloc(zeroed(rawptr), n * m);
 
 realloc :: fn(old_mem: rawptr, new_size: i64) rawptr = {
-    old_mem := u8.ptr_from_raw(old_mem);
-    @if(new_size == 0) return(zeroed(rawptr));  // TODO: free
+    MAGIC :: 0xABCDEF;
+    a := general_allocator();
+    old := i64.ptr_from_raw(old_mem).offset(-2);
+    old_size := @if(!old_mem.is_null(), old[], 0);
+    old_buf := old.slice(old_size);
+    
+    if new_size == 0 {
+        a.dealloc(i64, old_buf);
+        return zeroed(rawptr);
+    };
+    
+    new_size := new_size.ualign_to(16).udiv(8) + 2;
+    @if(old_size >= new_size) return(old_mem);
+    
+    //             :SLOW
+    buf := a.alloc_zeroed(i64, new_size);
+    buf[0] = new_size;
+    buf[1] = MAGIC;
+    if old_size != 0 {
+        @debug_assert_eq(old_buf[1], MAGIC, "bad pointer passed to realloc");
+        buf.rest(2).copy_from(old_buf.rest(2));
+        a.dealloc(i64, old_buf);
+    };
+    
     // TODO: needs 16 alignment
-    buf := general_allocator().alloc_zeroed(u8, new_size);
-    @assert(old_mem.is_null(), "TODO: realloc");  // TODO: copy & free
-    u8.raw_from_ptr(buf.ptr)
+    i64.raw_from_ptr(buf.index(2))
 }
 
 system :: fn(command: CStr) i64 = {
@@ -34,16 +54,11 @@ labs :: fn(val: i64) i64 #static =
 
 strtod :: fn(s: CStr, end_out: *CStr) f64 #static = {
     s := s.str() /*:SLOW*/;
-    negative := s.starts_with("-");
-    s = s.rest(int(negative));
     // TODO: this one doesn't support all the syntax. 1e-2
     n, rest := parse_float(s);
     ::ptr_utils(*u8);
     if !end_out.is_null() {
         end_out.ptr = rest.ptr;
-    };
-    if negative {
-        n *= -1;
     };
     n
 }

@@ -4,6 +4,9 @@
 prospero
 - threads and png. 
 - oops!!! interpret wasn't handling constants right. luckily fixing it doesn't affect the timings. 
+- parse_float: support e syntax. 
+- examples/os/user/libc: finish static realloc so FEAT_PNG works in browser. 
+- encode base64 so i can print a data url for the browser instead of mangled raw png bytes
 
 ## (Feb 16)
 

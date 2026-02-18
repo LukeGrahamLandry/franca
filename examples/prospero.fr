@@ -11,6 +11,8 @@
 // - recurse down a quad tree and calculate the intervals of outputs based on the input intervals
 // - if output interval is statically known positive or negative, no more work for that region
 // - to evaluate a pixel use the expression after interval simplification
+//
+// More detailed write-up: https://lukegrahamlandry.ca/words/prospero
 // 
 // note: only the 2d examples work 
 // TODO: i want to make this a self contained example that doesn't need to fetch thier program. 
@@ -66,6 +68,13 @@ fn impl(v: *ImportVTable) void = {
         draw :: @if(FEAT_PNG, draw_png, draw_ppm);
         draw(out&, pixels, args.width);
         if args.o == "" {
+            @if(FEAT_PNG) if query_current_arch() == .wasm32 {
+                encode :: import("@/lib/encoding/base64.fr").encode;
+                in := out.items();
+                out = u8.list(temp());
+                out&.push_all("data:image/png;base64,");
+                encode(out&, in);
+            };
             print(out.items());
         } else {
             write_entire_file_or_crash(args.o, out.items())
@@ -597,7 +606,6 @@ fn parse_program(al: Alloc, name: Str, s: Str) Program = {
         i := 0;
         while => i < s.len {
             continue :: local_return;
-            if(i >= s.len, => break());
             while => s[i].is_ascii_whitespace() {
                 i += 1;
                 if(i >= s.len, => break());
@@ -630,12 +638,13 @@ fn parse_program(al: Alloc, name: Str, s: Str) Program = {
             
             (o2: Operation, a2: u16, b2: u16) := @switch(op) {
                 @case("const") => {
-                    @assert(is_linking_libc(), "TODO: i need my own strtod and i needs to handle the exponential syntax");
-                    s := @fmt_cstr("%", eat_word());
-                    strtod :: fn(str: CStr, end_out: *CStr) f64 #weak #libc;    // TODO: write my own 
-                    end := zeroed(CStr);
-                    f := strtod(s, end&);
-                    @assert(end.ptr[] == 0, "failed to parse float: %", s);
+                    while => s[i].is_ascii_whitespace() {
+                        i += 1;
+                    }
+                    f, ss := parse_float(s.rest(i));
+                    consumed := (s.len - i) - ss.len;
+                    @assert(consumed > 0, "failed to parse float: %", s);
+                    i += consumed;
                     consts&.push(f);
                     (.const, consts.len.sub(1).trunc(), 0)
                 }
@@ -693,6 +702,7 @@ fn OptMap($T: Type) Type = {
 #use("@/lib/sys/threads.fr");
 
 fn draw_png(out: *List(u8), pixels: Qbe.BSet, width: i64) void = {
+    @assert(is_linking_libc(), "FEAT_PNG doesn't work when built with -syscalls");
     data := temp().alloc_uninit(u8, width*width);
     range(0, width) { y |
         range(0, width) { x |
