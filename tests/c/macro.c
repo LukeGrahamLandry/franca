@@ -25,8 +25,7 @@ int ends_with(char* haystack, char* needle) {
     return strlen(haystack) >= strlen(needle) && strcmp(haystack + strlen(haystack) - strlen(needle), needle) == 0;
 }
 
-// TODO
-// int defined(int a) { return a; }
+int defined(int a) { return a; }  
 
 // sure hope you don't loop on this
 const int FOO = 0;
@@ -35,6 +34,12 @@ const int FOO = 0;
 int main() {
     ASSERT(5, include1);
     ASSERT(7, include2);
+    
+    // only a magic keyword inside an #if
+    ASSERT(0, defined(FOO));
+    #if !defined(FOO)
+    #error "foo"
+    #endif
     
     FOO;
 
@@ -311,11 +316,10 @@ int main() {
 #endif
     ASSERT(4, m);
 
-// TODO: is this supposed to work?
-// #define IsDefined(name) defined(name)
-// #if !IsDefined(M12)
-// #error "a"
-// #endif
+#define IsM12Defined() defined(M12)
+#if !IsM12Defined()
+#error "a"
+#endif
 
 #if no_such_symbol == 0
     m = 5;

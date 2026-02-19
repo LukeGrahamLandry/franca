@@ -73,8 +73,9 @@ fn include(fr: CompCtx, c_source: Str) ScopeId = {
 
 include_cold :: fn(fr: CompCtx, c_source: Str, name: Str) ScopeId = {
     c := import_c'init_fr(fr);
-    bytes := import_c'compile_fr(fr, c_source, c, mangle_name_for_cache(name));
     no_cache := Foreign.ENV.FRANCA_NO_CACHE.get_environment_variable().is_some();
+    c.hash_files_for_frc_deps = !no_cache;
+    bytes := import_c'compile_fr(fr, c_source, c, mangle_name_for_cache(name));
     if query_current_arch() != .wasm32 && !no_cache {
         cachepath := FrIncr'choose_cache_filename(name);
         @if(show_backend_stats()) @eprintln(">>> (c) save: %", cachepath);
@@ -118,6 +119,7 @@ fn init_for_include(fr: CompCtx) *C.Compile.Ctx = {
     // "todo: make this work threaded"
     ctx := init_codegen_worker(m, false, fr.vtable);
     C'init_ctx(c, m, ctx);
+    c.hash_files_for_frc_deps = true;
     range(0, FTy.COUNT) { _ |
         m.save.unwrap()[].fty&.push(zeroed FTy);   // skip builtin types so offsets work out
     };
@@ -179,9 +181,6 @@ fn compile_to_module(fr: CompCtx, c_source: Str, c: *C.Compile.Ctx, debug_name: 
         panic(err)
     };
     
-    // TODO: need to include import_c as a dep as well
-    _, all_deps := FrIncr'write_deps(writer, c.codemap&, "", fr.vtable.self_hash);
-    
     // TODO: needs to include __os,__arch because include.fr observes them, 
     //       but i want to fix that by providing a stable abi from my libc instead. 
     //       cross compiling already doesn't work if you ifdef on the target because 
@@ -192,8 +191,15 @@ fn compile_to_module(fr: CompCtx, c_source: Str, c: *C.Compile.Ctx, debug_name: 
         entry_source = entry_source,
         // TODO: don't call this debug_name if im going to use it for stuff
         debug_name = writer.push(debug_name),
-        all_deps = all_deps,
     );
+    if c.hash_files_for_frc_deps {
+        // TODO: need to include import_c as a dep as well
+        _, all_deps := FrIncr'write_deps(writer, c.codemap&, "", fr.vtable.self_hash);
+        meta.all_deps = all_deps;
+    } else {
+        // not hashing inputs so result must never be seen as valid for files_unchanged().  
+        @debug_assert_eq(writer.dep.len, 0);
+    };
     b := writer.to_bytes(meta, c.m);
     
     // We're done with all the c compiler state. Copy out the compiled module and then free everything. 
@@ -355,8 +361,9 @@ fn import_cache_file(c: *Ctx, tok: *C.Tokens.Token) void = {
         };
         
         // TODO: if it was static (not exported) it won't get remangled so can collide because i just mangle by appending file index. 
+        //       but if you try to change global_symbol, you also have to change the sym name in the module bytes before doing task.All. 
         // TODO: should find_func in case it was forward declared 
-        obj := c.new_gvar(name_str, ty, tok, false);
+        obj := c.new_var(name_str, ty, c.arena);
         obj.is_function = ty.kind == .TY_FUNC;
 
         // != name_str if its from franca and mangled as foo = foo__FUNCID
@@ -364,6 +371,7 @@ fn import_cache_file(c: *Ctx, tok: *C.Tokens.Token) void = {
         sym := h.get(it.payload.sym);  
         sym_name := c.m.intern(h.get(sym.name));
         obj.global_symbol = (Some = sym_name);
+        obj.is_definition = sym.segment != .Import;
     };
     c.import_type_cache = empty();
     

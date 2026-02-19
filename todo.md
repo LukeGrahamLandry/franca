@@ -1,3 +1,8 @@
+- raylib/examples/shapes/shapes_ball_physics.c takes 10x longer to compile than any others. 
+  what's up with that? hitting a pathological case in spill(). 
+  oh im doing an entirely unrolled memset for the giant array of 5000*size_of(struct Ball) array on the stack. 
+  main() is 94351 instructions. oops. 
+- files_unchanged: if dep.len==1, that should be allowed? now that the whole program could be in entry_source. 
 - would be great if a zeroed ?T was None. 
 - auto mirror eveything in deps.fr when building in ci
 - finish :AsmNotYetImplemented rn it only works at the beginning of the program if there are relocations 

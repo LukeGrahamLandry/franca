@@ -211,28 +211,14 @@ replace_defined :: fn(c: *Ctx, tok: **Token) *Token = {
     new
 }
 
-// Read and evaluate a constant expression.
 fn eval_const_expr(c: *Ctx, rest: **Token, tok: *Token) bool = {
     start := tok;
     expr := c.copy_line(rest, tok.next);
+    c.is_inside_if_directive_cond = true;
     expr = c.preprocess2(expr);
+    c.is_inside_if_directive_cond = false;
 
     if(expr.kind == .TK_EOF, => @error_tok(c, start, "no expression"));
-
-    // [https://www.sigbus.info/n1570#6.10.1p4] The standard requires
-    // we replace remaining non-macro identifiers with "0" before
-    // evaluating a constant expression. For example, `#if foo` is
-    // equivalent to `#if 0` if foo is not defined.
-    head := Token.zeroed();
-    cur := head&;
-    t := expr;
-    for_linked t { t |
-        // TODO: if you get a "not a function" error because you tried to call it as a macro in an #if, 
-        //       it's misleading because it says "while expanding" but the problem is really that the macro was not defined.
-        new := @if(t.valid_macro_name(), c.new_num_token(0, t), t);
-        c.append_one(cur&, new, false);
-    };
-    expr = head.next;
 
     // Convert pp-numbers to regular numbers
     c.convert_pp_tokens(expr);
@@ -561,15 +547,15 @@ append_one :: fn(c: *Ctx, cur: **Token, tok: *Token, $copy: bool) void = {
 };
 
 fn expand_macro(c: *Ctx, rest: **Token, tok: *Token) bool #once = {
-    // TODO: only if inside an #if? (but can't do it after before expansion because apple)
-    if equal(tok, "defined") {
-        t := tok;
-        rest[] = c.replace_defined(t&);
-        rest.next = t;
-        return(true)
+    if c.is_inside_if_directive_cond && equal(tok, "defined") {
+        // this can't just be in eval_const_expr before calling preprocess (like chibicc does) 
+        // because apple's headers have things like `#define A() defined(B); #if A();`
+        rest[] = c.replace_defined(tok&);
+        rest.next = tok;
+        return true;
     };
 
-    m := c.find_macro(tok) || return(false);
+    m := c.macros&.get(tok.str()) || return(false);
     
     // If a funclike macro token is not followed by an argument list,
     // treat it as a normal identifier.
@@ -607,7 +593,7 @@ fn expand_macro(c: *Ctx, rest: **Token, tok: *Token) bool #once = {
     m.enabled = false;
     // TODO: make a simple test that needs this. lua/setobj2t does
     if !identical(end, rest[].next) {
-        c.hide_stack&.push(@as(@type c.hide_stack[0]) (m, end));
+        push(c.hide_stack&, (m, end));
     } else {
         c.check_hide(end);
         m.enabled = true;
@@ -900,14 +886,13 @@ fn read_warn_text(c: *Ctx, tok: **Token) Str = {
     msg.items()
 }
 
-fn check_hide(c: *Ctx, tok: *Token) void = {
-    if c.hide_stack&.last() { hide | 
-        if identical(hide._1, tok) {
-            hide._0.enabled = true;
-            c.hide_stack&.pop();
-            c.check_hide(tok);
-        };
-    };
+fn check_hide(c: *Ctx, tok: *Token) void = {  
+    // :HideStackPlaceholder can never be removed so the list is never empty
+    s := c.hide_stack&;
+    while => s[s.len - 1]._1.identical(tok) {
+        s[s.len - 1]._0.enabled = true;
+        s.len -= 1;
+    }
 }
 
 Directive :: @enum(
@@ -929,12 +914,20 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
 
     while => tok.kind != .TK_EOF  {
         continue :: local_return;
-        if c.expand_macro(tok&, tok) {
-            c.check_hide(tok);
-            continue();  
+        if tok.valid_macro_name() {
+            if c.expand_macro(tok&, tok) {
+                c.check_hide(tok);
+                continue();  
+            };
+            if c.is_inside_if_directive_cond {
+                // [n1570#6.10.1p4] `#if foo` is equivalent to `#if 0` if foo is not defined.
+                t := tok.next;
+                tok = c.new_num_token(0, tok);
+                tok.next = t;
+                continue();  
+            };
         };
 
-        // Pass through if it is not a "#".
         if !is_hash(tok) {
             tok.line_no += tok.file.line_delta;
             c.append_one(cur&, tok, false);
@@ -942,7 +935,15 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
             c.check_hide(tok);
             continue();
         };
+        
+        tok = handle_directive(c, tok, cur&);
+    };
+    cur.next = tok;
+    head.next
+}
 
+handle_directive :: fn(c: *Ctx, tok: *Token, cur: **Token) *Token = {
+    continue :: => return(tok);
         c.check_hide(tok);
         start := tok;
         tok = tok.next;
@@ -1051,7 +1052,7 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
         };
         fn discard_static_scope() => {
             tok.kind = .TK_discard_static_scope;
-            c.append_one(cur&, tok, false);
+            c.append_one(cur, tok, false);
             tok = tok.next;
         };
         // `#link_macos_framework "foo"` is like passing `-framework foo` to clang
@@ -1072,10 +1073,7 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
             }
         };
     };
-    };
-
-    cur.next = tok;
-    head.next
+    tok
 }
 
 fn move_cond_incl(c: *Ctx, start: *Token, require_non_else: bool, new_state: IfKind) i64 = {
@@ -1232,8 +1230,9 @@ builtins :: @struct {
         src := u8.list(c.arena);
         read_and_push(src&, path) 
             || @error_tok(c, tok, "failed to read %", path);
+        if c.hash_files_for_frc_deps {
         c.codemap&.add_file((@tfmt("@/%", path)).shallow_copy(c.arena), src.items().shallow_copy(c.arena));
-        
+        };
         c.current_file = tok.file;
         p := tok.str().as_ptr();
         s := c.new_token(.TK_STR, p, p);
@@ -1453,11 +1452,14 @@ fn promote_to_wide_string_literal(c: *Ctx, tok: *Token, basety: *Types.CType) *T
     t
 }
 
-// Entry point function of the preprocessor.
 fn preprocess(c: *Ctx, tok: *Token) *Token = {
     cond_incl := c.cond_incl; 
     c.cond_incl = empty();
+    hide_count := c.hide_stack.len;
+    push(c.hide_stack&, (zeroed(*Macro), @static(Token)));  // :HideStackPlaceholder
     tok = c.preprocess2(tok);
+    c.hide_stack&.pop().unwrap();
+    @debug_assert_eq(hide_count, c.hide_stack.len, "leaked hide");
     if c.cond_incl.len != 0 {
         @error_tok(c, c.cond_incl[c.cond_incl.len - 1].tok, "unterminated conditional directive");
     };

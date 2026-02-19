@@ -1,4 +1,15 @@
 
+## (Feb 19)
+
+- commit to using gvn forever so can get rid of some old code. 
+
+c
+- preprocess: allow `defined` as an identifier outside `#if` conditions.
+  if i have to special case it anyway, save an pass over the tokens for replacing undefs with 0.
+- raylib test spends 35% of its frontend time re-hashing all the headers 
+  but i only need that for ffi/include with caching enabled. 
+  so don't bother when using the c compiler directly. 
+
 ## (Feb 18)
 
 - started doing a convoluted thing to compare different peoples prosperos. 
