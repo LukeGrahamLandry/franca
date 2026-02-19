@@ -484,59 +484,7 @@ fn emit_suspended_inlinables(m: *QbeModule) void = {
         @debug_assert_eq(before, m.inlinable_but_referenced_later.len);
     };
     m.inlinable_but_referenced_later&.clear();
-    
-    if m.need_static_memmove {
-        import("@/backend/opt/simplify.fr")'emit_static_memmove(m);
-    };
-    
-    // TODO: it would be a good idea to always do a debug check for unfilled non-weak symbols. 
-    //       only matters when jitting until i stop defaulting to libc as import source. 
-    //       the whole treatment of finalizing symbols in this compiler could use a refactor. 
-    //       i just keep adding shit until it kinda works. 
-    // TODO: this is a dumb place to put this. it just needs to be at the end before you try to call anything. 
-    // TODO: on amd RipDisp32(0) won't get you null so you can't check if weak symbol is missing if skip this.
-    //       so actually do need to do this iteration and convert LEA -> GOT load. 
-    // :UnfilledGotAccessStillNeedsPatch
-    if !is_linking_libc() && !m.goal.got_indirection_instead_of_patches && m.goal.type == .JitOnly && (@is(m.goal.arch, .aarch64, .rv64)) {
-        // TODO: keep a list of unfilled brks in loadaddr_bits :SLOW 
-        for_symbols m { _, s |
-            ::ptr_utils(@type s.inline[]);
-            if s.inline.is_null() && @is(s.kind, .Pending) {
-                @assert(!s.strong, "importing non-weak symbol '%' in static binary", s.name);
-                when_debug(m, .Patch, fn(out) => @fmt(out, "# unfilled weak '%'\n", s.name));
-                @debug_assert(s.alias == Qbe.no_symbol_S || s.fixups.len == 0);
-                for s.fixups { it |
-                    when_debug(m, .Patch, fn(out) => @fmt(out, "# - %\n", it.type&));
-                    @match(it.type&) {
-                        fn DataAbsolute() => {
-                            // TODO: decide if this is the policy. 
-                            //       the world is a better place if weak symbol pointers are null when not available 
-                            //       but im inconsistant about doing that. 
-                            it.patch_at.i64[] = 0;
-                        };
-                        fn InReg(info) => @match(m.goal.arch) {
-                            fn aarch64() => {
-                                // filling this patch matters because emit leaves it as brk. 
-                                // it's legal to produce the address of a missing weak symbol, you just can't try to use it. 
-                                reg := @as(u5) info.r;
-                                inst := it.patch_at.u32.slice(2);
-                                inst[0] = movz(.X64, reg, 0, .Left0);
-                                inst[1] = Arm.arm_nop;
-                            };
-                            fn rv64() #use("@/backend/rv64/bits.fr") => {  // ditto
-                                reg := @as(u5) info.r;
-                                inst := it.patch_at.u32.slice(2);
-                                inst[0] = I(0, 0b00000, @as(u3) OpI.add, reg, .op_imm);
-                                inst[1] = inst[0];
-                            }
-                            @default => unreachable();
-                        };
-                        @default => ();
-                    };
-                };
-            }
-        };
-    };
+    finish_unfilled_patches(m);
 }
 
 fn load_inline_fn(m: *Qbe.Module, f: *Qbe.Fn, src: *Qbe.InlineFn) void = {

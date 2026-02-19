@@ -228,7 +228,7 @@ dedupins :: fn(f: *Qbe.Fn, g: *Gvn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
     }
     
     @if(ENABLE_CONST_FOLD) {
-        r := Fold'foldref(f, i);
+        r := foldref(f, i);
         if r != Qbe.Null {
             killins(f, g, i, r);
             return();
@@ -461,9 +461,83 @@ gvn :: fn(f: *Qbe.Fn) void = {
         };
         refcon(b.jmp.arg);
     };
-    Fold'mark_seen(f, seen&, false);
+    mark_seen(f, seen&);
     
     f.breaks(.Ssa); f.breaks(.Use); f.breaks(.UseCounts); f.breaks(.Dom);
+}
+
+fn mark_seen(f: *Qbe.Fn, seen: *Qbe.BSet) void = {
+    range(fixed_const_count, f.ncon.zext()) { i |
+        c := f.con[i]&;
+        @if(c.type() == .CAddr)
+        if bshas(seen, i) { 
+            // record that we referenced the symbol so it will be emitted even if it was suspended for inlining. 
+            use_symbol(f.globals, c.sym) { s | 
+                mark_referenced(f.globals, c.sym, s);  // required!
+                
+                // TODO: this was supposed to be just to help deduplication (which i got rid of), 
+                //       but now removing it breaks examples/bf/bf2ir.fr (i assume because of the declare_alias changes)
+                if s.alias != Qbe.no_symbol_S {
+                    c.sym = s.alias;
+                };
+            };
+        } else {
+            // prevent unreferenced constants showing up in .frc files (as `$foo is Invalid` spam). 
+            // happens when all uses were (inlined) or (dead after folding). 
+            c.sym = Qbe.no_symbol_S;  // optional
+        }
+    };
+}
+
+fn foldref(f: *Qbe.Fn, i: *Qbe.Ins) Qbe.Ref = {
+    @if(rtype(i.to) != .RTmp) return(Qbe.Null);
+    @if(!OpTab'get(i.op(), .can_fold)) return(Qbe.Null);
+    @if(rtype(i.arg&[0]) != .RCon) return(Qbe.Null);
+    cl := f.get_constant(i.arg&[0]);
+    rr := i.arg&[1];
+    if rr == Qbe.Null {
+        rr = Qbe.ConZero;
+    };
+    @if(rtype(rr) != .RCon) return(Qbe.Null);
+    cr := f.get_constant(rr);
+    c := try_fold(i.op(), i.cls(), cl, cr) || return(Qbe.Null);
+    f.newcon(c&)
+}
+
+fn try_fold(op: Qbe.O, cls: Qbe.Cls, cl: *Qbe.Con, cr: *Qbe.Con) ?Qbe.Con = {
+    c := Qbe.Con.zeroed();
+    c.sym.id = Qbe.no_symbol;  // .CBits
+    if cl.type() != .CBits || cr.type() != .CBits {
+        if(!cls.is_int() || !(@is(op, .add, .sub)), => return(.None));
+        // This is used for constant expression evaluation in import_c.
+        // TODO: but sometimes you'd be better off doing this in isel when you could have the offsets as part of the memory access and create fewer relocations. 
+        if cr.type() == .CAddr {
+            if op == .add {
+                t := cl; cl = cr; cr = t;
+            };
+            if(cr.type() == .CAddr, => return(.None));
+        };
+        c.sym = cl.sym;  // .CAddr
+    };
+    
+    w := cls.is_wide();
+    if cls.is_int() && (@is(op, .div, .rem, .udiv, .urem)) {
+        if(iscon(cr, w, 0), => return(.None));
+        if (@is(op, .div, .rem)) {
+            x := if(w, => MIN_i64, => MIN_i32);
+            if(iscon(cr, w, bitcast(-1)) && iscon(cl, w, x.bitcast()), => return(.None));
+        };
+    };
+    
+    r := Precompiled'do_fold(op, cls, cl.bits(), cr.bits());
+    c&.set_bits(r);
+    (Some = c)
+}
+
+fn iscon(c: *Qbe.Con, w: bool, k: u64) bool = {
+    c.type() == .CBits 
+    && (!w || (@as(u64) c.bits().bitcast()) == k) 
+    && ( w || (@as(u32) c.bits().trunc())   == k.trunc())
 }
 
 #use("@/backend/opt/gcm.fr");

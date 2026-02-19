@@ -1,0 +1,219 @@
+
+builtin_memove_symbol :: fn(m: *QbeModule) ?Qbe.Sym = {
+    @if(!ENABLE_STATIC_MEMMOVE) return(.None);
+    @if(disallow_static_memmove[]) return(.None);
+    
+    // HACK: amd/isel: "didn't find encoding for mul R imm8" (R4 =l mul -1, 8)
+    // TODO: really !constfold should be treated as !matching_comptime_incremental_abi 
+    //       because i rely on the early and late stages being done with the same settings. 
+    //       (but that doesn't work either because you have to turn off const fold if abi doesn't match). 
+    //       it just normally doesn't matter because they're run consecutively by the same compiler. 
+    h := static_memmove;
+    @if((h.hack_enable_const_fold.bit_and(1) != 0) != ENABLE_CONST_FOLD) return(.None);
+    
+    m.need_static_memmove = true;
+    (Some = m.symbol_memmove)
+};
+
+emit_static_memmove :: fn(m: *Qbe.Module) void = {
+    @if(!ENABLE_STATIC_MEMMOVE) return();
+    @if(disallow_static_memmove[]) return();
+    use_symbol(m, m.symbol_memmove) { it |
+        if it.kind == .Local {
+            m.have_static_memmove = true;
+        };
+    };
+    @if(m.have_static_memmove) return();
+    m.have_static_memmove = true;
+    @debug_assert_ne(m.goal.arch, .wasm32, "use memory.copy instead of static_memmove");
+    
+    h := static_memmove;
+    syms := preintern_syms(h, m);
+    f := zeroed Qbe.Fn;
+    f.globals = m;
+    // without this it does if the funcid ends up being the same, 
+    // which it will be because repro, so name collides with the real copy_bytes__XXX. 
+    // oh but also you do need it to be a fixed thing. 
+    syms[h.meta.entry_sym.off.zext()] = m.symbol_memmove;
+    did_regalloc := load(h, f&, h.meta.entry_sym, syms);
+    f.lnk.export = false;  // TODO: probably does nothing but it should
+    @debug_assert(!did_regalloc);
+    {m.target.finish_passes}(f&);
+};
+
+disallow_static_memmove :: @static(bool);
+static_memmove :: {
+    fid  := resolve_overload(copy_bytes_static, Ty(rawptr, rawptr, i64), void, zeroed Span);
+    fr   := current_compiler_context();
+    name := fr'vtable'mangle_name(fr.data, fid);
+    
+    bytes := {
+        m   := ast_alloc().box_uninit(Qbe.Module);
+        init_default_module_dyn(m, fr.vtable, (arch = .aarch64, os = .macos, type = .CachedEarly));
+        // it's not worth the overhead to start a worker thread when it's just one function like this. 
+        chunks := {fr.vtable.emit_qbe_included}(Qbe.Module.raw_from_ptr(m), fr&, @slice(fid), .GiveMeTheCodeAndGiveItToMeRawAlsoSingleThreadCodegen);
+        bytes := concat(chunks&, ast_alloc());
+        fr'vtable'drop_qbe_module(QbeModule.raw_from_ptr(m));
+        bytes
+    };
+
+    {
+        h := check(bytes);
+        h := h.unwrap();
+        @assert(h.typ.count == 0 && h.fty.count == 0, "static_memmove.frc doesn't want type info");
+        func_count := 0;
+        h.meta.entry_sym.off = Qbe.no_symbol;
+        for(h, h.all(Incremental.Sym)) { i, it |
+            func_count += int(@is(it.segment, .Code, .MachineCode, .Import));
+            if h.get(it.name) == name {  
+                h.meta.entry_sym = i;
+            }
+        };
+        
+        @assert(h.meta.entry_sym.off != Qbe.no_symbol, "static_memmove symbol not found");
+        // TODO: this should be true but it doesn't work out the first time until :UpdateBoot
+        // @assert(func_count == 1, msg); 
+        
+        msg :: "static_memmove.frc shouldn't be making calls";
+        @if(func_count != 1)
+        for(h, h.all(Qbe.Ins)) { i, it |
+            if it.op() == .call {
+                // should panic here. :UpdateBoot
+                eprintln(msg);
+                disallow_static_memmove[] = true;
+            };
+        };
+        h
+    }
+};
+
+//
+// For each valid combintion of op + output type, just generate the code to do the thing. 
+// This is more magic but also less verbose and less error prone than just typing out a massive switch statement.
+// This is more verbose than using `inline_for` and `#ir` on individual functions but it compiles much faster (saves ~40ms, Jun 2025). 
+//
+fn do_fold(rt_o: Qbe.O, rt_k: Qbe.Cls, a0: i64, a1: i64) i64 = {
+    impl :: gen_do_fold_impl(fn(o) = OpTab'get(o, .can_fold));
+    do_fold(rt_o, rt_k, a0, a1, impl)
+}
+
+fn do_fold();
+fn do_fold(rt_o: Qbe.O, rt_k: Qbe.Cls, a0: i64, a1: i64, $impl: ScopeId) i64 = {
+    if rt_o.iscmp() {
+        // cmp returning Kw vs Kl doesn't matter, it's always 0 or 1
+        rt_k = .Kl;
+    };
+    rt_o := intcast @as(i32) rt_o;  // waste. should allow J.switch on Cls.Kw
+    i := @match(rt_k) {
+        fn Kw() => impl'Kw(rt_o, a0, a1).zext();
+        fn Kl() => impl'Kl(rt_o, a0, a1);
+        fn Ks() => impl'Ks(rt_o, a0, a1).bitcast().zext();
+        fn Kd() => impl'Kd(rt_o, a0, a1).bitcast();
+        @default => unreachable();
+    };
+    i
+}
+
+// TODO: make the frcmodule api less painful for small useages like this
+gen_do_fold_impl :: fn(filter: @FnPtr(o: Qbe.O) bool) ScopeId = {
+    a := temp();
+    fr := current_compiler_context();
+    msg := "gen_do_fold_impl: frc module abi mismatch\nrecompile your franca compiler";
+    @assert_eq(fr.vtable.frc_module_magic_v, Incremental.MAGIC, msg);
+    m := a.box_uninit(QbeModule);
+    // TODO: "need to be consistant about how to handle modules like this that don't actually compile anything"
+    init_default_module_dyn(m, fr.vtable, (arch = query_current_arch(), os = query_current_os(), type = .CachedEarly));
+    
+    argcls := OpTab.tables;
+    
+    decls := Incremental'Fld.list(temp());
+    writer := m.save.unwrap();
+    // TODO: making everyone remember to do this is kinda lame
+    range(0, Incremental.FTy.COUNT) { _ |
+        writer.fty&.push(zeroed Incremental.FTy);   // skip builtin types so offsets work out
+    };
+    
+    cls :: @const_slice(Qbe.Cls.Kw, .Kl, .Ks, .Kd);
+    for cls { k |
+        f := a.box_uninit(Qbe.Fn);
+        default_init(f, m);
+        f.ret_cls = k;
+        f.lnk = (id = m.intern(@tfmt("%", k)), export = true);
+        
+        next := f.start&;
+        b := a.box_zeroed(Qbe.Blk); next[] = b; next = b.link&; f.nblk += 1;
+        f.start = b;
+       
+        r_o, r_a0, r_a1 := (f.newtmp("", .Kl), f.newtmp("", .Kl), f.newtmp("", .Kl));
+        push(b, make_ins(.par, .Kl, r_o, QbeNull, QbeNull));
+        push(b, make_ins(.par, .Kl, r_a0, QbeNull, QbeNull));
+        push(b, make_ins(.par, .Kl, r_a1, QbeNull, QbeNull));
+        
+        fail := a.box_zeroed(Qbe.Blk); next[] = fail; next = fail.link&; f.nblk += 1;
+        fail.jmp.type = .hlt;
+        end := a.box_zeroed(Qbe.Blk); next[] = end; next = end.link&; f.nblk += 1;
+        
+        s := f.new_switch(20, b, r_o, fail);
+        s := f.switches[s]&;
+        phi := f.new_phi(end, k, 20);
+        end.jmp = (type = k.retk(), arg = phi.to);
+        
+        r_a0s, r_a0d, r_a1s, r_a1d := (f.newtmp("", .Ks), f.newtmp("", .Kd), f.newtmp("", .Ks), f.newtmp("", .Kd));
+        push(b, make_ins(.cast, .Ks, r_a0s, r_a0, QbeNull));
+        push(b, make_ins(.cast, .Kd, r_a0d, r_a0, QbeNull));
+        push(b, make_ins(.cast, .Ks, r_a1s, r_a1, QbeNull));
+        push(b, make_ins(.cast, .Kd, r_a1d, r_a1, QbeNull));
+        a0 := @slice(r_a0, r_a0, r_a0s, r_a0d, QbeNull, QbeNull);
+        a1 := @slice(r_a1, r_a1, r_a1s, r_a1d, QbeNull, QbeNull);
+
+        range(0, Qbe.O.enum_count()) { i |
+            continue :: local_return;
+            o     := @as(Qbe.O) @as(i32) intcast i;
+            flags := argcls[i];
+            k0    := ops_table_argscls(flags, k, 0);
+            k1    := ops_table_argscls(flags, k, 1);
+            allow := filter(o) && k0 != .Ke && o != .sel1;
+            if(!allow, => continue());
+            // cmp returning Kw vs Kl doesn't matter, it's always 0 or 1
+            if(o.iscmp() && k == .Kw, => continue());
+            
+            // cast pars to the right types for this instruction (compiles to int vs float registers)
+            a0 := a0[intcast @as(i32) k0];
+            a1 := a1[intcast @as(i32) k1];
+            
+            b  := a.box_zeroed(Qbe.Blk); next[] = b; next = b.link&; f.nblk += 1;
+            r  := f.newtmp("", k);
+            r := @if(no_result(o), Qbe.Null, r);
+            push(b, make_ins(o, k, r, a0, a1));
+            push(s.cases&, s.case_count&, (b, i));
+            r := @if(no_result(o), Qbe.ConZero, r);
+            push(phi, b, r);
+            
+            b.jmp.type = .jmp;
+            b.s1 = end;
+        };
+        
+        // and this is kinda lame, the frontend could just do this itself if you don't provide a root_scope
+        // (it's just annoying because i don't want to mutate the module bytes so can't just abi_function_type in the compiler)
+        decls&.push(
+            name = writer.push(m.str(f.lnk.id)),
+            type = abi_function_type(writer, f),
+            payload = (offset = trunc writer.map_sym(m, f.lnk.id))
+        );
+        
+        fr'vtable'run_qbe_passes(Qbe.Fn.raw_from_ptr(f));
+    };
+    
+    meta: Incremental'Meta = (
+        arch_os = 0x0F0F, 
+        root_scope = save_fields(writer, .Scope, decls.items()),
+        debug_name = writer.push("backend_do_fold"),
+    );
+    b := writer.to_bytes(meta, m);
+    bytes := concat(b, ast_alloc());
+    fr'vtable'drop_qbe_module(QbeModule.raw_from_ptr(m));
+    result := fr'vtable'import_frc(fr.data, bytes);
+    result.or(fn(err) => fr.report_error(err))
+};
+
+#use("@/backend/lib.fr");

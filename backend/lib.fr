@@ -16,8 +16,8 @@ Simplify :: import("@/backend/opt/simplify.fr");
 #use("@/lib/bit_fields.fr");
 #use("@/lib/sys/sync/mutex.fr");
 #use("@/lib/sys/process.fr");
-Fold :: import("@/backend/opt/fold.fr");
 OpTab :: import("@/backend/meta/ops.fr");
+Precompiled :: import("@/backend/meta/precompiled.fr");
 
 backend :: import_module("@/backend/lib.fr");
 exports :: Type.scope_of(@struct {
@@ -29,8 +29,7 @@ exports :: Type.scope_of(@struct {
     load_one: (@Fn(h: *Incremental.Header, f: *Qbe.Fn, it: Incremental'One(Incremental.Sym), syms: []Qbe.Sym) bool) :load;
     load_all: (@Fn(header: *Incremental.Header, m: *QbeModule) void) :compile_all_symbols;
     drop_module: (@Fn(m: *QbeModule) void) :drop;
-    fold_op: (@Fn(rt_o: Qbe.O, rt_k: Qbe.Cls, a0: i64, a1: i64) i64) :Fold.do_fold;
-    try_fold_op: (@Fn(op: Qbe.O, cls: Qbe.Cls, cl: *Qbe.Con, cr: *Qbe.Con) ?Qbe.Con) :Fold.try_fold;
+    try_fold_op: (@Fn(op: Qbe.O, cls: Qbe.Cls, cl: *Qbe.Con, cr: *Qbe.Con) ?Qbe.Con) : import("@/backend/opt/gvn.fr")'try_fold;
     worker_thread: (@Fn(s: *CodegenShared) void) : codegen_thread_main;
     worker_start: (@Fn(m: *QbeModule, arena: Alloc, worker: CodegenWorker, threaded: bool, enqueue: @FnPtr(*CodegenShared, *CodegenEntry) void, join: CodegenWorker) *CodegenShared) : init_codegen_worker;
     worker_enqueue: (@Fn(*CodegenShared, *CodegenEntry) void) : enqueue_task;
@@ -38,12 +37,13 @@ exports :: Type.scope_of(@struct {
     writer_finish_imports: (@Fn(writer: *Incremental.Writer, m: *QbeModule) void) : finish_imports;
 });
 
-   ENABLE_INLINING :: true;
+   ENABLE_INLINING :: true
+    && !(__driver_abi_version < 1349);
 ENABLE_ELIDE_SLOTS :: true;
     ENABLE_PROMOTE :: true;
- ENABLE_CONST_FOLD :: true &&
+ ENABLE_CONST_FOLD :: true && ENABLE_GVN && 
     matching_comptime_incremental_abi;
-    // opt/fold.fr generates a module at comptime and includes that at comptime, 
+    // requires generating a module at comptime that performs each operation, 
     // so it can only be enabled when the host compiler has the same ir abi as the source code being compiled. 
 
 matching_comptime_incremental_abi :: { 
@@ -53,12 +53,8 @@ matching_comptime_incremental_abi :: {
 ENABLE_STATIC_MEMMOVE :: true 
     && matching_comptime_incremental_abi && ENABLE_INLINING;
 
-// replaces the old fold and copy passes. 
 ENABLE_GVN :: true
     && !(__driver_abi_version < 1349);
-    
-ALSO_OLD_COPY :: false 
-    && ENABLE_GVN;
 
 // doesn't help speed but makes the ir more readable in spill and rega. 
 LATE_COPY_ELIM :: true;
@@ -612,23 +608,13 @@ run_qbe_passes_common :: fn(f: *Qbe.Fn) bool = {
     fillalias(f); // !
     
     ::if(Qbe.O);
+    @if(!(__driver_abi_version < 1349))  // :UpdateBoot amd
     import("@/backend/opt/load.fr")'loadopt(f); // optional
     fill_use(f);
     fillalias(f); // for coalesce
     coalesce(f); // optional
     fill_use(f); 
     ssacheck(f); // debug
-    
-    @if(@run(!ENABLE_GVN)) {
-        import("@/backend/opt/copy.fr")'copy_elimination(f);
-        fill_use(f);
-        Fold'fold_constants(f);
-        fillcfg(f);
-    };
-    @if(ALSO_OLD_COPY) {
-        import("@/backend/opt/copy.fr")'copy_elimination(f);
-        fill_use(f);
-    };
     
     @if(ENABLE_GVN) {
         import("@/backend/opt/gvn.fr")'gvn(f);
@@ -895,6 +881,61 @@ fn usecheck(k_ref: Qbe.Cls, k_tmp: Qbe.Cls) bool #inline =
     k_tmp == k_ref || (k_tmp == .Kl && k_ref == .Kw);
 
 wasm_page_size :: 65536;
+
+// TODO: clarify the policy on when this and fill_pending_dynamic_imports need to be called
+fn finish_unfilled_patches(m: *Qbe.Module) void = {
+    if m.need_static_memmove {
+        import("@/backend/meta/precompiled.fr")'emit_static_memmove(m);
+    };
+    
+    // TODO: it would be a good idea to always do a debug check for unfilled non-weak symbols. 
+    //       only matters when jitting until i stop defaulting to libc as import source. 
+    //       the whole treatment of finalizing symbols in this compiler could use a refactor. 
+    //       i just keep adding shit until it kinda works. 
+    // TODO: on amd RipDisp32(0) won't get you null so you can't check if weak symbol is missing if skip this.
+    //       so actually do need to do this iteration and convert LEA -> GOT load. 
+    // :UnfilledGotAccessStillNeedsPatch
+    if !is_linking_libc() && !m.goal.got_indirection_instead_of_patches && m.goal.type == .JitOnly && (@is(m.goal.arch, .aarch64, .rv64)) {
+        // TODO: keep a list of unfilled brks in loadaddr_bits :SLOW 
+        for_symbols m { _, s |
+            ::ptr_utils(@type s.inline[]);
+            if s.inline.is_null() && @is(s.kind, .Pending) {
+                @assert(!s.strong, "importing non-weak symbol '%' in static binary", s.name);
+                when_debug(m, .Patch, fn(out) => @fmt(out, "# unfilled weak '%'\n", s.name));
+                @debug_assert(s.alias == Qbe.no_symbol_S || s.fixups.len == 0);
+                for s.fixups { it |
+                    when_debug(m, .Patch, fn(out) => @fmt(out, "# - %\n", it.type&));
+                    @match(it.type&) {
+                        fn DataAbsolute() => {
+                            // TODO: decide if this is the policy. 
+                            //       the world is a better place if weak symbol pointers are null when not available 
+                            //       but im inconsistant about doing that. 
+                            it.patch_at.i64[] = 0;
+                        };
+                        fn InReg(info) => @match(m.goal.arch) {
+                            fn aarch64() => {
+                                // filling this patch matters because emit leaves it as brk. 
+                                // it's legal to produce the address of a missing weak symbol, you just can't try to use it. 
+                                reg := @as(u5) info.r;
+                                inst := it.patch_at.u32.slice(2);
+                                inst[0] = movz(.X64, reg, 0, .Left0);
+                                inst[1] = Arm.arm_nop;
+                            };
+                            fn rv64() #use("@/backend/rv64/bits.fr") => {  // ditto
+                                reg := @as(u5) info.r;
+                                inst := it.patch_at.u32.slice(2);
+                                inst[0] = I(0, 0b00000, @as(u3) OpI.add, reg, .op_imm);
+                                inst[1] = inst[0];
+                            }
+                            @default => unreachable();
+                        };
+                        @default => ();
+                    };
+                };
+            }
+        };
+    };
+}
 
 // This is not what you want if you care about cross compiling!
 Dyn :: import("@/lib/dynamic_lib.fr");

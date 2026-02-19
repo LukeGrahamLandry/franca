@@ -282,19 +282,21 @@ phicopyref :: fn(f: *Qbe.Fn, b: *Qbe.Blk, p: *Qbe.Phi, g: *Gvn) Qbe.Ref = {
         }
     };
     
-    @if(!ALSO_OLD_COPY) {
-        Copy :: import("@/backend/opt/copy.fr");
+    // this is from the old copy elimination (before gvn)
+    // TODO: if im going to keep it, explain exactly what cases this still helps. 
+    // TODO: would be great to deduplicate between copyref and iscopy
+    if true {
         first_arg := QbeNull;
         range(0, p.narg.zext()) { a | 
             if p.blk[a].id.zext() < b.id.zext() {
-                check_arg := Copy'get_src_or_self(p.arg[a], g.copy_of);
+                check_arg := get_src_or_self(p.arg[a], g.copy_of);
                 if first_arg == QbeNull || first_arg == QbeUndef {
                     first_arg = check_arg;
                 };
             };
         };
         g.copy_of[p.to.val()] = p.to;
-        Copy'simplify_phi(f, p, first_arg, g.copy_of, g.stk&, g.t_s&, g.a_s&);
+        simplify_phi(f, p, first_arg, g.copy_of, g.stk&, g.t_s&, g.a_s&);
         r := g.copy_of[p.to.val()];
         if r != p.to {
             return r;
@@ -342,6 +344,132 @@ fn find_phi(b: *Qbe.Blk, to: Qbe.Ref) ?*Qbe.Phi = {
     };
     .None
 }
+
+/* detects a cluster of phis/copies redundant with 'r';
+ * the algorithm is inspired by Section 3.2 of "Simple
+ * and Efficient SSA Construction" by Braun M. et al.
+ */
+simplify_phi :: fn(f: *Qbe.Fn, phi_start: *Qbe.Phi, r: Qbe.Ref, copy_of: []Qbe.Ref, use_stack: *List(*Qbe.Use), dests_seen: *Qbe.BSet, arguments: *Qbe.BSet) void = {
+    bszero(dests_seen);
+    bszero(arguments);
+    phi_none  := Qbe.Phi.zeroed();
+    use_stack.clear();
+    use_stack_base: Qbe.Use = (type = .UPhi, bid = 0, u = (phi = phi_start));
+    use_stack.push(use_stack_base&);
+    while => use_stack.pop() { u |
+        continue :: local_return;
+        
+        dest, using_phi := @match(u.type) {
+            fn UIns() => {
+                f.iscopy(u.u.ins, r) || continue();  // if this instruction isn't making a copy of `r`, we don't care. 
+                (u.u.ins.to.val(), phi_none&)
+            }
+            fn UPhi() => (u.u.phi.to.val(), u.u.phi);
+            @default  => continue();
+        };
+        !bshas(dests_seen, dest) || continue();  // only visit each dest once. 
+        bsset(dests_seen, dest);
+        
+        range(0, using_phi.narg.zext()) { a |
+            source := get_src_or_self(using_phi.arg[a], copy_of);
+            if source != r {
+                rtype(source) == .RTmp || return();  // if the source of the copy isn't a temp, that means there can't be a chain, so we don't care? i think?
+                bsset(arguments, source.val());
+            }; 
+        };
+        
+        // Now push all uses of `dest` to the stack for the next iteration. 
+        uses := f.tmp.index(dest).uses();
+        use_stack.reserve(uses.len);
+        each uses { u |
+            use_stack.push(u);
+        };
+    };
+    
+    bsdiff(arguments, dests_seen);
+    if bscount(arguments) == 0 {
+        for dests_seen { t |
+            copy_of[t] = r;
+        }
+    }
+};
+
+// this checks if its safe to just remove the instruction and use arg0 directly instead.
+iscopy :: fn(f: *Qbe.Fn, i: *Qbe.Ins, arg0: Qbe.Ref) bool = {
+    if i.op() == .copy {
+        return true;
+    };
+    
+    // Some operations behave like a copy from the first argument when the second argument is a specific constant. 
+    has_identity, identity_value := OpTab'arithmetic_identity_table(i.op());
+    if has_identity && is_int(i.cls()) && rtype(i.arg&[1]) == .RCon {
+        @if(OpTab'get(i.op(), .cmpeqwl)) return(false);
+        c := f.get_constant(i.arg&[1]);
+        return(iscon(c, i.cls().is_wide(), identity_value));
+    };
+   
+    if !is_ext(i.op()) || rtype(arg0) != .RTmp {
+        return(false);
+    };
+    
+    // extending a word to a word is a copy. 
+    if i.cls() == .Kw && (i.op() == .extsw || i.op() == .extuw) {
+        return(true); // TODO: I guess you get here because of chains? :MakeATestThatFails if you make this a debug assert
+    };
+
+    t := f.get_temporary(arg0);
+    @debug_assert(is_int(t.cls), "can only extend integers");
+    
+    // extending word to long is not a copy
+    if i.cls() == .Kl && t.cls == .Kw {
+        // TODO: but zero extending is a copy right, because the top bits are always zeroed? qbe doesn't do this tho.
+        //       :MakeATestThatFails if you return(i.op() == .extuw); (the compiler fails tho so we know its not right)
+        //       oh because you can do `x = long; x = extuw x;` which is not a copy, its just sad when it was created by a loaduw
+        if !t.def.is_null() {
+            i_o, t_o := (i.op(), t.def.op());
+            @debug_assert(i_o.is_ext());
+            want_load := rebase(i_o, .loadsb, .extsb);
+            if want_load == t_o {
+                t.def.set_cls(.Kl);
+                return(true);
+            };
+            // TODO: i think this is wrong because we break use
+            if i_o == .extsw && t_o == .loaduw && t.nuse == 1 {
+                t.def.set_cls(.Kl);
+                t.def.set_op(.loadsw);
+                return(true);
+            };
+        };
+        return(false);
+    };
+    
+    // if we're extending (with the same high bits and greater/equal size) as arg0 was created with, that's just a copy. don't need to extend twice. 
+    i_width := BIT(i.source_width().raw().zext());  // silly because we already know it's an ext__ but i think this makes it more clear what we're doing. 
+    t_width := extcpy[t.width.raw().zext()];
+    return(i_width.bit_and(t_width) != 0);  // :MakeATestThatFails if you just always return true. i can see why that wouldn't be right so should be possible to break it. 
+    
+    extcpy :: {
+        T :: Qbe.TmpType;
+        r :: fn(t: T) i64 = t.raw().zext();
+        t := ast_alloc().alloc_zeroed(u64, T.enum_count());
+        t[T.WFull.r()] = 0;
+        t[T.Wsb.r()] = BIT(T.Wsb.r()).bit_or(BIT(T.Wsh.r())).bit_or(BIT(T.Wsw.r()));
+        t[T.Wub.r()] = BIT(T.Wub.r()).bit_or(BIT(T.Wuh.r())).bit_or(BIT(T.Wuw.r()));
+        t[T.Wsh.r()] = BIT(T.Wsh.r()).bit_or(BIT(T.Wsw.r()));
+        t[T.Wuh.r()] = BIT(T.Wuh.r()).bit_or(BIT(T.Wuw.r()));
+        t[T.Wsw.r()] = BIT(T.Wsw.r());
+        t[T.Wuw.r()] = BIT(T.Wuw.r());
+        t
+    };
+};
+
+get_src_or_self :: fn(r: Qbe.Ref, copy_of: []Qbe.Ref) Qbe.Ref = {
+    if rtype(r) == .RTmp && copy_of[r.val()] != QbeNull {
+        copy_of[r.val()]
+    } else {
+        r
+    }
+};
 
 #use("@/backend/lib.fr");
 
