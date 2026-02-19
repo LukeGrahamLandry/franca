@@ -1,0 +1,234 @@
+// some of my programs output image files 
+// and my belief system is that my stuff should be self contained 
+// so i want to provide a way to view them.
+// CONTROLS: drag to pan and scroll to zoom. cli/dragndrop/paste to open image. left/right to cycle images. 
+
+FEAT_PNG :: true; // adds dependency on stb_image to support more formats, otherwise only a subset of ppm. 
+
+open_image :: fn(state: *State, path: Str) void = {
+    #use("@/lib/sys/fs.fr");
+    
+    in := read_entire_file(temp(), path) || {
+        @eprintln("failed to read [%]", path);
+        return()
+    };
+    
+    data, width, height := @if(FEAT_PNG, {
+        (w: i32, h: i32, c: i32) := (0, 0, 4);
+        // :LEAK
+        pixels := Stb'stbi_load_from_memory(in.ptr, in.len.intcast(), w&, h&, zeroed(*i32), c);
+        if pixels.is_null() {
+            @eprintln("failed to load [%]", path);
+            return()
+        };
+        (pixels.slice(intcast(w*h*c)), w, h)
+    }, {
+        // https://netpbm.sourceforge.net/doc/ppm.html
+        prefix := "P5";
+        if !in.starts_with(prefix) {
+            @eprintln("not ppm P5 [%]", path);
+            return();
+        };
+        in = in.rest(prefix.len);
+        n := @ref zeroed(Array(i64, 3));
+        range(0, 3) { i |
+            while => in.len > 0 && in[0].is_ascii_whitespace() {
+                in = in.rest(1);
+            };
+            it, ss := convert_number(in, 10, dec_digit);
+            n[i] = it;
+            in = ss;
+        };
+        in = in.rest(1);
+        width, height, max_colour := (n[0], n[1], n[2]);
+        if in.len != width * height {
+            @eprintln("bad ppm dimensions [%]", path);
+            return();
+        };
+        data := temp().alloc_init(u32, width*height, fn(i) => pack_rgba(in[i], in[i], in[i], 255));
+        (data.interpret_as_bytes(), width.intcast(), height.intcast())
+    });
+
+    d := zeroed(Sg.ImageData);
+    d.subimage&[0]&[0] = data;
+    img: Sg.Image = state.sg.make(
+        width = width, height = height,
+        pixel_format = .RGBA8,
+        data = d,
+    );
+    state.images&.push(
+        img = img, 
+        name = path.shallow_copy(general_allocator()), 
+        aspect = width.intcast().float() / height.intcast().float(),
+    );
+    state.dirty = true;
+    state.image_i = state.images.len - 1;
+    @eprintln("loaded [%]", path);
+}
+
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
+    
+    sgl := state.draw&;
+    sgl.defaults();
+    sgl.viewport(0.intcast(), 0.intcast(), sapp.width().intcast(), sapp.height().intcast(), true);
+    sgl.load_pipeline(state.pipe);
+    
+    sdtx := state.text.default_context&;
+    image_aspect := 1.0;
+    if state.images.len > 0 {
+        it := state.images[state.image_i];
+        sgl.texturing_enabled = true;
+        sgl.texture(it.img, (id = Sg.INVALID_ID));
+        
+        x := 1.0 / sapp.dpi_scale;
+        sdtx.canvas(sapp.width().float().cast().mul(x), sapp.height().float().cast().mul(x));
+        sdtx.color = 0xFF005555;
+        sdtx.put(it.name);
+        
+        image_aspect = it.aspect;
+    };
+    
+    sgl.begin(.QUADS);
+    sgl.load_identity();
+    sgl.translate(state.pos.x, state.pos.y, 0.0);
+    sgl.scale(state.scale, state.scale, 0.0);
+    sgl.rotate(PI, 1.0, 0.0, 0.0);
+
+    screen_aspect := sapp.width().float() / sapp.height().float();
+    (x1: f32, x2: f32, y1: f32, y2: f32) := (0, 1, 0, cast(screen_aspect / image_aspect));
+    sgl.v2f_t2f(x1, y1, 0, 0);
+    sgl.v2f_t2f(x2, y1, 1, 0);
+    sgl.v2f_t2f(x2, y2, 1, 1);
+    sgl.v2f_t2f(x1, y2, 0, 1);
+    sgl.end();
+    
+    Easy'glue_begin_pass(sapp, sg, (colors = ((
+        load_action = .CLEAR,
+        clear_value = (r = 0.15, g = 0.15, b = 0.15, a = 1),
+    ), ..)));
+    sgl.draw_layer(sg, 0);
+    sdtx.draw_layer(0);
+    sg.end_pass();
+    sg.commit();
+};
+
+State :: @struct {
+    HIGH_DPI :: true;
+    pipe: Sgl.Pipeline;
+    draw: Sgl.Self;
+    text: Sdtx.Self;
+    pos: Vec2;
+    scale: f32;
+    sg: *Sg.Self;
+    sapp: *Sapp.Self;
+    images: List(Img);
+    image_i: i64;
+    dirty: bool;
+};
+
+Img :: @struct {
+    img: Sg.Image;
+    name: Str;
+    aspect: f64;
+};
+
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    state.sg = sg; state.sapp = sapp;
+    sapp.clipboard.enabled = true;
+    sapp.drop.enabled = true;
+    state.draw&.setup(
+        allocator = general_allocator(),
+        sg = sg,
+    );
+    
+    state.scale = 1.0;
+    state.pos = vec2(-1.0, 1.0);
+    
+    init_pipeline(state.draw&, state.pipe&, sg, (colors = (
+        (blend = (  // This makes transparency work
+            enabled = true,
+            src_factor_rgb = .SRC_ALPHA,
+            dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
+        )),
+        ..,
+    )));
+    
+    state.text&.setup(
+        sg = sg,
+        allocator = general_allocator(),
+        fonts = @slice(Sdtx.font.cpc),
+    );
+    
+    state.images = list(general_allocator());
+    for cli_args() { it |
+        it := it.str();
+        open_image(state, it);
+    };
+}
+
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    screen := vec2(sapp.framebuffer_width.float().cast(), sapp.framebuffer_height.float().cast()) 
+        / 2;
+    mouse := vec2(event.mouse_x, -event.mouse_y) / screen + vec2(-1.0, 1.0);
+    delta_mouse := vec2(event.mouse_dx, -event.mouse_dy) / screen;
+    @match(event.type) {
+        fn RESIZED() => ();
+        fn KEY_DOWN() => @match(event.key_code) {
+            fn LEFT() => state.next_example(-1);
+            fn RIGHT() => state.next_example(1);
+            @default => return();
+        };
+        fn MOUSE_MOVE() => {
+            @if(event.modifiers.get(.left_mouse) == 0) return();
+            state.pos += delta_mouse;
+        }
+        fn MOUSE_SCROLL() => {
+            if(state.scale < 0.00000001 && event.scroll_y > 0, => return());
+            delta := event.scroll_y * state.scale * 3 / screen.x;
+            pos := (mouse - state.pos) / state.scale;
+            pos0 := pos * vec2(state.scale);
+            pos1 := pos * vec2(state.scale + delta);
+            state.pos -= pos1 - pos0;
+            state.scale += delta;
+        }
+        fn CLIPBOARD_PASTED() => {
+            in := sapp.get_clipboard_string().items();
+            open_image(state, in);
+        }
+        fn FILES_DROPPED() => {
+            n: i64 = sapp.drop.num_files;
+            range(0, n) { i |
+                s := sapp.get_dropped_file_path(i);
+                open_image(state, s);
+            };
+        }
+        @default => return();
+    };
+    state.dirty = true;
+}
+
+fn next_example(state: *State, delta: i64) void = {
+    @if(state.images.len == 0) return();
+    state.image_i = mod(state.image_i + delta + state.images.len, state.images.len);
+}
+
+driver :: fn(vtable: *ImportVTable) void = 
+    Easy'build_for_graphics(vtable, @source_file_name());
+
+main :: fn() void = 
+    Easy'start(State);
+
+#use("@/graphics/lib.fr");
+
+Stb :: {
+    root := Foreign'stb();
+    Ffi  :: import("@/examples/import_c/ffi.fr");
+    c_source := @tfmt("""
+        #define STB_IMAGE_IMPLEMENTATION
+        #define STBI_NO_SIMD
+        #define STBI_NO_STDIO
+        #include "%/stb_image.h"
+    """, root);
+    Ffi'include(current_compiler_context(), c_source)
+}

@@ -1,4 +1,17 @@
 
+## (Feb 18)
+
+- started doing a convoluted thing to compare different peoples prosperos. 
+  with recursing down a quad tree and diffing, my idea was maybe knowing the region that 
+  way is more useful than just hey pixel number 12345 is different. 
+  but relying on my for_quads being correct maybe defeats the point. 
+  it's much easier to just switch between the images really fast and look at what changes. 
+  the sane answer is https://www.diffchecker.com/image-compare/
+  which thinks mine is the same as fidget which is reassuring. 
+- new example: trivial image viewer that can zoom and pan around. 
+- app: macos standardizedURL.path on something with spaces gives you %20, etc. 
+  ask it to escape them so dragndrop is usable. 
+
 ## (Feb 17)
 
 prospero

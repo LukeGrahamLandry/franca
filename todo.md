@@ -581,7 +581,7 @@ different subsets of the same resources.
 - in wasm/make_exec use debug_out when dumping module so you can redirect it
 - make sure `::@as(rawptr)(fn() void = ())` gives you the got_lookup_offset not the junk jit_addr. 
 - pass the tests
-  - cast.c, float.c, literal.c, fpcnv.ssa: `e` in float literals
+  - literal.c hex float literals
   - macro.c: `__FILE__; 1 != 0; ends_with(main_filename1, "test/macro.c")`
   - varargs.c, function.c: vsprintf
   - pragma_once.c: `redefinition of function 'assert'`
@@ -598,8 +598,9 @@ different subsets of the same resources.
 - kinda lame that web/demo.fr has to special case the graphics programs instead of drivers working properly
 - examples/terminal.fr stbtt__run_charstring panic! missing br_if target @120 -> @122
   - ugly=false
-- examples/terminal.fr: Uncaught RuntimeError: function signature mismatch
-  - ugly=true. regression! this used to work. (in browser) 
+- examples/gpu/viewer.fr doesn't work in wasm 
+  - FEAT_PNG "stbi__hdr_load panic! missing br target @64 -> @62"
+  - !FEAT_PNG "Uncaught RuntimeError: function signature mismatch"
 
 ## import_wasm 
 
