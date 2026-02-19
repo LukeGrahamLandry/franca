@@ -1,5 +1,5 @@
 # THIS IS NOT DONE
-# MACOS-ARM64-METAL ONLY (for now)
+# MACOS-ARM64-METAL / WEBGPU ONLY (for now)
 
 Various things useful for creating cross platform graphical applications. 
 
@@ -13,6 +13,10 @@ Various things useful for creating cross platform graphical applications.
 - app: open a window, get a 3D-context, handle input events (platforms: MacOS)
 - gl: OpenGL 1.x style immediate-mode rendering API
 - debugtext: a simple ASCII text renderer using vintage home computer fonts
+
+I haven't kept in sync with upstream since ~April 2025. 
+Maybe someday I'll steal some of their improvements, 
+for now what I have already is enough to draw some pretty pictures.
 
 ## My Additions
 
@@ -33,6 +37,7 @@ Various things useful for creating cross platform graphical applications.
 - (macos) removed ios and opengl support
 - (web) no dependency on emscripten
 - glue code for initializing webgpu native (dawn)
+  - convergent evolution: upstream has this now too
 - UNFINISHED
   - linux, windows
   - don't have timing stuff (frame_duration)

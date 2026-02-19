@@ -15,8 +15,8 @@
 ASSERT_NOT_IOS :: fn() => ();
 ASSERT_NOT_OLD :: fn() => ();
 
-_SG_MTL_UB_ALIGN :: { ASSERT_NOT_IOS(); 256 };
-_SG_MTL_INVALID_SLOT_INDEX :: 0;
+uniform_buffer_alignment :: { ASSERT_NOT_IOS(); 256 };
+null_id : Id("T") : 0;
 
 ReleaseItem :: @struct {
     frame_index: u32;   // frame index at which it is safe to release this resource
@@ -63,8 +63,8 @@ Shader :: @struct {
 
 Pipeline :: @struct {
     prim_type: M("MTLPrimitiveType");
-    index_size: i32;
     index_type: M("MTLIndexType");
+    index_size: i64;
     cull_mode: M("MTLCullMode");
     winding: M("MTLWinding");
     stencil_ref: u32;
@@ -93,7 +93,7 @@ StateCache :: @struct {
     cur_pipeline_id: Sg.Pipeline;
     cur_indexbuffer: *Sg.Buffer.T;
     cur_indexbuffer_id: Sg.Buffer;
-    cur_indexbuffer_offset: i32;
+    cur_indexbuffer_offset: i64;
     buffer: StateCacheEntry(Sg.Buffer, _SG_MTL_MAX_STAGE_BUFFER_BINDINGS);
     image: StateCacheEntry(Sg.Image, _SG_MTL_MAX_STAGE_IMAGE_BINDINGS);
     sampler: StateCacheEntry(Sg.Sampler, _SG_MTL_MAX_STAGE_SAMPLER_BINDINGS);
@@ -104,8 +104,8 @@ Impl :: @struct {
     valid: bool;
     use_shared_storage_mode: bool;
     cur_frame_rotate_index: i64;
-    ub_size: i32;
-    cur_ub_offset: i32;
+    ub_size: i64;
+    cur_ub_offset: i64;
     cur_ub_base_ptr: *u8;
     state_cache: StateCache;
     idpool: IdPool;
@@ -118,6 +118,7 @@ Impl :: @struct {
     cur_drawable: id("MTLDrawable");
     uniform_buffers: Array(id("MTLBuffer"), Sg.SG_NUM_INFLIGHT_FRAMES);
     pass_completed_sem: *Block_literal_1;
+    null: id("NsNull");
 };
 
 fn to_mtl(it: Sg.LoadAction) M("MTLLoadAction") = @map_enum(it) 
@@ -200,7 +201,7 @@ fn to_mtl(it: Sg.FaceWinding) M("MTLWinding") = @map_enum(it)
 fn to_mtl(it: Sg.IndexType) M("MTLIndexType") = @map_enum(it) 
     (UINT16 = 0, UINT32 = 1);
 
-fn to_mtl(it: Sg.IndexType) i32 = @map_enum(it) 
+fn to_mtl_size(it: Sg.IndexType) i32 = @map_enum(it) 
     (NONE = 0, UINT16 = 2, UINT32 = 4);
 
 fn to_mtl(it: Sg.ImageType) M("MTLTextureType") = @map_enum(it)
@@ -235,14 +236,14 @@ fn init_pool(mtl: *Impl, desc: *Sg.Desc) void = {
             2 * desc.pipeline_pool_size +
             desc.attachments_pool_size +
             128
-        ).intcast();
-    p.pool = @objc cls("NSMutableArray").arrayWithCapacity(@as(i64) p.num_slots);
+        );
+    p.pool = @objc cls("NSMutableArray").arrayWithCapacity(p.num_slots);
     @objc p.pool.retain();
-    null := @objc cls("NSNull").null();
+    null := mtl.null;
     range(0, p.num_slots) { _ |
         @objc p.pool.addObject(null);
     }
-    @debug_assert((@objc @as(i64) p.pool.count()) == @as(i64) p.num_slots);
+    @debug_assert((@objc @as(i64) p.pool.count()) == p.num_slots);
     a := mtl.sg.desc.allocator;
     // a queue of currently free slot indices
     // pool slot 0 is reserved!
@@ -253,14 +254,15 @@ fn init_pool(mtl: *Impl, desc: *Sg.Desc) void = {
     p.release_queue_front = 0;
     p.release_queue_back = 0;
     
-    // filled with _SG_MTL_INVALID_SLOT_INDEX
+    // filled with null_id
     p.release_queue = a.alloc_zeroed(ReleaseItem, p.num_slots);
 }
 
 fn destroy_pool(mtl: *Impl) void = {
     p := mtl.idpool&;
-    _sg_free(p.release_queue);  p.release_queue = 0;
-    _sg_free(p.free_queue);     p.free_queue = 0;
+    a := mtl.sg.desc.allocator;
+    a.dealloc(ReleaseItem, p.release_queue);
+    a.dealloc(i32, p.free_queue);
     release(p.pool);
 }
 
@@ -270,44 +272,35 @@ fn alloc_pool_slot(mtl: *Impl) i32 = {
     @debug_assert(p.free_queue_top > 0, "free_queue empty");
     p.free_queue_top -= 1;
     slot_index := p.free_queue[p.free_queue_top];
-    @debug_assert((slot_index > 0) && (slot_index < p.num_slots.intcast()));
+    @debug_assert(slot_index > 0 && slot_index.zext() < p.num_slots);
     slot_index
-}
-
-// put a free resource pool slot back into the free-queue
-fn free_pool_slot(mtl: *Impl, slot_index: i32) void = {
-    p := mtl.idpool&;
-    @debug_assert(p.free_queue_top < p.num_slots);
-    @debug_assert((slot_index > 0) && (slot_index < p.num_slots.intcast()));
-    p.free_queue[p.free_queue_top] = slot_index;
-    p.free_queue_top += 1;
 }
 
 // add an MTLResource to the pool, return pool index or 0 if input was 'nil'
 fn add_resource(mtl: *Impl, res: id("T")) Id("T") = {
-    if(res.is_nil(), => return(_SG_MTL_INVALID_SLOT_INDEX));
+    if(res.is_nil(), => return(null_id));
     mtl.sg.stat(.mtl_idpool_num_added, 1);
     slot_index := mtl.alloc_pool_slot();
     // NOTE: the NSMutableArray will take ownership of its items
-    //@debug_assert([NSNull null] == mtl.idpool.pool[@as(i64) slot_index]);  // TODO
-    @objc mtl.idpool.pool.replaceObjectAtIndex(@as(i64) slot_index.intcast(), withObject = res);
+    i: i64 = slot_index.intcast();
+    @debug_assert(bit_cast_unchecked(ObjCId, i64, mtl.null) == bit_cast_unchecked(ObjCId, i64, @objc mtl.idpool.pool.objectAtIndex(i)));
+    @objc mtl.idpool.pool.replaceObjectAtIndex(i, withObject = res);
     slot_index
 }
 
 /*  mark an MTLResource for release, this will put the resource into the
     deferred-release queue, and the resource will then be released N frames later. */
 fn release_resource(mtl: *Impl, frame_index: u32, slot_index: Id("T")) void = {
-    if slot_index == _SG_MTL_INVALID_SLOT_INDEX {
+    if slot_index == null_id {
         /* this means that a nil value was provided to mtl.add_resource */
         return();
     }
     p := mtl.idpool&;
     mtl.sg.stat(.mtl_idpool_num_released, 1);
-    @debug_assert((slot_index > 0) && (slot_index < p.num_slots.intcast()));
-    //@debug_assert([NSNull null] != p.pool[@as(i64) slot_index]);  // TODO
+    mtl.assert_nonnull(slot_index);
     release_index := p.release_queue_front;
     p.release_queue_front += 1;
-    if (p.release_queue_front >= p.num_slots) {
+    if p.release_queue_front >= p.num_slots {
         // wrap-around
         p.release_queue_front = 0;
     }
@@ -325,26 +318,24 @@ fn release_resource(mtl: *Impl, frame_index: u32, slot_index: Id("T")) void = {
 fn garbage_collect(mtl: *Impl, frame_index: u32) void = {
     p := mtl.idpool&;
     while => p.release_queue_back != p.release_queue_front {
-        if (frame_index < p.release_queue[p.release_queue_back].frame_index) {
+        if frame_index < p.release_queue[p.release_queue_back].frame_index {
             // don't need to check further, release-items past this are too young
             return();
         }
         mtl.sg.stat(.mtl_num_garbage_collected, 1);
         // safe to release this resource
         slot_index := p.release_queue[p.release_queue_back].slot_index;
-        @debug_assert((slot_index > 0) && (slot_index < p.num_slots.intcast()));
         // note: the NSMutableArray takes ownership of its items, assigning an NSNull object will
         // release the object, no matter if using ARC or not
-        // use 
-        null := @objc cls("NSNull").null();
-        i: i64 = slot_index.intcast();
-        @debug_assert(bit_cast_unchecked(ObjCId, i64, null) != bit_cast_unchecked(ObjCId, i64, @objc p.pool.objectAtIndex(i)));
-        @objc p.pool.replaceObjectAtIndex(i, withObject = null);
+        i := mtl.assert_nonnull(slot_index);
+        @objc p.pool.replaceObjectAtIndex(i, withObject = mtl.null);
         // put the now free pool index back on the free queue
-        mtl.free_pool_slot(slot_index);
+        @debug_assert(p.free_queue_top < p.num_slots);
+        p.free_queue[p.free_queue_top] = slot_index;
+        p.free_queue_top += 1;
         // reset the release queue slot and advance the back index
         p.release_queue[p.release_queue_back].frame_index = 0;
-        p.release_queue[p.release_queue_back].slot_index = _SG_MTL_INVALID_SLOT_INDEX;
+        p.release_queue[p.release_queue_back].slot_index = null_id;
         p.release_queue_back += 1;
         if (p.release_queue_back >= p.num_slots) {
             // wrap-around
@@ -353,12 +344,16 @@ fn garbage_collect(mtl: *Impl, frame_index: u32) void = {
     }
 }
 
+fn assert_nonnull(mtl: *Impl, slot_index: Id("T")) i64 = {
+    p := mtl.idpool&;
+    i: i64 = slot_index.zext();
+    @debug_assert(i > 0 && i < p.num_slots);
+    @debug_assert(bit_cast_unchecked(ObjCId, i64, mtl.null) != bit_cast_unchecked(ObjCId, i64, @objc p.pool.objectAtIndex(i)));
+    i
+}
+
 fn get_id(mtl: *Impl, slot_index: Id("T")) id("T") = 
     @objc mtl.idpool.pool.objectAtIndexedSubscript(@as(i64) slot_index.intcast());
-
-fn clear_state_cache(mtl: *Impl) void = {
-    mtl.state_cache = zeroed @type mtl.state_cache;
-}
 
 MTLGPUFamily :: @enum(u32) (Apple1 = 1001, Apple7 = 1007, Mac2 = 2002, Metal3 = 5001);
 
@@ -406,13 +401,12 @@ fn init_caps(mtl: *Impl) void = {
 fn ns_str(s: CStr) id("NSString") = 
     @objc cls("NSString").stringWithUTF8String(s);
 
-//-- main Metal backend state and functions ------------------------------------
 fn setup_backend(mtl: *Impl, desc: *Sg.Desc) void = {
     // assume already zero-initialized
     @debug_assert(!desc.environment.metal.device._.is_nil());
     @debug_assert(desc.uniform_buffer_size > 0);
+    mtl.null = @objc cls("NSNull").null();
     mtl.init_pool(desc);
-    mtl.clear_state_cache();  // ... not assuming already zero-initialized?
     mtl.valid = true;
     mtl.ub_size = desc.uniform_buffer_size;
     mtl.sem = dispatch_semaphore_create(Sg.SG_NUM_INFLIGHT_FRAMES);
@@ -423,7 +417,7 @@ fn setup_backend(mtl: *Impl, desc: *Sg.Desc) void = {
 
     range(0, Sg.SG_NUM_INFLIGHT_FRAMES) { i |
         o := 1; // MTLResourceCPUCacheModeWriteCombined|MTLResourceStorageModeShared;
-        mtl.uniform_buffers&[i] = @objc mtl.device.newBufferWithLength(@as(i64) mtl.ub_size.intcast(), options = o);
+        mtl.uniform_buffers&[i] = @objc mtl.device.newBufferWithLength(mtl.ub_size, options = o);
         if Sg.SOKOL_DEBUG {
             // TODO: is this supposed to use the varargs abi? or can i just use a normal selector based on the named args? 
             //       either way i need to change @objc to allow this :MsgSendVarArgs
@@ -469,15 +463,11 @@ fn discard_backend(mtl: *Impl) void = {
     mtl.compute_cmd_encoder = zeroed ObjCId;
 }
 
-fn reset_state_cache(mtl: *Impl) void = {
-    _sg_mtl_clear_state_cache();
-}
-
 fn create(mtl: *Impl, buf: *Sg.Buffer.T, desc: *Sg.Buffer.Desc) Sg.ResourceState = {
     @debug_assert(buf.cmn.size > 0);
     injected := !desc.mtl_buffers&[0].is_null();
     mtl_options := mtl.to_mtl(buf.cmn.usage);
-    range(0, intcast buf.cmn.num_slots) { slot | 
+    range(0, buf.cmn.num_slots) { slot | 
         mtl_buf := if injected {
             bit_cast_unchecked(rawptr, id"MTLBuffer", desc.mtl_buffers&[slot])
         } else {
@@ -505,8 +495,7 @@ fn create(mtl: *Impl, buf: *Sg.Buffer.T, desc: *Sg.Buffer.Desc) Sg.ResourceState
 }
 
 fn discard(mtl: *Impl, buf: *Sg.Buffer.T) void = {
-    range(0, intcast buf.cmn.num_slots) { slot | 
-        // it's valid to call release resource with '0'
+    range(0, buf.cmn.num_slots) { slot | 
         mtl.release_resource(mtl.sg.frame_index, buf.mtl.buf[slot]);
     }
 }
@@ -624,7 +613,7 @@ fn create(mtl: *Impl, img: *Sg.Image.T, desc: *Sg.Image.Desc) Sg.ResourceState =
             init_texdesc_rt(mtl_desc, img);
         }
     }
-    range(0, intcast img.cmn.num_slots) { slot |
+    range(0, img.cmn.num_slots) { slot |
         mtl_tex := if (injected) {
             @debug_assert(!desc.mtl_textures&[slot].is_null());
             bit_cast_unchecked(rawptr, id("MTLTexture"), desc.mtl_textures&[slot])
@@ -654,8 +643,7 @@ fn create(mtl: *Impl, img: *Sg.Image.T, desc: *Sg.Image.Desc) Sg.ResourceState =
 //       now that the default value is empty string, check for that instead
 
 fn discard(mtl: *Impl, img: *Sg.Image.T) void = {
-    // it's valid to call release resource with a 'null resource'
-    range(0, intcast img.cmn.num_slots) { slot |
+    range(0, img.cmn.num_slots) { slot |
         mtl.release_resource(mtl.sg.frame_index, img.mtl.tex&[slot]);
     }
 }
@@ -701,7 +689,6 @@ fn create(mtl: *Impl, smp: *Sg.Sampler.T, desc: *Sg.Sampler.Desc) Sg.ResourceSta
 }
 
 fn discard(mtl: *Impl, smp: *Sg.Sampler.T) void = {
-    // it's valid to call release resource with a 'null resource'
     mtl.release_resource(mtl.sg.frame_index, smp.mtl.sampler_state);
 }
 
@@ -712,11 +699,12 @@ fn Id(classname: Str) Type = i32;  // an index into the idpool
 fn M(enumname: Str) Type = u32;
 
 fn create_shader_func(mtl: *Impl, func: *Sg.ShaderFunction, label: CStr, label_ext: CStr, res: *_sg_mtl_shader_func_t) bool = {
-    @debug_assert(res.mtl_lib == _SG_MTL_INVALID_SLOT_INDEX);
-    @debug_assert(res.mtl_func == _SG_MTL_INVALID_SLOT_INDEX);
+    @debug_assert(res.mtl_lib == null_id);
+    @debug_assert(res.mtl_func == null_id);
     err := zeroed id("NSError");
     ::if(ObjCId);
     mtl_lib: id("MTLLibrary") = if !func.bytecode.ptr.is_null() {
+        // TODO: test this!
         @debug_assert(func.bytecode.len > 0);
         // TODO: where to #import from?
         fn dispatch_data_create(buffer: *u8, size: i64, queue: i64, destructor: i64) id("NSData") #import("libc");
@@ -761,7 +749,6 @@ fn release(self: ObjCId) void =
     @objc @as(void) self.release();
 
 fn discard(mtl: *Impl, func: _sg_mtl_shader_func_t) void = {
-    // it is valid to call _sg_mtl_release_resource with a 'null resource'
     mtl.release_resource(mtl.sg.frame_index, func.mtl_func);
     mtl.release_resource(mtl.sg.frame_index, func.mtl_lib);
 }
@@ -882,7 +869,7 @@ fn create(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipeline
     } else {
         prim_type := desc.primitive_type;
         pip.mtl.prim_type = to_mtl(prim_type);
-        pip.mtl.index_size = to_mtl(pip.cmn.index_type);
+        pip.mtl.index_size = intcast to_mtl_size(pip.cmn.index_type);
         if pip.cmn.index_type != .NONE {
             pip.mtl.index_type = to_mtl(pip.cmn.index_type);
         }
@@ -891,8 +878,8 @@ fn create(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipeline
         pip.mtl.stencil_ref = zext desc.stencil.ref;
 
         rp_desc := new "MTLRenderPipelineDescriptor";
-        @debug_assert(shd.mtl.vertex_func.mtl_func != _SG_MTL_INVALID_SLOT_INDEX);
-        @debug_assert(shd.mtl.fragment_func.mtl_func != _SG_MTL_INVALID_SLOT_INDEX);
+        @debug_assert(shd.mtl.vertex_func.mtl_func != null_id);
+        @debug_assert(shd.mtl.fragment_func.mtl_func != null_id);
         @objc_set(rp_desc) (
             vertexFunction = mtl.get_id(shd.mtl.vertex_func.mtl_func),
             fragmentFunction = mtl.get_id(shd.mtl.fragment_func.mtl_func),
@@ -990,7 +977,6 @@ fn create(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipeline
 }
 
 fn discard(mtl: *Impl, pip: *Sg.Pipeline.T) void = {
-    // it's valid to call release resource with a 'null resource'
     mtl.release_resource(mtl.sg.frame_index, pip.mtl.cps);
     mtl.release_resource(mtl.sg.frame_index, pip.mtl.rps);
     mtl.release_resource(mtl.sg.frame_index, pip.mtl.dss);
@@ -1086,7 +1072,7 @@ fn begin_render_pass(mtl: *Impl, pass: *Sg.Pass) void = {
         check :: fn(att, other) => {
             @debug_assert(att.slot.state == .VALID);
             @debug_assert(att.slot.id == other.image.id);
-            @debug_assert(att.mtl.tex&[att.cmn.active_slot.intcast()] != 0); // _SG_MTL_INVALID_SLOT_INDEX
+            @debug_assert(att.mtl.tex&[att.cmn.active_slot] != 0); // null_id
         };
         
         slice_or_depth :: fn(self, img, att) => {
@@ -1098,7 +1084,7 @@ fn begin_render_pass(mtl: *Impl, pass: *Sg.Pass) void = {
             }
         }
         
-        get_texture :: fn(img) => mtl.get_id(img.mtl.tex&[img.cmn.active_slot.intcast()]);
+        get_texture :: fn(img) => mtl.get_id(img.mtl.tex&[img.cmn.active_slot]);
         range(0, atts.cmn.num_colors.intcast()) { i |
             ca := @objc at.objectAtIndexedSubscript(i);
             cmn_color_att := atts.cmn.colors&[i]&;
@@ -1123,7 +1109,7 @@ fn begin_render_pass(mtl: *Impl, pass: *Sg.Pass) void = {
             if have_resolve {
                 cmn_resolve_att := atts.cmn.resolves&[i]&;
                 check(resolve_att_img, cmn_resolve_att);
-                @objc ca.setResolveTexture(mtl.get_id(resolve_att_img.mtl.tex&[resolve_att_img.cmn.active_slot.intcast()]));
+                @objc ca.setResolveTexture(mtl.get_id(resolve_att_img.mtl.tex&[resolve_att_img.cmn.active_slot]));
                 @objc ca.setResolveLevel(@as(i64) cmn_resolve_att.mip_level.intcast());
                 slice_or_depth(ca, resolve_att_img, cmn_resolve_att);
             }
@@ -1218,8 +1204,8 @@ fn begin_pass(mtl: *Impl, pass: *Sg.Pass) void = {
     @debug_assert(mtl.compute_cmd_encoder.is_nil());
     @debug_assert(mtl.render_cmd_encoder.is_nil());
     @debug_assert(mtl.cur_drawable.is_nil());
-    mtl.clear_state_cache();
-
+    mtl.state_cache = zeroed @type mtl.state_cache;
+    
     // if this is the first pass in the frame, create one command buffer and blit-cmd-encoder for the entire frame
     if mtl.cmd_buffer.is_nil() {
         // block until the oldest frame in flight has finished
@@ -1277,7 +1263,7 @@ fn end_pass(mtl: *Impl) void = {
                 blit_cmd_encoder := @objc mtl.cmd_buffer.blitCommandEncoder();
                 for mtl.sg.compute.readwrite_sbufs { it |
                     if mtl.sg.lookup(it) { sbuf |
-                        it := mtl.get_id(sbuf.mtl.buf&[@as(i64) sbuf.cmn.active_slot.intcast()]);
+                        it := mtl.get_id(sbuf.mtl.buf&[sbuf.cmn.active_slot]);
                         @objc blit_cmd_encoder.synchronizeResource(it);
                     }
                 }
@@ -1334,7 +1320,7 @@ fn apply_viewport(mtl: *Impl, x: i32, y: i32, w: i32, h: i32, origin_top_left: b
 fn apply_scissor_rect(mtl: *Impl, x: i32, y: i32, w: i32, h: i32, origin_top_left: bool) void = {
     @debug_assert(!mtl.render_cmd_encoder.is_nil() && mtl.sg.cur_pass.width > 0 && mtl.sg.cur_pass.height > 0);
     // clip against framebuffer rect
-    clip: Sg._sg_recti_t = clipi(x, y, w, h, mtl.sg.cur_pass.width, mtl.sg.cur_pass.height);
+    clip := Sg'clipi(x, y, w, h, mtl.sg.cur_pass.width, mtl.sg.cur_pass.height);
     MTLScissorRect :: @struct(x: i64, y: i64, width: i64, height: i64);
     r: MTLScissorRect = (
         x = intcast clip.x,
@@ -1353,7 +1339,7 @@ fn apply_pipeline(mtl: *Impl, pip: *Sg.Pipeline.T) void = {
         @debug_assert_eq(pip.cmn.compute, mtl.sg.cur_pass.is_compute);
         if pip.cmn.compute {
             @debug_assert(!mtl.compute_cmd_encoder.is_nil());
-            @debug_assert(pip.mtl.cps != _SG_MTL_INVALID_SLOT_INDEX);
+            @debug_assert(pip.mtl.cps != null_id);
             @objc mtl.compute_cmd_encoder.setComputePipelineState(mtl.get_id(pip.mtl.cps));
         } else {
             e := mtl.render_cmd_encoder;
@@ -1388,7 +1374,7 @@ fn apply_bindings(mtl: *Impl, bnd: *Sg.ResolvedBindings) bool = {
         @debug_assert(!mtl.render_cmd_encoder.is_nil());
         // store index buffer binding, this will be needed later in sg_draw()
         sc.cur_indexbuffer = bnd.ib;
-        sc.cur_indexbuffer_offset = bnd.ib_offset;
+        sc.cur_indexbuffer_offset = bnd.ib_offset.intcast();
         ::if(u32);
         sc.cur_indexbuffer_id.id = if !bnd.ib.is_null() {
             @debug_assert(bnd.pip.cmn.index_type != .NONE);
@@ -1421,12 +1407,12 @@ fn apply_bindings(mtl: *Impl, bnd: *Sg.ResolvedBindings) bool = {
         continue :: local_return;
         img := bnd.imgs&[i];
         if(img.is_null(), => continue());
-        @debug_assert(img.mtl.tex&[intcast img.cmn.active_slot] != 0);
+        @debug_assert(img.mtl.tex&[img.cmn.active_slot] != 0);
         stage := shd.cmn.images&[i].stage;
         mtl_slot := shd.mtl.img_texture_n&[i];
         @debug_assert(mtl_slot < _SG_MTL_MAX_STAGE_IMAGE_BINDINGS);
         
-        id := mtl.get_id(img.mtl.tex&[intcast img.cmn.active_slot]);  // todo: rather not hoist
+        id := mtl.get_id(img.mtl.tex&[img.cmn.active_slot]);  // todo: rather not hoist
         apply(stage, sc.image&, img, mtl_slot) { e, s |
             @objc e.setVertexTexture(id, atIndex = s);
             .mtl_bindings_num_set_vertex_texture
@@ -1444,7 +1430,7 @@ fn apply_bindings(mtl: *Impl, bnd: *Sg.ResolvedBindings) bool = {
         continue :: local_return;
         smp := bnd.smps&[i];
         if(smp.is_null(), => continue());
-        @debug_assert(smp.mtl.sampler_state != _SG_MTL_INVALID_SLOT_INDEX);
+        @debug_assert(smp.mtl.sampler_state != null_id);
         stage := shd.cmn.samplers&[i].stage;
         mtl_slot := shd.mtl.smp_sampler_n&[i];
         @debug_assert(mtl_slot < _SG_MTL_MAX_STAGE_SAMPLER_BINDINGS);
@@ -1466,11 +1452,11 @@ fn apply_bindings(mtl: *Impl, bnd: *Sg.ResolvedBindings) bool = {
         continue :: local_return;
         sbuf := bnd.sbufs&[i];
         if(sbuf.is_null(), => continue());
-        @debug_assert(sbuf.mtl.buf&[intcast sbuf.cmn.active_slot] != 0);
+        @debug_assert(sbuf.mtl.buf&[sbuf.cmn.active_slot] != 0);
         stage := shd.cmn.storage_buffers&[i].stage;
         mtl_slot := shd.mtl.sbuf_buffer_n&[i];
         @debug_assert(mtl_slot < _SG_MTL_MAX_STAGE_UB_SBUF_BINDINGS);
-        id := mtl.get_id(sbuf.mtl.buf&[intcast sbuf.cmn.active_slot]);
+        id := mtl.get_id(sbuf.mtl.buf&[sbuf.cmn.active_slot]);
         apply(stage, sc.buffer&, sbuf, mtl_slot) { e, s |
             @objc e.setVertexBuffer(id, offset = 0, atIndex = s);
             .mtl_bindings_num_set_vertex_buffer
@@ -1485,21 +1471,21 @@ fn apply_bindings(mtl: *Impl, bnd: *Sg.ResolvedBindings) bool = {
     return true;
 }
 
-fn apply_uniforms(mtl: *Impl, ub_slot: i32, data: []u8) void = {
-    @debug_assert((ub_slot >= 0) && (ub_slot < Sg.SG_MAX_UNIFORMBLOCK_BINDSLOTS));
-    @debug_assert((mtl.cur_ub_offset + intcast data.len) <= mtl.ub_size);
-    @debug_assert(mtl.cur_ub_offset.bit_and(_SG_MTL_UB_ALIGN - 1) == 0);
+fn apply_uniforms(mtl: *Impl, ub_slot: i64, data: []u8) void = {
+    @debug_assert(ub_slot.ult(Sg.SG_MAX_UNIFORMBLOCK_BINDSLOTS));
+    @debug_assert(mtl.cur_ub_offset + data.len <= mtl.ub_size);
+    @debug_assert(mtl.cur_ub_offset.umod(uniform_buffer_alignment) == 0);
     pip := mtl.state_cache.cur_pipeline;
     @debug_assert(pip.slot.id == mtl.state_cache.cur_pipeline_id.id);
     shd := pip.cmn.shader_t;
     @debug_assert(shd.slot.id == pip.cmn.shader.id);
-    @debug_assert(data.len == zext shd.cmn.uniform_blocks&[intcast ub_slot].size);
+    @debug_assert(data.len == zext shd.cmn.uniform_blocks&[ub_slot].size);
 
-    stage := shd.cmn.uniform_blocks&[intcast ub_slot].stage;
-    mtl_slot := shd.mtl.ub_buffer_n&[intcast ub_slot];
+    stage := shd.cmn.uniform_blocks&[ub_slot].stage;
+    mtl_slot := shd.mtl.ub_buffer_n&[ub_slot];
 
     // copy to global uniform buffer, record offset into cmd encoder, and advance offset
-    dst := mtl.cur_ub_base_ptr.offset(intcast mtl.cur_ub_offset);
+    dst := mtl.cur_ub_base_ptr.offset(mtl.cur_ub_offset);
     dst.slice(data.len).copy_from(data);
     @match(stage) {
         fn VERTEX() => {
@@ -1519,11 +1505,11 @@ fn apply_uniforms(mtl: *Impl, ub_slot: i32, data: []u8) void = {
         }
         @default => unreachable();
     }
-    new := mtl.cur_ub_offset + intcast data.len;
-    mtl.cur_ub_offset = Sg'roundup(new, _SG_MTL_UB_ALIGN);
+    new := mtl.cur_ub_offset + data.len;
+    mtl.cur_ub_offset = ualign_to(new, uniform_buffer_alignment);
 }
 
-fn draw(mtl: *Impl, base_element: i32, num_elements: i32, num_instances: i32) void = {
+fn draw(mtl: *Impl, base_element: i64, num_elements: i64, num_instances: i64) void = {
     sc := mtl.state_cache&;
     @debug_assert(!mtl.render_cmd_encoder.is_nil());
     @debug_assert(sc.cur_pipeline.slot.id == sc.cur_pipeline_id.id);
@@ -1532,22 +1518,22 @@ fn draw(mtl: *Impl, base_element: i32, num_elements: i32, num_instances: i32) vo
         // indexed rendering
         @debug_assert(sc.cur_indexbuffer.slot.id == sc.cur_indexbuffer_id.id);
         ib := sc.cur_indexbuffer;
-        ib := ib.mtl.buf&[intcast ib.cmn.active_slot];
+        ib := ib.mtl.buf&[ib.cmn.active_slot];
         @debug_assert(ib != 0);
-        index_buffer_offset: i64 = intcast(sc.cur_indexbuffer_offset + base_element * sc.cur_pipeline.mtl.index_size);
+        index_buffer_offset := sc.cur_indexbuffer_offset + base_element * sc.cur_pipeline.mtl.index_size;
         @objc mtl.render_cmd_encoder.drawIndexedPrimitives(prim, 
-            indexCount = @as(i64) intcast num_elements,
+            indexCount = num_elements,
             indexType = sc.cur_pipeline.mtl.index_type,
             indexBuffer = mtl.get_id(ib),
             indexBufferOffset = index_buffer_offset,
-            instanceCount = @as(i64) intcast num_instances,
+            instanceCount = num_instances,
         );
     } else {
         // non-indexed rendering
         @objc mtl.render_cmd_encoder.drawPrimitives(prim,
-            vertexStart   = @as(i64) intcast base_element,
-            vertexCount   = @as(i64) intcast num_elements,
-            instanceCount = @as(i64) intcast num_instances,
+            vertexStart   = base_element,
+            vertexCount   = num_elements,
+            instanceCount = num_instances,
         );
     }
 }
@@ -1581,7 +1567,7 @@ fn append_buffer(mtl: *Impl, buf: *Sg.Buffer.T, data: []u8, new_frame: bool) voi
 
 fn append_buffer(mtl: *Impl, buf: *Sg.Buffer.T, data: []u8, inc: bool, append_pos: i64) void = {
     @if(inc) inc_active_slot(buf);
-    mtl_buf := mtl.get_id(buf.mtl.buf&[intcast buf.cmn.active_slot]);
+    mtl_buf := mtl.get_id(buf.mtl.buf&[buf.cmn.active_slot]);
     dest := @objc @as(*u8) mtl_buf.contents();
     dest.offset(append_pos).slice(data.len).copy_from(data);
     ASSERT_NOT_IOS();

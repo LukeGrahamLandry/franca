@@ -360,10 +360,10 @@ fn uniform_buffer_init(wgpu: *Impl, desc: *Sg.Desc) void #once = {
     //
     // FIXME: is this still needed?
     num_bytes := desc.uniform_buffer_size + MAX_UNIFORM_UPDATE_SIZE;
-    wgpu.uniform.staging = wgpu.sg.desc.allocator.alloc_uninit(u8, intcast num_bytes);
+    wgpu.uniform.staging = wgpu.sg.desc.allocator.alloc_uninit(u8, num_bytes);
 
     ub_desc: WGPU.BufferDescriptor = (
-        size = num_bytes.intcast(),
+        size = num_bytes,
         usage = (_ = @or(WGPU.BufferUsage.Uniform, WGPU.BufferUsage.CopyDst)),
     );
     wgpu.uniform.buf = createBuffer(wgpu.dev, ub_desc&);
@@ -393,9 +393,9 @@ fn bindgroups_pool_discard() void = {
 fn bindgroup_at(wgpu: *Impl, bg_id: u32) *bindgroup_t = {
     @debug_assert(bg_id != Sg.Sg.INVALID_ID);
     p := wgpu.bindgroups_pool&;
-    slot_index := _sg_slot_index(bg_id);
-    @debug_assert((slot_index > Sg._SG_INVALID_SLOT_INDEX) && (slot_index < p.size));
-    ptr_cast_unchecked(u8, bindgroup_t, p.data.ptr.offset(slot_index.intcast() * size_of(bindgroup_t)))
+    slot_index := _sg_slot_index(bg_id).intcast();
+    @debug_assert(slot_index > Sg._SG_INVALID_SLOT_INDEX && slot_index < p.size);
+    ptr_cast_unchecked(u8, bindgroup_t, p.data.ptr.offset(slot_index * size_of(bindgroup_t)))
 }
 
 fn lookup_bindgroup(wgpu: *Impl, bg_id: u32) ?*bindgroup_t = {
@@ -571,6 +571,7 @@ fn discard(wgpu: *Impl, bg: *bindgroup_t) void = {
     }
 }
 
+// TODO
 fn discard_all_bindgroups(wgpu: *Impl) void = {
     bindgroups_pool_t* p = &wgpu.bindgroups_pool;
     for (int i = 0; i < p.pool.size; i++) {
@@ -589,7 +590,7 @@ fn bindgroups_cache_init(wgpu: *Impl, desc: *Sg.Desc) void #once = {
     num := desc.wgpu_bindgroups_cache_size;
     @if(num <= 1) _SG_PANIC("WGPU_BINDGROUPSCACHE_SIZE_GREATER_ONE");
     @if(!Sg'ispow2(num)) _SG_PANIC("WGPU_BINDGROUPSCACHE_SIZE_POW2");
-    num: i64 = intcast desc.wgpu_bindgroups_cache_size;
+    num := desc.wgpu_bindgroups_cache_size;
     wgpu.bindgroups_cache = (
         index_mask = num - 1,
         items = desc.allocator.alloc_zeroed(bindgroup_handle_t, num),
@@ -778,7 +779,7 @@ fn setup_backend(wgpu: *Impl, desc: *Sg.Desc) void = {
 
     wgpu.init_caps();
     wgpu.uniform_buffer_init(desc);
-    init_pool(wgpu.bindgroups_pool&, desc.allocator, intcast desc.wgpu_bindgroups_cache_size, size_of bindgroup_t);
+    init_pool(wgpu.bindgroups_pool&, desc.allocator, desc.wgpu_bindgroups_cache_size, size_of bindgroup_t);
     wgpu.bindgroups_cache_init(desc);
     wgpu.bindings_cache_clear();
 
@@ -826,7 +827,7 @@ fn create(wgpu: *Impl, buf: *Sg.Buffer.T, desc: *Sg.Buffer.Desc) Sg.ResourceStat
     } else {
         // buffer mapping size must be multiple of 4, so round up buffer size (only a problem
         // with index buffers containing odd number of indices)
-        wgpu_buf_size := Sg'roundup(buf.cmn.size, 4);
+        wgpu_buf_size := ualign_to(buf.cmn.size, 4);
         map_at_creation := buf.cmn.usage == .IMMUTABLE && !desc.data.ptr.is_null();
         @debug_assert(map_at_creation || desc.data.len == 0, "mutable buffer created with data is not automatically initialized");
         if map_at_creation && GRAPHICS_TARGET_WEB {
@@ -909,8 +910,8 @@ fn copy_image_data(wgpu: *Impl, img: *Sg.Image.T, wgpu_tex: WGPU.Texture, data: 
                 rowsPerImage = bitcast Sg'num_rows(img.cmn.pixel_format, mip_height),
             );
             if is_compressed(img.cmn.pixel_format) {
-                mip_width = Sg'roundup(mip_width, 4);
-                mip_height = Sg'roundup(mip_height, 4);
+                mip_width = ualign_to(mip_width, 4);
+                mip_height = ualign_to(mip_height, 4);
             }
             wgpu_extent: WGPU.Extent3D = (
                 width = bitcast mip_width,
@@ -1676,15 +1677,12 @@ fn apply_pipeline(wgpu: *Impl, pip: *Sg.Pipeline.T) void = {
 
 fn apply_bindings(wgpu: *Impl, bnd: *Sg.ResolvedBindings) bool = {
     @debug_assert(bnd.pip.cmn.shader.id == bnd.pip.cmn.shader_t.slot.id);
-    retval := true;
-    if (!wgpu.sg.cur_pass.is_compute) {
-        retval = wgpu.apply_index_buffer(bnd) && retval;
-    }
-    retval = wgpu.apply_bindgroup(bnd) && retval;
-    retval
+    // compute passes don't have index buffers
+    ok := wgpu.sg.cur_pass.is_compute || wgpu.apply_index_buffer(bnd);
+    wgpu.apply_bindgroup(bnd) && ok
 }
 
-fn apply_uniforms(wgpu: *Impl, ub_slot: i32, data: []u8) void #once = {
+fn apply_uniforms(wgpu: *Impl, ub_slot: i64, data: []u8) void #once = {
     alignment: i64 = wgpu.limits.minUniformBufferOffsetAlignment.zext();
     @debug_assert(!wgpu.uniform.staging.ptr.is_null(), "uninit");
     @debug_assert(wgpu.uniform.offset + data.len <= wgpu.uniform.staging.len, "you can't write more bytes than the whole buffer in one commit()");
@@ -1694,26 +1692,26 @@ fn apply_uniforms(wgpu: *Impl, ub_slot: i32, data: []u8) void #once = {
     @debug_assert(pip.slot.id == wgpu.cur_pipeline_id.id);
     shd := pip.cmn.shader_t;
     @debug_assert(shd.slot.id == pip.cmn.shader.id);
-    @debug_assert(data.len == zext shd.cmn.uniform_blocks&[zext ub_slot].size);
+    @debug_assert(data.len == zext shd.cmn.uniform_blocks&[ub_slot].size);
     @debug_assert(data.len <= MAX_UNIFORM_UPDATE_SIZE);
 
     wgpu.sg.stat(.wgpu_uniforms_num_set_bindgroup, 1);
     wgpu.uniform.staging.subslice(wgpu.uniform.offset, data.len).copy_from(data);
-    wgpu.uniform.bind_offsets&[zext ub_slot] = trunc wgpu.uniform.offset;
+    wgpu.uniform.bind_offsets&[ub_slot] = trunc wgpu.uniform.offset;
     new_off := wgpu.uniform.offset + data.len;
     wgpu.uniform.offset = Sg'roundup(new_off, alignment);
 
     wgpu.set_ub_bindgroup(shd);
 }
 
-fn draw(wgpu: *Impl, base_element: i32, num_elements: i32, num_instances: i32) void = {
+fn draw(wgpu: *Impl, base_element: i64, num_elements: i64, num_instances: i64) void = {
     rpass_enc := wgpu.rpass_enc.unwrap();
     pip := wgpu.cur_pipeline.unwrap();
     @debug_assert(pip.slot.id == wgpu.cur_pipeline_id.id);
     if pip.cmn.index_type != .NONE {
-        drawIndexed(rpass_enc, bitcast num_elements, bitcast num_instances, bitcast base_element, 0, 0);
+        drawIndexed(rpass_enc, trunc num_elements, trunc num_instances, trunc base_element, 0, 0);
     } else {
-        draw(rpass_enc, bitcast num_elements, bitcast num_instances, bitcast base_element, 0);
+        draw(rpass_enc, trunc num_elements, trunc num_instances, trunc base_element, 0);
     }
 }
 
