@@ -4316,12 +4316,35 @@ fn gen_assign(c: *Ctx, addr_node: *Node, value: Qbe.Ref, ty: *CType) *Node = {
 }
 
 fn gen_zero_var(c: *Ctx, var: *Obj, tok: *Token) void = {
-    if(c.speculate, => return());
+    if(c.speculate || c.b.jmp.type != .Jxxx, => return());
     dest := var.stack_slot;
     if dest == QbeNull {
         @error_tok(c, tok, "ICE: gen_zero_var missing slot for %", var.name);
     };
     size: i64 = var.ty.size.intcast();
+    
+    // would be faster to call memset but doing it this way works trivially without libc
+    if size > 256 {
+        // loop store 16 bytes at a time. 
+        s := size.align_back(16);
+        r, end, r2, cond := (c.f.newtmp("z", .Kl), c.f.newtmp("z", .Kl), c.f.newtmp("z", .Kl), c.f.newtmp("z", .Kl));
+        b := c.new_block();
+        c.b.jmp.type = .jmp; c.b.s1 = b;
+        b.jmp = (type = .jnz, arg = cond); b.s1 = b; b.s2 = c.new_block();
+        c.emit(.copy, .Kl, r, dest, Qbe.Null);  // don't assign to the ref used for the var's slot
+        c.emit(.add, .Kl, end, r, c.getcon(s));
+        c.b = b;
+        c.emit(.storel, .Kw, Qbe.Null, Qbe.ConZero, r);
+        c.emit(.add, .Kl, r2, r, c.getcon(8));
+        c.emit(.storel, .Kw, Qbe.Null, Qbe.ConZero, r2);
+        c.emit(.add, .Kl, r, r, c.getcon(16));
+        c.emit(.cnel, .Kl, cond, r, end);
+        c.b = b.s2;
+        // finish the rest if not a multiple of 16
+        size -= s;
+        dest = end;
+    };
+    
     off := 0;
     each Qbe.Simplify.blit_op_table { o |
         while => size >= o.size {

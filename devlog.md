@@ -9,6 +9,9 @@ c
 - raylib test spends 35% of its frontend time re-hashing all the headers 
   but i only need that for ffi/include with caching enabled. 
   so don't bother when using the c compiler directly. 
+- raylib/examples/shapes/shapes_ball_physics.c takes 10x longer to compile than any others. 
+  im doing an entirely unrolled memset for array of struct Ball on the stack with a partial initializer. 
+  main() is 94351 instructions. oops. 
 
 ## (Feb 18)
 
