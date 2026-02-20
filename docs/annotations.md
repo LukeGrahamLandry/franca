@@ -106,6 +106,12 @@ You probably want to be careful to not mark functions with side effects as `#fol
 that will do the side effects at comptime instead of runtime. The compiler does not 
 enforce sanity. 
 
+This is slightly different from putting `@run` on each callsite of the function. 
+`@run` will always evaluate the arguments at comptime (even if they do syscalls, etc.) 
+and error if the argument expressions access runtime variables. 
+#fold allows the function to be called as a normal at runtime 
+if any arguments access runtime variables. 
+
 ### where
 
 Allows the functions to have arguments with type annotations prefixed by a `~`, 
@@ -175,9 +181,26 @@ Inlined functions cannot be recursive.
 This has the same effect as declaring the function with `=>` instead of `=` 
 except that you can't access variables from the surrounding scope.
 
+This is not a hint that can ignored. 
+You cannot take a function pointer to an #inline function. 
+Since the inlining is guarenteed by the frontend, 
+a (somewhat sketchy) use of this is to allow pointers to 
+local variables to escape into the caller so it 
+can be used like a macro (grep for `/*semantic*/` for examples).
+
 ### noinline
 
 Prevent the compiler from optimising across calls to this function. 
+
+Since I don't have (what c calls volatile pointers) as a special type, 
+a hacky way of interacting with memory mapped io (when writing kernels/drivers) 
+is to put a single load/store in a seperate #noinline function. 
+Since the compiler is not a allowed to look at the body of the function 
+it must assume it could do anything and actually call it. 
+This usecase is only relevant for low level programs that talk to hardware directly 
+(it has nothing to do with multithreading). 
+
+TODO: not preserved by cached_compile_module or emit_c. 
 
 ### use
 
@@ -228,9 +251,6 @@ implement real closures and fallback to that instead of generating redundant cop
 ### comptime_addr
 
 Used internally to implement the builtin comptime functions. 
-The argument is an integer that is a function pointer in the comptime address space. 
-Instead of compiling a function body, the compiler will just call that pointer directly and hope for the best.  
-It's sort of like baby's first dlopen. 
 
 ### once
 

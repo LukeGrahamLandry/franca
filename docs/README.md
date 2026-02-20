@@ -11,6 +11,7 @@ and some things are dumb enough that I should defend myself.
 - aot_bake: how to make ahead-of-time executables and what data is included 
 - annotations: how to attach metadata to franca programs and query it from comptime code
 - comptime: example usecases for full compile time execution
+- higher_level: a nonexhaustive list of features i don't have
 - debugging
 - caching: details about `.frc` files
 - lib_summary: list of useful code provided with the franca distribution 

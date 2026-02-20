@@ -49,6 +49,7 @@ However, some types have special requirements.
 - `HashMap(T)` is interspersed with uninitialized memory for unused buckets. 
   They might even have aslr bytes if T contains pointers and some values were added and then removed. 
 - A type representing an operating system resource (like a file descriptor) probably doesn't make sense to include as constant data.
+- A type might be a header on some variable length data. 
 
 This is addressed by allowing user code to add overloads of `fn bake_relocatable_value(self: *T) Slice(BakedEntry)`.
 The question you're answering for the compiler is "If I have a T, how can I represent that with only the expressivity of a C global array initilizer?"
@@ -81,6 +82,8 @@ ditto cyclic data structures are allowed and will remain cycles when baked.
   ```
 
 - talk about how jit-shims are used to avoid compiling for comptime but still give you something that bakes to the same thing. 
+- memory that is baked must remain live for the entire compliation. 
+  it is an error to bake memory on the stack or in the temp() allocator. 
 
 ## Jitted Code
 

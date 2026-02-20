@@ -229,7 +229,6 @@ FrcModule :: @struct {
     header: *Header;
     scope: ScopeId;
     sym: []u32;  // [One(Sym)] = FuncId or BakedVarId
-    sym_ty: []One(FTy); // [One(Sym)]
     fty: []Type; // [One(FTy)] 
     data_symbols: []Ty(One(Sym), DynamicImport);
 };
@@ -273,13 +272,11 @@ fn import_frc(self: *SelfHosted, bytes: []u8) CRes(ScopeId) = {
         header = header, 
         scope = scope,
         sym = a.alloc_init(u32, zext header.sym.count, fn(_) => Qbe.no_symbol), 
-        sym_ty = a.alloc_init(One(FTy), zext header.sym.count, fn(_) => (off = Qbe.no_symbol)), 
         fty = a.alloc_zeroed(Type, zext header.fty.count),
         data_symbols = empty(),
     ));
     @err_assert(header.fty.count != 0, "tried to import_frc without frontend type info (fty)") return;
     
-    sym_ty := module.sym_ty;
     range(0, FTy.COUNT) { i |  // builtin types
         module.fty[i] = bit_cast_unchecked(u32, Type, trunc i);
     };
@@ -302,10 +299,9 @@ fn import_frc(self: *SelfHosted, bytes: []u8) CRes(ScopeId) = {
         )));
         is_function := header.get(it.type)[].tag == .Func;
         if !is_type {
-            // sema_frc_import_fid() needs this information and it's a lot less painful 
-            // to just store it now than to look it up through the scope later. 
-            // TODO: need to make this work for anon functions tho
-            sym_ty[zext it.payload.offset] = it.type;
+            sym := header.get(it.payload.sym);
+            // TODO: maybe want to allow this. it only matters that abi is the same. 
+            @debug_assert_eq(sym.type.off, it.type.off, "inconsistant type info: %", header.get(sym.name));
         };
         
         // TODO: I don't like this. 
@@ -358,9 +354,9 @@ fn sema_frc_import(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     it := header.get(i);
     caller_name := header.get(it.name);
     
-    type := module.sym_ty[zext import.index];
-    if type.off == Qbe.no_symbol {
-        return(@err("% wasn't referenced from the root scope so we don't know it's type", caller_name));
+    type := it.type;
+    if type.off == 0 || type.off == Qbe.no_symbol {
+        return(@err("% doesn't have type info", caller_name));
     };
     is_function := header.get(type)[].tag == .Func;
     
@@ -395,9 +391,9 @@ fn sema_frc_import_fid(self: *SelfHosted, module: *FrcModule, i: One(Sym)) CRes(
         return(Ok = bit_cast_unchecked(u32, FuncId, slot[]));
     };
     
-    type := self.import_type(module, module.sym_ty[zext i.off]);
-    info := self.get_type(type);
     it := h.get(i);
+    type := self.import_type(module, it.type);
+    info := self.get_type(type);
     caller_name := h.get(it.name);
     @debug_assert_ne(type, UnknownType, "must know signeture of imported function");
     @err_assert(info.is(.FnPtr), "expected function type for '%' but found %", caller_name, self.log_type(type)) return;
@@ -424,12 +420,14 @@ fn sema_frc_import_fid(self: *SelfHosted, module: *FrcModule, i: One(Sym)) CRes(
         func.set_flag(.AvoidJitShim);
     };
     
+    // this feels wasteful but the imported code might create one and let it escape
+    func.set_flag(.TookPointerValue);  
+
     func.set_flag(.ResolvedBody);
     func.set_flag(.ResolvedSign);
     func.set_flag(.EnsuredCompiled);
     func.set_flag(.BodyIsSpecial);
     if it.segment != .Import {
-        //@println("local function: %", caller_name);
         if it.segment == .MachineCode {
             func.body = (Asm = (
                 arm64 = h.get(it.asm.arm64),
@@ -639,10 +637,9 @@ import_baked_var :: fn(self: *SelfHosted, shared: *FrontendCodegen, inst: *FrcMo
     h := module.header;
     it := h.get(sym);
     @debug_assert(@is(it.segment, .MutableData, .ConstantData, .ZeroInitData), "import_baked_var(%, %)", it.segment, h.get(it.name));
-    ty := module.sym_ty[zext sym.off];
-    if ty.off != Qbe.no_symbol {
-        @debug_assert(h.get(ty)[].tag == .Ptr || ty.off == FTy.RAWPTR, "symbols are always pointers");
-    };  // else just means not referenced from root scope. kinda lame. 
+    ty := it.type;
+    // ty.off=0 example: string literals for import_c. TODO: maybe disallow?
+    @debug_assert(ty.off == 0 || h.get(ty)[].tag == .Ptr || ty.off == FTy.RAWPTR, "symbols are always pointers: %", h.get(it.name));
     
     slot := module.sym[zext sym.off]&;
     if slot[] != Qbe.no_symbol {
@@ -772,12 +769,11 @@ fn find_module(self: *SelfHosted, shared: *FrontendCodegen, module: *FrcModule) 
 // Ok(None) means it's data 
 fn get_fid(self: *SelfHosted, module: *FrcModule, i: One(Sym)) CRes(?FuncId) = {
     h := module.header;
-    ty := module.sym_ty[zext i.off];
-    if ty.off == Qbe.no_symbol {
-        // this symbol wasn't named in the root scope. 
+    it := h.get(i);
+    ty := it.type;
+    if ty.off == 0 {
+        // TODO: should make this an error to mistakes are caught earlier. 
         // (for now this just means it's a .L.._ import_c string literal -- Jun 8, 2025)
-        // TODO: need to allow anon functions so really the module should be providing types for all the 
-        //       symbols seperatly from the scope thing? 
         return(Ok = .None); 
     };
     
@@ -936,7 +932,9 @@ export_root_scope :: fn(c: *ExportCtx, fns: []FuncId, funcs_done: *DynamicBitSet
             type = f_ty,
             payload = (offset = trunc idx)
         );
+        c.writer.sym[idx].type = f_ty;
     };
+    // TODO: just set the symbol types, not root_scope
     symbols_exported: Qbe.BSet = init_bitset(c.writer.sym.len + funcs_done.bits.len * 64);
     for funcs_done { i |
         fid: FuncId = i.from_index(); i := ();
@@ -951,24 +949,17 @@ export_root_scope :: fn(c: *ExportCtx, fns: []FuncId, funcs_done: *DynamicBitSet
         f_ty := c.fr.intern_type(FnPtr = (ty = f_ty));
         f_ty := export_type(c, f_ty);
         
-        decls&.push(
-            name = c.writer.sym[idx].name,
-            type = f_ty,
-            payload = (offset = trunc idx)
-        );
+        push_decl(decls&, c.writer, c.m, id, f_ty);
         
         @if_let(func.body&) fn DynamicImport(it) => {
             id := c.m.intern(c.fr.get_string(it.name));
             idx := c.writer.map_sym(c.m, id);
             symbols_exported&.bsset(idx);
-            decls&.push(
-                name = c.writer.sym[idx].name,
-                type = f_ty,
-                payload = (offset = trunc idx)
-            );
+            push_decl(decls&, c.writer, c.m, id, f_ty);
         };
     };
     
+    // TODO: don't require this. have frontend fallback when sym.type=0=unknowntype?
     range(0, c.writer.sym.len) { idx |
         if !symbols_exported&.bshas(idx) {
             decls&.push(

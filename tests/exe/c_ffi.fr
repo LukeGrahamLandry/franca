@@ -44,6 +44,13 @@ go :: fn() void #use(c_scope) = {
     
     f2 :: fn(a: Small) void = @assert_eq(a.a, 7);
     @assert_eq(load_small_struct((a = 7), f2), 7);
+    
+    // store function pointers at comptime and call at runtime so must have baked properly
+    out :: @static(VTable);
+    @run get_fns(out);  
+    @assert_eq(out'mul2(9, 2), 18);  
+    @assert_eq(out'sqrt(9), 3);
+    @assert_eq(out'abs(-9), 9);
 }
 
 add_three :: fn(va: CVariadic) i64 = {
@@ -139,6 +146,23 @@ C_SRC :: """
         return a.a;
     }
     
+    extern double fabs(double);
+    long mul_two_again(long a, long b) { return a * b; }
+    typedef struct {
+        double (*sqrt)(double);
+        long (*mul2)(long, long);
+        double (*abs)(double);
+    } VTable;
+    void get_fns(VTable *out) {
+        // this is a situation where you want to make a jit shim for something that isn't exported. 
+        // declared locally so not in Header.meta.root_scope
+        extern double (sqrt)(double);  
+        *out = (VTable) { 
+            .sqrt = sqrt,
+            .mul2 = mul_two_again,  // has body
+            .abs = fabs, // top level import
+        };
+    }
 """;
 
 #use("@/lib/variadic.fr");

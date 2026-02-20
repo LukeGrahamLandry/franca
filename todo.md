@@ -1,4 +1,8 @@
 
+- jump.fr throw should stomp the jumpbuf so you can accidently use it multiple times without re-try()
+- error message while baking should show the tree of values to that point. 
+  ie. "we can't even find it if we scan all jitted functions."
+  on a field of a vtable should tell you which field not just source location that referenced the whole vtable. a
 - files_unchanged: if dep.len==1, that should be allowed? now that the whole program could be in entry_source. 
 - would be great if a zeroed ?T was None. 
 - auto mirror eveything in deps.fr when building in ci
@@ -1336,6 +1340,13 @@ and not need to serialize the arguments to a string.
 
 ## language decisions
 
+- more consistant way of doing feature toggles? allow setting them on command line? 
+  like FEAT_PNG in prospero/viewer.
+  often its about whether you want to accept more dependencies to get more features. 
+  not a huge deal for the main program but starts getting more annoying when libraries want features. 
+  only one version of the library and have them always additive like cargo? 
+  or compile multiple versions for each set of features needed? 
+  whatever it is, it would be nice if the core compiler didn't have to know about it. 
 - decide what the policy on not having a bti instruction on AsmFunction should be. 
   need to tell the frontend that it can't be shimmed without a patch. 
   should i just insert them for you? that's probably bad if you did it on purpose or 

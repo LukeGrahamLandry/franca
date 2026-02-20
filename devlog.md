@@ -1,4 +1,12 @@
 
+## (Feb 20)
+
+frc: 
+- stop using root_scope for the type info needed for jit shims. add a field to Sym. 
+- set TookPointerValue
+- c: compile_to_module needs to set the type for imports even if they aren't in the top level scope (you can have an extern local variable)
+- working towards compile_to_module not reexporting everything from libc. added some math.fr for raylib's examples. 
+
 ## (Feb 19)
 
 - commit to using gvn forever so can get rid of some old code. 

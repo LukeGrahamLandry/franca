@@ -132,14 +132,15 @@ fn compile_to_module(fr: CompCtx, c_source: Str, c: *C.Compile.Ctx, debug_name: 
     writer := c.m.save.unwrap();
     mark := mark_temporary_storage();
     entry_source := writer.push(c_source);
-    result := catch_call(c, One(FTy)) {
+    
+    result := catch_call(c, void) {
         src: List(u8) = assume_owned(c_source, temp());
         tok := c.tokenize_string("import_cTODO", src&.items());
         tok  = c.C'Preprocess'preprocess(tok);
         _ := c.parse(tok);
-        
         c.emitter.join_codegen_thread();
-        
+    };
+    result.or(fn(err) => panic(err));
         // add all the functions/globals/typedefs to a scope
         args := Fld.list(c.arena);
         sc := c.scope;
@@ -155,31 +156,37 @@ fn compile_to_module(fr: CompCtx, c_source: Str, c: *C.Compile.Ctx, debug_name: 
             }
             obj := value.var;
             ::ptr_utils(@type obj[]);
-            if !obj.is_null() {
+            
+            // TODO: i want to not export all imports. 
+            //       means you can't use any c program as a precompiled header of libc which is good. 
+            //       rn it doesn't work. makes chess try to call null jit address. 
+            if !obj.is_null() { // && obj.is_definition {
                 sym := map_sym(writer, c.m, obj.global_symbol.expect("mangle"));
-                // TODO: can't just skip when !obj.is_definition because i still need to know the types of imports, 
-                //       but i'd rather not have every c module re-export the libc types, so idk what to do about that. 
                 ty := @if(obj.is_function, obj.ty, c.pointer_to(obj.ty));
+                t := export_type(c, ty, false);
                 args&.push(
                     name = writer.sym[sym].name,
-                    type = export_type(c, ty, false),
+                    type = t,
                     payload = (offset = trunc sym),
                 );
-                
-                s := writer.sym[sym].segment&;
-                if !obj.is_definition && s[] == .Invalid {
-                    s[] = .Import;
-                    // rn this defaults to "libc" cause that's 0 but probably i want a different 
-                    // sentinal for "we don't know where it comes from, just give me a symbol with this name"
-                }
+                writer.sym[sym].type = t;
             };
         }
-        
-        save_fields(writer, .Scope, args.items())
-    };
-    root_scope := or result { err | 
-        panic(err)
-    };
+        // TODO: only if actually used, not just declared
+        for c.imports { obj |
+            id := obj.global_symbol.expect("mangle");
+            idx := map_sym(writer, c.m, id);
+            s := writer.sym[idx]&;
+            if s.type.off == 0 {
+                ty := @if(obj.is_function, obj.ty, c.pointer_to(obj.ty));
+                s.type = export_type(c, ty, false);
+            };
+            if !obj.is_definition && s.segment == .Invalid {
+                // rn this defaults to "libc" cause that's 0 but probably i want a different 
+                // sentinal for "we don't know where it comes from, just give me a symbol with this name"
+                s.segment = .Import;
+            };
+        };
     
     // TODO: needs to include __os,__arch because include.fr observes them, 
     //       but i want to fix that by providing a stable abi from my libc instead. 
@@ -187,7 +194,7 @@ fn compile_to_module(fr: CompCtx, c_source: Str, c: *C.Compile.Ctx, debug_name: 
     //       you can't import_frc needs to use the same code at comptime and runtime. 
     meta: Meta = (
         arch_os = 0x0F0F, 
-        root_scope = root_scope, 
+        root_scope = save_fields(writer, .Scope, args.items()),
         entry_source = entry_source,
         // TODO: don't call this debug_name if im going to use it for stuff
         debug_name = writer.push(debug_name),
@@ -624,6 +631,7 @@ fr_to_header :: fn(path: Str, remap: *?Ty(One(FTy), One(FTy))) []u8 = {
             type = f_ty,
             payload = (offset = trunc idx)
         );
+        c.writer.sym[idx].type = f_ty;
     };
     root_scope := save_fields(c.writer, .Scope, decls.items());
     meta: Incremental.Meta = (

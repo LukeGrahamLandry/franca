@@ -282,6 +282,8 @@ int main() {
   ASSERT(123, ({ typedef union { int a; } S; S s = (S) { .a = 123, }; s.a; }));  // trailing comma
   ASSERT(123, ({ typedef struct { int a; union {}; } S; S s = (S) { .a = 123, }; s.a; }));  // no fields
 
+  ASSERT(1, ({ int x[1001] = { 0, 0, }; x[0] == 0 && 0 == memcmp(&x[0], &x[1], sizeof(x) - sizeof(x[0])); }));  
+  
   printf("OK\n");
   return 0;
 }

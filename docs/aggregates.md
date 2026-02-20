@@ -24,23 +24,39 @@ S :: @struct {
   b: B = bb;
 }
 
-S :: @struct(a: A, b: B = bb);
+S2 :: @struct(a: A, b: B = bb);
 
 s: S = (a = aa);
 s: S = (a = aa, b = cc);
 ```
 
-There are no private fields, no constructors, and no destructors. 
-There are no methods but you can use structs as a namespace by 
-defining constant fields (with `::`). 
+Types are nominal. S and S2 above are equivalent but still distinct types. 
+It is an error to assign one to the other. However, binding a type to 
+a new name (like `S3 :: S2;`) does not create a distinct type. In that case, both names 
+refer to the same value and they can be used completely interchangeably. 
+
+There are no private fields, no constructors, no destructors, and no methods. 
+
+If all the fields have default values, you can have an empty initializer like `s: Foo = ();`, 
+since all the fields have constant known values, this is equivalent to a memcpy from a blessed 
+template version of the struct (even if it's not implemented that way). 
+
+You can use structs as a namespace by defining constant fields (with `::`). 
+These can be accessed on the type value itself but not on a specific value of the type. 
+```
+TypeN :: @struct { ct :: 1; rt: i64; }; 
+@assert_eq(TypeN.ct, 1);    // TypeN.rt is not valid
+value_n: TypeN = (rt = 2);
+@assert_eq(value_n.rt, 2);  // value_n.ct is not valid
+```
 
 A struct with one field has the same representation as that field's type. 
 A struct with zero fields requires no memory (same representation as `void`), 
 so you can use a `HashMap(K, void)` as a `HashSet(K)`. 
 
-If all the fields have default values, you can have an empty initializer like `s: Foo = ();`, 
-since all the fields have constant known values, this is equivalent to a memcpy from a blessed 
-template version of the struct (even if it's not implemented that way). 
+In general, struct layout matches c. 
+The order of fields in the declaration affects the layout of the struct. 
+There will be uninitialized padding between fields as needed to meet the ABI's alignment requirements. 
 
 ## Tuples
 
@@ -80,10 +96,22 @@ bar := E.b;
 
 ## Unions
 
-A union stores one value from a set of types in overlapping memory. 
+A union stores one value from a set of types in overlapping memory 
+(all fields are stored at offset 0). 
 Since the union doesn't know which type it currently contains, 
 you have to track that information seperatly. This is almost never what you want. 
 It is extremely easy to accidentally invoke behaviour considered disrespectful. 
+
+When the fields of a union are different sizes and a value is initialized 
+with one of the smaller fields, the extra padding is uninitialized 
+(reading that memory is considered disrespectful). 
+
+```
+U :: @union(a: i32, b: i64);
+u: U = (a = 1);
+u.a;     // legal
+// u.b;  // disrespectful
+```
 
 ## Tagged Unions
 
@@ -125,6 +153,13 @@ only assign to the currently active member (doing otherwise is considered disres
 When a varient has a payload of void you can initialize it with just `.Name` like an enum. 
 
 One special tagged union type is `Option(T)`, which is only special because it has syntax sugar: `?T`. 
+
+The current repr is very wasteful. 
+The tag always has 8 byte size/alignment and I don't do anything special with padding/niches. 
+```
+T2 :: @tagged(A: u8, B: @tagged(C: u8));
+@assert_eq(size_of(T2), 24); 
+```
 
 ## Arrays
 
@@ -187,3 +222,4 @@ Indexing past the end of a collection is considered disrespectful
 (and will trigger an assertion if you have bounds checks enabled). 
 
 Calling drop on a collection generally won't recursively call drop on it's elements. 
+(by convention). 

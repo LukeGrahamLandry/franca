@@ -26,6 +26,7 @@ Meta :: @struct {
     // Qbe.no_symbol if this file cannot be executed
     entry_sym:  One(Sym) = (off = Qbe.no_symbol);
     entry_dep:  One(Dep) = (off = Qbe.no_symbol);
+    // values that are exported by this module. 
     root_scope: One(FTy) = (off = Qbe.no_symbol);
     hack_enable_const_fold: u32 = ENABLE_CONST_FOLD.int().trunc();
     // this is used in import_frc as the name of a file to add as a transitive dependency (if the dep array is non-empty)
@@ -52,7 +53,8 @@ Sym :: @rec @struct {
     align_log2: u8 = 0;
     _0: u16 = 0;
     name: Ref(u8);  // TODO: having names is kinda dumb
-    _1: u32 = 0;  // because Fnc has u64 alignment
+    // import_frc needs enough information to create jitshims even if imported or did_regalloc so can't get abi info from the implementation. 
+    type: One(FTy) = (off = 0);  // UnknownType
     // TODO: this should parse when inlined but then need to :UpdateBoot :Compiler
     P :: @union(fnc: Fnc, dat: Dat, imp: Imp, asm: Asm, ali: Ali);  
     payload: P #use;  // active variant depends on segment
@@ -910,6 +912,19 @@ fn abi_function_type(writer: *Writer, f: *Qbe.Fn) One(FTy) = {
     arg := writer.fld_to_par(par.items());
     writer.fty&.push(tag = .Func, payload = (func = (arg = arg, ret = ret)));
     (off = trunc(writer.fty.len - 1))
+}
+
+// export name is the same as the symbol and infer type from function body. 
+fn push_decl(decls: *List(Fld), writer: *Writer, f: *Qbe.Fn) void = {
+    t := abi_function_type(writer, f);
+    push_decl(decls, writer, f.globals, f.lnk.id, t);
+}
+
+fn push_decl(decls: *List(Fld), writer: *Writer, m: *Qbe.Module, id: Qbe.Sym, t: One(FTy)) void = {
+    idx := writer.map_sym(m, id);
+    s := writer.sym[idx]&;
+    s.type = t;
+    decls.push(name = s.name, type = t, payload = (offset = trunc idx));
 }
 
 fn fld_to_par(writer: *Writer, par: []Fld) One(FTy) = {
