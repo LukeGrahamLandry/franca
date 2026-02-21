@@ -110,20 +110,14 @@ sys_capture_exec :: fn(args: []CStr) Result(RunningProcess, Str) = {
 
 exec :: fn(resolved_exe_path: CStr, args: []CStr) Never = {
     // execvpe is a glibc thing. macos doesn't have it. 
-    execve :: fn(pathname: CStr, null_terminated_argv: *CStr, envp: *CStr) i32 #weak #libc;
-    
-    libc_exec: rawptr = execve;
-    Syscall;
-    use_sys := prefer_syscalls() || libc_exec.is_null();
-    e: (@FnPtr(p: CStr, v: *CStr, e: *CStr) i32) = @if(use_sys, Syscall'execve, execve);
     envp := tls(.environment_variables)[];
     
     // HACK: it may appear that i am bad at my job... but so is everyone else... it just can't be done apparently?
     //       https://github.com/golang/go/commit/a4b2c5efbc259c7d23159d304f9cb4266cd64643
     i := 0;
     loop {
-        never := e(resolved_exe_path, args.ptr, envp);
-        error := @if(use_sys, -never, Posix'errno()[]);
+        never := Syscall'execve(resolved_exe_path, args.ptr, envp);
+        error := @if(prefer_syscalls(), -never, Posix'errno()[]);
         if query_current_os() != .linux || error != 26 || i >= 10 {
             err := u8.list(temp());
             @fmt(err&, "errno=%\n", error);

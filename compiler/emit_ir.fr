@@ -859,27 +859,20 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
             self.deref(src, p, expr_ty)
         }
         fn DataSymbol(info) => {
+            @err_assert(!@is(self.program.get_type(expr.ty), .FnPtr), "ICE: sema makes fake Func for DataSymbol") return;
             name := self.program.get_string(info.name);
             id := self.m.intern(name);
             
             if info.lib != Flag.SYMBOL_ZERO.ident() {
                 if self.when == .Jit && info.comptime != 0 {
                     addr := info.comptime;
-                    @if(abi_shift_easy_to_native) {  // don't have the real dlopen
-                        self := self.program;
-                        @if_let(self.get_type(expr.ty)) fn FnPtr(it) => {
-                            @debug_assert_eq(self.pool.get(info.lib), "libc");
-                            func := Vm'make_fake_func(self, info.name, it.ty);
-                            addr = Vm'wrap_with_native_abi(self, func&, addr).int_from_rawptr();
-                        };
-                    };
+                    @assert(!abi_shift_easy_to_native);
                     return(Ok = self.scalar_result(p, self.f.getcon(addr), i64));   // :get_or_create_type
                 };
                 // TODO: if jitting and not ready yet, we could make this be a call to a shim that returns the symbol?
                 set_lib(self, (id, self.program.get_string(info.lib), info.weak));
             };
             
-            save_signeture(self.program, self.shared, id, expr.ty);
             self.scalar_result(p, self.f.symcon(id), i64)  // :get_or_create_type
         }
         fn Deref(arg) => {

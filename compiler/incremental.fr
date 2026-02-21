@@ -592,6 +592,23 @@ fn move_from_module(emit_ir: *EmitIr, import: *FrcImport) CRes(CodegenTask) = {
     if it.segment == .Alias {
         // TODO: mostly untested because import_module caching is disabled currently  -- Oct 13, 2025
         target := instance.syms[it.ali.target.off.zext()];
+        
+        // :FrcExtraImportShims
+        // now that not always in root_scope, it might be a weak import that isn't filled 
+        // (like __errno_location is platform specific) but wait_for_symbol isn't allowed to return null. 
+        // so it's required to have a jit shim (which will error when called) so it can be baked 
+        // (and works when cross compiling where host doesn't have the import but target does
+        // but you need to put the pointer in a vtable at comptime and bake it so needs a unique value, not just null). 
+        // rn this only comes up with FRANCA_MORE_CACHE=1 but that's just luck not fundamental. 
+        // alternatively, the problem is just that shallow_jit_func doesn't know it's an import with comptime=0 if it wasn't in root_scope. 
+        // TODO: shouldn't need both shims
+        if (@try(self.get_fid(module, it.ali.target)) return) { fid | 
+            self.create_jit_shim(fid);
+        };
+        if (@try(self.get_fid(module, i)) return) { fid | 
+            self.create_jit_shim(fid);
+        };
+        
         zone_end(zone);
         return(Ok = (Bounce = (lnk = f.lnk&, target = target)));
     };
@@ -910,64 +927,43 @@ fn build_the_exports_scope(c: *ExportCtx, start_path: Str, entry_source: Str) CR
     (Ok = bytes)
 }
 
-// TODO: this is kinda dumb, i shouldn't need to export everything just to give it type info it needs for shims.  
+// TODO: this is kinda dumb, i shouldn't need to give detailed FTy just to give it type info it needs for shims.  
 //       should use FTy.Abi for everything that isn't explicitly exported. 
 export_root_scope :: fn(c: *ExportCtx, fns: []FuncId, funcs_done: *DynamicBitSet, names: []Str) One(FTy) = {
     decls := Fld.list(temp());
 
-    range(0, fns.len) { i | 
-        fid, export_name := (fns[i], names[i]);
-        name := c.fr.fmt_fn_name(fid);
-        id := c.m.intern(name);
-        idx := c.writer.map_sym(c.m, id);
-        
-        func := c.fr.get_function(fid);
-        // TODO: copy paste
-        f_ty := func.finished_ty() || @panic("unfinished type for %", c.fr.log(func));
-        f_ty := c.fr.intern_type(FnPtr = (ty = f_ty));
-        f_ty := export_type(c, f_ty);
-        
-        decls&.push(
-            name = c.writer.push(export_name),
-            type = f_ty,
-            payload = (offset = trunc idx)
-        );
-        c.writer.sym[idx].type = f_ty;
-    };
-    // TODO: just set the symbol types, not root_scope
-    symbols_exported: Qbe.BSet = init_bitset(c.writer.sym.len + funcs_done.bits.len * 64);
     for funcs_done { i |
         fid: FuncId = i.from_index(); i := ();
 
         name := c.fr.fmt_fn_name(fid);
         id := c.m.intern(name);
         idx := c.writer.map_sym(c.m, id);
-        symbols_exported&.bsset(idx);
         
         func := c.fr.get_function(fid);
         f_ty := func.finished_ty() || @panic("unfinished type for %", c.fr.log(func));
         f_ty := c.fr.intern_type(FnPtr = (ty = f_ty));
         f_ty := export_type(c, f_ty);
-        
-        push_decl(decls&, c.writer, c.m, id, f_ty);
+        c.writer.sym[idx].type = f_ty;
         
         @if_let(func.body&) fn DynamicImport(it) => {
             id := c.m.intern(c.fr.get_string(it.name));
             idx := c.writer.map_sym(c.m, id);
-            symbols_exported&.bsset(idx);
-            push_decl(decls&, c.writer, c.m, id, f_ty);
+            c.writer.sym[idx].type = f_ty;
         };
     };
     
-    // TODO: don't require this. have frontend fallback when sym.type=0=unknowntype?
-    range(0, c.writer.sym.len) { idx |
-        if !symbols_exported&.bshas(idx) {
-            decls&.push(
-                name = c.writer.sym[idx].name,
-                type = (off = FTy.RAWPTR),
-                payload = (offset = trunc idx)
-            );
-        }
+    range(0, fns.len) { i | 
+        fid, export_name := (fns[i], names[i]);
+        @assert(funcs_done.get(fid.as_index()), "exported but not compiled");
+        name := c.fr.fmt_fn_name(fid);
+        id := c.m.intern(name);
+        idx := c.writer.map_sym(c.m, id);
+        
+        decls&.push(
+            name = c.writer.push(export_name),
+            type = c.writer.sym[idx].type,
+            payload = (offset = trunc idx)
+        );
     };
     
     save_fields(c.writer, .Scope, decls.items())

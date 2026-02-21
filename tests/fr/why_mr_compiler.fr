@@ -320,6 +320,27 @@ fn tracking_shims_in_data() void #test = {
     @assert_eq(x, y'callee());
 }
 
+// TODO: this won't work on wasm because i have to manually list all the weak imports on the host side. that's dumb should represent them in a different way. 
+fn unfilled_shim_in_vtable() #test = {
+    A :: @static(@FnPtr() void);
+    thisfunctiondoesnotexistinlibc :: fn() void #weak #libc;
+    // need to produce a nonnull integer at comptime so this can be baked. 
+    @run { A[] = thisfunctiondoesnotexistinlibc; };
+    _ := @tfmt("%", bit_cast_unchecked(@type A[], rawptr, A[]));
+    
+    // ditto but requires making shims for DataSymbol. 
+    // (this is important. otherwise you couldn't use it with __errno_location when cross compiling)
+    B :: @static(@FnPtr() void);
+    @run { B[] = @expand(
+        expr = (DataSymbol = (name = @symbol neitherdoesthisone, lib = @symbol libc, comptime = 0, weak = true)),
+        loc = @source_location, ty = FnPtr(void, void), done = false,
+    ); };
+    _ := @tfmt("%", bit_cast_unchecked(@type B[], rawptr, B[]));
+    
+    // at runtime the strings would be "0" and at comptime they'd contain the address of the shim 
+    // (which means you can't always check if a weak import was available by comparing it to null)
+}
+
 // the field order/counts are important for reproducing the bug
 // see devlog :ByteOffsetUninitRootCause -- Apr 3, 2025
 fn field_init_reorder() #test = {

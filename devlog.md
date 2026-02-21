@@ -1,4 +1,14 @@
 
+## (Feb 21)
+
+- fr: export_root_scope tried to export less
+- finally make a fake function for expr.DataSymbol if it's type is FnPtr so it's less of a special case (notable use is for choose_syscall)
+  - broke on wasm because it was relying on fill_pending_dynamic_imports which wasn't looking at SymbolInfo.alias set by Task.Bounce 
+  - for boot, wrap_with_native_abi doesn't matter for the dlopen imports, just the comptime_addr ones. 
+    that's beleivable, the compiler's comptime doesn't need any libc and the "runtime" part even tho jitted takes the other path that uses 
+  - subprocess/exec is the only place where deduplicating the fake func for DataSymbol mattered.
+    i'm using execve for the libc case anyway now so let Syscall'foo handle it. bloat.fr still works in blink so seems fine. 
+
 ## (Feb 20)
 
 frc: 

@@ -665,15 +665,14 @@ fn create_import_body(self: *SelfHosted, func: *Func, fid: FuncId, lib_name: Sym
     @err_assert(func.body&.is(.Empty), "#import function must not have a body") return;
     func.set_flag(.BodyIsSpecial);
     info := self.dyn_import(func.name, lib_name, weak);
-    @if(abi_shift_easy_to_native) {  // don't have the real dlopen
-        @debug_assert_eq(self.pool.get(info.lib), "libc");
-        info.comptime = Vm'wrap_with_native_abi(self, func, info.comptime).int_from_rawptr();
-    };
     func.body = (DynamicImport = info);
     .Ok
 }
 
 fn dyn_import(self: *SelfHosted, name: Symbol, lib_name: Symbol, weak: bool) DynamicImport = {
+    // don't have the real dlopen. would work if wrap_with_native_abi but don't actually need to call libc at comptime for the compiler. 
+    @if(abi_shift_easy_to_native) return(name = name, lib = lib_name, comptime = 0, weak = weak);  
+    
     handle2 := self.comptime_libraries&.get(lib_name);
     is_libc := lib_name == Flag.libc.ident(); 
     name_s := self.pool.get(name);
@@ -1173,10 +1172,21 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
         //       but also functions are way easier to play tricks with since you can put 
         //       shims inside the call transparently. 
         fn DataSymbol(info) => if info.lib != Flag.SYMBOL_ZERO.ident() {
-            if self.comptime_libraries&.get(info.lib) { handle |
-                if handle.get(self.pool.get(info.name)) { addr |
-                    info.comptime = addr.int_from_rawptr();
-                };
+            // if it's a function, create a fake place to hang a jit shim. 
+            // could dedup these but there are very few invocations of @syscall so not a big deal. 
+            @if_let(self.get_type(expr.ty)) fn FnPtr(f_ty) => {
+                fid := self.add_function(empty_fn(f_ty.ty, info.name, expr.loc));
+                func := self.get_function(fid);
+                func.set_flag(.EnsuredCompiled);
+                types := self.comp().arg_types(f_ty.ty.arg);
+                fill_bindings(func, self.comp(), types);
+                r := self.create_import_body(func, fid, info.lib, info.weak);  // gets name from the func
+                @debug_assert(r&.is_ok(), "non empty body is unreachable. just made it.");
+                self.make_fn_ptr_expr(expr, fid, expr.ty);
+                // not using compile_fn_ptr because don't have to break cycles (its an import so no body to compile) and don't need the error checking. 
+                self.add_callee(fid);
+                // TODO: maybe want to set resolve_scope/etc. just so it's consistant 
+                //       but it doesn't matter because FrcImport does it this way too so anything that cares has to deal with it for now. 
             };
         }
         fn CVariadic(args) => {

@@ -1,4 +1,14 @@
 
+TODO: whatever speed improvement i get from fuckign around with assinging to the function table 
+is not work how much of a pain in the ass it is. 
+just have an extra level of indirection. 
+accept that a function pointer is always an index into the table 
+so the GOT should be a real array in memory like it is on native
+and then it doesn't have to special case everywhere and can treat data and functions the same way. 
+end state should allow it to drop in use dlopen instead 
+and then i could test most of the logic in real code where you have a debugger that doesn't suck ass. 
+and as bootstrapping strategy could try emit_c for jit as well but with tcc instead of my own backend. 
+
 - jump.fr throw should stomp the jumpbuf so you can accidently use it multiple times without re-try()
 - error message while baking should show the tree of values to that point. 
   ie. "we can't even find it if we scan all jitted functions."
