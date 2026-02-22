@@ -3,6 +3,10 @@ the beginnings of an operating system.
 currently it's good enough to run the franca compiler on qemu-system-aarch64's virt machine.
 it also runs doom (i don't have a keyboard driver yet so just the intro render)
 
+```
+franca examples/os/build.fr -vzf -append "spawn doom;" -fetch-doom -smp 2 -graphics
+```
+
 ## implemented
 
 - interrupt handling

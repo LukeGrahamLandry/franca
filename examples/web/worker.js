@@ -161,8 +161,13 @@ export const imports = {
                     // caller (fetch_or_crash) checks that the hash matches. 
                     // should allow any url not just mine but you need to be strict 
                     // about cors for threads/gpu to work so it wouldn't matter anyway. 
-                    const url = "https://lukegrahamlandry.ca/franca/mirror/" + sha256_hash;
-                    const result = sync_fetch(url);
+                    const mirrors = ["/mirror/", "https://lukegrahamlandry.ca/franca/mirror/"];
+                    let result = null;
+                    for (const base of mirrors) {
+                        const url = base + sha256_hash;
+                        result = sync_fetch(url);
+                        if (result !== null) break;
+                    }
                     if (result === null) return -1n;
                     if (result.byteLength > Number(len)) return BigInt(result.byteLength);
                     const dest = new Uint8Array(Franca.memory.buffer, Number(ptr), result.byteLength);

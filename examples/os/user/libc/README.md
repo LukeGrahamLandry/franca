@@ -9,17 +9,6 @@ and still target platforms that don't provide a native libc
 (wasm, my operating system, any time you want a static binary). 
 My programs only need a tiny subset and I care more about simplicity than performance. 
 
-I could have used musl for the platform independent parts 
-but I'd still have to port the io parts for non-linux targets. 
-I also care about exposing the same ABI on all targets (both architecture and os), 
-because it makes my compile time execution when cross compiling much easier to implement 
-(i can run sema once and use it for all platforms). 
-It also means I can cross compile without figuring out how 
-to install a new copy of all the headers for each target platform. 
-I couldn't find another libc that doesn't need to know the target at compile time 
-(even cosmopolitan is only os generic, it still has ifdefs based on architecture). 
-I also have low respect for the compliation model that involves make and a billion tiny object files. 
-
 (WIP: currently the fixed abi thing is true for the franca interface, lib/sys/posix.fr, but not the c one)
 the impl folder is for my operating system
 

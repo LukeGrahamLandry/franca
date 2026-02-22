@@ -48,7 +48,7 @@ driver :: fn(vtable: *ImportVTable) void = {
     if ci {
         default := "Math.floor(new Date().valueOf())";
         prefix := "let manifest_version = ";
-        main_js := read_entire_file_or_crash(temp(), "examples/web/main.js");
+        main_js := read_entire_file_or_crash(temp(), "target/web/main.js");
         dest := main_js.rest(prefix.len).slice(0, default.len);
         @assert(main_js.starts_with(prefix) && dest == default);
         commit.len = min(commit.len, dest.len - 2);
@@ -56,7 +56,23 @@ driver :: fn(vtable: *ImportVTable) void = {
         dest[dest.len - 1] = "\"".ascii();
         dest.slice(1, commit.len + 1).copy_from(commit);
         dest.slice(commit.len + 1, dest.len - 1).set_bytes("-".ascii());
-        write_entire_file_or_crash("examples/web/main.js", main_js);
+        write_entire_file_or_crash("target/web/main.js", main_js);
+        
+        // mirror any deps used by the examples so the web demo can get them from its own domain to get around CORS
+        _ := run_cmd_blocking(franca, @slice("tests/run_tests.fr", "fetch"));
+        mirror_path := "target/web/mirror";
+        cache_path := "target/franca/fetch";
+        make_dirs_or_crash(mirror_path);
+        walk_directory_unordered(cache_path.as_cstr()) { entry | 
+            if entry.name.ends_with(".out") && entry.type == .File {
+                src := @tfmt("%/%", cache_path, entry.name);
+                dest := @tfmt("%/%", mirror_path, entry.name.slice(0, entry.name.len - 4));
+                copy(dest, src);
+            };
+        };
+        // TODO: idk if it's more polite to generate an index file so you can see where  
+        //       each file comes from without unpacking them or no index so undesirables  
+        //       can't scrape and steal other people's bits without already knowing the hashes. 
     };
 }
 
