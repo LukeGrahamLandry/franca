@@ -1,14 +1,20 @@
 
-TODO: whatever speed improvement i get from fuckign around with assinging to the function table 
-is not work how much of a pain in the ass it is. 
-just have an extra level of indirection. 
-accept that a function pointer is always an index into the table 
-so the GOT should be a real array in memory like it is on native
-and then it doesn't have to special case everywhere and can treat data and functions the same way. 
-end state should allow it to drop in use dlopen instead 
-and then i could test most of the logic in real code where you have a debugger that doesn't suck ass. 
-and as bootstrapping strategy could try emit_c for jit as well but with tcc instead of my own backend. 
-
+- do i want to hook_backtrace automatically? it's kinda dumb to have to remember to do it everywhere. 
+  ie. tests/exe/wasm.fr doesn't rn. but it's annoying because it deletes information when running as a driver, 
+  generally don't want it to stomp the compiler's one, just provide if there isn't already. 
+- make the signal handler print the payload value of the brk instruction
+- would be nice if i could get rid of wasm/jit/Event.Assign 
+  (now only used in close_modules, redo_relocations_wasm).
+  then could switch to dlopen abi and maybe eventually support using emscripten instead of my library. 
+- anything that manually adds relocations needs to check that not jit_via_dlopen. ie. import_c/assembler.fr
+- `orb FRANCA_JIT_VIA_DLOPEN=1 ./target/f.out examples/os/build.fr`
+  panic! Assertion Failed: (put_jit_addr) redeclared symbol 4641: opendir__33632
+- if wasm fails an assertion on nonmain thread run.fr doesn't stop
+  (so it hangs instead of terminating if holding a lock)
+  also you don't see the assertion msg if log is capturing. 
+  also for worker.js: you get the message but if it's a graphical one, it keeps rendering new frames. 
+- ci run web tests in node
+- as bootstrapping strategy could try emit_c for jit as well but with tcc instead of my own backend. 
 - jump.fr throw should stomp the jumpbuf so you can accidently use it multiple times without re-try()
 - error message while baking should show the tree of values to that point. 
   ie. "we can't even find it if we scan all jitted functions."

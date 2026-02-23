@@ -22,8 +22,6 @@ SymbolInfo :: @struct(
     inline: *Qbe.InlineFn, // nullable
     fixups: RawList(Fixup),
     // or -1 if not referenced yet. valid: DynamicPatched
-    // this gets repurposed when fixups_locked. 
-    // when targetting wasm this is the index of the function (need to offset by import count if imported)
     got_lookup_offset: i64,
     segment: SegmentType, // valid: Local
     //  local: offset in the segment
@@ -166,6 +164,7 @@ fn find_library(m: *QbeModule, name: Str) ?u32 = {
 
 fn make_exec(self: *QbeModule) void = {
     (self.target.make_exec)(self);
+    self.flush_debug();
 }
     
 make_exec_via_mmap :: fn(self: *QbeModule) void = {
@@ -476,6 +475,10 @@ fn declare_alias(m: *Qbe.Module, target: Qbe.Sym, alias: *Qbe.Lnk) void = {
         };
     };
     
+    if m.goal.jit_via_dlopen {
+        m.hack_alias&.push(alias.id, m.forever&.borrow());
+    };
+    
     if target_kind == .Pending {
         return();
     };
@@ -545,18 +548,6 @@ fn put_jit_addr(self: *QbeModule, name: Qbe.Sym, addr: rawptr) void = {
     use_symbol(self, name) { symbol |
         @debug_assert(!symbol.pledge_local, "% was an import", symbol.name);
         when_debug(self, .Patch, fn(o) => @fmt(o, "# put_jit_addr(%, %)\n", symbol.name, addr));
-        @if(TODOWASM)
-        if self.goal.arch == .wasm32 {
-            // TODO: only do this if it's a function
-            addr := addr.int_from_rawptr();
-            if symbol.got_lookup_offset == -1 {
-                symbol.got_lookup_offset = addr;
-            } else {
-                when_debug(self, .Patch, fn(o) => @fmt(o, "# Assign T[%] = T[%]\n", symbol.got_lookup_offset, addr));
-                (self.target.wasm_jit_event)(Assign = (dest = symbol.got_lookup_offset, src = addr));
-            };
-        };
-        
         break :: local_return;
         // HACK: rn FrIncr'find_module can double import things. probably it should prevent that instead of just allowing it here. 
         if symbol.kind == .DynamicPatched && identical(symbol.jit_addr, addr) {
@@ -639,31 +630,6 @@ fn do_fixups_impl(self: *QbeModule, symbol: *SymbolInfo) void = {
         @debug_assert(!symbol.strong || !symbol.jit_addr.is_null(), "do_fixups jit null symbol %", symbol.name);
     };
     
-    @if(TODOWASM)
-    if self.goal.arch == .wasm32 && symbol.segment == .Code && symbol.got_lookup_offset == -1 {
-        if symbol.alias == Qbe.no_symbol_S || self.goal.type != .JitOnly {
-            @debug_assert(self.goal.type != .JitOnly, "wasm-jit $% should have known got_lookup_offset", symbol.name);
-            // Need to wait until the end of compilation to know its index. 
-            return();
-        };
-        
-        // TODO: can this move to declare_alias?
-        use_symbol(self, symbol.alias) { a |
-            // :wasmgotunify
-            if a.got_lookup_offset == -1 {
-                a.got_lookup_offset = (self.target.wasm_jit_event)(Grow = (delta = 1));
-                // TODO: only if it's a function
-                if a.jit_addr.is_null() {
-                    a.jit_addr = a.got_lookup_offset.rawptr_from_int();
-                }
-            };
-            symbol.got_lookup_offset = a.got_lookup_offset;
-            symbol.index_in_module = a.index_in_module;
-            symbol.jit_addr = a.jit_addr;
-            symbol.kind = .DynamicPatched;
-        };
-    };
-    
     @debug_assert(symbol.kind == .Local || !symbol.pledge_local, "trying to fixup an import (%, %) but pledge_local=true", symbol.kind, symbol.name);
     
     fixups := symbol.fixups.items();
@@ -679,8 +645,6 @@ fn do_fixups_impl(self: *QbeModule, symbol: *SymbolInfo) void = {
 }
 
 fn ensure_got_slot(self: *QbeModule, symbol: *SymbolInfo, jit_address: rawptr) ?Fixup = {
-    @if(TODOWASM) @debug_assert_ne(self.goal.arch, .wasm32);
-    
     @debug_assert(!self.fixups_locked);
     new_got_reloc: ?Fixup = .None;
     if symbol.got_lookup_offset == -1 {
@@ -1113,6 +1077,7 @@ fn align_to(m: *QbeModule, segment: SegmentType, align: i64) void = {
 // same as wasm/emit.fr/make_exec but for native targets. 
 // TODO: replace jit_instantiate_module interface and use this on wasm as well?
 make_exec_via_dlopen :: fn(m: *Qbe.Module) void = {
+    @debug_assert_eq(m.inlinable_but_referenced_later.len, 0, "jit_via_dlopen can't suspend for inlining");
     @if(m.exports.len == 0) return();
     mark := temp().mark();    
 
@@ -1123,17 +1088,7 @@ make_exec_via_dlopen :: fn(m: *Qbe.Module) void = {
     };
     
     // mach-o emit doesn't handle exporting an alias rn. 
-    alias := @ref Qbe.Sym.list(temp());
-    m.exports&.unordered_retain(fn(id) => {
-        keep := true;
-        use_symbol(m, id[]) { s |
-            keep = s.alias == Qbe.no_symbol_S;
-            if !keep {
-                alias.push(id[]);
-            }
-        };
-        keep
-    });
+    m.exports&.unordered_retain(fn(id) => m.follow_alias(id[]) == id[]);
     
     // time to do some sketchy shit do da do da
     m.goal.type = .Dynamic;
@@ -1165,11 +1120,12 @@ make_exec_via_dlopen :: fn(m: *Qbe.Module) void = {
         };
     };
     
-    for alias { id |
+    for m.hack_alias { id |
         use_symbol(m, id) { s |
             finish_alias(m, s.alias, id, false);
         };
     };
+    m.hack_alias&.clear();
     
     // it's fine to call this multiple times to keep adding jitted code to the module, 
     // just don't re-emit stuff that's already done. 

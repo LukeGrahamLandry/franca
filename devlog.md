@@ -1,4 +1,15 @@
 
+## (Feb 23)
+
+- wasm: stop handing out function table indices early. 
+  - instead of using JitEvent.Assign just use a GOT in linear memory like other targets. 
+    also means the same code works for functions and data pointers. 
+  - very error prone to undo everywhere that special cased wasm but seems to work now. 
+  - was afraid the extra indirection would make it slower but it's actually much faster. 
+    not syncing all those Assign between threads is a big win i guess. 
+    - jit mandelbrot_ui: (firefox: 545 -> 475. chrome: 375 -> 340)
+    - cross compiler/main to macos-arm: (firefox: 2620 -> 2105. chrome: 2345 -> 1940)
+    - my import_wasm seems about the same. 
 
 ## (Feb 22)
 
