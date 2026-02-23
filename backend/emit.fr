@@ -47,7 +47,7 @@ SymbolInfo :: @struct(
     // list from inside a use_symbol so the bucket is already locked. 
     id: Qbe.Sym,
     alias: Qbe.Sym,
-    wasm_module_function_index: i32,
+    index_in_module: i64,  // wasm: function index. elf: index in symbol table (the latter can't stomp got_lookup_offset because of jit_via_dlopen)
 );
 
 SymbolKind :: @enum(u8) (
@@ -165,19 +165,10 @@ fn find_library(m: *QbeModule, name: Str) ?u32 = {
 }
 
 fn make_exec(self: *QbeModule) void = {
-    @debug_assert_eq(self.goal.arch, query_current_arch());
-    @debug_assert_eq(self.goal.type, .JitOnly);
-    if self.goal.expecting_wx {
-        @debug_assert_ne(self.goal.arch, .wasm32);
-        return();  // already executable so this is a nop
-    };
+    (self.target.make_exec)(self);
+}
     
-    @if(TODOWASM)
-    if self.goal.arch == .wasm32 {
-        import("@/backend/wasm/emit.fr")'make_exec(self);
-        return();
-    };
-    
+make_exec_via_mmap :: fn(self: *QbeModule) void = {
     // do this before running so it works even if they exit() instead of returning
     self.write_perfmap_symbols();
     
@@ -200,7 +191,7 @@ fn make_exec(self: *QbeModule) void = {
     clear_instruction_cache(u8.raw_from_ptr(self.start_of_writable_code), u8.raw_from_ptr(end[]));  // IMPORTANT
     
     self.start_of_writable_code = end[];
-}
+};
 
 fn get_addr(self: *QbeModule, id: Qbe.Sym) ?Ty(rawptr, i64) = {
     @debug_assert(!self.fixups_locked, "you can't get a jit pointer after emitting for aot becuase it stomps data with relocation info.");
@@ -232,8 +223,9 @@ fn get_addr(self: *QbeModule, symbol: *SymbolInfo) ?Ty(rawptr, i64) = {
 }
 
 // TODO: add_asm functions don't go through this currently but they should
+//       ... now Task.Asm does because jit_via_dlopen needs it
 fn maybe_add_export(self: *QbeModule, id: Qbe.Sym, export: bool) void = if export {
-    if (self.goal.arch == .wasm32 || @is(self.goal.type, .Relocatable, .Dynamic)) {
+    if (self.goal.jit_via_dlopen || self.goal.arch == .wasm32 || @is(self.goal.type, .Relocatable, .Dynamic)) {
         self.exports&.push(id);
     };
     
@@ -317,6 +309,9 @@ fn emit_data(self: *QbeModule, dat: Dat2) void = {
     next[] = next[].offset(dest.len);
     use_symbol(self, dat.id) { s | 
         s.size = dest.len.trunc();
+        if self.goal.jit_via_dlopen {  // don't allow relative addressing
+            s.kind = .DynamicPatched;
+        };
     };
     // TODO: wasm data export can just be a global that has the pointer in it? 
     if self.goal.arch != .wasm32 {
@@ -509,7 +504,7 @@ fn finish_alias(m: *Qbe.Module, target: Qbe.Sym, alias: Qbe.Sym, export: bool) v
             if a.got_lookup_offset != -1 {
                 t.got_lookup_offset = a.got_lookup_offset;
             };
-            a.wasm_module_function_index = t.wasm_module_function_index;
+            a.index_in_module = t.index_in_module;
             
             when_debug(m, .Patch, fn(o) => @fmt(o, "# finish_alias(%) = %\n", a.name, t.name));
             m.do_fixups(a);
@@ -603,6 +598,8 @@ fn do_jit_fixups(self: *QbeModule, id: Qbe.Sym, segment: SegmentType, final_offs
         
         // harvard: jit_addr in code segment is useless. 
         @if(self.goal.arch == .wasm32 && segment == .Code) break();
+        // TODO: can ^ be replaced by v even when aot?
+        @if(self.goal.jit_via_dlopen && segment == .Code) break();
         
         dest := self.segment_address(symbol.segment, symbol.offset);
         symbol.jit_addr = dest;
@@ -661,7 +658,7 @@ fn do_fixups_impl(self: *QbeModule, symbol: *SymbolInfo) void = {
                 }
             };
             symbol.got_lookup_offset = a.got_lookup_offset;
-            symbol.wasm_module_function_index = a.wasm_module_function_index;
+            symbol.index_in_module = a.index_in_module;
             symbol.jit_addr = a.jit_addr;
             symbol.kind = .DynamicPatched;
         };
@@ -1112,3 +1109,78 @@ fn current_offset(m: *QbeModule, segment: SegmentType) i64 = {
 fn align_to(m: *QbeModule, segment: SegmentType, align: i64) void = {
     m.segments&.index(segment).align_to(align);
 }
+
+// same as wasm/emit.fr/make_exec but for native targets. 
+// TODO: replace jit_instantiate_module interface and use this on wasm as well?
+make_exec_via_dlopen :: fn(m: *Qbe.Module) void = {
+    @if(m.exports.len == 0) return();
+    mark := temp().mark();    
+
+    when_debug(m, .Patch) { out |
+        @fmt(out, "# make_exec #% [", m.handles.len);
+        for m.exports { id | @fmt(out, "%, ", m.str(id)); };
+        @fmt(out, "]\n");
+    };
+    
+    // mach-o emit doesn't handle exporting an alias rn. 
+    alias := @ref Qbe.Sym.list(temp());
+    m.exports&.unordered_retain(fn(id) => {
+        keep := true;
+        use_symbol(m, id[]) { s |
+            keep = s.alias == Qbe.no_symbol_S;
+            if !keep {
+                alias.push(id[]);
+            }
+        };
+        keep
+    });
+    
+    // time to do some sketchy shit do da do da
+    m.goal.type = .Dynamic;
+    chunks := {m.target.finish_module}(m);
+    bytes := chunks.concat(temp());
+    m.goal.type = .JitOnly;
+    m.fixups_locked = false;
+    
+    // this path must be unique (there can be multiple modules in the same process/thread 
+    // so m.handles.len isn't enough). otherwise it can reuse an old module. see examples/toy/stomp_dlopen.fr
+    path := anon_temp_path(@tfmt("target/make_exec_via_dlopen.%", int(timestamp_s() * 1000000)));
+    cpath := path.as_cstr();
+    write_file_direct(cpath, bytes) 
+        || @panic("make_exec_via_dlopen: failed to write");
+    lib := Dyn'open(path) 
+        || @panic("wrote an invalid dylib: (%) %", path, Dyn'dlerror());
+    m.handles&.push(lib, m.forever&.borrow());
+    
+    for m.exports& { id |
+        name := m.str(id);
+        p := lib.get(name) 
+            || @panic("failed to get symbol: % (from %)", name, path);
+        use_symbol(m, id) { s |
+            @debug_assert_eq(s.segment, .Code, "TODO: dljit data? %", s.name);
+            s.kind = .DynamicPatched;
+            s.offset = 0;
+            s.jit_addr = p;
+            m.do_fixups(s);  // fill got slot
+        };
+    };
+    
+    for alias { id |
+        use_symbol(m, id) { s |
+            finish_alias(m, s.alias, id, false);
+        };
+    };
+    
+    // it's fine to call this multiple times to keep adding jitted code to the module, 
+    // just don't re-emit stuff that's already done. 
+    m.exports&.clear();
+    m.local_needs_reloc&.clear();
+    // reusing the memory instead of just advancing commands_size_guess is important because 
+    // it means you don't have to keep hashing more and more for mach-o codesign. 60% -> 4%
+    code := m.segments&[.Code]&;
+    code.next = code.mmapped.index(m.goal.commands_size_guess);
+
+    Syscall'remove(cpath);
+    temp().reset(mark);
+    m.flush_debug();
+};

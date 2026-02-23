@@ -336,6 +336,7 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
         @match(symbol.kind) {
             fn DynamicPatched() => self.immediate_fixup_got(dest_reg, inc, symbol);
             fn Local() => {
+                @debug_assert(symbol.segment == .Code || !self.m.goal.jit_via_dlopen, "TODO: jit_via_dlopen instantiateinjitaddressapce");
                 // we've already compiled it so just compute its address directly.
                 when_debug(self.f, .Patch) { out |
                     distance := self.m.distance_between(.Code, self.m.current_offset(.Code), symbol.segment, symbol.offset + inc);
@@ -373,6 +374,20 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
 }
 
 fn immediate_fixup_got(self: *ArmState, dest_reg: i64, inc: i64, symbol: *SymbolInfo) void = {
+    if self.m.goal.jit_via_dlopen {
+        // TODO: if DynamicPatched and not a shim, can just create address directly
+        // can't do relative access to data segment because dlopen moves the code. 
+        // but loaded into same address space so just produce the address of GOT as a literal pointer and load it. 
+        if ensure_got_slot(self.m, symbol, symbol.jit_addr) { it |
+            push_fixup(self.m, symbol, it);
+        };
+        got := self.m.segment_address(.ConstantData, symbol.got_lookup_offset);  // :GotAtConstantDataBase 
+        loadcon_bits(self, got.int_from_rawptr(), dest_reg, true);
+        self.inst(ldr_uo(.X64, dest_reg, dest_reg, 0));
+        apply_inc(self, dest_reg, inc, symbol.name);
+        return();
+    };
+
     patch_addr := self.m.segment_address(.Code, self.m.current_offset(.Code));
     patch: Fixup = (patch_at = (addr = patch_addr), type = (InReg = (r = dest_reg, increment = 0, got_load = true)));
     if self.m.goal.type != .JitOnly { 
@@ -445,7 +460,7 @@ fn loadcon_bits(self: *ArmState, n: i64, r: i64, w: bool) void = {
         return();
     };
    
-    if self.m.goal.type == .JitOnly {
+    if self.m.goal.type == .JitOnly && !self.m.goal.jit_via_dlopen {
         // when jitting the absolute address of the function is constant 
         // so numbers can be formed relative to the instruction pointer. 
         // adrp+add vs mov+movk+movk

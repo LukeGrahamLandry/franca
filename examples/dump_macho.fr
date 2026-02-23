@@ -318,41 +318,9 @@ dump :: fn(bytes: []u8) void = {
                 command := bytes&.pop_type(LinkEditBlob);
                 @println("    [Exports Trie] %", command);
                 data := full_bytes.slice(command.offset.zext(), command.offset.zext() + command.size.zext());
-                // https://github.com/qyang-nj/llios/blob/main/exported_symbol/README.md#export-trie
-                S :: @struct(string: Str, ptr: *u8, depth: i64);
-                nodes := list(S, temp());
-                nodes&.push(string = "", ptr = data.ptr, depth = 0);
-                first := true;
-                while => nodes&.pop() { node |
-                    bytes: []u8 = (ptr = node.ptr, len = data.len - ptr_diff(data.ptr, node.ptr));
-                    terminal_size, rest, ok := read_leb128_unsigned(bytes);
-                    assert(ok, "failed read leb128");
-                    if !first {
-                        range(0, node.depth * 3) { _ |
-                            print("=");
-                        };
-                        @print(" |%| ", node.string);
-                    };
-                    // TODO: print the encoded value (its an address i think)
-                    range(0, terminal_size.bitcast()) { i |
-                        b := rest&.pop_type(u8)[];
-                        t := u8.list(temp());
-                        t&.push_prefixed_hex_byte(b);
-                        @print("% ", t.items());
-                    };
-                    println("");
-                    first = false;
-                    child_count := rest&.pop_type(u8)[];
-                    range(0, child_count.zext()) { i |
-                        s: CStr = (ptr = rest.ptr);
-                        s := s.str();
-                        rest.ptr = rest.ptr.offset(s.len + 1);
-                        child_offset, rest2, ok := read_leb128_unsigned(rest);
-                        assert(ok, "failed read leb128");
-                        rest = rest2;
-                        nodes&.push(string = s, ptr = data.ptr.offset(child_offset.bitcast()), depth = node.depth + 1);
-                    };
-                };
+                out := u8.list(temp());
+                show_exports_trie(out&, data);
+                print(out.items());
             };
             @default => {
                 unknown += 1;
@@ -379,6 +347,44 @@ dump :: fn(bytes: []u8) void = {
         @println("     % unknown load commands. (probably a problem with this tool, not your macho file)", unknown);
     };
 }
+
+show_exports_trie :: fn(out: *List(u8), data: []u8) void = {
+    // https://github.com/qyang-nj/llios/blob/main/exported_symbol/README.md#export-trie
+    S :: @struct(string: Str, ptr: *u8, depth: i64);
+    nodes := list(S, temp());
+    nodes&.push(string = "", ptr = data.ptr, depth = 0);
+    first := true;
+    while => nodes&.pop() { node |
+        bytes: []u8 = (ptr = node.ptr, len = data.len - ptr_diff(data.ptr, node.ptr));
+        terminal_size, rest, ok := read_leb128_unsigned(bytes);
+        assert(ok, "failed read leb128");
+        if !first {
+            range(0, node.depth * 3) { _ |
+                @fmt(out, "=");
+            };
+            @fmt(out, " |%| ", node.string);
+        };
+        // TODO: print the encoded value (its an address i think)
+        range(0, terminal_size.bitcast()) { i |
+            b := rest&.pop_type(u8)[];
+            t := u8.list(temp());
+            t&.push_prefixed_hex_byte(b);
+            @fmt(out, "% ", t.items());
+        };
+        @fmt(out, "\n");
+        first = false;
+        child_count := rest&.pop_type(u8)[];
+        range(0, child_count.zext()) { i |
+            s: CStr = (ptr = rest.ptr);
+            s := s.str();
+            rest.ptr = rest.ptr.offset(s.len + 1);
+            child_offset, rest2, ok := read_leb128_unsigned(rest);
+            assert(ok, "failed read leb128");
+            rest = rest2;
+            nodes&.push(string = s, ptr = data.ptr.offset(child_offset.bitcast()), depth = node.depth + 1);
+        };
+    };
+};
 
 // :slow but this is only called once per segment in a program we never run
 fn get_virtual_page(full_bytes: []u8, page_offset: i64, expected_segment_index: i64) i64 = {

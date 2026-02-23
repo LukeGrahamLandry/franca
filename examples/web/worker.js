@@ -236,6 +236,7 @@ let weak_imports = [
     "pthread_join",
     "opendir",
     "dlopen",
+    "dlclose", "dlerror"
     "sigaction",
     "pthread_attr_init",
     "strtod", "localtime_r", "time",

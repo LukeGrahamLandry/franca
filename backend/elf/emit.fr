@@ -79,6 +79,11 @@ finalize_symbols :: fn(m: *Qbe.Module) SymbolTableInfo = {
     };
     symbols := symbols.items();
     
+    if m.goal.jit_via_dlopen {
+        symbols&.unordered_retain(fn(it) => it.kind == .Local && it.segment == .Code);
+        fixups.len = 0;
+    };
+    
     // local symbols are kept seperate from imports. 
     // dynsym.sh_info is the index of the first global symbol. 
     // exports are also global (same as imports)
@@ -159,6 +164,7 @@ create_the_segments :: fn(e: *EmitElf) PayloadBase = {
         // without this skip you get `rosetta error: bss_size overflow`
         // yes, even tho this isn't for the bss segment; i don't make the rules; i just work here.
         @if(segment.len() == 0) break();  
+        @if(e.m.goal.jit_via_dlopen && seg != .Code) break();
         
         e.chunks&.push(live_segment_part(e.m, seg)); // :waste :commandsispartofcodenow
     
@@ -252,6 +258,7 @@ create_the_segments :: fn(e: *EmitElf) PayloadBase = {
 // results are in temp()
 fn output_elf(m: *QbeModule) [][]u8 = {
     if m.goal.wrap_entry_for_linux_libc {
+        @debug_assert(!m.goal.jit_via_dlopen);
         start := "start";
         m.emit_linux_start(m.intern(m.goal.entry_point), m.intern(start));
         m.goal.entry_point = start;
@@ -270,11 +277,14 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     if m.goal.type != .Relocatable {
         T := finalize_symbols(m);
         if T.symbols.len > 0 {
+            @if(!m.goal.jit_via_dlopen)
             e.request_interp(base);
             dynamics := e.for_dynamic_loader(base, T);
             e.seal_dynamic(e.program_header(), e.program_header(), base, dynamics);
         };
         
+        // even Dynamic needs this. otherwise on amd it default to assuming you want an executable stack 
+        // and then dlopen failing because there's already a stack and it's not going to make it executable just for you. 
         e.program_header()[] = (
             type = .Stack,
             prot = prot_read_write,
@@ -348,7 +358,7 @@ section_names :: fn(e: *EmitElf, base: PayloadBase) void = {
     };
 };
 
-request_interp :: fn(e: *EmitElf, base: PayloadBase) *Elf.ProgramHeader = {
+request_interp :: fn(e: *EmitElf, base: PayloadBase) void = {
     interp_header := e.program_header();
     loader_path := @match(e.m.goal.arch) {
         fn x86_64() => "/lib64/ld-linux-x86-64.so.2\0";
@@ -370,7 +380,6 @@ request_interp :: fn(e: *EmitElf, base: PayloadBase) *Elf.ProgramHeader = {
     );
     e.payload&.push_all(loader_path);
     e.payload&.zero_pad_to_align(8);
-    interp_header
 };
 
 // This is needed even for static executables: data relocations of local symbols are applied in franca_runtime_init. 
@@ -420,10 +429,12 @@ for_dynamic_loader :: fn(
     dynamics&.push(tag = .SymTab, val = table.symtab);
     dynamics&.push(tag = .SymEnt, val = size_of(Elf.Symbol));
     
+    if !e.m.goal.jit_via_dlopen {
     r_table := e.create_rela_table(T.fixups, base, table.symbol_table_index, 0, u8.ptr_from_int(0));
     dynamics&.push(tag = .RelA, val = r_table.rela);
     dynamics&.push(tag = .RelASz, val = r_table.relasz);
     dynamics&.push(tag = .RelAEnt, val = size_of(Elf.RelA));
+    };
     
     dynamics
 };
@@ -441,7 +452,7 @@ fn emit_dynamic_exports_hash(e: *EmitElf, T: SymbolTableInfo) void = {
     
     prev := 0;
     range(0, e.m.exports.len) { i |
-        idx := e.m.get_symbol_info(e.m.exports[i])[].got_lookup_offset + 1;  // in symbol table
+        idx := e.m.get_symbol_info(e.m.exports[i])[].index_in_module + 1;  // in symbol table
         @debug_assert(idx != 0);
         chain[idx] = prev.trunc();
         prev = idx;
@@ -460,7 +471,7 @@ SymbolTableResults :: @struct {
     first_global: i64;  // counting exports
 };
 
-// This sets symbol.got_lookup_offset to it's index in the table. 
+// This sets symbol.index_in_module to its index in the table. 
 create_symbol_table :: fn(
     e: *EmitElf, 
     symbols: []*SymbolInfo, 
@@ -563,7 +574,7 @@ create_symbol_table :: fn(
             size = symbol.size.zext(),  // TODO: does anyone care about this? maybe debugger disassemble? 
         );
         
-        symbol.got_lookup_offset = symbol_index;
+        symbol.index_in_module = symbol_index;
         symbol_index += 1;
     };
     @debug_assert_eq(cap, e.payload.maybe_uninit.len, "resized");
@@ -608,8 +619,8 @@ create_rela_table :: fn(
     
     reloc := m.goal.type == .Relocatable;
     each fixups { fix |
-        // got_lookup_offset is set by create_symbol_table()
-        sym: u32 = trunc(fix.symbol.got_lookup_offset + 1);
+        // index_in_module is set by create_symbol_table()
+        sym: u32 = trunc(fix.symbol.index_in_module + 1);
         
         // the target offset is relative to 
         // - exe: the virtual base address of the executable
@@ -696,8 +707,8 @@ create_rela_table :: fn(
                     // :StupidEncodingsWinStupidRelocations
                     anon := e.m.intern(@tfmt(".auipc%", off));
                     use_symbol(e.m, anon) { s |
-                        @debug_assert(s.got_lookup_offset != -1);
-                        sym = s.got_lookup_offset.trunc() + 1;
+                        @debug_assert(s.index_in_module != -1);
+                        sym = s.index_in_module.trunc() + 1;
                     };
                     inc = 0;
                 };

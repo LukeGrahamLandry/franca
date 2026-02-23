@@ -144,6 +144,8 @@ QbeModule :: @rec @struct(
     // i use this so little the api is just poke a value into this field. 
     macho_entitlements: Str,
     extra_macos_frameworks: RawList(Str),
+    
+    handles: RawList(Dyn.Handle),
 );
 
 // TODO: clearly this has to go in @/lib somewhere
@@ -222,6 +224,16 @@ QbeTargetEnv :: @struct(
     // this also makes the data section mode=passive. the main thread must do memory.init. 
     // (if you have mode=active, your static variables will be reset when you spawn a new thread). 
     wasm_shared_memory := true,
+    
+    // :SLOW 
+    // this exists only as a way of debuggging (the make_exec logic that wasm needs) on native targets. 
+    // instead of writing machine code directly into memory, 
+    // create an aot dynamic library and immediately (native: dlopen, wasm: jit_instantiate_module) it. 
+    // this works without wx memory, always uses got indirection, handles calling make_exec again after adding new code. 
+    // this only affects the Code segment, it can still contain absolute references to data in the jit address space. 
+    // speed cost is 2x on linux and 100x on macos (!!). 
+    // sadly it's annoying to profile on macos because it also completly cripples samply::mac::proc_maps::DyldInfoManager::check_for_changes to the point that i get bored before it terminates. 0.13.1
+    jit_via_dlopen := false,  // always true on wasm
 );
 
 QbeOutputPurpose :: @enum(i64) (Cached, JitOnly, Exe, Relocatable, Dynamic, CachedEarly);
@@ -269,6 +281,7 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
     if m.goal.arch == .wasm32 {
         m.goal.commands_size_guess *= 8;
         if goal.type == .JitOnly {
+            goal.jit_via_dlopen = true;
             Jit :: import("@/backend/wasm/jit.fr");
             FR_wasm_jit_event :: fn(event: Jit.Event) i64 #weak #libc;
             if goal.wasm_shared_memory {
@@ -277,6 +290,13 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
                 m.target.wasm_jit_event = Jit.impl.run;
             };
         };
+    };
+    if goal.type != .JitOnly {
+        goal.jit_via_dlopen = false;
+    };
+    if goal.jit_via_dlopen {
+        goal.got_indirection_instead_of_patches = true;
+        goal.expecting_wx = false;
     };
     
     segment_size := goal.segment_size;
@@ -440,6 +460,7 @@ if need_segments {
     // :leak
     m.libraries&.push("", general_allocator());
     
+    @if(!goal.jit_via_dlopen)
     if !@is(m.goal.type, .Exe, .Dynamic) {
         m.goal.exe_debug_symbol_table = false;
     };
@@ -459,6 +480,7 @@ if need_segments {
 fn set_target_vtable(m: *QbeModule) void = {
     EmitWasm :: import("@/backend/wasm/emit.fr");
     t := m.target&;
+    goal := m.goal&;
     t.apple = m.goal.os == .macos;
     @match(m.goal.arch) {
         fn aarch64() => import("@/backend/arm64/abi.fr")'fill_target_arm(t);
@@ -495,10 +517,18 @@ fn set_target_vtable(m: *QbeModule) void = {
         @if(@is(m.goal.type, .Cached, .CachedEarly))  => @if(enable_incremental(), Incremental'finish_module, 
             panic("tried to init cached module but that feature was disabled at comptime"));
         @if(m.goal.arch == .wasm32)  => EmitWasm.output_wasm_module;
-        @if(m.goal.type == .JitOnly) => (fn(m: *QbeModule) [][]u8 = empty());
+        @if(goal.type == .JitOnly && !goal.jit_via_dlopen) => (fn(m: *QbeModule) [][]u8 = empty());
         @if(m.goal.os == .macos)     => import("@/backend/macho/emit.fr").output_macho;
         @if(m.goal.os == .linux)     => import("@/backend/elf/emit.fr").output_elf;
         @else => panic("TODO: we don't support this target");
+    };
+    
+    t.make_exec = @if_else {
+        @if(goal.arch == .wasm32 && goal.type == .JitOnly) => import("@/backend/wasm/emit.fr").make_exec;
+        @if(goal.jit_via_dlopen) => make_exec_via_dlopen;
+        @if(goal.expecting_wx) => (fn(_: *Qbe.Module) = ());  // already executable so this is a nop
+        @if(goal.type == .JitOnly) => make_exec_via_mmap;
+        @else => (fn(_: *Qbe.Module) = panic("called make_exec for aot module"));
     };
 } 
 
@@ -527,6 +557,10 @@ fn drop(m: *QbeModule) void = {
     m.write_perfmap_symbols();
     if m.wasm_exec_handles.len != 0 {
         (m.target.wasm_jit_event)(Close = (events = m.wasm_exec_handles.items()));
+    };
+    
+    for m.handles { it |
+        Dyn'dlclose(it);  // :SLOW
     };
 
     @run assert_eq(enum_count(SegmentType), 4);
@@ -1211,7 +1245,10 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
         fn Shim(it) => {
             m := it.f.globals;
             @debug_assert_eq(m.goal.type, .JitOnly);
+            it.f.lnk.export = m.goal.jit_via_dlopen;
             run_qbe_passes(it.f);
+            
+            @if(m.goal.arch != .wasm32 && m.goal.jit_via_dlopen) m.make_exec();  // :SLOW
             
             // The other guy's got slot points to us until it's ready. 
         use_symbol(m, it.f.lnk.id) { shim_s | 
@@ -1268,6 +1305,8 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
             // This is trivial but we want to do it without threads fighting. 
             // TODO: support it being exported, etc. 
             m.add_code_bytes(it.lnk.id, it.code);  
+            // TODO: make this more official + make sure it doesn't break wasm + make sure im not redundantly calling it elsewhere becuase i didn't do it here before
+            @if(m.goal.jit_via_dlopen) m.maybe_add_export(it.lnk.id, true);
         }
         fn JitImport(it) => {
             //@if(TODOWASM) @if(m.goal.arch == .wasm32 && m.goal.type == .JitOnly)
@@ -1339,6 +1378,20 @@ OutputPurpose :: QbeOutputPurpose;
 find_ip_in_module :: fn(m: *QbeModule, addr: rawptr) ?Str = {
     #use("@/lib/crash_report.fr");
     if(!m.initialized, => return(.None));
+    
+    if m.goal.jit_via_dlopen {  // :SLOW
+        result: ?Str = .None;
+        // TODO: what if we panicked in a use_symbol block 
+        for_symbols m { id, s |
+            if s.kind == .DynamicPatched {
+                d := ptr_diff(s.jit_addr, addr);
+                if d.ult(s.size.zext()) {
+                    result = (Some = s.name);
+                }
+            }
+        };
+        return result;
+    };
     
     code := m.segments&.index(.Code);
     code_segment := code.mmapped.ptr.slice(code.len());

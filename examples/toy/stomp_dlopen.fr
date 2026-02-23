@@ -1,0 +1,46 @@
+// ldd (Ubuntu GLIBC 2.41-6ubuntu1.2) 2.41
+// glibc reuses dlopen of the same path if you don't close (even if content changed).
+// macos gives you the new code whether you close or not. 
+// man dlopen says "A second call to dlopen() with the same path will return the same handle", 
+// not so on Tahoe 26.0 (25A354)
+driver :: fn(_: *ImportVTable) void = {
+    franca := get_executable_path(temp());
+    A := "fn important_value() i64 #export = 123;";
+    B := "fn important_value() i64 #export = 456;";
+    code := @slice(A, B);
+    cases := @slice(true, false);
+    for cases { close |
+        results := @ref zeroed(Array(i64, 2));
+        prev := zeroed(@FnPtr() i64);
+        
+        dest := @tfmt("target/stomp_dlopen%.out", int(close));
+        enumerate code { i, code |
+            src := "target/stomp_dlopen_input.fr";
+            write_entire_file_or_crash(src, code[]);
+            args := @slice("examples/default_driver.fr", "build", src, "-o", dest, "-dynamiclib");
+            run_cmd_blocking(franca, args) || panic("failed compile");
+            lib := Dyn'open(dest) || @panic("failed dlopen");
+            important_value := Dyn'get(lib, "important_value")
+                || @panic("failed dlsym");
+            @println("handle=% function=%", lib.lib, important_value);
+            important_value := bit_cast_unchecked(rawptr, @FnPtr() i64, important_value);
+            results[i] = important_value();
+            if close {  // lets you get the new code next iteration
+                Dyn'dlclose(lib).unwrap();
+            } else {
+                // both targets, won't replace the old function with the new code if you don't close. 
+                if i == 1 { 
+                    @assert_eq(results[0], prev());
+                };
+                prev = important_value;
+            }
+        };
+        @println("^^^ (close=%, results=%, new=%) ^^^",
+            close, results.items(), results[1] == 456);
+    };
+};
+
+Dyn :: import("@/lib/dynamic_lib.fr");
+#use("@/lib/sys/fs.fr");
+#use("@/lib/sys/process.fr");
+#use("@/lib/sys/subprocess.fr");

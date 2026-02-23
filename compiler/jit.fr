@@ -57,10 +57,9 @@ fn wait_for_symbol(shared: *FrontendCodegen, id: Qbe.Sym) rawptr = {
     @debug_assert(!shared.worker.threaded);
     c := rawptr.zeroed();
     use_symbol(shared.m, id) { symbol | 
-        @if(TODOWASM)
-        if shared.m.goal.arch == .wasm32 && symbol.kind == .Local && symbol.segment == .Code {
+        if shared.m.goal.jit_via_dlopen && symbol.kind == .Local && symbol.segment == .Code {
             shared.m.make_exec();
-            @debug_assert(symbol.kind == .DynamicPatched);
+            @debug_assert_eq(symbol.kind, .DynamicPatched, "jit_via_dlopen didn't replace % %", symbol.name, symbol.segment);
         };
         c = symbol.jit_addr;  
         @debug_assert(!c.is_null(), "wait_for_symbol % % % %: %", 
@@ -95,6 +94,7 @@ fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) DynCallShim = {
         f.default_init(m);
         f.leaf = false;
         f.lnk.no_inline = true;
+        f.lnk.export = true;
         id = shared.m.intern(@tfmt("dyncall%_%_%", f_ty.arg.as_index(), f_ty.ret.as_index(), int(f_ty.unary)));
         f.lnk.id = id;
         entry.task = (Func = f);
@@ -210,6 +210,7 @@ fn emit_jit_shim(c: *SelfHosted, fid: FuncId) void = {
         f.leaf = false;
         f.lnk.no_inline = true;
         f.lnk.id = id;
+        f.lnk.export = true;
         f.start = newblk(); name_block(f.start, "start"); f.start.id = 0;
         do_the_call := newblk(); name_block(do_the_call, "do_the_call"); do_the_call.id = 1;
         not_ready := newblk(); name_block(not_ready, "not_ready"); not_ready.id = 2;

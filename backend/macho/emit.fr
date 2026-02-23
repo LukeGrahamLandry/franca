@@ -50,6 +50,7 @@ fn output_macho(m: *QbeModule) [][]u8 = {
     patch_pending_symbols(m);
     
     alignment := if(m.goal.type == .Relocatable, => 8, => macos_page_size);
+    // TODO: don't waste space when jit_via_dlopen
     for_enum SegmentType { s | 
         //m.align_to(s, 8);  // forgeting this manifested as getting fucked on __LINKEDIT (when reading not writing because you're writting into a new allocation)
         // but do we need to do this? it makes it look more like clang does. 
@@ -95,6 +96,10 @@ fn output_macho(m: *QbeModule) [][]u8 = {
         chunks&.push(live_segment_part(m, .ConstantData));  // TODO: waste. dead zone ConstantData[got_cursor..MAX_GOT_SIZE]
         chunks&.push(live_segment_part(m, .MutableData));
         
+        if m.goal.jit_via_dlopen {
+            chunks[chunks.len - 1].len = 0;
+            chunks[chunks.len - 2].len = 0;
+        };
         segments&.push(prot = 5, name = "__TEXT");
         segments&.push(prot = 3, name = "__DATA_CONST");
         segments&.push(prot = 3, name = "__DATA");
@@ -102,6 +107,12 @@ fn output_macho(m: *QbeModule) [][]u8 = {
             s.virtual_size = m.segments&[@as(SegmentType) i].mmapped.len;
             s.file_size = chunks[i + 1].len;
         };
+        
+        if m.goal.jit_via_dlopen {
+            segments[segments.len - 1].virtual_size = 0;
+            segments[segments.len - 2].virtual_size = 0;
+        };
+        
         s    := m.segments&.index(.ZeroInitData);
         size := ptr_diff(s.mmapped.ptr, s.next);
         segments&.push(prot = 3, name = "__BSS", virtual_size = size);
@@ -240,6 +251,7 @@ fn output_macho(m: *QbeModule) [][]u8 = {
             _ := e.m.find_library(name) 
                 || m.new_library(name);
         };
+        @if(!e.m.goal.jit_via_dlopen)
         for e.m.libraries.items().rest(1) { name | 
             name := guess_path(name);
             macho_load_dylib(e.commands&, e.command_count&, .LinkLibrary, name);
@@ -392,6 +404,7 @@ EmitMacho :: @struct(
     starts_offset := 0,
 );
 
+// imports, got fixups, dylib exports
 fn emit_exe_fixups(e: *EmitMacho, chained: *List(u8)) void #inline = {
     m := e.m;
     chain_header := chained.reserve_type(ChainedFixupsHeader);
@@ -399,12 +412,14 @@ fn emit_exe_fixups(e: *EmitMacho, chained: *List(u8)) void #inline = {
     fixups, symbols := collect_aot_fixups(m);
     symbols := symbols.items();
     @debug_assert_ge(fixups.len, e.m.got&.len() / 8, "at least each __got entry needs a fixup");
+    if e.m.goal.jit_via_dlopen {| fixups.len = 0; };
     Sort'default(FixP, fixups, fn(a, b) => ptr_diff(a.fix.patch_at.addr, b.fix.patch_at.addr) >= 0);
     // at this point, `fixups` is in the order of the patch targets in virtual memory which is the order we need to emit the fixup chains. 
     import_count := 0;
+    @if(!e.m.goal.jit_via_dlopen)  // don't use the loader for imports. its being loaded in same address space so do it myself
     for symbols { s |
         if s.kind != .Local {
-            s.got_lookup_offset = import_count;
+            s.index_in_module = import_count;
             import_count += 1;
         };
     };
@@ -416,6 +431,7 @@ fn emit_exe_fixups(e: *EmitMacho, chained: *List(u8)) void #inline = {
     symbols_offset := chained.len; // TODO: is this right?
     imports_bytes := chained.items().slice(chained.len - imports_len_b, chained.len);
     imports_bytes: []ChainedImport = (ptr = ptr_cast_unchecked(u8, ChainedImport, imports_bytes.ptr), len = import_count);
+    @if(!e.m.goal.jit_via_dlopen)
     for symbols { s |
         if s.kind != .Local {
             n := chained.len - symbols_offset;
@@ -426,7 +442,7 @@ fn emit_exe_fixups(e: *EmitMacho, chained: *List(u8)) void #inline = {
                     @panic("import % from unknown library", s.name)
                 };
             };
-            imports_bytes[s.got_lookup_offset] = construct(
+            imports_bytes[s.index_in_module] = construct(
                 lib_ordinal = s.library.zext(), 
                 weak = int(!s.strong), 
                 name_offset = n,
@@ -496,7 +512,7 @@ fn emit_exe_fixups(e: *EmitMacho, chained: *List(u8)) void #inline = {
         trie: T = init();
         for e.m.exports { export_id | 
             s := e.m.get_symbol_info(export_id);
-            @debug_assert(s.kind == .Local, "can only export local symbols");
+            @debug_assert(s.kind == .Local, "can only export local symbols %", s.name);
             trie&.put(@tfmt("_%", s.name), s.offset);
         };
         trie&.write(chained);
@@ -599,8 +615,8 @@ fn emplace_fixup(e: *EmitMacho, fix: *FixP, next_encoded: i64, import_count: i64
     set(r.bind&, .is_bind, int(is_bind));
         
     if is_bind {
-        // got_lookup_offset has been converted to an ordinal already. 
-        o := fix.symbol.got_lookup_offset;
+        // index_in_module has been converted to an ordinal already. 
+        o := fix.symbol.index_in_module;
         @debug_assert(o >= 0 && o < import_count, "bad ordinal %", o);
         // TODO: test that gets here with non-zero
         @assert_ge(addend, 0, "TODO: does macho chained fixup allow negative addend to import?");

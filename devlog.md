@@ -1,4 +1,22 @@
 
+
+## (Feb 22)
+
+jit_via_dlopen: decouple the dlopen like make_exec from wasm. 
+- the macho/elf emit needs to not ask for imports/fixups
+- arm emit needs to not try to access data by relative address
+- alias needs special handling because i don't cope with exporting it from mach-o
+- fix ExportsTrie. i was clearing node.edges with a default field. 
+- Task.Asm needs to be exported so its on the list to get out of the dylib
+- now it works, can self compile in a mere 3.5 minutes. lol! 57% of that is calling dlclose at the end. 
+  - it outputs identical bytes to building the normal way. 
+  - that's for dlopening 2924 times. with -unsafe it's only 2386 times in 1.3 minutes (with no close). 
+  - the display_t in assert_cond gets a lit_fn. fixing that brings -safe down to about the same. 
+- linux dlopen paths need to be unique or they're reused and can't find new symbols. 
+  which is in fact what the man page (including apple's) says should happen so apple is just smoking crack i guess?
+- woah! on linux it's much much faster. 2.6 SECONDS. wtf is apple's dlopen doing. 
+- avoid special case in call_symbol: isel converts all calls to indirect (needed anyway to allocate a scratch register on amd)
+
 ## (Feb 21)
 
 - fr: export_root_scope tried to export less

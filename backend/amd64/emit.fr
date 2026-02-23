@@ -508,11 +508,20 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                 done := false;
                 use_symbol(e.m, c.sym) { symbol | 
                     done = symbol.kind != .Local && (e.m.goal.got_indirection_instead_of_patches || symbol.kind == .DynamicPatched);
+                    done = done || e.m.goal.jit_via_dlopen;
                     if done {
+                        break :: local_return;
                         if ensure_got_slot(e.m, symbol, symbol.jit_addr) { it |
                             push_fixup(e.m, symbol, it);
                         };
-                        
+                        if e.m.goal.jit_via_dlopen { // see immediate_fixup_got in arm
+                            got := e.m.segment_address(.ConstantData, symbol.got_lookup_offset);  // :GotAtConstantDataBase 
+                            encode_imm64(e.a&, i.to.int_reg_d(), got.int_from_rawptr().bitcast());
+                            r := e.f.new_mem(i.to, QbeNull, 0, 0);  // wasteful allocation :(
+                            emitins(make_ins(.load, .Kl, i.to, r, QbeNull), e);
+                            break();
+                        };
+                    
                         // TODO: very copy paste 
                         size_of_load_encoding :: 7;
                         current_offset := e.start_of_function + e.a.len();

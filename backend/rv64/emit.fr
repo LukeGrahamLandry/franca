@@ -240,6 +240,7 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
                 fn RCon() => {
                     c := f.get_constant(a0);
                     // TODO: use jal instead of wasting an extra instruction
+                    //       (don't forget to fix jit_via_dlopen too)
                     // RA is stomped by the call instruction anyway so it's fine to use it as scratch. 
                     e.emit(.copy, .Kl, TMP(RvReg.RA), a0, Qbe.Null);
                     e.inst(jalr(.RA, 0, .RA));
@@ -464,12 +465,13 @@ fn decode_mem(e: *EmitRv, a: Qbe.Ref, other: Qbe.Ref) Ty(RvReg, i12) = {
 
 // TODO: factor together with arm/loadaddr_bits>
 fn load_symbol(e: *EmitRv, c: *Qbe.Con, dest_reg: RvReg) void = {
-    import := e.f.could_be_import(c);
+    import := e.f.could_be_import(c) || e.m.goal.jit_via_dlopen;
     inc := @if(import, 0, c.bits());
     use_symbol(e.m, c.sym) { symbol |
         patch_addr := e.m.segment_address(.Code, e.m.current_offset(.Code));
         patch: Fixup = (patch_at = (addr = patch_addr), type = (InReg = (r = dest_reg.raw().zext(), increment = inc)));
-        @match(symbol.kind) {
+        kind := @if(e.m.goal.jit_via_dlopen, SymbolKind.Pending, symbol.kind);
+        @match(kind) {
             fn DynamicPatched() => immediate_fixup_got(e, patch, symbol);
             fn Pending() => immediate_fixup_got(e, patch, symbol);
             fn Local() => {
@@ -505,7 +507,7 @@ fn load_symbol(e: *EmitRv, c: *Qbe.Con, dest_reg: RvReg) void = {
     // TODO: decide if this is better or if i should just allow multiple GOT slots with different addends. 
     //       if i keep this way, use add immediate when it's small. 
     //       (same question applies to arm but im not sure if mach-o can do negative addends)
-    if import {
+    if import && c.bits() != 0 {
         @debug_assert(TMP(dest_reg) != rv_scratch_int);
         e.emit(.copy, .Kl, rv_scratch_int, e.f.getcon(c.bits()), Qbe.Null);
         e.emit(.add, .Kl, TMP(dest_reg), TMP(dest_reg), rv_scratch_int);
@@ -515,6 +517,17 @@ fn load_symbol(e: *EmitRv, c: *Qbe.Con, dest_reg: RvReg) void = {
 // this doesn't need to do the same indirection with pending_immediate_fixup_got as arm
 // because i never use direct calls (because i'm lazy and don't care as much about performace on rv)
 immediate_fixup_got :: fn(e: *EmitRv, patch: Fixup, symbol: *SymbolInfo) void = {
+    if e.m.goal.jit_via_dlopen {  // see immediate_fixup_got for arm
+        r := patch.type.InReg.r;
+        if ensure_got_slot(e.m, symbol, symbol.jit_addr) { it |
+            push_fixup(e.m, symbol, it);
+        };
+        got := e.m.segment_address(.ConstantData, symbol.got_lookup_offset);  // :GotAtConstantDataBase 
+        e.load_number(got.int_from_rawptr(), TMP(r));
+        e.emit(.load, .Kl, TMP(r), TMP(r), Qbe.Null);
+        return();
+    };
+
     e.inst(ebreak);
     e.inst(ebreak);
     
