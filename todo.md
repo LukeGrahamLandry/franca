@@ -1,4 +1,5 @@
 
+- i need to stop using warp. figure out what else i need in my terminal to not feel clunky. 
 - replace examples/web/usefuckinghttpssoicandrawonthefuckingscreen.py with something based on https://github.com/Mbed-TLS/mbedtls/blob/development/programs/ssl/ssl_server.c
 - do i want to hook_backtrace automatically? it's kinda dumb to have to remember to do it everywhere. 
   ie. tests/exe/wasm.fr doesn't rn. but it's annoying because it deletes information when running as a driver, 

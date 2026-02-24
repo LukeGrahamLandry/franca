@@ -16,7 +16,7 @@ Compared to chibicc, my changes:
 - C11: `_Generic`, `_Noreturn`, `_Alignof`, `_Static_assert`, anonymous structs/unions, `_Atomic`
 - C23: `__VA_OPT__`, typeof
 - GNU: statement expressions, `a :? b`
-- attributes: packed, aligned
+- attributes: packed, aligned, weak, alias
 
 ### NOT IMPLEMENTED
 
@@ -29,6 +29,15 @@ Compared to chibicc, my changes:
 - the builtin standard headers are incomplete
   > but you can use your system headers instead with a bit of cajoling, 
   > see ../../tests/external/(raylib, curl, bubblewrap).fr for examples.
+- glibc symbol versioning when outputting an exe directly (so only on linux). 
+  that information isn't in the headers and in most toolchains it's handled by the linker, not the c frontend. 
+  > if you need it, you can compile with -c and use someone else's linker. 
+  > im sure there are others but the situation i've found where this matters is 
+  > calling realpath with null as the second argument. 
+- a complete assembler for asm statements (assemble.fr only handles a few instructions)
+- comprehensive errors/warnings/sanitizers. my main usecase is compiling libraries that are known 
+  to be correct, not writing new c code. currently errors are mostly when there's not enough 
+  information to compile or to catch a few mistakes i wasted time on while writing tests.
 
 ## Changes from Chibicc
 
@@ -43,6 +52,7 @@ Compared to chibicc, my changes:
 - allow a union declaration with a single expression assigning the whole union 
   instead of a treating it as a single element initializer list initializing only the first member. 
 - allow reading const variables in constant expressions
+- adjust expansion order to allow `#define A() defined(B); #if A();`
 
 ### Features
 
@@ -53,6 +63,10 @@ Compared to chibicc, my changes:
 - show chain of macro declarations in error report
 - declare symbol aliases with the `asm` keyword
 - `__builtin`: clz, ctz, popcount, bswap, rotateleft, rotateright, expect, constant_p, `__clear_cache`
+- builtin headers for a semi-arbitrary subset of libc 
+  so simple programs can be cross compiled trivially. 
+- track which frameworks must be linked based on which header 
+  defines each symbol used when including apple's system headers. 
 
 ### Refactors 
 

@@ -51,11 +51,18 @@ You can still print out the ir as human readable text between passes and modify 
   Franca achieves an equivalent by putting them at the end of the stack with fixed alignment.
 - Removed support for custom section names.
 
+#### fixes
+
+- opt/load: treat vaarg/start as writing to memory (avoids miscompliation if that stack regeion was already written to)
+- abi: allow structs without fields
+
 #### fixed upstream
 
 - arm abi: respect the platform register (it gets zeroed when you context switch on macos) [issue](https://lists.sr.ht/~mpu/qbe/%3CCAHT_M7NPc_vufQ7hj+JwdB2cVrZKOmKmRk2z8ETLJ4T9=25YRw@mail.gmail.com%3E)
 - arm abi: large FHA (ie. struct of 4 doubles) [issue](https://lists.sr.ht/~mpu/qbe/%3CCAHT_M7Pp-6_vSjOd-WkRt4ACJWLrKq=YpgUrnzW0Vy=T-7AFYg@mail.gmail.com%3E)
-
+- rv isel: invalid float immediate [issue](https://lists.sr.ht/~mpu/qbe/%3CCAHT_M7MdJVV+9E8Y48quD3tN4E=9HpAE08fJr_AbWSQbGBQLMg@mail.gmail.com%3E)
+- rv: segfault when spilling jnz arg [issue](https://lists.sr.ht/~mpu/qbe/patches/64515)
+ 
 ### Optimisations
 
 - added peephole optimisations for arm isel
@@ -65,7 +72,6 @@ You can still print out the ir as human readable text between passes and modify 
   - fuse mul followed by add into 3 arg madd.
   - fuse ldr+ldr/str+str pairs into ldp/stp
 - Inline small (single block) functions.
-- Convert simple phi instructions into conditional select 
 - elide some redundant memory operations introduced when the abi passes aggregates in registers. (see opt/slots.fr)
 - reuse constants that are produced multiple times in the same basic block (but not across calls) 
 - simplified matching of amd64 addressing modes: removed 1600 lines of ocaml dsl compiler

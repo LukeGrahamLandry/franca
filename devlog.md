@@ -2,6 +2,9 @@
 ## (Feb 24)
 
 - web: test runner don't spam checking wait condition
+- wasm abi scalar_struct asserting on zero sized type in ffi_c.fr. 
+  added a .ssa test and i also don't match clang on native targets. 
+  strip those out at the very beginning since all targets agree.
 
 ## (Feb 23)
 

@@ -12,9 +12,18 @@
 //
 // TODO: wrong! see tests/todo/apple_arm_subword_abi.ssa
 
+// also removes argc/parc/retc of zero sized types. 
 #use("@/backend/lib.fr");
 fn extsb_parargret(f: *Qbe.Fn) void = {
     any_changed := false;
+    with f.globals.types_mutex& {
+    
+    ret_void_struct := f.ret_cls == .Ke && f.is_void_struct(f.retty);
+    if ret_void_struct { 
+        f.retty = Qbe.Null; 
+        f.ret_cls = .Kx;
+    };
+    
     for_blocks f { b |
         changed := false; 
         f.reset_scratch();
@@ -27,11 +36,27 @@ fn extsb_parargret(f: *Qbe.Fn) void = {
             b.jmp.arg = r;
             b.jmp.type = .retw;
         };
+        if ret_void_struct && j == .retc {
+            b.jmp = (type = .ret0, arg = Qbe.Null);
+        };
         for_insts_rev b { i | 
+            if i[].op() == .parc && f.is_void_struct(i[].arg&[0]) {
+                i[].set_op(.copy);
+                i.arg&[0] = Qbe.ConZero;
+            };
+        
             if is_parbh(i[].op()) {
                 // nobody gets here but it's more symetrical until i fix apple_arm_subword_abi.ssa
                 i[].set_op(.par);
             };
+            
+            if i[].op() == .call && f.is_void_struct(i[].arg&[1]) {
+                f.move_end_of_block_to_scratch(b, i[], changed&);
+                f.emit(.copy, i[].cls(), i.to, Qbe.ConZero, Qbe.Null);
+                i.to = Qbe.Null;
+                i.arg&[1] = Qbe.Null;
+            };
+            
             if changed {
                 f.emit(i[]);
             };
@@ -48,8 +73,14 @@ fn extsb_parargret(f: *Qbe.Fn) void = {
                         i.to = f.newtmp("abi", .Kl);
                         prev.arg&[0] = i.to;
                     } else {
-                        if changed {
-                            f.emit(i[]);
+                        void_struct := i[].op() == .argc && f.is_void_struct(i[].arg&[0]);
+                        if void_struct {
+                            f.move_end_of_block_to_scratch(b, i[], changed&);
+                            // no emit
+                        } else {
+                            if changed {
+                                f.emit(i[]);
+                            }
                         };
                     }
                 };
@@ -68,9 +99,16 @@ fn extsb_parargret(f: *Qbe.Fn) void = {
             any_changed = true;
         };
     };
+    };
+
+    // TODO: making this #inline costs 250ms of phicopyref
+    is_void_struct :: fn(f: *Qbe.Fn, maybe_type: Qbe.Ref) bool = {
+        rtype(maybe_type) == .RType 
+            && f.globals.get_type(maybe_type.val())[].header.size == 0
+    };
 
     @if(any_changed)
-    when_debug_printfn(f, .Abi, "\n## After Apple pre-ABI:\n");
+    when_debug_printfn(f, .Abi, "\n## After pre-ABI:\n");
 }
 
 fn split(f: *Qbe.Fn, b: *Qbe.Blk) *Qbe.Blk = {
