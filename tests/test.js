@@ -50,16 +50,15 @@ let out_innerText = "";
 let thread_pool = [];
 let running_threads = [];
 let worker = null;
-let running = false;
 const wasm_module = await WebAssembly.compile(readFileSync("target/demo.wasm"));
 
-const handle = (msg) => {
+const handle = (resolve) => (msg) => {
     msg = msg.data;
     switch (msg.tag) {
         case "show": { out_innerText += msg.text; break;  }
         case "log": break;
         case "err": { err_innerText += msg.text; break; }
-        case "done": { running = false; break; }
+        case "done": { resolve(); break; }
         case "ready": break;
         case "spawn": {
             const w = get_worker(); 
@@ -70,7 +69,7 @@ const handle = (msg) => {
                     thread_pool.push(w);
                     return;
                 }
-                handle(msg);
+                handle(() => {})(msg);
             };
             running_threads.push(w);
             w.postMessage({ tag: "start", args: [], child: msg.child, memory: msg.memory });
@@ -92,17 +91,12 @@ function get_worker() {
     return thread_pool.pop();
 }
 
-const start_worker = async (input_path, compiler) => {
-    assert(worker === null && !running, "had worker");
-    for (const w of thread_pool) {  // children that already returned from wasm_init_thread are not stuck
-        w.postMessage({ tag: "reset" });
-    }
-    running = true;
-    const args = ["demo.wasm", "-file", input_path, "-lang", compiler.name, "-target", "wasm-jit"];
+const start_worker = (args, resolve) => {
+    assert(worker === null, "had worker");
     worker = get_worker();
-    worker.onmessage = handle;
+    worker.onmessage = handle(resolve);
     const memory = new WebAssembly.Memory({ initial: 300, maximum: 1 << (32 - 16), shared: true, });
-    worker.postMessage({ tag: "start", args: args, memory }, []);
+    worker.postMessage({ tag: "start", args: ["demo.wasm", ...args], memory }, []);
 };
 
 async function run_tests() {
@@ -111,14 +105,11 @@ async function run_tests() {
     for (const name of tests) {
         // i'm forcing native and wasm to run sequentially (instead of Promise.all()) 
         // because i want to get more meaningful time comparison. 
-        // TODO: this way of semi-busy waiting is also dumb but im lazy. 
-        
         async function measure(run) {
             out_innerText = "";
             err_innerText = "";
             const start = performance.now();
-            const timed_out = await run();
-            if (timed_out) err_innerText += "FAIL";
+            await run();
             return { time: Math.round(performance.now() - start), out: out_innerText, err: err_innerText };
         }
         const n = await measure(async () => {
@@ -128,16 +119,14 @@ async function run_tests() {
             });
             native.stdout.on('data', (data) => out_innerText += data);
             native.stderr.on('data', (data) => err_innerText += data);
-            let status = null;
-            native.on('close', (it) => status = it);
-            return await wait(() => status !== null, 25, 20000) || status !== 0;
+            let status = await (new Promise((resolve) => native.on('close', resolve)));
+            if (status !== 0) err_innerText += `status=${status}`;
         });
         const w = await measure(async () => {
-            start_worker(name, { name: "franca" });         // correct programs join their threads
-            return await wait(() => !running, 25, 60000) || running_threads.length !== 0;
+            await new Promise((resolve) => start_worker(["-file", name, "-lang", "franca"], resolve));
+            if (running_threads.length !== 0) err_innerText += "correct programs join their threads";
         });
         reset_worker();
-        
         const ok = w.err.length == 0 && w.err == n.err && w.out == n.out;
         console.log(`name=${name}; ok=${ok}; native=${n.time}ms; wasm=${w.time}ms; ratio=${(w.time/n.time).toFixed(1)}x; output_size=${w.out.length};`);
         if (!ok) failed += 1;
@@ -147,36 +136,22 @@ async function run_tests() {
 }
 
 function reset_worker() {
-    if (running) {
-        worker.terminate();  // race :(
-        for (const w of thread_pool) { w.terminate(); }
-        thread_pool = []
-        worker = null;
-        running = false;
-    } else { // sent 'done' so not stuck
-        thread_pool.push(worker);
-        worker = null;
-    }
+    thread_pool.push(worker);
+    worker = null;
     // any children that were still running might be stuck
     for (const w of running_threads) { w.terminate(); }
     running_threads = [];
+    for (const w of thread_pool) { w.postMessage({ tag: "reset" }); }
 }
 
-const wait = (f, step, timeout) => {
-    return new Promise((resolve) => {
-        const t = Date.now();
-        const loop = () => {
-            if (f()) {
-                resolve(false);
-            } else if (Date.now() > t + timeout) {
-                resolve(true);
-            } else {
-                setTimeout(loop, step);
-            }
-        };
-        loop();
-    });
-};
-
-await run_tests();
+if (process.argv.includes("-file")) {
+    // cwd doesn't matter because demo.wasm doesn't use the real file system
+    await new Promise((resolve) => start_worker(process.argv.slice(2), resolve));
+    process.stdout.write(out_innerText);
+    process.stderr.write(err_innerText);
+    if (err_innerText.length !== 0) process.exit(1);
+} else {
+    // running multiple in a row reusing the compiled demo.wasm module is much faster than execing node many times
+    await run_tests();
+}
 process.exit(0);

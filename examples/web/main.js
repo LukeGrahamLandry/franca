@@ -7,7 +7,7 @@ if (typeof Worker === "undefined")
 let thread_pool = []
 let running_threads = []
 let doing_test = false;
-const handle = (_msg) => {
+const handle = (resolve) => (_msg) => {
     const msg = _msg.data;
     switch (msg.tag) {
         case "show": {
@@ -36,6 +36,7 @@ const handle = (_msg) => {
             for (let w of thread_pool) {
                 w.postMessage({ tag: "reset" });
             }
+            resolve();
             break;
         }
         case "download": {
@@ -59,7 +60,7 @@ const handle = (_msg) => {
                     thread_pool.push(w);
                     return;
                 }
-                handle(msg);
+                handle(() => {})(msg);
             };
             running_threads.push(w);
             w.postMessage({ tag: "start", args: [], child: msg.child, memory: msg.memory });
@@ -94,7 +95,7 @@ const start_message = "Run";
 let worker = null;
 let running = false;
 let removers = [];
-const toggle_worker = async () => {
+const toggle_worker = (resolve) => {
     if (!running && worker !== null) {  // means it sent "done" so not stuck
         thread_pool.push(worker);
         worker = null;
@@ -142,7 +143,7 @@ const toggle_worker = async () => {
             ...(dbg.length == 0 ? [] : (dbg.includes("-") ? dbg.split(" ") : ["-d", dbg])),
         ];
         worker = get_worker();
-        worker.onmessage = handle;
+        worker.onmessage = handle(resolve);
         let need_canvas = input.includes("graphics/lib.fr");  // :HackyGraphicsDetection
         
         // need to do this extra dance because you can't un-transferControlToOffscreen, 
@@ -196,7 +197,7 @@ async function get_file(path) {
         w.onmessage = async (msg) => {
             if (msg.data.tag != "download") {
                 console.log(msg.data);
-                if (msg.data.tag === "err" || msg.data.tag === "show") handle(msg); 
+                if (msg.data.tag === "err" || msg.data.tag === "show") handle(() => {})(msg); 
                 flush();
             } else {
                 w.postMessage({ tag: "reset" });
@@ -258,7 +259,7 @@ const show_compilers = () => {
 document.getElementById("in").oninput = () => {
     document.getElementById("stale").hidden = false;
 };
-document.getElementById("btn").onclick = toggle_worker;
+document.getElementById("btn").onclick = () => toggle_worker(() => {});
 
 document.getElementById("compiler").onchange = function () {
     document.getElementById("stale").hidden = false;
@@ -331,7 +332,7 @@ if (path !== null) {
 }
 
 enable_graphics(true);  // TODO: only do this if the program being compiled needs it
-toggle_worker();
+toggle_worker(() => {});
 
 document.getElementById("all").onclick = async () => {
     let start = performance.now();
@@ -352,10 +353,15 @@ document.getElementById("all").onclick = async () => {
         let examples = it.examples;
         results += "=== " + it.name + " ===\n";
         for (let it of examples) {
+            if (it == "examples/chess/perft.fr" || it == "compiler/main.fr") {  // slow
+                all += 1;
+                errors += `skip ${it}\n`;
+                continue;
+            }
+            
             results += it;
             await load_example(it);
-            toggle_worker();
-            await wait(() => !running, 25, 10000);
+            await new Promise(toggle_worker);
             let ok = err.innerText.length == 0;
             results += " " + (ok ? "ok" : "FAIL") + "\n";
             if (!ok) errors += "\n\n" + it + "\n";
@@ -386,23 +392,6 @@ function flush() {
     }
 };
 window.setInterval(flush, 200);
-
-const wait = (f, step, timeout) => {
-    return new Promise((resolve) => {
-        var t = Date.now();
-        const loop = () => {
-            if (f()) {
-                resolve();
-            } else if (Date.now() > t + timeout) {
-                document.getElementById("err").innerText += "timeout";
-                resolve();
-            } else {
-                window.setTimeout(loop, step);
-            }
-        };
-        loop();
-    });
-};
 
 // who fucking knows man, i don't care. https://stackoverflow.com/questions/6637341/use-tab-to-indent-in-textarea
 for (const it of document.getElementsByTagName("textarea")) {

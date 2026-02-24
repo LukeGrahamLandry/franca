@@ -1,4 +1,8 @@
 
+## (Feb 24)
+
+- web: test runner don't spam checking wait condition
+
 ## (Feb 23)
 
 - wasm: stop handing out function table indices early. 
@@ -10,6 +14,7 @@
     - jit mandelbrot_ui: (firefox: 545 -> 475. chrome: 375 -> 340)
     - cross compiler/main to macos-arm: (firefox: 2620 -> 2105. chrome: 2345 -> 1940)
     - my import_wasm seems about the same. 
+- node runner for tests. doesn't test everything but would at least catch a missing comma in worker.js. 
 
 ## (Feb 22)
 
