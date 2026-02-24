@@ -46,10 +46,7 @@ IfKind :: @enum(u8) (Then, Elif, Else);
 fn is_hash(tok: *Token) bool #inline =
     tok.at_bol && equal(tok, "#");
 
-// https://github.com/rui314/chibicc/issues/112
-
-// Some preprocessor directives such as #include allow extraneous
-// tokens before newline. This function skips such tokens.
+// Some preprocessor directives such as #include allow extraneous tokens before newline. 
 fn skip_line(c: *Ctx, tok: *Token) *Token = {
     if(tok.at_bol, => return(tok));
     @warn_tok(c, tok, "extra tokens after directive will be discarded");
@@ -1197,7 +1194,7 @@ builtins :: @struct {
     
     __has_include :: fn(c: *Ctx, tok: *Token) *Token = {
         parent := tok.file.name;
-        tok = tok.next;
+        c.eat(tok&, "__has_include");
         tok = c.skip(tok, "(");
         filename, is_dquote := c.read_include_filename_no_skip_line(tok&, tok);
         tok = c.skip(tok, ")");
@@ -1207,7 +1204,7 @@ builtins :: @struct {
             .set_next(tok)
     };
     __has_feature :: fn(c: *Ctx, tok: *Token) *Token = {
-        tok = tok.next;
+        c.eat(tok&, "__has_feature");
         tok = c.skip(tok, "(");
         tok = tok.next;
         tok = c.skip(tok, ")");
@@ -1221,7 +1218,7 @@ builtins :: @struct {
     // i want it so you can #include a .s file by wrapping this in an asm statment. 
     __include_as_string_literal :: fn(c: *Ctx, tok: *Token) *Token = {
         parent := tok.file.name;
-        tok = tok.next;
+        c.eat(tok&, "__include_as_string_literal");
         tok = c.skip(tok, "(");
         filename, is_dquote := c.read_include_filename_no_skip_line(tok&, tok);
         path := c.search_include_paths(filename, is_dquote, parent, @ref "")
@@ -1245,13 +1242,27 @@ builtins :: @struct {
     }
     
     __has_builtin :: fn(c: *Ctx, tok: *Token) *Token = {
-        tok = tok.next;
+        c.eat(tok&, "__has_builtin");
         tok = c.skip(tok, "(");
-        name := tok.str();  // TODO: probably supposed to macro expand this?
-        tok = tok.next;
+        // dowhile(=> c.expand_macro(tok&, tok));   // TODO: very sad. clang doesn't expand macros here but gcc does. 
+        name := tok.str();
+        if c.is_inside_if_directive_cond && name == "0" && !tok.origin.is_null() {  
+            // HACK: for using `#define __glibc_has_builtin(name) __has_builtin(name)` in #if. 
+            //       arguments are expanded before the macro gets called which replaces any remaining identifiers with 0. 
+            //       :HackRewindExpansion AAAA this is garbage TODO TODO
+            t := tok.origin;
+            t = c.skip(t, "TK_IDENT");  // macro that expands to __has_builtin
+            t = c.skip(t, "(");
+            dowhile(=> c.expand_macro(t&, t));    // clang and gcc agree here
+            name = t.str();
+            t = c.skip(t, "TK_IDENT");  // argument
+            tok = tok.next;
+        } else {
+            tok = c.skip(tok, "TK_IDENT");
+        };
         tok = c.skip(tok, ")");
-        cond := false;  // TODO: i do implement a bunch of them. see compile.fr/parse_builtin
-        c.new_num_token(int(cond), tok)
+        kind, _ := parse_builtin_name(name);
+        c.new_num_token(int(kind != ._), tok)
             .set_next(tok)
     }
 };

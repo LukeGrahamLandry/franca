@@ -3346,50 +3346,6 @@ post_dec :: fn(c, rest, tok, node) #infix(.@"--", .PostFix) = {
     set_rest_and_gen(c, rest, tok, node)
 };
 
-va_start :: fn(c, rest, tok) #prefix(.__builtin_va_start) = {
-    start := tok;
-    c.eat(tok&, "__builtin_va_start");
-    tok = c.skip(tok, "(");
-    ap := c.parse_expr(tok&, tok, .Assign);
-    ap := c.new_addr(ap, tok);
-    if consume(tok&, tok, ",") {
-        // for compatibility, allow a second argument (last named parameter)
-        c.eat(tok&, "TK_IDENT");
-    }
-    rest[] = c.skip(tok, ")");
-    r := c.gen_expr(ap);
-    c.emit(.vastart, .Kw, QbeNull, r, QbeNull);
-    c.ir_node(c.ty_int, QbeConZero, QbeNull, start)
-};
-va_arg :: fn(c, rest, tok) #prefix(.__builtin_va_arg) = {
-    start := tok;
-    c.eat(tok&, "__builtin_va_arg");
-    tok = c.skip(tok, "(");
-    ap := c.parse_expr(tok&, tok, .Assign);
-    if c.m.goal.arch != .x86_64 {  // TODO: why not always? if it's already a struct this should do nothing. 
-        ap = c.new_addr(ap, tok);
-    };
-    tok = c.skip(tok, ",");
-    type := c.typename(tok&, tok);
-    if @is(type.kind, .TY_STRUCT, .TY_UNION) {
-        @warn_tok(c, tok.origin, "TODO: non-scalar variadic parameter");
-    };
-    rest[] = c.skip(tok, ")");
-    ap := c.gen_expr(ap);
-    r := c.emit(.vaarg, type.cls(), ap, QbeNull);
-    c.ir_node(type, r, QbeNull, start)
-};
-compatible :: fn(c, rest, tok) #prefix(.__builtin_types_compatible_p) = {
-    start := tok;
-    c.eat(tok&, "__builtin_types_compatible_p");
-    tok = c.skip(tok, "(");
-    t1 := c.typename(tok&, tok);
-    tok = c.skip(tok, ",");
-    t2 := c.typename(tok&, tok);
-    rest[] = c.skip(tok, ")");
-    c.new_num(is_compatible(t1, t2).int(), start)
-};
-
 return :: fn(c, rest, tok) #prefix(.return, .ND_STMT) = {
     current_fn := c.current_fn || @error_tok(c, tok, "stray return");
     ty := current_fn.ty.return_ty;
@@ -3758,27 +3714,41 @@ _Static_assert :: fn(c, rest, tok) #prefix(._Static_assert, .ND_STMT) = {
 
 };
 
-fn parse_builtin(c: *Ctx, name: Str, rest: **Token) ?*Node = {
+BuiltinName :: @enum(u32) (
+    clz, ctz, popcount, bswap, rotateright, rotateleft,
+    cas, expect, constant_p, alloca, __clear_cache,
+    va_start, va_arg, types_compatible_p, 
+    _,
+);
+
+fn parse_builtin_name(name: Str) Ty(BuiltinName, Qbe.Cls) = {
     prefix := "__builtin_";
-    @if(!name.starts_with(prefix)) return(.None);
+    @if(!name.starts_with(prefix)) return(._, .Ke);
     name := name.slice(prefix.len, name.len);
-    tok := rest[];
-    
     k: ?Qbe.Cls = .None;
     if name.ends_with("ll") {| k = (Some = .Kl); name.len -= 2; };  // long long
     if name.ends_with("l")  {| k = (Some = .Kl); name.len -= 1; };  // long
     if name.ends_with("64") {| k = (Some = .Kl); name.len -= 2; };
     if name.ends_with("32") {| k = (Some = .Kw); name.len -= 2; };
     k := k || (.Kw);  // no suffix defaults to int
+    kind := contextual_keyword(name, BuiltinName);
+    (kind, k)
+}
+
+fn parse_builtin(c: *Ctx, name: Str, rest: **Token) ?*Node = {
+    kind, k := parse_builtin_name(name);
+    @if(kind == ._) return(.None);
+    tok := rest[];
+    start := tok;
     
-    o: Qbe.O = @switch(name) {
-        @case("clz") => .clz;
-        @case("ctz") => .ctz;
-        @case("popcount") => .ones;
-        @case("bswap") => .byteswap;
-        @case("rotateright") => .rotr;
-        @case("rotateleft") => .rotl;
-        @case("cas") => {
+    o: Qbe.O = @match(kind) {
+        fn clz() => .clz;
+        fn ctz() => .ctz;
+        fn popcount() => .ones;
+        fn bswap() => .byteswap;
+        fn rotateright() => .rotr;
+        fn rotateleft() => .rotl;
+        fn cas() => {
             args := c.builtin_args(rest, 3);
             @if(args&[0].ty.kind != .TY_PTR) @error_tok(c, args&[0].tok, "__builtin_cas requires pointer");
             ty := args&[0].ty.base;  // TODO: cast old/new to this type
@@ -3788,12 +3758,12 @@ fn parse_builtin(c: *Ctx, name: Str, rest: **Token) ?*Node = {
             r := c.emit(.cas1, cls(ty), old, new);
             return(Some = c.ir_node(ty, r, QbeNull, tok));
         };
-        @case("expect") => {
+        fn expect() => {
             // a static hint that a0==a1, which i ignore. 
             args := c.builtin_args(rest, 2);
             return(Some = args&[0]);
         };
-        @case("constant_p") => {
+        fn constant_p() => {
             b, nblk := (c.b, c.f.nblk);
             c.b = c.new_block();  // :SLOW should just reuse one extra block
             args := c.builtin_args(rest, 1);
@@ -3802,18 +3772,55 @@ fn parse_builtin(c: *Ctx, name: Str, rest: **Token) ?*Node = {
             const := c.getcon(int(const));
             return(Some = c.ir_node(c.ty_uint, const, QbeNull, tok));
         };
-        @case("alloca") => {
+        fn alloca() => {
             args := c.builtin_args(rest, 1);
             r := c.emit(.alloc16, .Kl, args&[0].r, QbeNull);
             ty := c.pointer_to(c.ty_void);
             return(Some = c.ir_node(ty, r, r, tok));
         };
-        @case("__clear_cache") => {
+        fn __clear_cache() => {
             args := c.builtin_args(rest, 2);
             c.sync_icache(args&[0].r, args&[1].r);
             return(Some = c.new_node(.ND_NULL_EXPR, tok));
         };
-        @default => return(.None);
+        fn va_start() => {
+            tok = c.skip(tok, "(");
+            ap := c.parse_expr(tok&, tok, .Assign);
+            ap := c.new_addr(ap, tok);
+            if consume(tok&, tok, ",") {
+                // for compatibility, allow a second argument (last named parameter)
+                c.eat(tok&, "TK_IDENT");
+            }
+            rest[] = c.skip(tok, ")");
+            r := c.gen_expr(ap);
+            c.emit(.vastart, .Kw, QbeNull, r, QbeNull);
+            return(Some = c.ir_node(c.ty_int, QbeConZero, QbeNull, start));
+        };
+        fn va_arg() => {
+            tok = c.skip(tok, "(");
+            ap := c.parse_expr(tok&, tok, .Assign);
+            if c.m.goal.arch != .x86_64 {  // TODO: why not always? if it's already a struct this should do nothing. 
+                ap = c.new_addr(ap, tok);
+            };
+            tok = c.skip(tok, ",");
+            type := c.typename(tok&, tok);
+            if @is(type.kind, .TY_STRUCT, .TY_UNION) {
+                @warn_tok(c, tok.origin, "TODO: non-scalar variadic parameter");
+            };
+            rest[] = c.skip(tok, ")");
+            ap := c.gen_expr(ap);
+            r := c.emit(.vaarg, type.cls(), ap, QbeNull);
+            return(Some = c.ir_node(type, r, QbeNull, start))
+        };
+        fn types_compatible_p() => {
+            tok = c.skip(tok, "(");
+            t1 := c.typename(tok&, tok);
+            tok = c.skip(tok, ",");
+            t2 := c.typename(tok&, tok);
+            rest[] = c.skip(tok, ")");
+            return(Some = c.new_num(is_compatible(t1, t2).int(), start));
+        };
+        fn _() => unreachable();
     };
     
     unary := !@is(o, .rotr, .rotl);

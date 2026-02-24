@@ -5,6 +5,10 @@
 - wasm abi scalar_struct asserting on zero sized type in ffi_c.fr. 
   added a .ssa test and i also don't match clang on native targets. 
   strip those out at the very beginning since all targets agree.
+- c
+  - no special tokens for builtins
+  - finished has_builtin. trying to match gcc/clang but they're inconsistant :(
+
 
 ## (Feb 23)
 

@@ -476,5 +476,26 @@ B() A  // don't stomp this new line
 #error "thats not my department"
 #endif
 
+#define S(a, b) _Static_assert((a) == (b), #b)
+S(1, __has_builtin(__builtin_expect));
+S(0, __has_builtin(__builtin_thisisntarealbuiltin));
+#define have_builtin(it) __has_builtin(it)
+S(0, __has_builtin(it));
+S(1, have_builtin(__builtin_expect));
+#define expected __builtin_expect
+S(1, have_builtin(expected));
+// S(0, __has_builtin(expected)); // clang: argument is NOT expanded!
+// S(1, __has_builtin(expected)); // gcc: argument IS not expanded!
+#if !__has_builtin(__builtin_expect)  
+#error "expect A"
+#endif
+// :HackRewindExpansion
+#if !have_builtin(__builtin_expect) 
+#error "expect B"
+#endif
+#if !have_builtin(expected)
+#error "expect C"
+#endif
+
 #if 1
 #endif  // no trailing new line at the end of this file!
