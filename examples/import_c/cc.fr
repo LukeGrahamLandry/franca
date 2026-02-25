@@ -14,6 +14,7 @@ Args :: @struct {
     prelude := "";
     // this lets you do tremendously hacky things
     inject: ?C.Compile.TransformCall = .None;
+    do_warnings := true;
 };
 
 Crash :: import("@/lib/crash_report.fr");
@@ -156,6 +157,10 @@ main :: fn() void = {
             cfg.prelude = s;
             continue();
         };
+        if arg == "-Wno-everything" {
+            cfg.do_warnings = false;
+            continue();
+        };
         
         @panic("unknown argument '%'", arg);
     };
@@ -180,10 +185,10 @@ fn compile(args: Args) Result(void, Str) = {
     // it's nicer to just generate a string and pass it in, so it can just be treated as an opaque blob in FrcModule.dep 
     // when deciding if a cache file can be reused. 
     src := create_single_source(args&);
-    compile(src, args.target, args.debug, args.output_path, args.no_builtin_headers, args.jit_args, args.inject)
+    compile(src, args.target, args.debug, args.output_path, args.no_builtin_headers, args.jit_args, args.inject, args.do_warnings)
 }
 
-fn compile(src: Str, target: QbeTargetEnv, debug: Str, output_path: Str, no_builtin_headers: bool, jit_args: []CStr, inject: ?C.Compile.TransformCall) Result(void, Str) = {
+fn compile(src: Str, target: QbeTargetEnv, debug: Str, output_path: Str, no_builtin_headers: bool, jit_args: []CStr, inject: ?C.Compile.TransformCall, do_warnings: bool) Result(void, Str) = {
     m := @uninitialized QbeModule;
     
     backend'init_module(m&, target);
@@ -194,6 +199,7 @@ fn compile(src: Str, target: QbeTargetEnv, debug: Str, output_path: Str, no_buil
     
     c := C'Compile.Ctx.zeroed();
     import_c'init_c(c&, m&, ctx);
+    c.do_warnings = do_warnings;
     if inject { inject |
         c.transform = inject;
     };

@@ -1,4 +1,20 @@
 
+
+## (Feb 25)
+
+c: https://github.com/c-testsuite/c-testsuite (high overlap with tcc's tests but neither is a subset of the other)
+- 220: wchar.h
+- 145: division by zero in constexpr
+- 216: multiple fields in union init if they're all on the same anon struct
+- 216: compound_literal in global variable
+- 174: usual arithmetic conversions. i do it for + but not +=. 
+- 170: incomplete enum
+see i was thinking oh why am i being so obsessive about rewriting build system stuff,
+i should just accept being a part of a larger thing and make my thing work as a drop in replacement. 
+but im immediatly reminded that bash programs dont work because they rely on random shit like timeout that macos doesn't have (plus wtf is the compiler they're imagining where 5 minutes is a sane timeout).  
+so no fuck that we use a real language that works on all the platforms i care about. 
+wtf somehow mine runs in 440ms instead of 3650ms (strace -f output size: mine=02632k, theirs=30003k). 
+
 ## (Feb 24)
 
 - web: test runner don't spam checking wait condition
@@ -8,7 +24,6 @@
 - c
   - no special tokens for builtins
   - finished has_builtin. trying to match gcc/clang but they're inconsistant :(
-
 
 ## (Feb 23)
 

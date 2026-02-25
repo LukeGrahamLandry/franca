@@ -1,7 +1,7 @@
 // Adapted from chibicc. MIT License. Copyright (c) 2019 Rui Ueyama
 
 // TODO: https://github.com/rui314/chibicc/issues/
-//      #153 #141 #138 #110 #107 #99 #86 #84 more...
+//      #141 #138 #110 #107 #99 #86 #84 more...
 //      - https://github.com/fuhsnn/slimcc/issues?q=is%3Aissue+is%3Aclosed+label%3Aupstream-chibicc&page=2
 // _Alignas needs more backend support
 // TODO: don't be copying types all the time? 
@@ -170,6 +170,7 @@ Ctx :: @rec @struct {
     strings: RawHashMap([]u8, *Obj);
     yielded_builtin_clear_cache: bool;
     have_seen_c_code: bool;  // TODO: remove once top level asm with relocationscan go through CodegenShared
+    static_initializer_depth: i32;
     
     // I'm probably going to regret this. 
     error_buf: List(u8);
@@ -461,8 +462,8 @@ fn create_stack_slot(c: *Ctx, var: *Obj) void = {
     // :ZeroSizeTypes chibicc has empty structs with sizeof(0) but thats an extension
     // what if you tried to diy static_assert with that, now we broke your code?
     if var.ty.size < 0 {
-        // TODO: this is a dumb error message since it happens when its just an undeclared struct type. 
-        @error_tok(c, var.tok, "tried to create stack slot for a variable with negative size (%)", var.ty.size);
+        // happens for undeclared / forward declared struct/enum tag
+        @error_tok(c, var.tok, "variable has incomplete type");
     };
     if var.stack_slot == QbeNull {
         var.stack_slot = c.f.newtmp(var.name, .Kl);
@@ -932,7 +933,12 @@ fn enum_specifier(c: *Ctx, rest: **Token, tok: *Token) *CType #once = {
 
     if tag { tag |
         if !equal(tok, "{") {
-            ty := c.find_tag(tag) || @error_tok(c, tag, "unknown enum type");
+            ty := c.find_tag(tag) || {
+                // you can use an incomplete enum in some contexts. 
+                // @warn_tok(c, tag, "unknown enum type");
+                ty.size = -1;
+                ty
+            }; 
             if(ty.kind != .TY_ENUM, => @error_tok(c, tag, "not an enum tag"));
             rest[] = tok;
             return(ty);
@@ -1126,7 +1132,7 @@ fn string_initializer(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) v
         @case(1) => slow(u8);
         @case(2) => slow(u16);
         @case(4) => slow(u32);
-        @default => unreachable();
+        @default => @error_tok(c, tok, "TODO: string initializer element size = %", init.ty.base.size);
     };
     
     rest[] = c.skip(tok, "TK_STR")
@@ -1412,7 +1418,22 @@ fn union_initializer(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) vo
         mem := c.struct_designator(tok&, tok, init.ty);
         init.mem = mem;
         c.designation(tok&, tok, init[mem.idx.intcast()]);
-        _ := consume(tok&, tok, ",");
+        
+        if consume(tok&, tok, ",") && equal(tok, ".") {
+            if !init.mem.name.is_null() {
+                @error_tok(c, tok, "multiple union designators only valid if initializing an inner anon struct");
+            };
+            // this is similar to struct_initializer1 but after going down a level so you can't mix fields from different union members. 
+            init := init[mem.idx.intcast()];
+            dowhile {
+                if equal(tok, ".") {
+                    mem := c.struct_designator(tok&, tok, init.ty);
+                    c.designation(tok&, tok, init[mem.idx.intcast()]);
+                };
+                consume(tok&, tok, ",")
+            };
+        };
+        
         rest[] = c.skip(tok, "}");
         return();
     };
@@ -1669,6 +1690,20 @@ fn write_gvar_data(c: *Ctx, cur: *List(Dat2.Reloc), init: *Initializer, ty: *CTy
         return();
     };
     if ty.kind == .TY_STRUCT {
+        if !init.expr.is_null() {  
+            // initializer2 called parse_expr and found a compound literal by value. relies on static_initializer_depth. 
+            // the child already went through gvar_initializer and got flattened, just copy the bytes into the parent. 
+            @if(init.expr.kind != .ND_VAR) @error_tok(c, init.expr.tok, "ICE: expected struct init expr to be var for static compund literal");
+            v := init.expr.var;
+            @if(v.init_data.len != init.ty.size.intcast()) @error_tok(c, init.expr.tok, "size mismatch for static compund literal in initializer");
+            buf.subslice(off, v.init_data.len).copy_from(v.init_data);
+            for v.rel { it |
+                it.off += off.trunc();
+                cur.push(it);
+            };
+            return();
+        };
+    
         if true {
             break :: local_return;
             for_linked ty.members { mem | 
@@ -1743,7 +1778,9 @@ fn size(init: *Initializer) i64 =
 // objects to a flat byte array. It is a compile error if an
 // initializer list contains a non-constant expression.
 fn gvar_initializer(c: *Ctx, rest: **Token, tok: *Token, var: *Obj) void = {
+    c.static_initializer_depth += 1;
     init := c.initializer(rest, tok, var.ty&);
+    c.static_initializer_depth -= 1;
     c.check_constness(var, init);
     if init.all_zeros {
         return();
@@ -2951,7 +2988,10 @@ parse_bracketed :: fn(c, rest, tok) #prefix(.@"(") = {
 
         is_compound_literal := equal(tok, "{");
         if is_compound_literal {
-            if c.scope.next.is_null() {  // global
+            // compound literal inside static local also gets here 
+            // which will have scope != null but still need to set 
+            // var.(rel, init_buf) for the parent write_gvar_data to read.
+            if c.scope.next.is_null() || c.static_initializer_depth != 0 {  // global
                 var := c.new_anon_gvar(ty, tok);
                 c.gvar_initializer(rest, tok, var);
                 c.yield(var);
@@ -3297,7 +3337,8 @@ funcall :: fn(c, rest, tok, f) #infix(.@"(", .PostFix) = {
             // HACK: my official position on passing structs as varargs is "don't do that" 
             //       but just letting it slide fixes tcc/test/abitest.c which is nice to be able to run. 
             //       TODO: maybe use TransformCall for this instead? i think i just need argc->arg. 
-            if arg.ty.size > 16 && @is(arg.ty.kind, .TY_STRUCT) {
+            // TODO: but doesn't this mean i get the wrong abi for single field scalar structs?
+            if @is(arg.ty.kind, .TY_STRUCT, .TY_UNION) {
                 arg = c.new_addr(arg, arg.tok);
             };
         };
@@ -4114,18 +4155,14 @@ fn eval_double(c: *Ctx, node: *Node) f64 = {
     con.bits().bitcast()
 }
 
-// Convert op= operators to expressions containing an assignment.
-//
-// In general, `A op= C` is converted to ``tmp = &A, *tmp = *tmp op B`.
-// However, if a given expression is of form `A.x op= C`, the input is
-// converted to `tmp = &A, (*tmp).x = (*tmp).x op C` to handle assignments
-// to bitfields.
+// `A op= C` -> `tmp = &A, *tmp = *tmp op B` but bitfields and atomics need extra attention. 
 fn to_assign(c: *Ctx, kind: NodeKind, lhs: *Node, rhs: *Node, tok: *Token) *Node = {
     @if(c.speculate) return(lhs);
     c.check_assignable(lhs, tok);
     is_bitfield := lhs.kind == .ND_MEMBER && lhs.member.is_bitfield;
     addr  := c.gen_addr(lhs);
-    delta := c.gen_cast(c.gen_expr(rhs), rhs.ty, lhs.ty, tok);
+    ty := c.get_common_type(lhs.ty, rhs.ty);
+    delta := c.gen_cast(c.gen_expr(rhs), rhs.ty, ty, tok);
     
     // n1570#6.5.16.2p3 "If E1 has an atomic type, compound assignment is a read-modify-write operation with memory_order_seq_cst memory order semantics"
     // TODO: extra stuff for float exceptions
@@ -4138,7 +4175,7 @@ fn to_assign(c: *Ctx, kind: NodeKind, lhs: *Node, rhs: *Node, tok: *Token) *Node
 
         k := lhs.ty.cls();
         old := c.gen_load(addr, lhs.ty);
-        new := c.gen_binary(kind, old, delta, lhs.ty, lhs.ty, tok);
+        new := c.gen_binary_with_cast(kind, old, delta, lhs.ty, ty, tok);
         c.emit(.cas0, .Kw, Qbe.Null, addr, Qbe.Null);
         prev := c.emit(.cas1, k, old, new);
         cond := c.emit(k.cmp_base(), .Kw, old, prev);
@@ -4155,7 +4192,7 @@ fn to_assign(c: *Ctx, kind: NodeKind, lhs: *Node, rhs: *Node, tok: *Token) *Node
     } else {
         c.gen_load(addr, lhs.ty)
     };
-    final := c.gen_binary(kind, start, delta, lhs.ty, lhs.ty, tok);
+    final := c.gen_binary_with_cast(kind, start, delta, lhs.ty, ty, tok);
     if is_bitfield {
         // this generates silly code that loads the other fields with the same storage again even though we already did that, but whatever
         c.gen_store_bitfield(addr, final, lhs.member);
@@ -4164,6 +4201,17 @@ fn to_assign(c: *Ctx, kind: NodeKind, lhs: *Node, rhs: *Node, tok: *Token) *Node
     };
     
     c.ir_node(lhs.ty, final, QbeNull, tok)
+}
+
+fn gen_binary_with_cast(c: *Ctx, kind: NodeKind, lhs_r: Qbe.Ref, rhs_r: Qbe.Ref, lhs_ty: *CType, ctrl_ty: *CType, tok: *Token) Qbe.Ref = {
+    if !identical(ctrl_ty, lhs_ty) {
+        lhs_r = c.gen_cast(lhs_r, lhs_ty, ctrl_ty, tok);
+    };
+    final := c.gen_binary(kind, lhs_r, rhs_r, ctrl_ty, ctrl_ty, tok);
+    if !identical(ctrl_ty, lhs_ty) {
+        final = c.gen_cast(final, ctrl_ty, lhs_ty, tok);
+    };
+    final
 }
 
 fn check_atomic_type(c: *Ctx, ty: *CType, tok: *Token, msg: Str) void = {
@@ -4445,6 +4493,12 @@ fn emit(c: *Ctx, o: Qbe.O, k: Qbe.Cls, a0: Qbe.Ref, a1: Qbe.Ref) Qbe.Ref = {
         f :: Qbe.backend.try_fold_op;
         if f(o, k, lhs_c, rhs_c) { result |
             return(c.getcon(result));
+        };
+        if @is(o, .div, .udiv, .rem, .urem) {
+            // eh... sketchy
+            // backend doesn't fold invalid division because that changes runtime behaviour 
+            // (faults on amd) but i want to allow `0 && 0/0` in constexpr. 
+            return Qbe.ConZero;
         };
     };
     

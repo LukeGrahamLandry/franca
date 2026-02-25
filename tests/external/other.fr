@@ -1,0 +1,38 @@
+main :: fn() void = {
+    ctestsuite();
+};
+
+ctestsuite :: fn() void = {
+    root := group(
+        url = "https://github.com/c-testsuite/c-testsuite/archive/5c7275656d751de0e68b2d340a95b5681858ed07.tar.gz", 
+        legacy = "010008bf4b5671f947ae7e8d693a1c959a4a4d795fa7227c0abb1f95de45f7e7",
+    );
+    path := @tfmt("%/tests/single-exec", root);
+    files := collect_directory_ordered(path, temp(), temp()).unwrap();
+    passed, skipped := (0, 0);
+    for files { it |
+        continue :: local_return;
+        @if(!it.name.ends_with(".c")) continue();
+        for skip { skip |
+            @if(it.name.ends_with(skip)) { skipped += 1; continue(); };
+        };
+        src := @tfmt("%/%", path, it.name);
+        ok, o, e := exec_and_catch("./target/cc.out", @slice("-r", src), temp());
+        expected := read_entire_file_or_crash(temp(), @tfmt("%/%.expected", path, it.name));
+        @assert(ok && o.items() == expected, "failed %", src);
+        passed += 1;
+    };
+    @println("c-testsuite: passed %; skipped %;", passed, skipped);
+    @assert(passed == 213 && skipped == 7);
+    skip :: @const_slice(
+        "00204.c",  // tcc/73_arm64 see easy_long_double_abi in tests/external/tcc.fr
+        "00219.c",  // TODO: tcc/94_generic
+        "00218.c",  // TODO: tcc/92_enum_bitfield
+        "00210.c",  // TODO: tcc/82_attribs_position
+        "00209.c",  // TODO: tcc/81_types
+        "00206.c",  // TODO: tcc/77_push_pop_macro
+        "00152.c",  // TODO: #line line
+    );
+}
+
+#use("@/examples/fetch.fr");

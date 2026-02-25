@@ -3,18 +3,28 @@ on: [push]
 
 jobs:
   test:
-    name: run_tests macos-arm64
-    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        system: [macos-14, macos-15-intel, ubuntu-latest, ubuntu-24.04-arm]
+    name: run_tests ${{ matrix.system }}
+    runs-on: ${{ matrix.system }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: target/franca/fetch
+          key: cache-deps-${{ hashFiles('tests/deps.fr') }}
       - run: ./boot/strap.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: built_on_macos_arm64
+          name: built_on_${{ matrix.system }}
           path: target/release
-  deploy:
-    needs: test3
+  repro:
+    name: repro and deploy
+    runs-on: ubuntu-latest
+    needs: test
     if: github.ref == 'refs/heads/main'
     permissions:
       pages: write
@@ -22,57 +32,23 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: wnebsnite
-        id: deployment
-        uses: actions/deploy-pages@v4
-  test2:
-    name: run_tests macos-amd64
-    runs-on: macos-15-intel
-    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - run: ./boot/strap.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/cache@v4
         with:
-          name: built_on_macos_amd64
-          path: target/release
-  test3:
-    name: run_tests linux-amd64
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - run: ./boot/strap.sh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: built_on_linux_amd64
-          path: target/release
-      - run: target/franca.out examples/web/build.fr
-      - run: node target/web/test.js
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: target/web
-  test4:
-    name: run_tests linux-arm64
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - run: ./boot/strap.sh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: built_on_linux_arm64
-          path: target/release
-  repro:
-    name: repro
-    runs-on: ubuntu-latest
-    needs: [test, test2, test3, test4]
-    steps:
+          path: target/franca/fetch
+          key: cache-deps-${{ hashFiles('tests/deps.fr') }}
       - uses: actions/download-artifact@v4
         with: 
           path: .
-      - run: diff built_on_macos_arm64 built_on_macos_amd64
-      - run: diff built_on_macos_arm64 built_on_linux_amd64
-      - run: diff built_on_macos_arm64 built_on_linux_arm64
+      - run: diff built_on_macos-14 built_on_macos-15-intel
+      - run: diff built_on_macos-14 built_on_ubuntu-latest
+      - run: diff built_on_macos-14 built_on_ubuntu-24.04-arm
+      - run: ./boot/strap.sh -no-test
+      - run: ./target/f.out examples/web/build.fr
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/web
+      - name: wnebsnite
+        id: deployment
+        uses: actions/deploy-pages@v4

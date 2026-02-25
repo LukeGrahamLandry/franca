@@ -42,6 +42,9 @@ int main() {
     c.b.a.x + c.b.a.y;
   }));
   
+  // compound literal in local static relies on static_initializer_depth
+  ASSERT(456, ({ typedef struct { int a; } S; static S s = ((S) {456}); s.a; }));  
+  
   printf("OK\n");
   return 0;
 }

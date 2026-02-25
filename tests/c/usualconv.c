@@ -47,6 +47,9 @@ int main() {
     sprintf(result, "%#04x %#04x %#04x %d %d", c, d, e, x, xx);
     strcmp(result, "0x1234 0x1234 0x1234 -6 -6");
   }));
+  
+  ASSERT(1116355953, ({ float a = 12.34; a += (double) 56.78; *(unsigned*)&a; }));
+  ASSERT(1116355952, ({ float a = 12.34; a += (float ) 56.78; *(unsigned*)&a; }));
 
   printf("OK\n");
   return 0;

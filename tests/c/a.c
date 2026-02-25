@@ -126,3 +126,6 @@ int bar(char* a) { return 1; }
 #define macro1() defined(macro2)
 #if macro1()
 #endif
+
+_Static_assert(!(0 && 0/0));
+typedef void (*forward_fn)(enum never_declared);
