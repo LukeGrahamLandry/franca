@@ -7,6 +7,9 @@ it also runs doom (i don't have a keyboard driver yet so just the intro render)
 franca examples/os/build.fr -vzf -append "spawn doom;" -fetch-doom -smp 2 -graphics
 ```
 
+For debugging you can also run the userspace part without the kernel 
+(run examples/os/host/user.fr for arm64-linux or examples/web/build.fr for browser). 
+
 ## implemented
 
 - interrupt handling

@@ -1,0 +1,197 @@
+// this allows testing the userspace code on native targets without using the kernel or drivers. 
+// futex,mmap,munmap,mprotect,clone are inherited from the host, 
+// but filesystem and libc use os/user/* (just like host/web.fr). 
+// TODO: non-arm-linux host, sleep, signals, graphics, -append startup commands.
+// TODO: when you hit enter in the shell the line is printed an extra time. 
+
+#include_std("examples/os/user/init.fr");
+
+// TODO: it shouldn't take 20 lines of code just to use entry() instead of main(). 
+driver :: fn(vtable: *ImportVTable) void = {
+    start := timestamp();
+    m := @ref @uninitialized Qbe.Module;
+    init_default_module(m, (
+        os = .linux, 
+        arch = .aarch64, 
+        type = .Exe,
+        exe_debug_symbol_table = true,
+    ));
+    opts := vtable.default_build_options();
+    opts.retain_function_names = true;
+    src := @tfmt("""#include_std("lib/core.fr"); #include_std("%"); """, @source_file_name());
+    c := new_with_src(vtable, src, "entry_file", opts);
+    c := vtable.with(c);
+    fid := c.get_unique_named("entry").expect("entry fn");
+    bytes := emit_qbe_included_dyn(m, c&, @slice(fid), .WrapMain); 
+    #use("@/lib/sys/fs.fr");
+    bytes := bytes.concat(temp());
+    write_entire_file_or_crash("target/os.out", bytes);
+    drop(m);
+    c'vtable'destroy_compiler(c.data);
+    #use("@/lib/sys/subprocess.fr");
+    @eprintln("compiled in %ms", timestamp() - start);
+    if query_current_arch() == .aarch64 && query_current_os() == .linux {
+        exec("target/os.out", empty());  // better than run_cmd_blocking because debuggers can follow this way
+        unreachable();
+    } else {
+        @eprintln("built target/os.out (only supports running on arm-linux host rn)");
+    };
+}
+
+entry :: fn() void = {
+    @run {
+        perform_syscall := get_function_ast(Syscall.perform_syscall, false, false, false, false);
+        real_perform_syscall := get_function_ast(real_perform_syscall, false, false, false, false);
+        real_perform_syscall.body = perform_syscall.body;
+        perform_syscall.body = (Redirect = user_handle_syscall);
+    };
+
+    // set the vtable at runtime not comptime so it's not in the list of relocations. 
+    real_libc.write = Syscall'write;  // allow debug_write2 before redo_relocations_static_linux
+
+    // if host links libc need to save the real imported functions before stomping them. 
+    ;{
+        iter :: FuncId.scope_of(do_relocations_static_linux).iter;
+        iter(true) { unpacked, _, sym, dest, it |
+            name := unpacked.strings.rest(sym.name.zext()).peek_cstr();
+            T :: @type real_libc[];
+            inline_for T.get_fields() { $f | 
+                if name == (@run f.name.str()) {
+                    T.get_field_ptr(real_libc, f)[] = bit_cast_unchecked(rawptr, @run f.ty, dest[]);
+                };
+            };
+        };
+    };
+    
+    // pretending to pass on information from the boot loader. 
+    // this is where it looks for -append startup commands. 
+    dt := zeroed(DT.Header);
+    dt.magic = DT.MAGIC;
+    dt.last_comp_version = 16;
+    dt := (dt, DT.FDT.BEGIN_NODE, @as(u32) 0, DT.FDT.BEGIN_NODE, @as(u32) 0, DT.FDT.END_NODE, DT.FDT.END_NODE, DT.FDT.END);
+    dt._0.totalsize = size_of(@type dt).byte_swap();
+    dt._0.off_dt_struct = size_of(@type dt._0).trunc();
+    dt._0.size_dt_struct = dt._0.totalsize - dt._0.off_dt_struct;
+    dt._0.off_mem_rsvmap = dt._0.totalsize;
+    DT.Header.byte_swap_fields(dt._0&);
+    
+    // keep in sync with kernel/start.fr/user_exec()
+    device_tree_bytes: [](@type dt) = (ptr = dt&, len = 1);
+    cli := temp().alloc_zeroed(CStr, 3);
+    cli[0].ptr = device_tree_bytes.interpret_as_bytes().as_ptr();
+    cli[1] = @fmt_cstr("page_size=%", page_size());
+    tls(.cli_arguments)[] = cli;
+    
+    // can't be libc_allocator because redo_relocations_static_linux stomps malloc/free with ones that use general_allocator. 
+    A :: import("@/lib/alloc/fixed_block.fr").BlockAlloc;
+    general_allocator: A = init(page_allocator);
+    tls(.general_allocator)[] = general_allocator&.borrow();
+    
+    allow_real_syscalls[] = false;
+    redo_relocations_static_linux(true);
+    main2();
+}
+
+// required so syscalls aren't blocked too early. not thread safe! only turn it off once in entry(). 
+allow_real_syscalls :: @static(bool) true;  
+
+real_libc :: @static(@struct {
+    read: @FnPtr(fd: Fd, buf: *u8, size: i64) i64Result;
+    write: @FnPtr(fd: Fd, buf: *u8, size: i64) i64Result;
+    mmap: @FnPtr(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) i64;
+    munmap: @FnPtr(addr: rawptr, len: i64) voidResult;
+});
+
+// body can't just be = (); because then it's not marked BodyIsSpecial. 
+real_perform_syscall :: AsmFunction(fn(args: *Array(i64, 6), n: i64) Ty(i64, u8) = (), 
+    empty(), fn(out: *List(u8)) => (), fn(out: *List(u8)) => (), empty());
+
+// TODO: have to route user jitted code through this as well. 
+user_handle_syscall :: fn(args: *Array(i64, 6), n: i64) Ty(i64, u8) = {
+    // TODO: unpack these more explicitly so i can run on more hosts
+    if n.shift_right_logical(28) == 0 && allow_real_syscalls[] {
+        return real_perform_syscall(args, n);
+    };
+    @debug_assert(!allow_real_syscalls[], "my os syscall too early");
+
+    // futex, mmap, munmap, mprotect, exit_thread, exit
+    if n == 98 || n == 222 || n == 215 || n == 226 || n == 93 || n == 94 {
+        // don't need to remap flags
+        @assert(query_current_arch() == .aarch64 && query_current_os() == .linux, "TODO: support non-arm/non-linux");
+        return real_perform_syscall(args, n);
+    };  
+    
+    result := -1;
+    @switch(n) {
+        @case(0xFFFF0008) => {  // virtq_create
+            q, p, l, n := (UQueue.ptr_from_int(args[0]), u8.ptr_from_int(args[1]), args[2], args[3]);
+            label := p.slice(l);
+            if label == "stdio.console" && n == 0 {
+                // if n == 1; sys_debug_write_poll is fine 
+                q.system_handle = rawptr_from_int(0x12345);
+                q.poll = user_io_poll_in;
+                result = 0;
+            };
+        };
+        @case(0xFFFF0003) => { // sig_action
+            result = 0;  // TODO
+        };
+        @case(0xFFFF0002) => @panic("TODO: sleep");
+        @case(0xFFFF0005) => {  // spawn_thread
+            ctx := MContext.ptr_from_int(args[0]);
+            t := ThreadConfig.ptr_from_int(args[1]);
+            thread := Thread.ptr_from_int(ctx.gpr&[0]);
+            with_syscalls {
+                raw_create_thread(thread);
+                0
+            };
+            return(thread.tid.intcast(), 0);
+        };
+        @case(0xFFFF0009) => {
+            debug_write2(u8.ptr_from_int(args[0]).slice(args[1]));
+            result = args[1];
+        };
+        @default => {
+            callee := get_libc_syscall_callee(n)
+                || @panic("invalid syscall %\n", fmt_hex(n));
+            callee := bit_cast_unchecked(rawptr, @FnPtr(i64, i64, i64, i64, i64, i64) i64, callee); 
+            result = callee(args[0], args[1], args[2], args[3], args[4], args[5]);
+        };
+    };
+    (result, 0)
+}
+
+user_io_poll_in :: fn(q: *UQueue, who: i64) void = {
+    fs := Vfs.fs;
+    // if polling after work.push, do nothing, wait for an interrupt.
+    @if(who == 0) return();  
+    // else, polling before done.pop
+    work := fs.stdin.pipe.work&;
+    
+    {
+        if work.claimed.kiki == work.committed.kiki {
+            work.claimed.kiki += 1;
+        };
+        
+        data: u8 = 0;
+        dowhile {
+            n := real_libc'read(STD_IN, data&, 1);
+            n.value == 0
+        };
+        
+        entry := work[work.committed.kiki]&;
+        i := u32.atomic_inc(entry.n.bytes_written&).zext();
+        if i < entry.bufs[0].len {
+            entry.bufs[0][i] = data;
+        };  // else, silently drop the bytes :(
+    };
+
+    entry := work[work.committed.kiki];
+    work.committed.kiki += 1;
+    @assert(work.claimed.kiki == work.committed.kiki);
+    fs.stdin.pipe.done&.push(entry);
+}
+
+debug_write2 :: fn(msg: Str) void = {
+    real_libc'write(STD_OUT, msg.ptr, msg.len);
+};

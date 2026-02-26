@@ -14,6 +14,7 @@ Thread :: @struct {
     stack_reserved_size: i64;
     stack: AlignedStack;  // free-ed on join
     first_temporary_allocator: Arena.Allocator;  // free-ed on join
+    finally: @FnPtr() void;
     
     // used when running on my os with my libc. avoids an extra allocation for pthread_t
     // TODO: use it for green.fr as well
@@ -100,9 +101,11 @@ fn raw_create_thread(t: *Thread) void = {
     // https://github.com/apple/darwin-libpthread/blob/main/src/types_internal.h#L348 
     fence();
     if prefer_pthread() {
+        t.finally = (fn() = ());
         t.opaque = use_pthread(stack, callee, userdata);
         @debug_assert(!t.opaque.opaque.is_null(), "failed to spawn thread");  // TODO: error handling
     } else {
+        t.finally = (fn() = Syscall'exit_thread(0));
         t.tid = LinuxLibc'sys_clone(stack, callee, userdata, t.tid_futex&);
     };
     fence();
@@ -116,11 +119,8 @@ franca_runtime_init_thread :: fn(franca_userdata: rawptr) void = {
     fence();
     set_legacy_dynamic_environment(franca_userdata);
     thread'callee(thread.userdata);
-    @if(SLOW_USERSPACE_THREADS) import("@/lib/sys/sync/green.fr")'end_current_task();
+    thread'finally();  // may or may not return
     // not freeing the stack here, the sane thing is to free it on the joining side (since on amd64 you return by popping something off it). 
-    if !prefer_pthread() {
-        Syscall'exit_thread(0);
-    };
 };
 
 fn join(t: *Thread) void = {

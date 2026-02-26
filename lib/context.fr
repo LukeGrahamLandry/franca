@@ -266,6 +266,12 @@ FRHOSTED_MAGIC :u64: 0x444554534F485246;
 // Just no vtables. Alloc is fine because that's just a function pointer, not a pointer to a function pointer. 
 do_relocations_static_linux :: fn() void = {
     Elf :: import("@/backend/elf/bits.fr");
+    iter(false) { _, value, sym, dest, __ |
+        if sym.value != 0 {
+            dest[] = value;
+        };
+    };
+iter :: fn(no_unpacked_skew: bool, $body: @Fn(unpacked: *Elf.DynUnpacked, value: rawptr, sym: *Elf.Symbol, dest: *rawptr, it: *Elf.RelA) void) void = {
     // TODO: use (maybe backwards offset from) AT_PHDR instead of this symbol, 
     //       then it should work when going through a relocatable object as well
     base   := @import_symbol "__franca_base_address";
@@ -297,19 +303,21 @@ do_relocations_static_linux :: fn() void = {
         // todo: this doesn't work for examples/os/user/init.fr
         // @debug_assert(h.type != .Interp, "asked for a dynamic loader (had Interp header) so why are we redoing relocations?");
     };
+    skew = @if(no_unpacked_skew, 0, skew);  // HACK for examples/os/host/user.fr
     
     ::ptr_utils(Elf.Symbol);
     unpacked.relocations.ptr = unpacked.relocations.ptr.offset_bytes(skew);
+    unpacked.strings.ptr = unpacked.strings.ptr.offset_bytes(skew);
+    unpacked.symbols = unpacked.symbols.offset_bytes(skew);
     each unpacked.relocations { it |
         @debug_assert(it.type == Elf.R_AMD64_64 || it.type == Elf.R_AARCH64_ABS64 || it.type == Elf.R_RISCV_64, "TODO: unknown relocation type %", it.type);
-        sym := unpacked.symbols.offset(it.sym.zext()).offset_bytes(skew);
+        sym := unpacked.symbols.offset(it.sym.zext());
         dest := rawptr.ptr_from_raw(base.offset(it.offset - requested_base));
-        if sym.value != 0 {
-            dest[] = base.offset(sym.value).offset(it.addend - requested_base);
-        } else {
-            @debug_assert(sym.info.shift_right_logical(4) != Elf.STB_LOCAL);
-        };
+        value := base.offset(sym.value).offset(it.addend - requested_base);
+        @debug_assert(sym.value != 0 || sym.info.shift_right_logical(4) != Elf.STB_LOCAL);
+        body(unpacked&, value, sym, dest, it);
     };
+};
 };
 
 __driver_abi_version :: @if(IS_BOOTSTRAPPING, 1119, __builtin_compiler_abi);

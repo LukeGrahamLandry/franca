@@ -1,4 +1,7 @@
 
+## (Feb 26)
+
+- join needs to do the right thing based on how the thread was created since it sets perfer_syscalls internally, can't just return. 
 
 ## (Feb 25)
 
@@ -14,6 +17,13 @@ i should just accept being a part of a larger thing and make my thing work as a 
 but im immediatly reminded that bash programs dont work because they rely on random shit like timeout that macos doesn't have (plus wtf is the compiler they're imagining where 5 minutes is a sane timeout).  
 so no fuck that we use a real language that works on all the platforms i care about. 
 wtf somehow mine runs in 440ms instead of 3650ms (strace -f output size: mine=02632k, theirs=30003k). 
+each iteration they exec a python that imports sqlite3 to check if that test is in the list to skip. 
+
+started os/host/user.fr
+- need intercept syscalls. tried just handling sigsys but linux doesn't send those, just returns -38. 
+  thought about mprotect and replace the first instruction of perform_syscall but page granularity is too big and also that's too large a hammer. 
+  instead do comptime redirect thing and filter that way. 
+- fix skew in redo_relocations_static_linux when loaded dynamically
 
 ## (Feb 24)
 
