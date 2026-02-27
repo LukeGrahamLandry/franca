@@ -3,9 +3,12 @@
 // but filesystem and libc use os/user/* (just like host/web.fr). 
 // this is not a sandbox! jitted code that does a syscall instruction 
 // directly instead of using lib/sys/*.fr will go to the real host. 
-// TODO: macos host, rv host, sleep, signals, graphics, -append startup commands.
+// TODO: sleep, signals, graphics, -append startup commands.
+// TODO: macos host is a pain because redo_relocations_static_linux expects to be in an elf file. 
+//       futex->ulock is fine, mmap flags (what to do about MAP_JIT)
 // TODO: ci test
 // TODO: when you hit enter in the shell the line is printed an extra time. 
+// TODO: bin/test_fuse "panic! failed write 6 bytes"
 
 #include_std("examples/os/user/init.fr");
 
@@ -15,9 +18,10 @@ driver :: fn(vtable: *ImportVTable) void = {
     m := @ref @uninitialized Qbe.Module;
     // TODO: args for arch/os/syscalls
     use_syscalls := false;
+    out := "target/os.out";
     init_default_module(m, (
         os = .linux,  // TODO
-        arch = query_current_arch(), 
+        arch = query_current_arch(),  // edit to cross compile 
         type = .Exe,
         exe_debug_symbol_table = true,
     ));
@@ -35,20 +39,16 @@ driver :: fn(vtable: *ImportVTable) void = {
     if use_syscalls && m.goal.os == .linux {
         import("@/backend/elf/emit.fr")'patch_out_interp_header(bytes);
     };
-    write_entire_file_or_crash("target/os.out", bytes);
+    write_entire_file_or_crash(out, bytes);
+    @eprintln("compiled % in %ms for %-%-%", 
+        out, timestamp() - start, m.goal.os, m.goal.arch, @if(use_syscalls, "sta", "dyn"));
     drop(m);
     c'vtable'destroy_compiler(c.data);
     #use("@/lib/sys/subprocess.fr");
-    @eprintln("compiled in %ms", timestamp() - start);
     
     if can_run {
-        if query_current_arch() == .rv64 {
-            @eprintln("TODO: will try to run but this doesn't work yet");
-        };
         exec("target/os.out", empty());  // better than run_cmd_blocking because debuggers can follow this way
         unreachable();
-    } else {
-        @eprintln("built target/os.out (only supports running on linux host rn)");
     };
 }
 
@@ -124,7 +124,8 @@ entry :: fn() void = {
     tls(.general_allocator)[] = general_allocator&.borrow();
     
     tls(.current_os)[] = trunc @as(i64) Os.linux;
-    redo_relocations_static_linux(!host_syscalls.prefer_syscalls);
+    // TODO: why is skew different on riscv???? HACK !!
+    redo_relocations_static_linux(!host_syscalls.prefer_syscalls && query_current_arch() != .rv64);
     host_syscalls.intercept = true;
     main2();
 }
@@ -143,6 +144,7 @@ host_syscalls :: @static(@struct {
         exit_thread: Syscall.SyscallVTable;
         exit: Syscall.SyscallVTable;
         clock_gettime: Syscall.SyscallVTable;
+        riscv_flush_icache: Syscall.SyscallVTable;
     };
 });
 
@@ -166,6 +168,7 @@ user_handle_syscall :: fn(args: *Array(i64, 6), n: i64) Ty(i64, u8) = {
     fns := host_syscalls.fns&;
     T :: @type fns[];
     @assert(query_current_os() == .linux, "TODO: support non-linux. remap mmap flags.");
+    @debug_assert(n != 259 || query_current_arch() == .rv64);
     inline_for T.get_fields() { $f | 
         vtable := T.get_field_ptr(fns, f);
         if vtable.n&[arch_index] == n {

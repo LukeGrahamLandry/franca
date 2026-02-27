@@ -17,7 +17,7 @@ and the file system just exists in memory so most libc things
 that would usually be syscalls are just normal functions. 
 
 For debugging you can also run the userspace part without the kernel 
-(run examples/os/host/user.fr for arm64-linux or examples/web/build.fr for browser). 
+(run examples/os/host/user.fr for linux or examples/web/build.fr for browser). 
 
 ## implemented
 
