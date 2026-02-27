@@ -7,6 +7,15 @@ it also runs doom (i don't have a keyboard driver yet so just the intro render)
 franca examples/os/build.fr -vzf -append "spawn doom;" -fetch-doom -smp 2 -graphics
 ```
 
+Many new operating systems exist because their authors have 
+a grand unified theory of security or interprocess communication. 
+This one does not, so maybe operating system is the wrong word for it 
+but I don't know a better one. It's just a program that allows other programs 
+(that were written with the assumption that there is an operating system) to work.
+Currently all user code runs in the same address space 
+and the file system just exists in memory so most libc things 
+that would usually be syscalls are just normal functions. 
+
 For debugging you can also run the userspace part without the kernel 
 (run examples/os/host/user.fr for arm64-linux or examples/web/build.fr for browser). 
 
@@ -80,5 +89,6 @@ For debugging you can also run the userspace part without the kernel
 - usb driver
 - keyboard input for doom
 - other clock types. real time, thread time
+  - pthread_getcpuclockid is a stub rn and clock_gettime is always system uptime. 
 - when you rename a directory its `..` entry needs to change
 - `..` out of a fuse file system into the normal one

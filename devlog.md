@@ -1,7 +1,17 @@
 
 ## (Feb 26)
 
+making os/host/user work
 - join needs to do the right thing based on how the thread was created since it sets perfer_syscalls internally, can't just return. 
+- lib/sys: SyscallVTable doesn't need a ClearOnAotBake anymore because i fixed bakes of DataSymbol functions. 
+  letting it bake affected repro in a confusing way but im just gonna pretend that's fine and sort the relocations for now. 
+- support more host platforms. 
+  - don't rely on saving the libc fn so can build with -syscalls (neat to see it work in blink, more layers per layer)
+  - :HostUserNightmare my user code automatically switches syscall abi based on current_arch 
+    which i can't fake because it's needed for jitting as well, 
+    so have to carefully remap the syscall numbers on the recieving end 
+    (ditto openat flags and fstatat struct). that kinda sucks, 
+    but don't want to change the magic numbers because it would be cool to be able to run other people's binaries. 
 
 ## (Feb 25)
 

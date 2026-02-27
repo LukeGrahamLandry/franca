@@ -644,7 +644,6 @@ create_rela_table :: fn(
                 }, it.increment)
             }
             fn RipDisp32(it) => {
-                @debug_assert(reloc);
                 @debug_assert(m.goal.arch == .x86_64);
                 
                 // TODO: probably don't need this and it shouldn't be at risc of having aslr 
@@ -703,7 +702,7 @@ create_rela_table :: fn(
                     type = fst.trunc(),
                 );
                 
-                if e.m.goal.type == .Relocatable && e.m.goal.arch == .rv64 {
+                if e.m.goal.arch == .rv64 {
                     // :StupidEncodingsWinStupidRelocations
                     anon := e.m.intern(@tfmt(".auipc%", off));
                     use_symbol(e.m, anon) { s |
@@ -726,6 +725,19 @@ create_rela_table :: fn(
         );
     };
     
+    // you don't have to do this but without it now that im trying to bake SyscallVTable.libc, 
+    // it doesn't repro between host being static/dynamic without this? 
+    // TODO: figure out why (must be that it changes symbol names) and make a smaller test program. 
+    //       but i can convince myself it's better this way anyway because the loader doesn't have to 
+    //       jump around in memory and cache miss as much so it should be a tiny tiny bit faster at runtime?
+    //       compile speed cost is <1 sample for self-compile so not a big deal. 
+    rel := Elf.RelA.reinterpret_bytes(e.payload.items().rest(relocation_table_start));
+    // when outputting relocatable, sorting 30400 in code segment is noticeably slower. 
+    // TODO: but if that's needed for repro too then i have to do it or debug the other problem. 
+    if !reloc || e.section_index&[.Code] != target_section_index {
+        Sort'default(Elf.RelA, rel, fn(a, b) => a.offset <= b.offset);
+    };
+    
     name := @if(!reloc, ".rela.dyn", @tfmt(".rela%", e.section_names[target_section_index.zext()]));
     // ugh
     e.section_header(name)[] = (
@@ -739,6 +751,7 @@ create_rela_table :: fn(
         ent_size = size_of(Elf.RelA),
         link = symbol_table_index.zext(),
         // only matters for static. 
+        // (for dynamic, always 0 and relocs for both mut/const data sections are in the same table)
         info = target_section_index.zext(),  // index of the section the relocation applies to
     );
     (rela = base.virtual + relocation_table_start, relasz = e.payload.len - relocation_table_start)
@@ -942,4 +955,3 @@ patch_out_interp_header :: fn(elf_bytes: []u8) void = {
         };
     };
 };
-

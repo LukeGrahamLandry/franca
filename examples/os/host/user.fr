@@ -1,7 +1,10 @@
 // this allows testing the userspace code on native targets without using the kernel or drivers. 
 // futex,mmap,munmap,mprotect,clone are inherited from the host, 
 // but filesystem and libc use os/user/* (just like host/web.fr). 
-// TODO: non-arm-linux host, sleep, signals, graphics, -append startup commands.
+// this is not a sandbox! jitted code that does a syscall instruction 
+// directly instead of using lib/sys/*.fr will go to the real host. 
+// TODO: macos host, rv host, sleep, signals, graphics, -append startup commands.
+// TODO: ci test
 // TODO: when you hit enter in the shell the line is printed an extra time. 
 
 #include_std("examples/os/user/init.fr");
@@ -10,12 +13,16 @@
 driver :: fn(vtable: *ImportVTable) void = {
     start := timestamp();
     m := @ref @uninitialized Qbe.Module;
+    // TODO: args for arch/os/syscalls
+    use_syscalls := false;
     init_default_module(m, (
-        os = .linux, 
-        arch = .aarch64, 
+        os = .linux,  // TODO
+        arch = query_current_arch(), 
         type = .Exe,
         exe_debug_symbol_table = true,
     ));
+    @assert_ne(m.goal.arch, .wasm32, "use host/web.fr instead");
+    can_run := query_current_arch() == m.goal.arch && query_current_os() == .linux;
     opts := vtable.default_build_options();
     opts.retain_function_names = true;
     src := @tfmt("""#include_std("lib/core.fr"); #include_std("%"); """, @source_file_name());
@@ -25,16 +32,23 @@ driver :: fn(vtable: *ImportVTable) void = {
     bytes := emit_qbe_included_dyn(m, c&, @slice(fid), .WrapMain); 
     #use("@/lib/sys/fs.fr");
     bytes := bytes.concat(temp());
+    if use_syscalls && m.goal.os == .linux {
+        import("@/backend/elf/emit.fr")'patch_out_interp_header(bytes);
+    };
     write_entire_file_or_crash("target/os.out", bytes);
     drop(m);
     c'vtable'destroy_compiler(c.data);
     #use("@/lib/sys/subprocess.fr");
     @eprintln("compiled in %ms", timestamp() - start);
-    if query_current_arch() == .aarch64 && query_current_os() == .linux {
+    
+    if can_run {
+        if query_current_arch() == .rv64 {
+            @eprintln("TODO: will try to run but this doesn't work yet");
+        };
         exec("target/os.out", empty());  // better than run_cmd_blocking because debuggers can follow this way
         unreachable();
     } else {
-        @eprintln("built target/os.out (only supports running on arm-linux host rn)");
+        @eprintln("built target/os.out (only supports running on linux host rn)");
     };
 }
 
@@ -45,22 +59,44 @@ entry :: fn() void = {
         real_perform_syscall.body = perform_syscall.body;
         perform_syscall.body = (Redirect = user_handle_syscall);
     };
-
-    // set the vtable at runtime not comptime so it's not in the list of relocations. 
-    real_libc.write = Syscall'write;  // allow debug_write2 before redo_relocations_static_linux
-
-    // if host links libc need to save the real imported functions before stomping them. 
-    ;{
-        iter :: FuncId.scope_of(do_relocations_static_linux).iter;
-        iter(true) { unpacked, _, sym, dest, it |
-            name := unpacked.strings.rest(sym.name.zext()).peek_cstr();
-            T :: @type real_libc[];
-            inline_for T.get_fields() { $f | 
-                if name == (@run f.name.str()) {
-                    T.get_field_ptr(real_libc, f)[] = bit_cast_unchecked(rawptr, @run f.ty, dest[]);
-                };
+    
+    host_syscalls.prefer_syscalls = tls(.prefer_syscalls)[];
+    host_syscalls.current_os = tls(.current_os)[];
+    
+    fns :: host_syscalls.fns&;
+    T :: @type fns[];
+    inline_for T.get_fields() { $f | 
+        fid :: get_constant(FuncId, Syscall, f.name);
+        @if(@run fid.is_some()) {
+            // if host links libc need to save the real imported functions before stomping them. 
+            // set the vtable at runtime not comptime so it's not in the list of relocations. 
+            T.get_field_ptr(fns, f)[] = @run {
+                it, _ := Syscall'get_syscall_vtable_from_signeture(@run fid.unwrap(), @source_location());
+                it
             };
         };
+    };
+    
+    if host_syscalls.prefer_syscalls {
+        inline_for T.get_fields() { $f | 
+            fid :: get_constant(FuncId, Syscall, f.name);
+            xxx :: f;  // :compilerbug
+            @if(@run fid.is_some()) {
+                wrap :: fn(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) i64 = {
+                    args: Array(i64, 6) = (a, b, c, d, e, f);
+                    vtable := T.get_field_ptr(fns, xxx);
+                    Syscall'choose_syscall(args&, vtable, host_syscalls.prefer_syscalls, @as(Os) @as(i64) host_syscalls.current_os.zext(), real_perform_syscall)
+                };
+                T.get_field_ptr(fns, f)[].libc = wrap;  // stomp but that's fine because choose_syscall won't choose it
+            };
+        };
+    };
+    
+    if query_current_arch() != .aarch64 {
+        // TODO: fast system_counter_uptime asm for amd,rv
+        wrap :: fn(clock_id: i64, time_spec: *TimeSpec) i64 = 
+            with_syscalls(=> Syscall'clock_gettime(clock_id, time_spec));
+        libc_exports.insert("clock_gettime", wrap, panicking_allocator);
     };
     
     // pretending to pass on information from the boot loader. 
@@ -87,19 +123,27 @@ entry :: fn() void = {
     general_allocator: A = init(page_allocator);
     tls(.general_allocator)[] = general_allocator&.borrow();
     
-    allow_real_syscalls[] = false;
-    redo_relocations_static_linux(true);
+    tls(.current_os)[] = trunc @as(i64) Os.linux;
+    redo_relocations_static_linux(!host_syscalls.prefer_syscalls);
+    host_syscalls.intercept = true;
     main2();
 }
 
-// required so syscalls aren't blocked too early. not thread safe! only turn it off once in entry(). 
-allow_real_syscalls :: @static(bool) true;  
-
-real_libc :: @static(@struct {
-    read: @FnPtr(fd: Fd, buf: *u8, size: i64) i64Result;
-    write: @FnPtr(fd: Fd, buf: *u8, size: i64) i64Result;
-    mmap: @FnPtr(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) i64;
-    munmap: @FnPtr(addr: rawptr, len: i64) voidResult;
+host_syscalls :: @static(@struct {
+    intercept: bool;  // defaults to false to not break the setup code before main2. not thread safe! only turn it off once in entry(). 
+    prefer_syscalls: bool;  // can't change later because entry() stomps the libc field if true
+    current_os: u8;
+    fns: @struct {
+        read: Syscall.SyscallVTable;
+        write: Syscall.SyscallVTable;
+        mmap: Syscall.SyscallVTable;
+        munmap: Syscall.SyscallVTable;
+        mprotect: Syscall.SyscallVTable;
+        sys_futex: Syscall.SyscallVTable;
+        exit_thread: Syscall.SyscallVTable;
+        exit: Syscall.SyscallVTable;
+        clock_gettime: Syscall.SyscallVTable;
+    };
 });
 
 // body can't just be = (); because then it's not marked BodyIsSpecial. 
@@ -108,18 +152,31 @@ real_perform_syscall :: AsmFunction(fn(args: *Array(i64, 6), n: i64) Ty(i64, u8)
 
 // TODO: have to route user jitted code through this as well. 
 user_handle_syscall :: fn(args: *Array(i64, 6), n: i64) Ty(i64, u8) = {
-    // TODO: unpack these more explicitly so i can run on more hosts
-    if n.shift_right_logical(28) == 0 && allow_real_syscalls[] {
+    if !host_syscalls.intercept {
+        @debug_assert(n.shift_right_logical(28) == 0, "invalid syscall %", n);
+        // currently in comptime or the setup code before calling main2()
         return real_perform_syscall(args, n);
     };
-    @debug_assert(!allow_real_syscalls[], "my os syscall too early");
-
-    // futex, mmap, munmap, mprotect, exit_thread, exit
-    if n == 98 || n == 222 || n == 215 || n == 226 || n == 93 || n == 94 {
-        // don't need to remap flags
-        @assert(query_current_arch() == .aarch64 && query_current_os() == .linux, "TODO: support non-arm/non-linux");
-        return real_perform_syscall(args, n);
-    };  
+    // caller is using the abi for linux on whatever the real query_current_arch is. 
+    
+    arch_index := @if(query_current_arch() == .x86_64, 1, 0);  // :HostUserNightmare
+    // TODO: exit_thread only called from Thread.finally, not needed on macos. 
+    //        but todo: won't work because i put in hlt for never
+    // TODO: exit (_group) changes when i want to do processes
+    fns := host_syscalls.fns&;
+    T :: @type fns[];
+    @assert(query_current_os() == .linux, "TODO: support non-linux. remap mmap flags.");
+    inline_for T.get_fields() { $f | 
+        vtable := T.get_field_ptr(fns, f);
+        if vtable.n&[arch_index] == n {
+            // trivial; just pass it through to the host system. 
+            // redundant with entry()'s wrap() but easier to call because can just pass the array
+            // and wrap is needed because i call read/write directly for debug_write2/user_io_poll_in
+            result := Syscall'choose_syscall(args, vtable, 
+                host_syscalls.prefer_syscalls, @as(Os) @as(i64) host_syscalls.current_os.zext(), real_perform_syscall);
+            return(result, 0);
+        };
+    };
     
     result := -1;
     @switch(n) {
@@ -140,7 +197,8 @@ user_handle_syscall :: fn(args: *Array(i64, 6), n: i64) Ty(i64, u8) = {
         @case(0xFFFF0005) => {  // spawn_thread
             ctx := MContext.ptr_from_int(args[0]);
             t := ThreadConfig.ptr_from_int(args[1]);
-            thread := Thread.ptr_from_int(ctx.gpr&[0]);
+            // relies on raw_create_thread being the only caller
+            thread := Thread.ptr_from_int(ctx.gpr&[0]);  
             with_syscalls {
                 raw_create_thread(thread);
                 0
@@ -152,8 +210,13 @@ user_handle_syscall :: fn(args: *Array(i64, 6), n: i64) Ty(i64, u8) = {
             result = args[1];
         };
         @default => {
+            // redirect back to my fake libc. just using the syscalls as a stable abi that doesn't use varargs. 
+            if query_current_arch() == .x86_64 {  // :HostUserNightmare
+                n = @if(n == 262, 79, n);  // fstatat
+                n = @if(n == 257, 56, n);  // openat
+            };
             callee := get_libc_syscall_callee(n)
-                || @panic("invalid syscall %\n", fmt_hex(n));
+                || @panic("invalid syscall % %\n", n, fmt_hex(n));
             callee := bit_cast_unchecked(rawptr, @FnPtr(i64, i64, i64, i64, i64, i64) i64, callee); 
             result = callee(args[0], args[1], args[2], args[3], args[4], args[5]);
         };
@@ -173,10 +236,13 @@ user_io_poll_in :: fn(q: *UQueue, who: i64) void = {
             work.claimed.kiki += 1;
         };
         
+        read := host_syscalls.fns.read.libc;
+        read := bit_cast_unchecked(rawptr, @FnPtr(Fd, *u8, i64) i64, read);
+        
         data: u8 = 0;
         dowhile {
-            n := real_libc'read(STD_IN, data&, 1);
-            n.value == 0
+            n := read(STD_IN, data&, 1);
+            n == 0
         };
         
         entry := work[work.committed.kiki]&;
@@ -193,5 +259,7 @@ user_io_poll_in :: fn(q: *UQueue, who: i64) void = {
 }
 
 debug_write2 :: fn(msg: Str) void = {
-    real_libc'write(STD_OUT, msg.ptr, msg.len);
+    write := host_syscalls.fns.write.libc;
+    write := bit_cast_unchecked(rawptr, @FnPtr(Fd, *u8, i64) i64, write);
+    write(STD_OUT, msg.ptr, msg.len);
 };

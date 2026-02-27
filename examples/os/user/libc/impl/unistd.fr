@@ -78,7 +78,13 @@ FR_openat :: fn(f: Fd, path: CStr, flags: i64, mode: i64) i64 = {
         path = file;
     };
     fd := get_file(f) || return(-1);
-    result := fd'vtable'openat(fd.data, path, flags, mode);
+
+    d := flags;  // :HostUserNightmare
+    if query_current_arch() == .x86_64 && d.bit_and(LinuxLibc.O_amd.DIRECTORY) != 0 { 
+        d = d.bit_and(bit_not(LinuxLibc.O_amd.DIRECTORY)).bit_or(LinuxLibc.O_amd.DIRECTORY);
+    };
+    
+    result := fd'vtable'openat(fd.data, path, d, mode);
     @trace("openat(fd = %, %, %, %) = %", f.fd, path, flags, mode, result);
     @assert(f.fd.intcast() != result, "openat must return new fd");
     if need_close {
@@ -87,18 +93,26 @@ FR_openat :: fn(f: Fd, path: CStr, flags: i64, mode: i64) i64 = {
     result
 }
 
-fstat :: fn(f: Fd, out: *Posix.Linux.StatArm64) i64 = {
+fstat :: fn(f: Fd, out: *Syscall.SysStat) i64 = {
     out[] = zeroed(@type out[]);
     fd := get_file(f) || return(-1);
-    result := fd'vtable'fstat(fd.data, out);
+    s := zeroed(Vfs.FStatOut);
+    result := fd'vtable'fstat(fd.data, s&);
     @trace("fstat(%) = %; %", f.fd, result, @if(result == 0, {
-        ifmt := out.st_mode.int().bit_and(Posix.S.IFMT);
+        ifmt := s.st_mode.int().bit_and(Posix.S.IFMT);
         @if(ifmt == Posix.S.IFDIR, "DIR", "REG")
     }, "-"));
+    
+    if query_current_arch() == .x86_64 {  // :HostUserNightmare
+        out.l.st_mode = s.st_mode;
+    } else {
+        out.la.st_mode = s.st_mode;
+    };
+    
     result
 };
 
-fstatat :: fn(fd: Fd, path: CStr, out: *Posix.Linux.StatArm64, _: i64) i64 = {
+fstatat :: fn(fd: Fd, path: CStr, out: *Syscall.SysStat, _: i64) i64 = {
     fd := FR_openat(fd, path, 0, 0);
     @if(fd < 0) return(fd);
     fd: Fd = (fd = fd.intcast());

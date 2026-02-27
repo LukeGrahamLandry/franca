@@ -182,8 +182,77 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
     os := arg[2];
     arg := arg.rest(3);
     fid := const_eval(FuncId)(fid);
-    func := get_function_ast(fid, true, true, true, false);
 
+    inst := FatExpr.list(arg.len + 1, ast_alloc());
+    each arg { e |
+        e[] = compile_ast(e[]);
+        inst&.push(@{
+            T :: @[@literal e.ty];
+            @if(size_of(T) == 8,
+                bit_cast_unchecked(T, i64, @[e[]]),
+                bit_cast_unchecked(T, u32, @[e[]]).zext(),
+            )
+        });
+        
+        if size_of(e.ty) > 8 {
+            compile_error("syscall argument must fit in a register", loc);
+        };
+    };
+    
+    // the zero padding is important becuase sometimes i use it for flags without explicitly 
+    // mentioning the parameter. ie. fork->clone, dup2->3, 
+    while => inst.len < 6 {
+        inst&.push(@literal 0);
+    };
+    
+    ::import("@/lib/sys/process.fr");
+    crash :: fn() Never = panic("unimplemented syscall");
+
+    // TODO: this duplicates the expressions (3 times)! that's a crime! don't do that!!
+    arg_expr := @as(FatExpr) (expr = (Tuple = arg.as_raw_list()), ty = UnknownType, done = false, loc = loc);
+    if arg.len == 1 {
+        arg_expr = arg[0];
+    };
+    if arg.len == 0 {
+        arg_expr = @literal ();
+    };
+
+    func := get_function_ast(fid, true, true, true, false);
+    ret := func.finished_ret.unwrap();
+    
+    vtable, legacy_callee := get_syscall_vtable_from_signeture(fid, loc);
+    no_libc := vtable.libc.is_null();
+    arg_expr_padded := @as(FatExpr) (expr = (Tuple = inst.as_raw()), ty = UnknownType, done = false, loc = loc);
+    
+    return @{
+        old :: __driver_abi_version <= 1512; // :UpdateBoot old compilers couldn't bake a DataSymbol
+    
+        // TODO: the nice debloated one doesn't work on wasm. 
+        //       if i keep it this way, i might as well always do the libc case here instead of also in choose_syscall? 
+        @if(query_current_arch() == .wasm32, {
+            @if(@[@literal no_libc]) crash();
+            callee := @if(old, 
+                @[legacy_callee],
+                bit_cast_unchecked(rawptr, @[@literal AsFnPtr(fid)], @as(rawptr) @[@literal vtable.libc]));
+            callee(@[arg_expr])
+        }, {
+            // TODO: you really really want these to be read only
+            //       (but i don't have a language feature to ask for that)
+            vtable := @static(SyscallVTable) {
+                vtable := @[@literal vtable];
+                @if(old) { vtable.libc = zeroed(rawptr); };
+                vtable
+            };
+            @if(old) { vtable.libc = @as(rawptr) @[legacy_callee]; };
+            args := @array(@[arg_expr_padded]);
+            result := choose_syscall(args&, vtable, @[perfer_sys], @[os], perform_syscall);
+            bit_cast_unchecked(i64, @[@literal ret], result)
+        })
+    };
+}
+
+get_syscall_vtable_from_signeture :: fn(fid: FuncId, loc: Span) Ty(SyscallVTable, FatExpr) = {
+    func := get_function_ast(fid, true, true, true, false);
     libc := false;
     can_syscall := false;
     sys := zeroed Array(i64, 3);
@@ -204,48 +273,11 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
         };
     };
     
-    inst := FatExpr.list(arg.len + 1, ast_alloc());
-    each arg { e |
-        e[] = compile_ast(e[]);
-        inst&.push(@{
-            T :: @[@literal e.ty];
-            @if(size_of(T) == 8,
-                bit_cast_unchecked(T, i64, @[e[]]),
-                bit_cast_unchecked(T, u32, @[e[]]).zext(),
-            )
-        });
-        
-        if size_of(e.ty) > 8 {
-            compile_error("syscall argument must fit in a register", loc);
-        };
-    };
-    
-    if arg.len > 6 {
-        compile_error("syscall has too many arguments", loc);
-    };
-    
-    // the zero padding is important becuase sometimes i use it for flags without explicitly 
-    // mentioning the parameter. ie. fork->clone, dup2->3, 
-    while => inst.len < 6 {
-        inst&.push(@literal 0);
-    };
-    
     ::import("@/lib/sys/process.fr");
-    crash :: fn() Never = panic("unimplemented syscall");
-    
     if IS_BOOTSTRAPPING {
         can_syscall = false;
     };
 
-    // TODO: this duplicates the expressions (3 times)! that's a crime! don't do that!!
-    arg_expr := @as(FatExpr) (expr = (Tuple = arg.as_raw_list()), ty = UnknownType, done = false, loc = loc);
-    if arg.len == 1 {
-        arg_expr = arg[0];
-    };
-    if arg.len == 0 {
-        arg_expr = @literal ();
-    };
-    
     arg, ret := (func.finished_arg.unwrap(), func.finished_ret.unwrap());
     // can't just call fid now that syscall.S is replacing the function body with ourself
     callee: FatExpr = (
@@ -256,43 +288,27 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
     if func.name.str().starts_with("clone") {
         compile_error("use perform_clone instead. it's special because it returns again in a different stack.", loc);
     };
+    
+    if func.arg.bindings.len > 6 {
+        compile_error("syscall has too many arguments", loc);
+    };
 
     if !libc {
         callee = @{ zeroed(rawptr) };
     };
-    arg_expr_padded := @as(FatExpr) (expr = (Tuple = inst.as_raw()), ty = UnknownType, done = false, loc = loc);
-    return @{
-        // TODO: the nice debloated one doesn't work on wasm. 
-        //       if i keep it this way, i might as well always do the libc case here instead of also in choose_syscall? 
-        @if(query_current_arch() == .wasm32, {
-            @if(@[@literal !libc]) crash();
-            @[callee](@[arg_expr])
-        }, {
-            // TODO: you really really want these to be read only
-            // TODO: "You can't have a void pointer 6518175468 as a constant" :CompilerBug
-            //        when doing a DataSymbol it doesn't have a FuncId to put in the pagemap. 
-            // now it also wouldn't work because i allocate_stack before do_relocations_static_linux
-            //     ditto debug print/assert while doing relocations. 
-            //vtable := @static(SyscallVTable) (n = @[@literal sys], libc = ::@as(rawptr) @[callee]);
-            vtable := @static(SyscallVTable) (n = @[@literal sys], libc = (it = zeroed rawptr));
-            f := @as(rawptr) @[callee];
-            vtable.libc.it = f;  // not a race, we're in a macro; one per customer
-            args := @array(@[arg_expr_padded]);
-            result := choose_syscall(args&, vtable, @[perfer_sys], @[os]);
-            bit_cast_unchecked(i64, @[@literal ret], result)
-        })
-    };
-}
+    ((n = sys, libc = rawptr.const_eval(@{ @as(rawptr) @[callee] })), callee)
+};
+
 
 SyscallVTable :: @struct {
     n: Array(i64, 3);
-    libc: ClearOnAotBake(rawptr);  // HACK: shouldn't need the ClearOnAotBake
+    libc: rawptr;
 };
 
 // TODO: this really needs to return if we did libc or sys so you know where to look for errno 
 //       or maybe sys_ret should just get pulled into here as well? 
-choose_syscall :: fn(a: *Array(i64, 6), info: *SyscallVTable, perfer_sys: bool, os: Os) i64 = {
-    want_syscall := perfer_sys || info.libc.it.is_null();
+choose_syscall :: fn(a: *Array(i64, 6), info: *SyscallVTable, perfer_sys: bool, os: Os, $perform_syscall: @Fn(args: *Array(i64, 6), n: i64) Ty(i64, u8)) i64 = {
+    want_syscall := perfer_sys || info.libc.is_null();
     if want_syscall {
         sys_index := @if(os == .macos, 2, @if(query_current_arch() == .aarch64 || query_current_arch() == .rv64, 0, 1));
         n := info.n&[sys_index];
@@ -307,7 +323,7 @@ choose_syscall :: fn(a: *Array(i64, 6), info: *SyscallVTable, perfer_sys: bool, 
     } else {
         // this relies on the native calling conventions not caring about the arity of functions (when passing 0 to 6 ints)
         F :: @FnPtr(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) i64;
-        f := bit_cast_unchecked(rawptr, F, info.libc.it);
+        f := bit_cast_unchecked(rawptr, F, info.libc);
         f(a[0], a[1], a[2], a[3], a[4], a[5])
     }
 };
