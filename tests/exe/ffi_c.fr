@@ -14,6 +14,13 @@ main :: fn() void = {
     c :: import("@/examples/import_c/ffi.fr")'include(C_SRC);
     @assert_eq(c'test_callback(), 10);
     @assert_eq(c'use_franca_types(123), 123);
+    
+    // this sucks, can't just use `VTableFr` directly because it re-exports all the types so signeture won't match.  
+    // same situation as import_module needing to stomp the signetures on the imported functions. 
+    VTableC :: Deref(get_function_ast(c.get_fns2, true, false, true, false)[].arg.bindings[0].ty.Finished);
+    out :: @static(VTableC);
+    @run c'get_fns2(out);   // same shims test as c_ffi.fr's get_fns
+    @assert_eq(out'a(9), 12);
 }
 
 C_SRC :: """
@@ -45,6 +52,10 @@ C_SRC :: """
             default: return -1;
         };
     }
+    
+    void get_fns2(typeof(get_fns()) *out) {
+        *out = get_fns();
+    }
 """;
 
 F :: @FnPtr(a: i64) i64;
@@ -52,6 +63,7 @@ callback :: @static(F);
 Empty :: @struct();
 
 // TODO: allow exporting types and data. rn build_the_exports_scope only does functions. 
+//       (which is why C_SRC uses typeof so much)
 exports :: Type.scope_of(@struct {
     set_callback :: fn(f: F) void = {
         callback[] = f;
@@ -61,13 +73,23 @@ exports :: Type.scope_of(@struct {
     one_va :: fn(va: CVariadic) i32 = va&.start().next(i32);
     get_nothing :: fn() Empty = ();
     use_nothing :: fn(a: Empty, b: i64, c: Empty, d: i64, e: Empty) void = {
-        ok := (b == 1 && d == 3);
-        //@assert(ok); // TODO: tried to import panic__519 from env. 
-        dowhile(=> !ok);
+        important_function :: fn() void #noinline = ();
+        important_function();
+        sqrt :: fn(f: f64) f64 #libc;
+        @assert_eq(sqrt(16), 4);
+        
+        @assert(b == 1 && d == 3);
     };
     get_tagged :: fn(a: i64) (@tagged(A: i64, B: Str)) = (A = a);
     get_array :: fn(a: i64) Array(i64, 2) = (a, a);
     get_tuple :: fn(a: i64) Ty(i64, Str) = (a, "");
+    get_fns :: fn() VTableFr = (
+        a = (fn(a: i64) i64 = a + 3),
+    );
 });
+
+VTableFr :: @struct {
+    a: @FnPtr(a: i64) i64;
+};
 
 #use("@/lib/variadic.fr");

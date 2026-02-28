@@ -1,4 +1,11 @@
 
+## (Feb 28)
+
+- ffi_c test dying when calling a non-exported function.
+  c compile_to_module is only doing types for things that are named, 
+  functions not in root_scope in import_cache_file won't get a type 
+  and then fr get_fid would silently drop them. 
+
 ## (Feb 27)
 
 - hack for rv sign extension

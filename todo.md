@@ -1,5 +1,9 @@
-
+- i do a lot of redundant work moving symbols/types between modules 
+  when you have layers like tests/exe/ffi_c.fr. instead just be able to reference. 
+  have a list of child ones inside it. would also make disk space of target/franca/cache less offensive 
+  (especially with FRANCA_MORE_CACHE=1)
 - i need to stop using warp. figure out what else i need in my terminal to not feel clunky. 
+  im not going crazy they broke pasting, it doesn't take the command line anymore its the whole output even if thats not at all what's selected. 
 - replace examples/web/usefuckinghttpssoicandrawonthefuckingscreen.py with something based on https://github.com/Mbed-TLS/mbedtls/blob/development/programs/ssl/ssl_server.c
 - do i want to hook_backtrace automatically? it's kinda dumb to have to remember to do it everywhere. 
   ie. tests/exe/wasm.fr doesn't rn. but it's annoying because it deletes information when running as a driver, 
