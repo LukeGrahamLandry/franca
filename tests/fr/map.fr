@@ -92,12 +92,28 @@
     assert_eq(true, out.is_none());
 }
 
-#test fn debug_map_original() void = {
-    m: HashMap(Str, i64) = init(temp());
-    m&.insert("a", 123);
-    assert_eq(true, m&.get("b").is_none());
-    assert_eq(true, m&.get("a").is_some());
-    assert_eq(true, m&.get("b").is_none());
+fn bake_hash_map() #test = {
+    MaybeBakeable :: @struct(_hack := zeroed(rawptr), allow: bool);
+    fn bake_relocatable_value(self: *MaybeBakeable) []BakedEntry = {
+        @assert(self.allow, "tried to bake MaybeBakeable(false)");
+        dyn_bake_relocatable_value(MaybeBakeable.cast_to_bytes(self), MaybeBakeable, true)
+    }
+    it := @run {
+        it: HashMap(i64, *i64) = init(ast_alloc());
+        range(0, 10) { i | it&.insert(i, i&); };  // stack pointer can't be baked
+        it&.clear();  // mark each slot as empty but the junk bytes are still there to be removed by bake
+        it&.insert(0, @static(i64) 123);
+        it.raw
+    };
+    @assert_eq(123, it&.get(0).unwrap()[]);
+    it := @run {  // will error if try to bake zero value
+        it: HashMap(i64, MaybeBakeable) = init(ast_alloc());
+        range(0, 10) { i | it&.insert(i, (allow = false)); };
+        it&.clear();
+        it&.insert(0, (allow = true));
+        it.raw
+    };
+    @assert(it&.get(0).is_some() && it&.get(1).is_none());
 }
 
 #use("@/lib/collections/map.fr");

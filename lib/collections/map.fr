@@ -153,18 +153,13 @@ fn RawHashMap($K: Type, $V: Type) Type = {
     
     fn resize(self: *Self, gpa: Alloc) void #inline = 
         hashmap_expand_erased(ptr_cast_unchecked(Self, RawHashMapErased, self), size_of(Entry), align_of(Entry), gpa, load_percent);
-    
-    fn zero_unused_slots(self: *Self) void = 
-        hashmap_erased_zero_unused_slots(ptr_cast_unchecked(Self, RawHashMapErased, self), size_of(Entry));
-    
-    // TODO: why does this cause 
-    //       "Compile Error: Missing Value: #ir invalid op name: copy"
-    //fn bake_relocatable_value(self: *Self) []BakedEntry = {
-    //    // TODO: don't assume it's ok to bake the zero value. 
-    //    //       should only bake the slots that are actually in the map!
-    //    self.zero_unused_slots();  // remove any uninitialized memory
-    //    dyn_bake_relocatable_value(Self.cast_to_bytes(self), Self, true)
-    //}
+   
+    ::@if(::(__driver_abi_version > 1512)) {
+    fn bake_relocatable_value(self: *Self) []BakedEntry = {
+        @run @ct_assert(Entry.offset_of(.hash) == 0 && Self.offset_of(.arr) == 0 && Self.offset_of(.len_including_tombstones) == 16 && Self.offset_of(.capacity) == 24, @source_location, "layout");
+        bake_relocatable_hashmap_erased(ptr_cast_unchecked(Self, RawHashMapErased, self), Entry)
+    }
+    };
     
     fn for_keys(self: *Self, $body: @Fn(key: K) void) void = 
         each_entry(self, fn(it) => body(it.key));
@@ -175,7 +170,6 @@ fn RawHashMap($K: Type, $V: Type) Type = {
     fn each_ref(self: *Self, $body: @Fn(key: *K, value: *V) void) void = 
         each_entry(self, fn(it) => body(it.key&, it.value&));
     
-    // TODO: drop entries? 
     fn drop(self: *Self, alloc: Alloc) void = {
         alloc.dealloc(Entry, self.arr);
         self.arr = empty();
@@ -201,8 +195,6 @@ fn RawHashMap($K: Type, $V: Type) Type = {
     
     Self
 }
-
-// TODO: can do more by specializing just on key type for things that need to call eq/hash and step over the value size dynamically. 
 
 // :Polymorphise
 RawHashMapErased :: @struct(entries: rawptr, entry_count: i64, len_including_tombstones: i64, capacity: i64);
@@ -239,17 +231,28 @@ hashmap_expand_erased :: fn(self: *RawHashMapErased, entry_size: i64, entry_alig
     self.entries = new_mem;
 };
 
-// Unused slots may contain uninitialized memory, so explicitly zeroing is nice before baking an AOT binary to make sure it repros.
-// :Polymorphise
-hashmap_erased_zero_unused_slots :: fn(self: *RawHashMapErased, entry_size: i64) void #noinline = {
-    range(0, self.entry_count) { i |
-        h := i64.ptr_from_raw(self.entries.offset(i * entry_size))[];
-        if h == 0 || h == 1 {
-            // not setting the hash to zero! need to remember if it's a tombstone incase there was a collision so we can find the next guy that got bumped
-            slot := u8.ptr_from_raw(self.entries.offset(i * entry_size + 8)).slice(entry_size - 8);
-            slot.set_zeroed();
-        }
+bake_relocatable_hashmap_erased :: fn(self: *RawHashMapErased, Entry: Type) []BakedEntry = {
+    // same idea as bake_relocatable_slice_erased but filtering by the hash slot
+    // because can't even try to bake uninitialized memory in the unused slots. 
+    size_of := size_of(Entry);
+    bytes := u8.ptr_from_raw(self.entries).slice(self.entry_count * size_of);
+    arr := create_array_type(Entry, self.entry_count);
+    id, addend := emplace_bake(bytes, arr) {
+        parts: List(BakedEntry) = list(bytes.len/8, ast_alloc());
+        range(0, self.entry_count) { i | 
+            bytes := bytes.slice(i*size_of, (i+1)*size_of);
+            hash := bytes.peek_type(i64)[];
+            if hash.ule(1) {  // empty or tombstone
+                parts&.push(Num = (value = hash));
+                parts&.push_repeated(size_of/8 - 1, (Num = (value = 0)));
+            } else {
+                parts&.push_all(dyn_bake_relocatable_value(bytes, Entry, false));
+            };
+        };
+        (VoidPtrArray = parts.as_raw())
     };
+    ptr := entry_with_addend(id, addend);
+    @slice(ptr, (Num = (value = self.entry_count)), (Num = (value = self.len_including_tombstones)), (Num = (value = self.capacity))) ast_alloc()
 };
 
 fn RawHashMapKeyErased($K: Type, $Hasher: Type) Type = {
@@ -265,7 +268,7 @@ fn RawHashMapKeyErased($K: Type, $Hasher: Type) Type = {
         h := h.abs();  // since i use mod to map to a slot, hash can't be negative. 
         
         // I use 0 to indicate an empty slot and 1 as a tombstone to mark removals. 
-        if h == 0 || h == 1 {
+        if h.ule(1) {
             h = 2;
         };
         

@@ -9,6 +9,7 @@
   - barely used, move to a test: ExecSlice, @list
   - @bit_fields: don't use width as default for construct()
   - be strict about bucketarray invariants and remove push_all_contiguous
+- bake_relocatable_value(HashMap) zero empty slots works on new compilers
 
 ## (Feb 27)
 
