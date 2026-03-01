@@ -20,6 +20,7 @@ pthread_create :: fn(out: *pthread_t, attr: *ThreadAttr, callee: @FnPtr(userdata
     ctx.gpr&[31] = bit_cast_unchecked(*u8, i64, attr.stack.end_pointer());
     
     thread := Thread.ptr_from_raw(userdata);
+    add_to_current_thread_group(thread);
     t: ThreadConfig = (
         signal_handler = handle_signal,
         signal_stack_buf = thread.allocate_signal_stack(),
@@ -47,6 +48,17 @@ pthread_join :: fn(thread: pthread_t, value_ptr: *rawptr) i64 = {
     // not the same as `with_syscalls { t.join(); 0 };` because that would free the stack twice
     @if(t.tid_futex != 0) @trace("joining(%)", t.tid);
     t.sys_join();
+    
+    ::ptr_utils(Thread);
+    g := get_current_tls()[].thread_group;
+    with g.vfs.mutex& {
+        i := g.threads.index_of(fn(it) => identical(it[], t))
+            .expect("thread in thread group");
+        @debug_assert_ne(i, 0, "cannot join main thread");
+        g.threads&.ordered_remove(i);
+    };
+    // TODO: don't :leak signal_stack_buf
+    
     @trace("joined(%)", t.tid);
     value_ptr[] = zeroed rawptr; // TODO
     0

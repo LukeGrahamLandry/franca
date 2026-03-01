@@ -8,13 +8,20 @@ main :: fn() void = {
     main2();
 }
 
+root_thread_group :: @static(ThreadGroup);
+
 // also called directly by host/user.fr/entry
 main2 :: fn() void = {
     @assert(query_current_arch() != .wasm32);  // host/web.fr uses the browser as the top level loop. 
         tls(.prefer_syscalls)[] = false;
         
         t := get_current_thread();
-        
+        t.tid = 1; t.tid_futex = 1;
+        g := root_thread_group;
+        g.parent = .None;
+        get_current_tls()[].thread_group = g;
+        g.threads = init(general_allocator(), 1);
+        g.threads&.push_assume_capacity(t);
         Crash'push_aot_debug_resolver();
         
         #use("@/lib/sys/jump.fr");
@@ -82,7 +89,7 @@ main2 :: fn() void = {
 Vfs :: import("@/examples/os/user/vfs.fr");
 
 run_startup_commands :: fn() void = {
-    fs := Vfs.fs;
+    fs := Vfs'get_vfs();
     count := 0;
     start := timestamp();
     run(cli_args()[2].str());
@@ -98,11 +105,16 @@ run_startup_commands :: fn() void = {
 }
 
 decode_and_run_cmd :: fn(full_command: Str) void = {
-    fs := Vfs.fs;
+    fs := Vfs'get_vfs();
     while => full_command.len > 0 && full_command[0].is_ascii_whitespace() {
         full_command = full_command.rest(1);
     };
     @if(full_command == "") return(); 
+    unordered_retain shell.reap& { it |
+        done := it.tid_futex == 0;
+        @if(done) it[].join();
+        !done
+    };
     
             parts := full_command.split(" ", temp()).items();
             @switch(parts[0]) {
@@ -126,6 +138,23 @@ decode_and_run_cmd :: fn(full_command: Str) void = {
                     import("@/examples/dump_devicetree.fr")'dump(out&, shell.device_tree_bytes);
                     print(out.items());
                 };
+                @case("ps") => {
+                    out := u8.list(temp());
+                    f(root_thread_group, out&, 0);
+                    print(out.items());
+                    f :: fn(g: *ThreadGroup, out: *List(u8), depth: i64) void = {
+                        out.push_repeated(depth*2, " ".ascii());
+                        @fmt(out, "+ (threads=%, children=%, files=%)\n", 
+                            g.threads.len, g.children.len, g.vfs.fd.len);
+                        for g.threads { it |
+                            out.push_repeated((depth + 1)*2, " ".ascii());
+                            @fmt(out, "- (tid=%, idx=%%)\n", 
+                                it.tid, it.first_environment.thread_index,
+                                @if(it.tid_futex == 0, ", DONE", ""));
+                        };
+                        for(g.children, fn(it) => f(it, out, depth + 1));
+                    };
+                };
                 @default => {
                     break :: local_return;
                     spawn := parts[0] == "spawn";
@@ -143,7 +172,8 @@ decode_and_run_cmd :: fn(full_command: Str) void = {
                     cmd := general_allocator().boxed(Command, cmd);  
                     if spawn {
                         #use("@/lib/sys/threads.fr");
-                        start_thread(Command, run_command, cmd);
+                        t := start_thread(Command, run_command, cmd);
+                        shell.reap&.push(t, general_allocator());
                     } else {
                         start := timestamp();
                         run_command(cmd);
@@ -183,7 +213,6 @@ run_command :: fn(cmd: *Command) void = {
             args&.push(it.as_cstr());
         };
     push_tls_value(.cli_arguments, args.items()) { 
-        fs := Vfs.fs;
         // TODO: passing nocache here is weaker than FRANCA_NO_CACHE=1 because some user code only checks the envvar
         import("@/compiler/main.fr")'main2(command, shell.nocache);
     };
@@ -209,14 +238,14 @@ shell :: @static(@struct {
     timer: bool;
     nocache: bool;
     device_tree_bytes: []u8;
+    reap: RawList(*Thread);
 });
 
 pl011_int_poll :: fn(q: *UQueue, who: i64) void = {
-    fs := Vfs.fs;
     // if polling after work.push, do nothing, wait for an interrupt.
     @if(who == 0) return();  
     // else, polling before done.pop
-    work := fs.stdin.pipe.work&;
+    work := q.pipe.work&;
     
     // handle_signal doesn't done.push, it claims from work without committing. 
     // so instead of being able to wait in done.pop, we need to wait for 
@@ -232,12 +261,11 @@ pl011_int_poll :: fn(q: *UQueue, who: i64) void = {
     entry := work[work.committed.kiki];
     work.committed.kiki += 1;
     @assert(work.claimed.kiki == work.committed.kiki);
-    fs.stdin.pipe.done&.push(entry);
+    q.pipe.done&.push(entry);
 }
 
 // note: you can't use a mutex here because it has the same thread_index as the interrupted task
 handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) Ty(i64, *MContext) = {
-    fs := Vfs.fs;
 
         thread := get_current_tls();
         if bit_cast_unchecked(@type thread.signal_handler, i64, thread.signal_handler) != 0 {
@@ -250,7 +278,7 @@ handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) Ty(i64, *MContext) = 
     // TODO: don't hardcode the 33. get it from device tree. 
     //       the kernel side now knows the right numbers. just have to use them here. 
     if intid == 33 {
-        work := fs.stdin.pipe.work&;
+        work := Vfs.root_console_stdin[].pipe.work&;
         if work.claimed.kiki == work.committed.kiki {
             work.claimed.kiki += 1;
         };
@@ -394,8 +422,10 @@ LIBC :: @struct {
         sys_debug_write(ptr.slice(len));
 };
 
-fn get_current_tls() *ThreadData = {
-    thread := Thread.ptr_from_raw(tls(.thread)[]);
+fn get_current_tls() *ThreadData = 
+    get_tls(Thread.ptr_from_raw(tls(.thread)[]));
+
+fn get_tls(thread: *Thread) *ThreadData = {
     @run @assert_eq(size_of(@type thread.runtime_data), size_of(ThreadData));
     ::ptr_utils(Thread);
     @assert(!thread.is_null(), "missing env.thread");
@@ -445,8 +475,24 @@ fn trace(arg: FatExpr) FatExpr #macro = @{
 ThreadData :: @struct {
     signal_handler: SignalHandler.F; 
     known_wasm_jit_event: i64;
-    _: Array(i64, 3);
+    thread_group: *ThreadGroup;
+    _: Array(i64, 2);
 };
+
+ThreadGroup :: @rec @struct {
+    vfs: Vfs.Fs;
+    threads: RawList(*Thread);
+    parent: ?*ThreadGroup;
+    children: RawList(*ThreadGroup);
+};
+
+add_to_current_thread_group :: fn(thread: *Thread) void = {
+    g := get_current_tls()[].thread_group;
+    with g.vfs.mutex& {
+        thread.get_tls()[].thread_group = g;
+        g.threads&.push(thread, g.vfs.allocator);
+    };
+}
 
 // signal stack must be in the same franca_required_stack_bits aligned chunk for tls to work. 
 // see threads/allocate_stack.
@@ -477,6 +523,7 @@ time <on, off>       (log runtime after running a program)
 nocache <on, off>    (recompile every time instead of saving .frc)
 uptime               (read the system counter)
 devicetree           (show hardware info from the boot loader)
+ps                   (list running threads)
 
 example programs:
 test_fuse

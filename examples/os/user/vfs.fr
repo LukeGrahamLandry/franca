@@ -9,18 +9,17 @@
 //       the part where it gets confusing is devices / MemDir. 
 
 #use("@/lib/sys/sync/mutex.fr");
-fs :: @static(@struct {
+Fs :: @struct {
     fd: List(FileHandle); // indexed by Fd
     free: RawDeque(Fd);  // TODO: posix wants it to always reuse the lowest value not the oldest closed
     mutex: Mutex;  // locked when push to fd / reading an entry from fd. TODO: RWLock
     // TODO: decide which other things care about being thread safe
-    stdin: UQueue;
-    stdout: UQueue;
     root_dir: Fd;
     cwd: Fd;
     next_fuse_request_id: u64;
     allocator: Alloc;
-});
+};
+root_console_stdin :: @static(*UQueue);
 
 FileHandle :: @rec @struct {
     vtable: *FileVTable;
@@ -53,6 +52,8 @@ FStatOut :: @struct {
 IoctlErased :: @FnPtr(self: rawptr, data: rawptr) i64;
 
 init_vfs :: fn() void = {
+    // :leak everything here but there's only one
+    fs := get_vfs();
     fs.allocator = general_allocator();
     Pair :: Ty(u32, u32);
     fs_i, contents := @run {
@@ -68,25 +69,28 @@ init_vfs :: fn() void = {
         (fs_i.items(), contents.items())
     };
     
-    fs.stdin.pipe = init(fs.allocator, 2);
-    if !virtq_create(fs.stdin&, "stdio.console", 0) {
-        fs.stdin.poll = pl011_int_poll;
+    io := fs.allocator.box_zeroed(@struct(stdin: UQueue, stdout: UQueue));  
+    io.stdin.pipe = init(fs.allocator, 2);
+    if !virtq_create(io.stdin&, "stdio.console", 0) {
+        io.stdin.poll = pl011_int_poll;
     };
+    
+    root_console_stdin[] = io.stdin&;
     range(0, 2) { _ |
         bufs := fs.allocator.alloc_init([]u8, 1, fn(_) => fs.allocator.alloc_zeroed(u8, 256));
-        fs.stdin.pipe.work&.push(bufs = bufs, n = (bufs_readable = 0));
+        io.stdin.pipe.work&.push(bufs = bufs, n = (bufs_readable = 0));
     };
-    fs'stdin'poll(fs.stdin&, 0);
+    io'stdin'poll(io.stdin&, 0);
     
-    fs.stdout.pipe = init(fs.allocator, 1);
-    if !virtq_create(fs.stdout&, "stdio.console", 1) {
-        fs.stdout.poll = sys_debug_write_poll;
+    io.stdout.pipe = init(fs.allocator, 1);
+    if !virtq_create(io.stdout&, "stdio.console", 1) {
+        io.stdout.poll = sys_debug_write_poll;
     };
     
     fs.fd = list(fs.allocator);
-    push_file(StdinFile, (queue = fs.stdin&));
-    push_file(StdoutFile, (queue = fs.stdout&));
-    push_file(StdoutFile, (queue = fs.stdout&));
+    push_file(StdinFile, (queue = io.stdin&));
+    push_file(StdoutFile, (queue = io.stdout&));
+    push_file(StdoutFile, (queue = io.stdout&));
     
     // build a tree of MemDir with MemFileRO leaves containing all the baked files. 
     fs.root_dir = push_file(MemDir, (files = empty()));
@@ -162,6 +166,7 @@ init_vfs :: fn() void = {
 }
 
 fn create_child_dir(parent: FileHandle, name: Str) Ty(FileHandle, *MemDir) = {
+    fs := get_vfs();
     p := MemDir.ptr_from_raw(parent.data);
     child := create_child(p, name, MemDir, (files = empty()));
     c := MemDir.ptr_from_raw(child.data);
@@ -171,6 +176,7 @@ fn create_child_dir(parent: FileHandle, name: Str) Ty(FileHandle, *MemDir) = {
 }
 
 fn create_child(self: *MemDir, name: Str, $T: Type, data: T) FileHandle #generic = {
+    fs := get_vfs();
     each self.files { it |
         @assert_ne(it.name, name, "create_child: duplicate");
     };
@@ -261,6 +267,7 @@ MemFile :: @struct {
         0
     };
     write :: fn(self, src, pos) = {
+        fs := get_vfs();
         extra := (src.len + pos) - self.contents.len;
         if extra > 0 {
             self.contents&.reserve(extra, fs.allocator);
@@ -338,6 +345,7 @@ MemDir :: @struct {
         0
     };
     openat :: fn(self, path, flags, _mode) = {
+        fs := get_vfs();
         path := path.str();
         trunc := flags.bit_and(LinuxLibc.O_arm.TRUNC) != 0;
         for self.files { it |
@@ -364,6 +372,7 @@ MemDir :: @struct {
         fd.fd.intcast()
     };
     mkdir :: fn(self, path, _mode) = {
+        fs := get_vfs();
         name := path.str();
         each self.files { it |
             @if(it.name == name) return(-1);
@@ -375,6 +384,7 @@ MemDir :: @struct {
         0
     };
     rename :: fn(self, dest_dir, src_name, dest_name) = {
+        fs := get_vfs();
         dest_dir := get_file(dest_dir) || return(-1);
         ::ptr_utils(FileVTable);
         @if(!identical(dest_dir.vtable, get_vtable(MemDir))) return(-1);
@@ -442,6 +452,7 @@ PipeFile :: @struct {
     close :: fn(self) = {
         self.it.refs -= 1;
         if self.it.refs == 0 {
+            fs := get_vfs();
             fs.allocator.dealloc(u8, self.it.q.ring);
             fs.allocator.dealloc_one(PipeFile.Backing, self.it);
         }
@@ -460,10 +471,10 @@ PipeFile :: @struct {
         
         r
     }
-
 };
 
 create_pipe :: fn() Array(Fd, 2) = {
+    fs := get_vfs();
     p := fs.allocator.box_zeroed(PipeFile.Backing);
     p.refs = 2;
     p.q.ring = fs.allocator.alloc_uninit(u8, 2048);
@@ -472,11 +483,13 @@ create_pipe :: fn() Array(Fd, 2) = {
 }
 
 fn push_file($T: Type, data: T) Fd #generic = {
+    fs := get_vfs();
     data := fs.allocator.boxed(T, data);
     push_file(vtable = get_vtable(T), data = T.raw_from_ptr(data))
 }
 
 fn push_file(it: FileHandle) Fd = {
+    fs := get_vfs();
     fs.mutex&.lock();
     fd := fs.fd.len;
     if fs.free&.pop_front() { old |
@@ -542,6 +555,7 @@ FuseFile :: @struct {
         }
     }
     close :: fn(self) = {
+        fs := get_vfs();
         // for now only the root is stored in a MemDir, every other fd is unique to an open()
         @if(self.nodeid == 1) return();
         
@@ -711,6 +725,7 @@ cstr_with_null :: fn(it: CStr) []u8 = {
 };
 
 init_fuse :: fn(q: *UQueue) Fd = {
+    fs := get_vfs();
     q.pipe = init(fs.allocator, 128);
     
     in := zeroed Fuse.InitIn;
@@ -734,6 +749,7 @@ fn fuse_blocking(q: *UQueue, op: Fuse.Opcode, node: u64, in: ~I) Result(FuseOutT
 }
 
 fn fuse_blocking(q: *UQueue, op: Fuse.Opcode, node: u64, in: ~I, e_out: []u8) Result(FuseOutType(I), i64) #where = {
+    fs := get_vfs();
     hi := zeroed Fuse.InHeader;
     hi.opcode = op;
     hi.nodeid = node;
@@ -837,6 +853,7 @@ fn get_file(fd: Fd) ?FileHandle = {
 }
 
 fn use_file(fd: Fd, $body: @Fn(it: *FileHandle) void) void = {
+    fs := get_vfs();
     if query_current_arch() == .rv64 {  // :HostUserNightmare
         // HACK: my syscall wrappers bit_cast_unchecked(T, u32, @[e[]]).zext(),
         //       on arm/amd it's fine because all the 32 bit instructions zero the high bits anyway. 
@@ -859,6 +876,7 @@ FRes :: fn($T: Type) Type = Result(T, i64);
 
 // [fd(a), str(b/c/d)] -> [fd(a/b/c), str(d)] 
 fn follow_path_prefix(fd: Fd, path: Str) Result(Ty(Fd, CStr), i64) = {
+    fs := get_vfs();
     full_path := path;
     if path.starts_with("./") {
         path = path.rest(2);
@@ -929,3 +947,5 @@ sys_debug_write_poll :: fn(q, who) = {
     };
     q.pipe.done&.push(entry);
 };
+
+get_vfs :: fn() *Fs = get_current_tls()[].thread_group.vfs&;
