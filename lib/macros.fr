@@ -1,11 +1,4 @@
 
-#macro #outputs(FatExpr)
-fn literal(arg: FatExpr, target: FatExpr) FatExpr = @{
-    make_literal(@[arg], @[target])
-};
-
-// TODO: implement the single arg version with this somehow. it looks easy but no
-//       i made the macros before i had a type system that could do this. 
 make_literal :: fn($T: Type, value: T) FatExpr #generic = {  
     literal_ast(T, raw_from_ptr(T, value&))
 };
@@ -14,8 +7,9 @@ fn if(cond: FatExpr, do: FatExpr) FatExpr #macro = {
     @{ @if(@[cond], @[do], ()) }
 }
 
-// Same as the two argument version but infers the type. 
-// TODO: assert that arg isn't 'void' because then its ambigous with the two argument version. -- Apr 21
+// convert a value into an expression. 
+// ie. with x:i64 and e:FatExpr as local variables in a macro function, 
+//     `@{ @[e] + x }` is illegal but `@{ @[e] + @[@literal x] }` will work. 
 #macro #outputs(FatExpr)
 fn literal(arg: FatExpr) FatExpr = @{
     value := @[arg];
@@ -30,6 +24,7 @@ fn as(T: Type, expr: FatExpr) FatExpr = as(@literal T, expr);
 #macro 
 fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     loc := arg.loc;
+    @ct_assert(target.expr&.is(.Block), target.loc, "@match expected a block");
     stmts := target.expr.Block.body.items();
     arg = compile_ast(arg);
     enum_type := arg.ty;
@@ -239,8 +234,6 @@ fn match_on_enum(arg: FatExpr, info: *TypeInfo, stmts: [] FatStmt) FatExpr = {
     varients := info.fields.items();
     cases: List(Ty(i64, FatExpr)) = list(ast_alloc());
     
-    // TODO: why can't i call 'as'? ffi unique? 
-    
     ::if(FatExpr);
     crash :: fn() Never #noinline = panic("@match invalid tag");
     @{
@@ -279,7 +272,6 @@ fn match_on_enum(arg: FatExpr, info: *TypeInfo, stmts: [] FatStmt) FatExpr = {
                         expand_case_body(handler_body.expr.Closure);
                     } else {
                         // TODO: better error message if its a call because they forgot a semi-colon. 
-                        //debug_log_ast(handler_body[]);
                         name := macro_at_default_helper(handler_body);
                         branch := handler_body.expr.PrefixMacro&;
                         arg := branch.arg;
@@ -464,9 +456,7 @@ fn get_type_int(e: *FatExpr) IntTypeInfo = {
 /// This version can be used when you just want sequential integers. 
 #macro #outputs(Type)
 fn enum(names: FatExpr) FatExpr = {
-    @ct_assert(names.expr&.is(.Tuple), names.loc, "expected @enum(name1, name2, etc)"); // TODO: single element should be legal i guess. 
-
-    fn binding(name: Symbol, value: i64) Binding = {
+    binding :: fn(name: Symbol, value: i64) Binding = {
         template := @{ (a = 0) };
         template := template.expr.Block.result[];
         all := template.expr.StructLiteralP.bindings.items();
@@ -474,10 +464,10 @@ fn enum(names: FatExpr) FatExpr = {
         out.name = (Ident = name);
         out.default = @literal(value);
         out
-    }
+    };
     
     cases: List(Binding) = list(ast_alloc());
-    parts := names.expr.Tuple.items();
+    parts := names&.items();
     enumerate(parts) {i, part|
         name := part.ident() || compile_error("Expected symbol in @enum", names.loc); // TODO: this should work as not a closure
         cases&.push(binding(name, i));
@@ -536,13 +526,10 @@ fn enum(names: FatExpr) FatExpr = {
         @if(IS_BOOTSTRAPPING, init(@slice @[elements]), @[elements]) }
 }
 
-// TODO: have @tagged auto call this
 // TODO: seperate out the parts that could work on any sequential enum. 
 // TODO: move these to like meta.fr maybe? enum.fr? 
 fn tagged_derive($Tagged: Type) void = {
     // TODO: assert its really a tagged type.
-    
-    // assert_eq(size_of(Tagged.Tag()), size_of(i64)); // TODO: ?? doesn't type check. happening too early? -- Jul 1
     
     T :: Tagged.Tag();
     
@@ -585,9 +572,8 @@ fn enum_derive($T: Type) void = {
         @if(:: T.get_type_info_ref()[].Enum.sequential) 
             return(enum_display_from_ordinal(self[].raw().int(), packed_enum_names(T), out));
         
-        // TODO: without the extra force comptime eval, it wrongly thinks calling this function needs compctx.  -- Jul 1
         i := or self.try_ordinal() {
-            @fmt(out, "<invalid enum value: %>", self[].raw().int());  // TODO: don't assume it's an int
+            @fmt(out, "<invalid enum value: %>", @as(RAW) self[]);
             return()
         };
         out.push_all(self[].name_str());
@@ -599,7 +585,7 @@ enum_display_from_ordinal :: fn(i: i64, names: *PackedStrings, out: *List(u8)) v
     if i.ult(offs.len) {
         out.push_all(packed.subslice(offs[i*2].zext(), offs[i*2+1].zext()));
     } else {
-        @fmt(out, "<invalid enum value: %>", i);  // TODO: don't assume it's an int
+        @fmt(out, "<invalid enum value: %>", i);
     }
 };
 
@@ -843,7 +829,7 @@ fn safety_check_failed() Never =
     panic("Safety Check Failed.");
 
 fn if_else(handlers: FatExpr) FatExpr #macro = {
-    @ct_assert(handlers.expr&.is(.Block), handlers.loc, "@if_else expected block"); // TODO: add this check to @match
+    @ct_assert(handlers.expr&.is(.Block), handlers.loc, "@if_else expected block");
     handlers := handlers.expr.Block.body.items();
     
     no_else :: "@if_else must have @else as last branch";
@@ -1102,11 +1088,6 @@ fn or(arg: FatExpr) FatExpr #macro = {
 }
 
 // SAFETY: don't use this in a loop (the pointer will NOT stay live across iterations)
-// TODO: I think my policy is that stack frame is valid for the whole function regardless 
-//       of if the block ends. are we sure that's what i want to commit to? 
-//       tho since that's not true for loops it's kinda incoherent to make it true for 
-//       other blocks i guess? :Compiler
-// 
 // TODO: give macros access to the inferred result type so you don't have to always use @as
 fn ref(value: FatExpr) FatExpr #macro = @{
     value := @[value];

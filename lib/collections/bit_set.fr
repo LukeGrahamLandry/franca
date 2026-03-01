@@ -65,18 +65,15 @@ DynamicBitSet :: @struct(bits: List(i64));
 fn empty(a: Alloc) DynamicBitSet = (bits = list(a));
 
 fn get(self: *DynamicBitSet, i: i64) bool = {
-    //@println("i=% len=% cap=% % self=%", 
-    //    i, self.bits.len, self.bits.maybe_uninit.len, 
-    //    i64.raw_from_ptr(self.bits.maybe_uninit.ptr), DynamicBitSet.raw_from_ptr(self));
     @if(i >= self.bits.len*64) return(false);
-    index, bit := i.div_mod(64);
+    index, bit := i.udiv_mod(64);
     self.bits&[index].bit_and(1.shift_left(bit)) != 0
 }
 
 fn set(self: *DynamicBitSet, i: i64) void = {
     cap := self.bits.len.mul(64);
     if(i >= cap, => self.reserve(i.sub(cap).add(1)));
-    index, bit := i.div_mod(64);
+    index, bit := i.udiv_mod(64);
     self.bits&[index] = self.bits&[index].bit_or(1.shift_left(bit));
 }
 
@@ -84,8 +81,7 @@ fn set(self: *DynamicBitSet, i: i64) void = {
 fn get_set(self: *DynamicBitSet, i: i64) bool = {
     cap := self.bits.len.mul(64);
     if(i >= cap, => self.reserve(i - cap + 1));
-    index := i.shift_right_logical(6);
-    bit   := i.bit_and(63);
+    index, bit := i.udiv_mod(64);
     old := self.bits&[index];
     mask := 1.shift_left(bit);
     self.bits&[index] = old.bit_or(mask);
@@ -93,13 +89,12 @@ fn get_set(self: *DynamicBitSet, i: i64) bool = {
 }
 
 fn unset(self: *DynamicBitSet, i: i64) void = {
-    @safety(.Bounds) i.ult(self.bits.len * 64);
-    index, bit := i.div_mod(64);
+    index, bit := i.udiv_mod(64);
     self.bits&[index] = self.bits&[index].bit_and(1.shift_left(bit).bit_not());
 }
 
 fn reserve(self: *DynamicBitSet, extra: i64) void = 
-    self.bits&.push_repeated(extra.align_to(64)/64, 0);
+    self.bits&.push_repeated(extra.ualign_to(64).udiv(64), 0);
 
 fn clear(self: *DynamicBitSet) void = {
     self.bits&.clear();
@@ -112,11 +107,7 @@ fn unset_all(self: *DynamicBitSet) void = {
 fn capacity(self: *DynamicBitSet) i64 = self.bits.len.mul(64);
 
 fn set_all_from(self: *DynamicBitSet, other: *DynamicBitSet) void = {
-    // TODO: this reserves more than needed
-    self.bits&.reserve(other.bits.len);
-    while => self.bits.len < other.bits.len {
-        self.bits&.push(0);
-    };
+    self.bits&.push_repeated(max(0, other.bits.len - self.bits.len), 0);
     range(0, other.bits.len) { i |
         self.bits[i] = self.bits[i].bit_or(other.bits[i]);
     };

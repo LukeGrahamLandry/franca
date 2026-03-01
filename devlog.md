@@ -5,6 +5,10 @@
   c compile_to_module is only doing types for things that are named, 
   functions not in root_scope in import_cache_file won't get a type 
   and then fr get_fid would silently drop them. 
+- going through old lib comments
+  - barely used, move to a test: ExecSlice, @list
+  - @bit_fields: don't use width as default for construct()
+  - be strict about bucketarray invariants and remove push_all_contiguous
 
 ## (Feb 27)
 

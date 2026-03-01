@@ -16,7 +16,7 @@ fn List($T: Type) Type = {
     }
     
     fn list(cap: i64, gpa: Alloc) Self #inline = 
-        (maybe_uninit = gpa.alloc_uninit(T, cap), len = 0, gpa = gpa);  // todo: no alloc if len 0 since i dont free
+        (maybe_uninit = gpa.alloc_uninit(T, cap), len = 0, gpa = gpa);
     fn list(gpa: Alloc) Self #inline = list(0, gpa);
     
     fn fixed_list(buf: []T) Self #inline = 
@@ -26,25 +26,14 @@ fn List($T: Type) Type = {
         (maybe_uninit = self, len = self.len, gpa = by);
    
     fn repeated(t: T, count: i64, gpa: Alloc) Self = {
-        // TODO: better error message if you forget the type annotataion here -- Jun 4
-        self: Self = list(count, gpa);
-        range(0, count, fn(_) => self&.push(t));
-        self
+        gpa.alloc_init(T, count, fn(_) => t).assume_owned(gpa)
     }
     
-    // TOOD: rename shallow_clone?
-    // Can't reuse the allocation because drop() will free it. TODO: COW?
     fn clone(from: Slice(T), gpa: Alloc) Self = {  // TODO: better error message if you put the = on the wrong side of the type
-        self: Self = list(from.len(), gpa);
-        self&.push_all(from);
-        self
+        from.shallow_copy(gpa).assume_owned(gpa)
     }
     
-    fn clone(from: *Self) Self = {  // TODO: better error message if you put the = on the wrong side of the type
-        self: Self = list(from.len(), from.gpa);
-        self&.push_all(from.items());
-        self
-    }
+    fn clone(from: *Self) Self = from.items().clone(from.gpa);
     
     fn clone(from: Self) Self #inline = from&.clone();
     
@@ -485,19 +474,15 @@ fn concat(bytes: ~SSu8, in: Alloc) []u8 #where = {
 // Since this is #fold, the length check happens during compilation if the argument to a call is a constant.
 // So this function can take the place of a char literal in other languages without new syntax. 
 fn char(s: Str) i64 #fold = {
-    // TODO: can't get field of const cause cant take pointer. 
-    // TODO: @assert that takes a format string so its less painful to print the arg as well. 
-    assert(s.len().eq(1), "char str expected length 1. TODO: utf8"); 
+    @debug_assert(s.len == 1, "char str expected length 1. TODO: utf8. s=%", s); 
     s[0].zext()
 }
 
 // The intent is that you always call this with a constant argument and use it like C's '' literals.
 fn ascii(s: Str) u8 #fold = {
-    c: i64 = s[0].zext();
-    // TODO: safety checked intcast instead of trunc?
-    assert(s.len().eq(1), "ascii str expected length 1"); 
-    assert(c.lt(128), "expected ascii"); // TODO: make an @assert fmt version. 
-    c.trunc()
+    // can't use the formatting version of assert because this is called from format_into() and there's no bootstrapping step
+    @if(@run(__driver_abi_version >= 1512)) @debug_assert(s.len == 1 && s[0] < 128, "expected ascii"); 
+    s[0]
 }
 
 fn reserve_type(bytes: *List(u8), $T: Type) *T #generic = {
@@ -537,6 +522,5 @@ fn zero_pad_len_to_align(bytes: *List(u8), align: i64) void = {
 }
 
 fn push_zeroes(self: *List(u8), count: i64) void = {
-    self.reserve(count);
-    range(0, count, fn(_) => self.push(0));  // TODO: be less silly 
+    self.push_repeated(count, 0);
 }

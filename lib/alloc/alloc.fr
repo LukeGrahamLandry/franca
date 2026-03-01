@@ -9,9 +9,6 @@
 //! which is 32 bit and 4GB really isn't enough memory to pretend you'll never run out. 
 //!
 
-// TODO: it seems like a good idea to allow it to return more memory than you asked for (like for a growable collection),
-//       so this would return a slice. but rust's GlobalAlloc and zig's allocator interface don't do that so maybe there's a reason. 
-//       tho rust's new Allocator does return a slice. 
 // TODO: add resize function that tries to extend an allocation in place if possible. 
 Alloc :: @struct {
     data: rawptr;
@@ -193,46 +190,12 @@ fn page_size() i64 = {
             @if(query_current_arch() == .aarch64, 16384, 4096)) // macos
 }
 
-ExecSlice :: @struct(ptr: rawptr, len: i64); 
-
-fn make_write(arr: ExecSlice) Slice(u8) = {
-    ptr := arr.ptr;
-    prot := bit_or(@as(i64) MapProt.Write, @as(i64) MapProt.Read);
-    res := Syscall'mprotect(ptr, arr.len, prot);
-    assert(res.value.eq(0), "mprotect failed");
-    (ptr = u8.ptr_from_raw(ptr), len = arr.len)
-}
-
-/// Read the comment on clear_instruction_cache
-/// SAFETY: 'arr' must be from 'os_alloc' and not written to until 'make_write' is called on it.   
-fn make_exec(arr: Slice(u8)) ExecSlice = {
-    ptr := u8.raw_from_ptr(arr.ptr);
-    prot := bit_or(@as(i64) MapProt.Exec, @as(i64) MapProt.Read);
-    res := Syscall'mprotect(ptr, arr.len, prot);
-    assert(res.value.eq(0), "mprotect failed");
-    (ptr = ptr, len = arr.len)
-}
-
-fn os_dealloc(arr: ExecSlice) void = {
-    page_allocator.dealloc(u8, make_write(arr)); // TODO: dont do an extra syscall just for type
-}
-
-// TODO: pass requested type through generic args so this isn't so clunky. -- Jun 23
 boxed :: fn(a: Alloc, $T: Type, t: T) *T #generic = {
     out := a.box_uninit(T);
     out[] = t;
     out
 };
 
-// TODO: if i'm doing this clearly my stance on not treating allocation as fallible was wrong. 
-//       the compiler does it in the x64 backend where i wrote the encoding functions to take a list, 
-//       but the compiler allocates a big chunk of memory for the code and declares that you're never allowed to use more than that. 
-//       so that specific situation could also be fixed by less annoying generics (so you could impl the encoding for anything with push(u8)),
-//       but in general its fair for a program to have some invalient on amount of memory used even if the os would give you more than that. 
-//       but its such a pain to thread errors through everywhere, and i don't like exceptions. 
-//       TLDR: this is kinda trash but i don't have a better solution 
-//       -- Sep 8
-//
 // Can use this when you know a List won't need to grow. 
 panicking_allocator: Alloc : (data = 0.rawptr_from_int(), vptr = panicking_allocator_fn);
 panicking_allocator_fn :: fn(_: rawptr, action: Alloc.Action, ptr: rawptr, count: i64, align: i64) []u8 = {

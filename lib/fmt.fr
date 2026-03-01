@@ -1,6 +1,4 @@
 // TODO: 
-//     - be able to declare fn display for anything with a write method. really I want my old @impl syntax. 
-//     - derive fn display for structs based on fields. 
 //     - the float display/parse here is GARBAGE. use a real one if you care. 
 
 //!
@@ -52,7 +50,6 @@ fn display(self: Str, writer: *List(u8)) void = writer.write(self);
 /// Currently display is only implemented with 'Writer' being *List$u8 (TODO: need better generics). 
 /// 'Args' can be any types that have fn display(Self, Writer) void;
 /// 'fmt_spec_str' must be a const string value. '%' characters will be replaced (like printf, you just don't need the type hint).
-// TODO: double '%%' to actually put a literal '%' 
 #macro 
 fn fmt(arg: FatExpr) FatExpr = {
     arg := compile_ast(arg);
@@ -64,8 +61,6 @@ fn fmt(arg: FatExpr) FatExpr = {
     format_into(writer, args.rest(1), arg.loc)
 }
 
-// compiler bug: if you get a `Assertion Failed: Not typechecked:` here, try @enum(i64)(...) instead of @enum(...) somewhere random. 
-//               hopefully new sema can fix this -- Aug 15
 fn format_into(writer: FatExpr, args: Slice(FatExpr), loc: Span) FatExpr = {
     fmt_string := const_eval(Str)(args[0]);
     if args.len == 1 {
@@ -86,12 +81,12 @@ fn format_into(writer: FatExpr, args: Slice(FatExpr), loc: Span) FatExpr = {
     if(parts.len != params.len + 1, => compile_error("Fmt specifier count mismatch", loc));
     
     count := parts.len().add(params.len());
-    actions: List(FatExpr) = list(count, ast_alloc());  // TODO: with_capacity_exact or shrink_to_fit at the end or have FatExpr.Tuple expose that its a Vec not a Slice 
+    actions: List(FatExpr) = list(count, ast_alloc());
     
     // TODO: reserve space for known length args. 
     emit :: fn(msg1: FatExpr) void => {
         if msg1.expr&.is(.Value) && msg1.ty == FuncId {
-            // TODO: this is a bit of a hash because it relies on evaluation order and 
+            // TODO: this is a bit of a hack because it relies on evaluation order and 
             //       on aliasing the writer list.  
             actions&.push(@{ @[msg1]() });
         } else {
@@ -122,7 +117,6 @@ fn format_into(writer: FatExpr, args: Slice(FatExpr), loc: Span) FatExpr = {
         s.sym().str()  // deduplicate in the compiler's string pool
     };
     
-    // TODO: zip iterators
     enumerate params { i, param |
         emit(param[]);
         
@@ -137,7 +131,6 @@ fn format_into(writer: FatExpr, args: Slice(FatExpr), loc: Span) FatExpr = {
 #macro 
 fn prepend_tuple(arg: FatExpr, target: FatExpr) FatExpr = {
     target := compile_ast(target);
-    // TODO: now that i dont double track types, this will break everything if you do it to an int literal. -- May 1
     if target.expr&.is(.Tuple) {
         original := target.expr.Tuple.items();
         tuple := FatExpr.list(original.len + 1, ast_alloc()); 
@@ -162,7 +155,7 @@ fn prepend_tuple(arg: FatExpr, target: FatExpr) FatExpr = {
 fn println(arg: FatExpr) FatExpr = @{
     out: List(u8) = list(0, temp());
     @fmt(@prepend_tuple(out&) @[arg]);
-    out&.push_all(::"\n");  // TODO: shouldn't need the :: here
+    out&.push_all("\n");
     print(out&.items());
 };
 
@@ -170,7 +163,7 @@ fn println(arg: FatExpr) FatExpr = @{
 fn eprintln(arg: FatExpr) FatExpr = @{
     out: List(u8) = list(0, temp());
     @fmt(@prepend_tuple(out&) @[arg]);
-    out&.push_all(::"\n");  // TODO: shouldn't need the :: here
+    out&.push_all("\n");
     eprint(out&.items());
 };
 
@@ -275,7 +268,6 @@ fn display(self: Type, writer: *List(u8)) void = {
 
 // Note: at comptime with compiler symbols you could use .c_str but the compiler itself cant which makes it annoying 
 fn display(self: Symbol, writer: *List(u8)) void = {
-    // TODO: !!!! don't use c str! but need to have less sketchy tuple abi. 
     display(self.id(), writer);
 }
 
@@ -293,10 +285,6 @@ fn display(self: *CStr, writer: *List(u8)) void = self[].display(writer);
 fn display(self: void, writer: *List(u8)) void = display("()", writer);
 
 fn display(self: f64, writer: *List(u8)) void = {
-    // TODO: if you try to inline this into the macro call, it crashes trying to compile in fn fmt. 
-    //       bus error. works on cranelift tho which is fun. 
-    //       works if you call self.int here and then also inline it so its a problem with adding it as a callee?
-    //       -- May 26
     if self.is_nan() {
         return(display("NaN", writer));
     };
@@ -308,11 +296,6 @@ fn println(self: CStr) void = @println("%", self);
 
 ::if(Str);
 fn str(self: bool) Str = if(self, => "true", => "false");
-
-// TODO: this whole model of resolving the overload up front doesn't work because you need to call different functions 
-//       at compiletime or runtime depending on the target arch. So need to delay as long as possible by passing in the overload set. 
-//       Alternatively, I could go through with the Expr::Either but that feels like special casing just for the ct/rt. 
-
 
 //////
 /// CStr
@@ -369,8 +352,7 @@ fn alloc_cstr(s: []u8, in: Alloc) CStr = {
 } 
 
 fn println(msg: bool) void = {
-    msg := if(msg, => "true", => "false");
-    println(msg);
+    print(@if(msg, "true\n", "false\n"));
 }
 
 fn println(i: i64) void = {
@@ -435,7 +417,6 @@ fn hex(s: Str) ?i64 = {
     (Some = i)
 }
 
-// TODO: this should return an error. 
 fn parse_int(s: Str) i64 = {
     i, rest := convert_number(s, 10, dec_digit);
     @assert_eq(rest.len, 0, "invalid input to parse_int()");
@@ -475,7 +456,6 @@ fn dec_digit(cc: u8) ?i64 = {
     (Some = c - "0".char())
 }
     
-// TODO: this should return an error. 
 fn float(s: Str) f64 = {
     i, rest := parse_float(s);
     @assert_eq(rest.len, 0, "invalid input to float: %", s);
@@ -675,10 +655,9 @@ fn println_bytes(s: []u8) void = {
     print(out.items());
 }
 
-// 
+// *_UNBUFFERED
 // These are extra :SLOW so serious programs shouldn't used them, 
 // but they're convenient for a few little tests. 
-//
 
 putchar_UNBUFFERED :: fn(c: u8) void = {
     s: []u8 = (ptr = c&, len = 1);

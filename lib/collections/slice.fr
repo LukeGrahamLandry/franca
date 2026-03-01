@@ -82,8 +82,6 @@ fn Slice($T: Type) Type = {
    
     fn copy_from(dest: Self, src: Self) void #inline = {
         @safety(.Bounds) dest.len == src.len;
-        // TODO: make this less painful to look at
-        //copy_aligned(T.raw_from_ptr(dest.ptr), T.raw_from_ptr(src.ptr), dest.len * T.size_of(), T.align_of());
         copy_overlapping(T.raw_from_ptr(dest.ptr), T.raw_from_ptr(src.ptr), dest.len * T.size_of());
     }
     
@@ -194,7 +192,6 @@ fn deep_clone(out: ~S, self: S, a: Alloc) void #where(PointerTo(IsSlice)) = {
 fn bake_relocatable_slice_erased(addr: rawptr, length: i64, T: Type) []BakedEntry = {
     ::List(BakedEntry); ::if(BakedEntry); ::if(BakedVarId);
     
-    // TODO: StructName.(initilizer) so you're not forced to use @as or put the type on the other side? 
     len: BakedEntry = (Num = (value = length));
     ptr: BakedEntry = if length == 0 {
         // TODO: should we make this non-zero so you can pass them to rust? 
@@ -217,16 +214,13 @@ fn bake_relocatable_slice_erased(addr: rawptr, length: i64, T: Type) []BakedEntr
         info := get_meta(T);
         size_of: i64 = info.stride_bytes.zext();
         // TODO: assert alignment
-        // TODO: assert len isnt big enough to be a pointer?
-        // TODO: need to check against c.baked.lookup (the first ptr not each individual element) :BLOAT
-        bytes: []u8 = (ptr = u8.ptr_from_int(addr), len = length * size_of); // TODO: decide if i need to clone. 
+        bytes := u8.ptr_from_int(addr).slice(length * size_of); // TODO: decide if i need to clone. 
         
         // TODO: this is wrong because what if someone previously baked a smaller new into the same memory.   :FUCKED -- Jul 16
         //       we need to still emit and compare to make sure we would have baked the same thing? 
         //       should that be a compile error or just have two? what if someone was relying on them being aliased? 
         arr := create_array_type(T, length);
         id, addend := emplace_bake(bytes, arr) {
-            //@println("baking a new slice %*%=%", length, size_of, bytes.len);
             ::if(BakedVar);
             if info.contains_pointers {
                 parts: List(BakedEntry) = list(ast_alloc());
@@ -253,7 +247,6 @@ fn bake_relocatable_slice_erased(addr: rawptr, length: i64, T: Type) []BakedEntr
 // The first element is used for type inference. TODO: let macros access the expression's result location type. 
 // 
 // this is better than making an @slice on the stack and then copying. 
-// but also @slice on the stack miscompiles if the length is > 50. 
 //
 #macro fn slice(elements: FatExpr, allocator: FatExpr) FatExpr = {
     e := elements&.items();
@@ -277,13 +270,6 @@ fn bake_relocatable_slice_erased(addr: rawptr, length: i64, T: Type) []BakedEntr
         }]
     }
 }
-
-#macro fn list(elements: FatExpr, allocator: FatExpr) FatExpr = @{
-    a := @[allocator];
-    s := @slice(@[elements]) a;
-    s: List(@type s[0]) = (maybe_uninit = s, len = s.len, gpa = a);
-    s
-};
 
 #macro fn const_slice(elements: FatExpr) FatExpr = @{
     :: @slice(@[elements]) ast_alloc()
@@ -439,7 +425,6 @@ fn HashEach($Collection: Type, $Hasher: Type) void = {
 // for now this only works for contiguous memory (and expects to be used via DeriveAsSliceIndexable)
 //
 // Note: Passing *Self and Self mean different things. Containers that are already logically a pointer may want both for convenience. 
-// TODO: trait bounds. fn index(Self) *T; fn len(Self) i64;
 // IMPORTANT: DO NOT impl this for a linked list! It expects fast random access to the collection!
 fn DeriveIndexable($Self: Type, $T: Type) void = {
     fn set(self: Self, i: i64, v: T) void #inline = {
@@ -448,9 +433,6 @@ fn DeriveIndexable($Self: Type, $T: Type) void = {
     
     fn get(self: Self, i: i64) T #inline = self[i];
     
-    // TODO: the other fn type syntax so you can name the arguments in the closure as documentation. 
-    // TODO: be more consistant about how tuples are expanded into args to fix Fn((a, b), c) === Fn(a, b, c) when you want Fn(Ty(a, b), c)
-    //       seems like a massive mistake that I create ambiguity and then just guess something stupid and hope for the best. 
     fn enumerate(arr: Self, $f: @Fn(i: i64, e: *T) void) void = {
         i := 0;
         it := arr.ptr;
@@ -535,10 +517,7 @@ fn DeriveIndexable($Self: Type, $T: Type) void = {
         };
         .None
     }
-    // TODO: add addr_eq/identical if that's really what you want but like... it never is I feel. 
     // TODO: for slices, if !contains_ptrs && !has_padding && no eq special overloads, just call some vectorized memcmp and skip a bunch of pointless code gen work. 
-    // TODO: if it has a trivial .items() (like lists, RawList), it would be better to convert and call eq on that 
-    //       so you don't have to generate this function many times. cause those versions wouldn't be easy to deduplicate later. 
     fn eq(lhs: Self, rhs: Self) bool = {
         @if(lhs.len != rhs.len) return(false);
         @if(lhs.ptr.identical(rhs.ptr)) return(true);  // TODO: is this too creepy? it means we might skip calling your eq overload. 

@@ -43,9 +43,7 @@ fn comptime_compute_self_hash() Array(u32, 8) = :: {
     hash := zeroed Array(u32, 8);
     @if(!IS_BOOTSTRAPPING) // :UpdateBoot
     each self.codemap.files { it |
-        // uncomment to check that the compilation order hack with set_self_hash is working. 
         if is_cachable(it.name) {
-            // @println("% %", it.name, it.hash&);
             hash = add(hash, it.hash);
         }
     };
@@ -78,7 +76,7 @@ fn files_unchanged(header: *Header, read: @FnPtr(a: Alloc, name: Str) ?Str, self
         
         break :: fn() Never => {
             if false {
-                @println("A"); // TODO
+                // :compilerbug without this: Type Error: expected Never but found Str
             };
             return(false);
         };
@@ -361,7 +359,6 @@ fn sema_frc_import(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     is_function := header.get(type)[].tag == .Func;
     
     if it.segment == .Import && !is_function {
-        //@println("import data: %", caller_name);
         // TODO: do this at the beginning since we have to anyway and otherwise it's redundant
         expr.expr = (DataSymbol = as_data_import(self, header, i));
         expr.ty = self.import_type(module, type);
@@ -370,7 +367,6 @@ fn sema_frc_import(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
 
     if @is(it.segment, .MutableData, .ConstantData, .ZeroInitData) {
         // let emit_ir.fr deal with it
-        //@println("local data: %", caller_name);
         expr.ty = self.import_type(module, type);
         expr.done = true;
         return(.Ok);
@@ -460,7 +456,6 @@ fn sema_frc_import_fid(self: *SelfHosted, module: *FrcModule, i: One(Sym)) CRes(
             };
         };
     } else {
-        //@println("import function: %", caller_name);
         lib := h.get(h.get(it.imp.lib)[].name);
         lib := self.pool.insert_owned(lib);
         @try(self.create_import_body(func, fid, lib, it.imp.weak)) return;
@@ -658,14 +653,13 @@ import_baked_var :: fn(self: *SelfHosted, shared: *FrontendCodegen, inst: *FrcMo
     slot := module.sym[zext sym.off]&;
     if slot[] != Qbe.no_symbol {
         id := bit_cast_unchecked(u32, BakedVarId, slot[]);
-        @debug_assert_ult(@as(i64) zext id.id, self.baked.values.len);
+        @debug_assert_ult(@as(i64) zext id.id, self.baked.values&.len());
 
         // :TheOtherWayDoesNotWorkOnExamplesTerminal
         // TODO: don't do this every time but find_module puts junk in there
         //if inst.syms[zext sym.off].id == Qbe.no_symbol {
             inst.syms[zext sym.off] = shared.m.intern(self.mangle_name(id)); 
         //}
-        //@println("reuse % = g%", h.get(it.name), id.id);
         return(Ok = id);
     };
     
@@ -680,7 +674,6 @@ import_baked_var :: fn(self: *SelfHosted, shared: *FrontendCodegen, inst: *FrcMo
     //use_symbol(shared.m, inst.syms[zext sym.off]) { s |
     //    s.pledge_local = true;
     //};
-    //@println("bake % = g%", h.get(it.name), id.id);
     
     Template :: @type dest.template;
     template: Template = @if(it.dat.bytes.off == Qbe.no_symbol, 
@@ -697,7 +690,6 @@ import_baked_var :: fn(self: *SelfHosted, shared: *FrontendCodegen, inst: *FrcMo
         } else {
             target = (BakedVarId = @try(import_baked_var(self, shared, inst, xx)) return);
         };
-        //@println("[%; %]%(%)+%", r, it.off, h.get(h.get(xx)[].name), target.BakedVarId.id, it.addend);
         relocs[r] = (target = target, off = it.off, addend = it.addend);
         r += 1;
     };
@@ -715,7 +707,6 @@ fn emit_import_ref(self: *EmitIr, it: *FrcImport, p: EmitIr.P) CRes(Qbe.Ref) = {
     @debug_assert_eq(it.table, SYM_TABLE);
     id := @try(import_baked_var(self.program, self.shared, inst, (off = it.index))) return;
     ref := self.as_ref(AddrOf = id);
-    //@println("emit_import_ref g%", id.id);
     (Ok = self.scalar_result(p, ref, i64))  // :get_or_create_type
 } 
 
@@ -744,7 +735,6 @@ fn find_module(self: *SelfHosted, shared: *FrontendCodegen, module: *FrcModule) 
             if @try(self.get_fid(module, i)) return { fid |
                 name := self.fmt_fn_name(fid);
                 syms[i.off.zext()] = shared.m.intern(name);
-                //@println("prep fid for % sym=%", name, syms[i.off.zext()].id)
             } else {
                 name_s := h.get(it.name);
                 // :TheOtherWayDoesNotWorkOnExamplesTerminal

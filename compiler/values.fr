@@ -95,13 +95,13 @@ fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type, loc: Span,
     };
     
     out := BakedReloc.list(c.get_alloc());
-    start_id := c.baked.values.len;
+    start_id := c.baked.values&.len();
     @try(c.bake_relocatable_body(value, type, out&, 0, false)) return;
     
     // It's really irritating to force the user code to pass the span around, 
     // so instead, just assume anything made inside that call can be attributed to this constant. 
     if !loc.is_null() {
-        end_id   := c.baked.values.len;
+        end_id := c.baked.values&.len();
         range(start_id, end_id) { i | 
             value := c.baked.values&.nested_index(i);
             if value.loc.is_null() {
@@ -262,7 +262,7 @@ fn from_legacy(self: *SelfHosted, legacy: BakedVar) BakedValue = {
 
 fn reserve_baked(c: *SelfHosted, jit_ptr: ?[]u8) Ty(*BakedValue, BakedVarId) #inline = {
     v := c.baked.values&;
-    id: BakedVarId = (id = v.len.trunc());
+    id: BakedVarId = (id = v.len().trunc());
     v.push(zeroed BakedValue);  // .init = false
     dest := v.nested_index(id.id.zext());
     if jit_ptr { ptr | 
@@ -515,13 +515,13 @@ fn intern_type(self: *SelfHosted, info: TypeInfo) Type = {
     if info&.should_deduplicate() {
         get_or_insert :: get_or_insert_pinky_swear_not_to_mutate_the_key;
         self.type_lookup.raw&.get_or_insert(info&, self.type_lookup.alloc, fn(key) => {
-            id: Type = from_index(self.types.len);
+            id: Type = from_index(self.types&.len());
             key[] = self.types&.push(info);  // make the pointer stable
             self.type_extra&.push(TypeMeta.zeroed()); // is_sized = false
             id
         })[]
     } else {
-        id: Type = from_index(self.types.len);
+        id: Type = from_index(self.types&.len());
         self.types&.push(info);
         self.type_extra&.push(TypeMeta.zeroed()); // is_sized = false
         id
@@ -577,7 +577,7 @@ fn update_placeholder(self: *SelfHosted, placeholder_slot: Type, real_type: Type
     @debug_assert(self.type_lookup&.get(slot&).is_none());
     self.save_guessed_name(real_type, name, loc);
     
-    i := self.type_extra.len - 1; // we happen to know this can't underflow because there are builtin types.  
+    i := self.type_extra&.len() - 1; // we happen to know this can't underflow because there are builtin types.  
     while => i > idx {
         it := self.type_extra&.nested_index(i);
         if it.is_sized {
@@ -593,7 +593,7 @@ fn update_placeholder(self: *SelfHosted, placeholder_slot: Type, real_type: Type
 // because i assume im allowed to use these common ones 
 // as literals without calling intern_type. 
 fn init_fixed_types(self: *SelfHosted) void = {
-    @debug_assert_eq(self.types.len, 0);
+    @debug_assert_eq(self.types&.len(), 0);
     self.intern_type(.Placeholder);  // UnknownType
     self.intern_type(.void);
     self.opaque_index(.Type);
@@ -799,7 +799,7 @@ fn get_info_outlined(self: *SelfHosted, ty_original: Type, old_original: *TypeMe
 }
 
 fn finish_layout_deep(self: *SelfHosted, ty: Type) void = {
-    @debug_assert_ule(ty.as_index(), self.types.len);
+    @debug_assert_ule(ty.as_index(), self.types&.len());
     if(self.finished_layout_deep&.get(ty.as_index()), => return());
     self.finished_layout_deep&.set(ty.as_index()); // do this at the beginning to stop recursion.
     self.finish_layout(ty);
