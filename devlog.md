@@ -1,3 +1,6 @@
+## (Mar 1)
+
+- to use the normal test running in examples/os i need "processes", this shall be a long road. 
 
 ## (Feb 28)
 

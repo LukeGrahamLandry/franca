@@ -1,0 +1,27 @@
+
+ppoll :: fn(fd_p: *Posix.pollfd, fd_n: i64, timeout: *TimeSpec, sigmask: i64) i64 = {
+    @debug_assert_eq(sigmask, 0, "TODO: poll sigmask");
+    ::ptr_utils(@type timeout[]);
+    blocking := timeout.is_null();
+    @debug_assert(blocking || (timeout.seconds == 0 && timeout.nanoseconds == 0), "TODO: poll timeout");
+    ::[]@type fd_p[];
+    fd := fd_p.slice(fd_n);
+    @trace("poll(hang=%)", blocking);
+    n := 0;
+    dowhile {
+        each fd { it |
+            if get_file(it.fd) { f |
+                mask := it.events.bit_or(Posix.POLL.HUP);
+                result := f'vtable'poll(f.data);
+                it.revents = mask.bit_and(result.trunc());
+                n += int(it.revents != 0);
+            };
+            if it.fd.fd < 0 {
+                it.revents = 0;
+            };
+        };
+        // TODO: don't busy wait
+        blocking && n == 0
+    };
+    n
+}

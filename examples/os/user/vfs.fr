@@ -42,6 +42,7 @@ FileVTable :: @struct {
     ioctl: @FnPtr(self: rawptr, op: i64, data: rawptr) i64 = (fn(_0, _1, _2) = -1);
     ioctls: []Ty(i64, IoctlErased) = empty();
  truncate: @FnPtr(self: rawptr, a: i64) void = (fn(_0, _1) = ());
+     poll: @FnPtr(self: rawptr) Posix'Mask(Posix.POLL, i64) = (fn(_0) = 0);
 };
 
 FStatOut :: @struct {
@@ -241,6 +242,7 @@ MemFileRO :: @struct {
         out.st_mode = Posix.S.IFREG;
         0
     };
+    poll :: fn(self) = Posix.POLL.IN;
 };
 
 MemFile :: @struct {
@@ -271,6 +273,7 @@ MemFile :: @struct {
     truncate :: fn(self, a) = {
         self.contents.len = 0;
     }
+    poll :: fn(self) = @or(Posix.POLL.IN, Posix.POLL.OUT);
 };
 
 StdoutFile :: @struct {
@@ -289,6 +292,7 @@ StdoutFile :: @struct {
         @assert(identical(done.bufs[0].ptr, src.ptr));
         src.len
     };
+    poll :: fn(self) = Posix.POLL.OUT;
 };
 
 StdinFile :: @struct {
@@ -320,6 +324,7 @@ StdinFile :: @struct {
         };
         dest.len
     };
+    poll :: fn(self) = @panic("TODO: StdinFile.poll");
 };
 
 MemDir :: @struct {
@@ -410,6 +415,61 @@ MemDir :: @struct {
     };
     
 };
+
+PipeFile :: @struct {
+    is_read: bool;
+    it: *Backing;
+    Backing :: @struct {
+        q: UQueue'QRing'Tube(u8);  // :SLOW don't do 1 byte at a time
+        refs: i64;
+    };
+    read :: fn(self, dest, _) = {
+        @debug_assert(self.is_read, "read from write end of pipe");
+        i := 0;
+        while => i < dest.len && self.it.q.committed.bouba > self.it.q.claimed.kiki {
+            dest[i] = self.it.q&.pop();
+            i += 1;
+        };
+        i
+    };
+    write :: fn(self, src, _) = {
+        @debug_assert(!self.is_read, "wrote to read end of pipe");
+        for src { it |
+            self.it.q&.push(it);
+        };
+        src.len
+    };
+    close :: fn(self) = {
+        self.it.refs -= 1;
+        if self.it.refs == 0 {
+            fs.allocator.dealloc(u8, self.it.q.ring);
+            fs.allocator.dealloc_one(PipeFile.Backing, self.it);
+        }
+    };
+    poll :: fn(self) = {
+        r := 0;
+        @if(self.it.refs < 2) { r = r.bit_or(Posix.POLL.HUP); };  // closed
+        
+        @if(self.is_read)
+        @if(self.it.q.committed.bouba > self.it.q.claimed.kiki) 
+        { r = r.bit_or(Posix.POLL.IN); };
+        
+        @if(!self.is_read)
+        @if(self.it.q.committed.kiki - self.it.q.claimed.bouba != self.it.q.ring.len.trunc()) 
+            { r = r.bit_or(Posix.POLL.OUT); };
+        
+        r
+    }
+
+};
+
+create_pipe :: fn() Array(Fd, 2) = {
+    p := fs.allocator.box_zeroed(PipeFile.Backing);
+    p.refs = 2;
+    p.q.ring = fs.allocator.alloc_uninit(u8, 2048);
+    (Vfs'push_file(Vfs.PipeFile, (is_read = true, it = p)),
+     Vfs'push_file(Vfs.PipeFile, (is_read = false, it = p)))
+}
 
 fn push_file($T: Type, data: T) Fd #generic = {
     data := fs.allocator.boxed(T, data);

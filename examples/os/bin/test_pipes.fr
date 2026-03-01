@@ -1,0 +1,32 @@
+
+main :: fn() void = {
+    pipes :: @static(Array(Array(Fd, 2), 2));
+    each pipes { p |
+        Syscall'pipe(p).unwrap();
+    };
+    fd := pipes[0]&[0];
+    @assert_eq(poll(fd), 0);
+    t := start_thread_nodata {
+        buf := msg;
+        fd := pipes[0]&[1];
+        @assert_eq(poll(fd), Posix.POLL.OUT);
+        Syscall'write(fd, buf.ptr, buf.len).unwrap();
+        Syscall'close(fd);
+        pipes[0]&[1].fd = -1;
+    };
+    t.join();
+    @assert_eq(poll(fd), @or(Posix.POLL.IN, Posix.POLL.HUP));
+    buf := temp().alloc_zeroed(u8, 64);
+    buf.len = Syscall'read(fd, buf.ptr, buf.len).unwrap();
+    @assert_eq(poll(fd), Posix.POLL.HUP);
+    @assert_eq(buf, msg);
+    each(pipes, fn(it) => for(it, fn(it) => Syscall'close(it)));
+    println(buf);
+    msg :: "Hello World!";
+}
+
+poll :: fn(fd: Fd) i64 = {
+    fd := @slice(@as(Posix.pollfd) (fd = fd, events = @or(Posix.POLL.IN, Posix.POLL.OUT), revents = 0));
+    Posix'poll(fd, 0).unwrap();
+    fd[0].revents.zext()
+};

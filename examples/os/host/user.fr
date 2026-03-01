@@ -14,6 +14,13 @@
 
 // TODO: it shouldn't take 20 lines of code just to use entry() instead of main(). 
 driver :: fn(vtable: *ImportVTable) void = {
+    bootargs := @ref u8.list(temp());
+    if cli_args().index_of(fn(it) => it[] == "-append") { i |
+        @assert(i + 1 < cli_args().len(), "usage: -append \"<boot-args>\"");
+        bootargs.push_all(cli_args().index(i + 1)[].str());
+        bootargs.push_all(";");
+    };
+
     start := timestamp();
     m := @ref @uninitialized Qbe.Module;
     // TODO: args for arch/os/syscalls
@@ -46,8 +53,10 @@ driver :: fn(vtable: *ImportVTable) void = {
     c'vtable'destroy_compiler(c.data);
     #use("@/lib/sys/subprocess.fr");
     
-    if can_run {
-        exec("target/os.out", empty());  // better than run_cmd_blocking because debuggers can follow this way
+    if can_run || bootargs.len != 0 {
+        @if(!can_run) eprintln("had -append so will try exec but host != target so this probably won't work unless you have multiarch setup");
+        args := make_args_for_exec(out, @slice(bootargs.items()), temp());
+        exec(out.as_cstr(), args);  // better than run_cmd_blocking because debuggers can follow this way
         unreachable();
     };
 }
@@ -60,6 +69,7 @@ entry :: fn() void = {
         perform_syscall.body = (Redirect = user_handle_syscall);
     };
     
+    bootargs := @if(cli_args().len() > 1, cli_args()[1], "");  // semicolon separated startup commands
     host_syscalls.prefer_syscalls = tls(.prefer_syscalls)[];
     host_syscalls.current_os = tls(.current_os)[];
     
@@ -113,9 +123,10 @@ entry :: fn() void = {
     
     // keep in sync with kernel/start.fr/user_exec()
     device_tree_bytes: [](@type dt) = (ptr = dt&, len = 1);
-    cli := temp().alloc_zeroed(CStr, 3);
+    cli := temp().alloc_zeroed(CStr, 4);
     cli[0].ptr = device_tree_bytes.interpret_as_bytes().as_ptr();
     cli[1] = @fmt_cstr("page_size=%", page_size());
+    cli[2] = bootargs;
     tls(.cli_arguments)[] = cli;
     
     // can't be libc_allocator because redo_relocations_static_linux stomps malloc/free with ones that use general_allocator. 
