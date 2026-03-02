@@ -8,6 +8,9 @@
     it would be more similar to native but that became a bit of a nightmare because of aliases so 
     each symbol can have multiple got slots and i don't want to add back more special cases to unify them.
   - just commit to only doing assign at startup and then close doesn't care because imports can't be unloaded
+- another layer of indirection for FileHandle and refcount them. still very sketchy rn. 
+  added more debug info to the `ps` command. leak less. 
+- something's fucked with one specific cas when using host/user??
 
 ## (Feb 28)
 

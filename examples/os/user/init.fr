@@ -137,19 +137,33 @@ decode_and_run_cmd :: fn(full_command: Str) void = {
                 };
                 @case("ps") => {
                     out := u8.list(temp());
-                    f(root_thread_group, out&, 0);
+                    show_files := parts.len > 1 && parts[1].contains("f");
+                    f(root_thread_group, out&, 0, show_files);
                     print(out.items());
-                    f :: fn(g: *ThreadGroup, out: *List(u8), depth: i64) void = {
+                    f :: fn(g: *ThreadGroup, out: *List(u8), depth: i64, show_files: bool) void = {
+                        with g.vfs.mutex& {
                         out.push_repeated(depth*2, " ".ascii());
-                        @fmt(out, "+ (threads=%, children=%, files=%)\n", 
-                            g.threads.len, g.children.len, g.vfs.fd.len);
+                        @fmt(out, "G (threads=%, children=%, files=%, cwd=%)\n", 
+                            g.threads.len, g.children.len, g.vfs.fd.len - g.vfs.free.len, g.vfs.cwd.fd);
                         for g.threads { it |
                             out.push_repeated((depth + 1)*2, " ".ascii());
-                            @fmt(out, "- (tid=%, idx=%%)\n", 
+                            @fmt(out, "T (tid=%, idx=%%)\n", 
                                 it.tid, it.first_environment.thread_index,
                                 @if(it.tid_futex == 0, ", DONE", ""));
                         };
-                        for(g.children, fn(it) => f(it, out, depth + 1));
+                        if show_files {
+                            enumerate g.vfs.fd { i, it |
+                                if it.refs > 0 {
+                                    ::FmtPad(i64);
+                                    out.push_repeated((depth + 1)*2, " ".ascii());
+                                    @fmt(out, "F % >%(#%, %)\n", 
+                                        f_pad(i, 3, .Before), f_pad(it.uid.zext(), 5, .Before), 
+                                        it.refs, => it'vtable'debug(it.data, out));
+                                }
+                            };
+                        };
+                        for(g.children, fn(it) => f(it, out, depth + 1, show_files));
+                        };
                     };
                 };
                 @default => {
@@ -531,7 +545,7 @@ time <on, off>       (log runtime after running a program)
 nocache <on, off>    (recompile every time instead of saving .frc)
 uptime               (read the system counter)
 devicetree           (show hardware info from the boot loader)
-ps                   (list running threads)
+ps [-f]              (list running threads)
 
 example programs:
 test_fuse

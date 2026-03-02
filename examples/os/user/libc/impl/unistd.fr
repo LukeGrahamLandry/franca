@@ -38,15 +38,27 @@ close :: fn(f: Fd) i64 = {
     fs := get_vfs();
     @if(f.fd == { xxx := LinuxLibc.AT_FDCWD; xxx.fd }) return(-1);
     fd := get_file(f) || return(-1);
+    old_refs: i32 = -1;
+    use_file f { f |
+        old_refs = i32.atomic_add(f.refs&, -1);
+    };  
     ::ptr_utils(@type fd.vtable[]);
     @if(identical(fd.vtable, closed_file_vtable)) return(-1);
     @trace("close(%)", f.fd);
+    @if(old_refs > 1) return(0);
+    @debug_assert_eq(old_refs, 1);
     fd'vtable'close(fd.data);
     fs.mutex&.lock();
     // default impl for everything to just error
-    closed_file_vtable :: @static(FileVTable) { xxx: FileVTable = (); xxx };
-    fs.fd[f.fd.intcast()] = (vtable = closed_file_vtable, data = zeroed(rawptr));
+    closed_file_vtable :: @static(FileVTable) { 
+        it: FileVTable = ();
+        it.debug = fn(self, out) = @fmt(out, "CLOSED");
+        it 
+    };
+    closed_file_instance :: @static(FileInstance) (vtable = closed_file_vtable, data = zeroed(rawptr), refs = 0);
+    fs.fd[f.fd.intcast()] = closed_file_instance;
     fs.free&.push_back(f, fs.allocator);
+    fs.allocator.dealloc_one(FileInstance, fd);
     fs.mutex&.unlock();
     // note: not freeing fd.data because it's owned by the directory.
     0
@@ -125,12 +137,13 @@ fstatat :: fn(fd: Fd, path: CStr, out: *Syscall.SysStat, _: i64) i64 = {
 mkdirat :: fn(parent: Fd, path: CStr, mode: i64) i64 = {
     parent2, path2 := follow_path_prefix(parent, path.str()) 
         .or(fn(e) => return(e));
-    // TODO: don't :leak if parent2 != parent
-    
     @trace("mkdir(%, %) => mkdir(%, %)", parent.fd, path, parent2.fd, path2);
     f := get_file(parent2) || return(-1);
     result := f'vtable'mkdir(f'data, path2, mode);
     @trace("mkdir(%, %, %) = %", parent.fd, path, mode, result);
+    if parent2.fd != parent.fd {
+        Syscall'close(parent2);
+    };
     result
 }
 
@@ -148,14 +161,22 @@ access :: fn(path: CStr, mode: i64) i64 = {
 renameat :: fn(old_dir: Fd, old: CStr, new_dir: Fd, new: CStr) i64 = {
     new_dir2, new_file := follow_path_prefix(new_dir, new.str()) 
         .or(fn(e) => return(e));
-    old_dir2, old_file := follow_path_prefix(old_dir, old.str()) 
-        .or(fn(e) => return(e));  // :leak
-    // :leak
-    // TODO: don't leak the newly opened fds
+    old_dir2, old_file := or follow_path_prefix(old_dir, old.str()) { e |
+        if new_dir2.fd != new_dir.fd {
+            Syscall'close(new_dir2);
+        };
+        return(e)
+    };
 
     f := get_file(old_dir2) || return(-1);
     result := f'vtable'rename(f'data, new_dir2, old_file, new_file);
     @trace("renameat(%, %, %, %) = %", old_dir.fd, old, new_dir.fd, new, result);
+    if old_dir2.fd != old_dir.fd {
+        Syscall'close(old_dir2);
+    };
+    if new_dir2.fd != new_dir.fd {
+        Syscall'close(new_dir2);
+    };
     result
 }
 
@@ -171,3 +192,15 @@ chdir :: fn(path: CStr) i64 = {
 }
 
 getpid :: fn() i32 = 42;  // needed for anon_temp_path
+
+dup2 :: fn(old: Fd, new: Fd) Fd = {
+    fs := get_vfs();
+    @if(old.fd == new.fd) return(new);
+    old := get_file(old) || return(fd = -1);
+    with fs.mutex& {
+        _ := Syscall'close(new);
+        i32.atomic_add(old.refs&, 1);
+        fs.fd[new.fd.intcast()] = old;
+    };
+    new
+}

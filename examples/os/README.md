@@ -44,12 +44,16 @@ For debugging you can also run the userspace part without the kernel
 
 ## incomplete
 
+- MemDir ref counts / shallow copying children is very sketchy
 - mprotect
 - multiple address spaces
 - block device
 - persistant file system
-- exec and capture stdout
-- thread groups and clean up resources when all exit
+- clean up resources when main thread in a group exits
+- wait, exit_group vs exit_thread
+- posix_spawn an actual program not just a stub that prints something useless
+- don't busy wait in poll
+- sigaction api
 - dlopen
 - ptrace
 - swapping
@@ -69,12 +73,13 @@ For debugging you can also run the userspace part without the kernel
 - rest of the libc functions needed for all my tests:
 ```
    "unlinkat", 
-   "wait4", "pipe", "mkstemp", "dup2",
-   "readlinkat", "mkdirat", 
+   "wait4", 
+   "mkstemp",
+   "readlinkat",
    "sigaction",
    "localtime_r", 
    "snprintf", 
-   "ppoll", "execve",
+   "execve",
    fmodf, fmod, sinf, cosf
 ```
 - compile with import_c and mount it in the vfs:

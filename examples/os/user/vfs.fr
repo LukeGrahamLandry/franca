@@ -21,16 +21,32 @@ Fs :: @struct {
 };
 root_console_stdin :: @static(*UQueue);
 
-FileHandle :: @rec @struct {
+FileHandle :: *FileInstance;
+FileInstance :: @rec @struct {
     vtable: *FileVTable;
     data: rawptr;
     position := 0;
+    refs: i32 = 0;
+    uid: u32 = 0;  // only used for debug printing
 };
+
+/* TODO: examples/os/host/user.fr :FUCKED
+0xaaaaaabc5308 <+24>: adrp   x2, 24296
+0xaaaaaabc530c <+28>: add    x2, x2, #0x200 ; g10793
+0xaaaaaabc5310 <+32>: mov    w2, w2   TODO: crack is being smoked ??
+0xaaaaaabc5314 <+36>: mov    w17, w1
+0xaaaaaabc5318 <+40>: cas    w17, w0, [x2]
+*/
+//global_next_file_id :: @static(u32);
+//get_next_file_id :: fn() u32 = u32.atomic_inc(global_next_file_id);
+global_next_file_id :: @static(i64);
+get_next_file_id :: fn() u32 = i64.atomic_inc(global_next_file_id).trunc();
 
 FileVTable :: @struct {
      read: @FnPtr(self: rawptr, buf: []u8, position: i64) i64 = (fn(_0, _1, _2) = -1);
     write: @FnPtr(self: rawptr, buf: []u8, position: i64) i64 = (fn(_0, _1, _3) = -1);
     lseek: @FnPtr(self: rawptr, offset: i64, whence: Whence, position: *i64) i64 = (fn(_0, _1, _2, _4) = -1);
+   // only called when FileInstance.refs==0 (so after the last close call in the last process)
     close: @FnPtr(self: rawptr) void = fn(self) = ();
    openat: @FnPtr(self: rawptr, path: CStr, flags: i64, mode: i64) i64 = (fn(_0, _1, _2, _3) = -1);
     fstat: @FnPtr(self: rawptr, out: *FStatOut) i64 = (fn(_0, _1) = -1);
@@ -42,6 +58,7 @@ FileVTable :: @struct {
     ioctls: []Ty(i64, IoctlErased) = empty();
  truncate: @FnPtr(self: rawptr, a: i64) void = (fn(_0, _1) = ());
      poll: @FnPtr(self: rawptr) Posix'Mask(Posix.POLL, i64) = (fn(_0) = 0);
+    debug: @FnPtr(self: rawptr, out: *List(u8)) void = (fn(_0, _1) = ());
 };
 
 FStatOut :: @struct {
@@ -171,6 +188,8 @@ fn create_child_dir(parent: FileHandle, name: Str) Ty(FileHandle, *MemDir) = {
     p := MemDir.ptr_from_raw(parent.data);
     child := create_child(p, name, MemDir, (files = empty()));
     c := MemDir.ptr_from_raw(child.data);
+    @debug_assert_eq(child.refs, 1);
+    // not _inc(_.refs&, 1) because don't want reference cycle. MemDir.mkdir doesn't pass in the real one anyway.
     c.files&.push((name = ".", handle = child), fs.allocator);
     c.files&.push((name = "..", handle = parent), fs.allocator);
     (child, c)
@@ -182,7 +201,8 @@ fn create_child(self: *MemDir, name: Str, $T: Type, data: T) FileHandle #generic
         @assert_ne(it.name, name, "create_child: duplicate");
     };
     data := fs.allocator.boxed(T, data);
-    fd: FileHandle = (vtable = get_vtable(T), data = T.raw_from_ptr(data));
+    fd := fs.allocator.boxed(FileInstance, (vtable = get_vtable(T), data = T.raw_from_ptr(data), refs = 1));
+    fd.uid = get_next_file_id();
     self.files&.push((name = name, handle = fd), fs.allocator);
     fd
 }
@@ -237,6 +257,7 @@ get_vtable :: fn($T: Type) *FileVTable = @static(FileVTable) {
 MemFileRO :: @struct {
     contents: []u8;
     
+    debug :: fn(self, out) = @fmt(out, "MemRO(%)", self.contents.len);
     read :: fn(fd, dest, pos) = {
         dest.len = min(dest.len, fd.contents.len - pos).max(0);
         src := fd.contents.subslice(pos, dest.len);
@@ -255,6 +276,7 @@ MemFileRO :: @struct {
 MemFile :: @struct {
     contents: RawList(u8);
     
+    debug :: fn(self, out) = @fmt(out, "MemRW(%)", self.contents.len);
     read :: fn(self, dest, pos) = {
         dest.len = min(dest.len, self.contents.len - pos).max(0);
         src := self.contents.items().subslice(pos, dest.len);
@@ -287,6 +309,7 @@ MemFile :: @struct {
 StdoutFile :: @struct {
     queue: *UQueue;
     
+    debug :: fn(self, out) = @fmt(out, "Console(out)");
     write :: fn(self, src, _) = {
         q := self.queue;
         q'poll(q, 1);
@@ -308,6 +331,7 @@ StdinFile :: @struct {
     bufs: [][]u8 = empty();
     buf: []u8 = empty();
     
+    debug :: fn(self, out) = @fmt(out, "Console(in)");
     read :: fn(self, dest, _) = {
         // TODO: don't hardcode blocking + MIN=1 + timeout=infinity (which is what interactive_read_line wants)
         
@@ -341,6 +365,7 @@ MemDir :: @struct {
         name: Str;
         handle: FileHandle;
     };
+    debug :: fn(self, out) = @fmt(out, "MemDir(%%)", self.files.len, => each(self.files, fn(it) => @fmt(out, "|%", it.name)));
     fstat :: fn(self, out) = {
         out.st_mode = Posix.S.IFDIR;
         0
@@ -349,14 +374,24 @@ MemDir :: @struct {
         fs := get_vfs();
         path := path.str();
         trunc := flags.bit_and(LinuxLibc.O_arm.TRUNC) != 0;
+        
+        // TODO: this is wrong if you put something that frees its allocation when refs==0. 
+        return_fresh_handle :: fn(it) => {
+            it := it[];
+            @debug_assert(!identical(it.vtable, get_vtable(PipeFile)), "TODO: allow pipe in dir, don't free when refs=0?");
+            it.refs = 0;
+            it.uid = get_next_file_id();
+            fd := push_file(fs.allocator.boxed(FileInstance, it));
+            return fd.fd.intcast();
+        };
+        
         for self.files { it |
             if it.name == path {
                 ::ptr_utils(FileVTable);
                 if trunc {
                     it'handle'vtable'truncate(it.handle.data, 0);
                 };
-                fd := push_file(it.handle);
-                return(fd.fd.intcast());
+                return_fresh_handle(it.handle);
             };
         };
         create := flags.bit_and(LinuxLibc.O_arm.CREAT) != 0;
@@ -369,8 +404,7 @@ MemDir :: @struct {
         
         path := path.shallow_copy(fs.allocator);
         fd := create_child(self, path, MemFile, (contents = empty()));
-        fd := push_file(fd);
-        fd.fd.intcast()
+        return_fresh_handle(fd)
     };
     mkdir :: fn(self, path, _mode) = {
         fs := get_vfs();
@@ -379,9 +413,9 @@ MemDir :: @struct {
             @if(it.name == name) return(-1);
         };
         
-        self: FileHandle = (vtable = get_vtable(MemDir), data = MemDir.raw_from_ptr(self));
+        self: FileInstance = (vtable = get_vtable(MemDir), data = MemDir.raw_from_ptr(self), refs = 0);
         name := name.shallow_copy(fs.allocator);
-        _ := create_child_dir(self, name);
+        _ := create_child_dir(self&, name);
         0
     };
     rename :: fn(self, dest_dir, src_name, dest_name) = {
@@ -434,6 +468,8 @@ PipeFile :: @struct {
         q: UQueue'QRing'Tube(u8);  // :SLOW don't do 1 byte at a time
         refs: i64;
     };
+    
+    debug :: fn(self, out) = @fmt(out, "Pipe(%, %)", @if(self.is_read, "R", "W"), self.it.refs);
     read :: fn(self, dest, _) = {
         @debug_assert(self.is_read, "read from write end of pipe");
         i := 0;
@@ -486,12 +522,15 @@ create_pipe :: fn() Array(Fd, 2) = {
 fn push_file($T: Type, data: T) Fd #generic = {
     fs := get_vfs();
     data := fs.allocator.boxed(T, data);
-    push_file(vtable = get_vtable(T), data = T.raw_from_ptr(data))
+    f := fs.allocator.boxed(FileInstance, (vtable = get_vtable(T), data = T.raw_from_ptr(data)));
+    f.uid = get_next_file_id();
+    push_file(f)
 }
 
 fn push_file(it: FileHandle) Fd = {
     fs := get_vfs();
     fs.mutex&.lock();
+    i32.atomic_add(it.refs&, 1);
     fd := fs.fd.len;
     if fs.free&.pop_front() { old |
         fd = old.fd.intcast();
@@ -512,6 +551,8 @@ FuseFile :: @struct {
     nodeid: u64;
     fh: u64;
     is_dir: bool;  // sad
+    
+    debug :: fn(self, out) = @fmt(out, "Fuse(%, %)", self.nodeid, self.fh);
     
     fn do_read(self: *FuseFile, buf: []u8, position: i64) i64 = {
         op: Fuse.Opcode = @if(self.is_dir, .READDIR, .READ);

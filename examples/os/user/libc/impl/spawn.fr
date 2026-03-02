@@ -6,7 +6,7 @@ Attr :: @struct {  // posix_spawnattr_t
 FileActions :: RawList(FileAction);  // posix_spawn_file_actions_t
 FileAction :: @tagged(
     Close: @struct(fd: Fd), 
-    Dup2: @struct(oldfd: Fd, newfd: Fd),
+    Dup2: @struct(old: Fd, new: Fd),
     Open: @struct {
         fd: Fd;
         path: CStr;
@@ -51,14 +51,8 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
                         || Syscall'exit(127);
                 }
                 fn Dup2(it) => {
-                    // TODO: do this properly. they need to share pos. 
-                    use_file it.oldfd { old |
-                        use_file it.newfd { new |
-                            old[] = new[];
-                        };
-                    };
-                    //Syscall'dup2(it.oldfd, it.newfd) 
-                    //    || Syscall'exit(127);
+                    Syscall'dup2(it.old, it.new) 
+                        || Syscall'exit(127);
                 }
                 fn Open(it) => {
                     _ := Syscall'close(it.fd);
@@ -97,12 +91,15 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
             t.get_tls()[].thread_group = child;
             parent.children&.push(child, a);
             fs2.root_dir = fs.root_dir;
-            fs2.cwd = fs2.cwd;
+            fs2.cwd = fs.cwd;
             // TODO: next_fuse_request_id should be global?
             
-            // TODO: some sort of ref counting situation. now when parent closes it can't free stuff. 
-            //       need another level of indirection i guess. need to share pos. 
-            //       also maybe more locks, the FileVTable impls assume they aren't racing. 
+            // TODO: more locks, the FileVTable impls assume they aren't racing. 
+            each fs.fd& { it |
+                if it.refs != 0 {
+                    i32.atomic_add(it.refs&, 1);
+                };  // else: already closed
+            };
             fs2.fd = fs.fd&.clone();
             fs2.free = fs.free&.clone(a);
             
