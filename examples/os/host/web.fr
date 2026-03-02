@@ -19,15 +19,19 @@ GRAPHICS_TARGET_WEB :: true;
 fn main(argc: i64, argv: *CStr, envp: *CStr, sp: i64) void = {
     init_the_memory();
     
-    // this is done twice so mmap works in allocate_stack
+    // must be done early so mmap works in allocate_stack
+    globals.startup_table_assign = from_capacity(@run ast_alloc().alloc_uninit(Ty(i32, i32), 64));
     for_wasm_imports { i, name |
         if wasm_libc_exports.get(name) { addr |
-            Jit'impl'run(Assign = (dest = i, src = addr.int_from_rawptr()));
+            dest, src := (i.intcast(), addr.int_from_rawptr().intcast());
+            table_assign(dest, src);
+            push_assume_capacity(globals.startup_table_assign&, (dest, src));
         };
     };
+    @assert(globals.startup_table_assign.len <= globals.startup_table_assign.cap);
+    globals.startup_table_assign.cap = globals.startup_table_assign.len;  // assert no push after startup. 
     
     // TODO: don't waste the memory of the original stack
-    
     franca_runtime_init(argc, argv, main2, envp, sp);
 }
 
@@ -43,7 +47,6 @@ init_the_memory :: AsmFunctionWasmOnly(fn() void = (),
 
 main2 :: fn() void = {
     globals.jit_events = list(4096, general_allocator());
-    redo_relocations_wasm();  // do it again to record 
     globals.free = list(4096, general_allocator());
     Vfs'init_vfs();
     xxx := Vfs.root_console_stdin;  // :compilerbug ?? Type Error: field 'fs' does not exist
@@ -56,7 +59,6 @@ main2 :: fn() void = {
             libc_exports.insert(name, i.rawptr_from_int(), general_allocator());
         };
     };    
-
     shell.strace = cli_args().contains(fn(it) => it[] == "-strace");
     globals.ready = true;
     tls(.prefer_syscalls)[] = false;
@@ -96,14 +98,6 @@ reach_webgpu_imports :: fn() []rawptr #noinline = @run {
     force_reachable.items()
 };
 
-redo_relocations_wasm :: fn() void #inline = {
-    for_wasm_imports { i, name |
-        if wasm_libc_exports.get(name) { addr |
-            Overrides'FR_wasm_jit_event(Assign = (dest = i, src = addr.int_from_rawptr()));
-        };
-    };
-};
-
 wasm_libc_exports :: {  // note: evaluating this mutates libc_exports as well
     @run collect_from_scope(libc_exports, Type.scope_of(Overrides), true);
     libc_exports
@@ -137,15 +131,22 @@ globals :: @static(@struct {
     ready: bool;
     
     // TODO: make this less chunky. also merge all the Grow
-    //       and when you drop the Qbe.Module, drop the corrisponding Event.Module. 
     jit_events: List(Jit.Event);
     jit: Mutex;
+    // only used for real imports at startup. imports are never unloaded, 
+    // so close_modules never has to follow assignments to remove all function references and allow gc.  
+    startup_table_assign: RawList(Ty(i32, i32));
 });
 
 wasm_page_size :: 65536;
 
 // don't need to preserve callee because it's always franca_runtime_init_thread
 fn wasm_init_thread(franca_userdata: rawptr, known_wasm_jit_event: i64) i64 #export = {
+    @if(known_wasm_jit_event == 0) 
+    for globals.startup_table_assign { dest, src |
+        table_assign(dest, src);
+    };
+    
     get_current_tls()[].known_wasm_jit_event = known_wasm_jit_event;
     tls(.panic_hook)[] = fn(msg) = {
         Overrides'FR_debug_write(msg.ptr, msg.len);
@@ -160,45 +161,25 @@ fn wasm_init_thread(franca_userdata: rawptr, known_wasm_jit_event: i64) i64 #exp
 fn close_modules(events: []i64) void = {
     fs := Vfs'get_vfs();
     @debug_assert(globals.jit&.locked_by_me());
-    indices: HashMap(i64, void) = init(temp());
-    event_i := 0;
-    range(events[0], globals.jit_events.len) { i |
+    for events { i |
         event := globals.jit_events.index(i);
-        @match(event) {
-            // to start with, all the functions creating by this module are now dead
-            fn Module(it) => if event_i < events.len && events[event_i] == i {
-                fs.allocator.dealloc(u8, it.wasm);
-                @trace("jit_close(%, %..+%)", i, it.table_start, it.count);
-                range(it.table_start, it.table_start+it.count) { i |
-                    indices&.insert(i, ());
-                };
-                event[] = .Sync;
-                event_i += 1;
-            }
-            // now follow through all the assignments to get the final set of dead slots
-            fn Assign(it) => {
-                if indices&.get(it.src).is_some() {
-                    // src is dead so dest is dead too. 
-                    indices&.insert(it.dest, ());
-                    // when a new thread grows the table, entry start off as null, so its fine to do nothing
-                    event[] = .Sync;
-                    // TODO: i think that's still wrong for threads that are only partially synced
-                } else {
-                    // src is live so dest is no longer dead.
-                    indices&.remove(it.dest);
-                }
-            }
-            @default => ();
-        }
-    };
-    @assert_eq(event_i, events.len, "closed multiple times or unordered events");
-    // for threads that have already seen the functions we're removing, 
-    // tell them to move null into that slot so it crashes if they try to call it. 
-    // also my hope is this lets the module be gc-ed. 
-    each indices& { i, _ |
-        event: Jit.Event = (Assign = (dest = i, src = 0));
-        Jit'impl'run(event);
-        globals.jit_events&.push(event);
+        @debug_assert(event.is(.Module));
+        it := event.Module&;
+        // all the functions created by this module are now dead
+        // leave the event in the list so other threads that already opened 
+        // can see the range to clear
+        w := it.wasm; it.wasm = empty();  
+        if w.len == 0 && i > get_current_tls()[].known_wasm_jit_event {
+            // open+close were both after last sync. never opened on this thread. 
+        } else {
+            fs.allocator.dealloc(u8, w);
+            @trace("jit_close(%, %..+%)", i, it.table_start, it.count);
+            range(it.table_start, it.table_start+it.count) { i |
+                // move null into that slot so it crashes if they try to call it. 
+                // also my hope is this lets the module be gc-ed. 
+                table_assign(i.intcast(), 0);
+            };
+        };
     };
 }
 
@@ -207,7 +188,6 @@ Overrides :: @struct {
     FR_wasm_jit_event :: fn(event: Jit.Event) i64 = {
         fs := Vfs'get_vfs();
         @match(event&) {
-            fn Assign(it) => @if(it.src == it.dest) return(0);
             fn Grow(it) => @assert(it.delta != 0, "can't check the size like that because i don't store results");
             fn Module(it) => {
                 it.wasm = it.wasm.shallow_copy(fs.allocator);
@@ -222,13 +202,14 @@ Overrides :: @struct {
             i := get_current_tls()[].known_wasm_jit_event&;
             to_sync := globals.jit_events.items().rest(i[]);
             for to_sync { it |
-                Jit'impl'run(it);
+                if it&.is(.Module) && it.Module.wasm.len == 0 {
+                    // closed before this thread saw it
+                } else {
+                    Jit'impl'run(it);
+                };
             };
             @if(to_sync.len != 0) @trace("jit_sync(%..+%)", i[], to_sync.len);
-            
-            if !@is(event&, .Sync, .Close) {
-                globals.jit_events&.push(event);
-            };
+            @if(!@is(event&, .Sync)) globals.jit_events&.push(event);
             
             result = Jit'impl'run(event);
             @match(event&) {
@@ -359,6 +340,20 @@ memory_grow :: AsmFunctionWasmOnly(fn(page_delta: i32) i32 = (), fn(out) = {
     out.push(0x20);  // local.get(0)
     out.push(0x00);  // ^
     out.push(0x40);  // memory.grow()
+    out.push(0x00);  // ^
+    out.push(0x0B);  // end
+});
+
+// table[dest] = table[src]
+table_assign :: AsmFunctionWasmOnly(fn(dest: i32, src: i32) void = (), fn(out) = {
+    out.push(0x00);  // 0 locals
+    out.push(0x20);  // local.get(0)
+    out.push(0x00);  // ^
+    out.push(0x20);  // local.get(1)
+    out.push(0x01);  // ^
+    out.push(0x25);  // table.get(0)
+    out.push(0x00);  // ^
+    out.push(0x26);  // table.set(0)
     out.push(0x00);  // ^
     out.push(0x0B);  // end
 });

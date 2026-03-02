@@ -9,11 +9,6 @@
   ie. tests/exe/wasm.fr doesn't rn. but it's annoying because it deletes information when running as a driver, 
   generally don't want it to stomp the compiler's one, just provide if there isn't already. 
 - make the signal handler print the payload value of the brk instruction
-- would be nice if i could get rid of wasm/jit/Event.Assign 
-  (now only used in close_modules, redo_relocations_wasm).
-  - should be able to just do the GOT redirect like i do for host/user.fr,
-    problem is that i need to pass in those addresses because there's no reloc table. 
-  then could switch to dlopen abi and maybe eventually support using emscripten instead of my library. 
 - anything that manually adds relocations needs to check that not jit_via_dlopen. ie. import_c/assembler.fr
 - `orb FRANCA_JIT_VIA_DLOPEN=1 ./target/f.out examples/os/build.fr`
   panic! Assertion Failed: (put_jit_addr) redeclared symbol 4641: opendir__33632

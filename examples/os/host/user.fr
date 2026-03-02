@@ -3,9 +3,10 @@
 // but filesystem and libc use os/user/* (just like host/web.fr). 
 // this is not a sandbox! jitted code that does a syscall instruction 
 // directly instead of using lib/sys/*.fr will go to the real host. 
-// TODO: sleep, signals, graphics, -append startup commands.
+// TODO: signals, graphics
 // TODO: macos host is a pain because redo_relocations_static_linux expects to be in an elf file. 
 //       futex->ulock is fine, mmap flags (what to do about MAP_JIT)
+//       save pthread_create from libc. 
 // TODO: ci test
 // TODO: when you hit enter in the shell the line is printed an extra time. 
 // TODO: bin/test_fuse "panic! failed write 6 bytes"
@@ -102,11 +103,14 @@ entry :: fn() void = {
         };
     };
     
+    override :: fn(name, f) => libc_exports.insert(name, f, panicking_allocator);
+    override("pthread_create", user_pthread_create);
+    override("nanosleep", fn(a: *TimeSpec, b: *TimeSpec) = 
+        with_syscalls {| Syscall'nanosleep(a, b); 0 });
     if query_current_arch() != .aarch64 {
         // TODO: fast system_counter_uptime asm for amd,rv
-        wrap :: fn(clock_id: i64, time_spec: *TimeSpec) i64 = 
-            with_syscalls(=> Syscall'clock_gettime(clock_id, time_spec));
-        libc_exports.insert("clock_gettime", wrap, panicking_allocator);
+       override("clock_gettime", fn(a: i64, b: *TimeSpec) = 
+            with_syscalls {| Syscall'clock_gettime(a, b) });
     };
     
     // pretending to pass on information from the boot loader. 
@@ -155,7 +159,9 @@ host_syscalls :: @static(@struct {
         exit_thread: Syscall.SyscallVTable;
         exit: Syscall.SyscallVTable;
         clock_gettime: Syscall.SyscallVTable;
+        nanosleep: Syscall.SyscallVTable;
         riscv_flush_icache: Syscall.SyscallVTable;
+        // note: import_c's __builtin___clear_cache does riscv_flush_icache directly in asm so won't be intercepted by that but the franca one will.
     };
 });
 
@@ -207,18 +213,6 @@ user_handle_syscall :: fn(args: *Array(i64, 6), n: i64) Ty(i64, u8) = {
         @case(0xFFFF0003) => { // sig_action
             result = 0;  // TODO
         };
-        @case(0xFFFF0002) => @panic("TODO: sleep");
-        @case(0xFFFF0005) => {  // spawn_thread
-            ctx := MContext.ptr_from_int(args[0]);
-            t := ThreadConfig.ptr_from_int(args[1]);
-            // relies on raw_create_thread being the only caller
-            thread := Thread.ptr_from_int(ctx.gpr&[0]);  
-            with_syscalls {
-                raw_create_thread(thread);
-                0
-            };
-            return(thread.tid.intcast(), 0);
-        };
         @case(0xFFFF0009) => {
             debug_write2(u8.ptr_from_int(args[0]).slice(args[1]));
             result = args[1];
@@ -237,6 +231,15 @@ user_handle_syscall :: fn(args: *Array(i64, 6), n: i64) Ty(i64, u8) = {
     };
     (result, 0)
 }
+
+user_pthread_create :: fn(out: *pthread_t, _0: rawptr, _1: rawptr, userdata: rawptr) i64 = {
+    t := Thread.ptr_from_raw(userdata);
+    add_to_current_thread_group(t);
+    with_syscalls {| raw_create_thread(t); 0 };  // perform_clone doesn't go through perform_syscall so won't get intercepted
+    out.opaque = userdata;
+    @trace("pthread_create(%) = %", userdata, t.tid);
+    0
+};
 
 user_io_poll_in :: fn(q: *UQueue, who: i64) void = {
     fs := Vfs'get_vfs();
