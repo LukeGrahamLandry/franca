@@ -11,6 +11,8 @@
 - another layer of indirection for FileHandle and refcount them. still very sketchy rn. 
   added more debug info to the `ps` command. leak less. 
 - something's fucked with one specific cas when using host/user??
+  yikes, arm/isel/sel_inst/cas1(cls=Kw) was doing fixarg(Kw) on the pointer as well, 
+  this was the first time i did it on a constant i guess. :(
 
 ## (Feb 28)
 
