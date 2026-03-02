@@ -18,6 +18,8 @@ that would usually be syscalls are just normal functions.
 
 For debugging you can also run the userspace part without the kernel 
 (run examples/os/host/user.fr for linux or examples/web/build.fr for browser). 
+The later is used (as an emscripten alternative) by the 
+[franca playground website](https://franca.lukegrahamlandry.ca).
 
 ## implemented
 
@@ -53,6 +55,9 @@ For debugging you can also run the userspace part without the kernel
 - wait, exit_group vs exit_thread
 - posix_spawn an actual program not just a stub that prints something useless
 - don't busy wait in poll
+- don't recycle tid so fast
+- @trace into its own pipe so it doesn't stomp on your processes output. 
+  also needs to be thread local since i toggle it in the shell
 - sigaction api
 - dlopen
 - ptrace
@@ -73,7 +78,6 @@ For debugging you can also run the userspace part without the kernel
 - rest of the libc functions needed for all my tests:
 ```
    "unlinkat", 
-   "wait4", 
    "mkstemp",
    "readlinkat",
    "sigaction",

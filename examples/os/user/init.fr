@@ -1,14 +1,13 @@
 
 // called by kernel/start.fr/user_exec via examples/elf_loader.fr
 main :: fn() void = {
+    host_platform[] = kernel_platform;
     t := get_current_thread();
     buf := t.allocate_signal_stack();
     _ := set_signal_handler(callee = handle_signal, stack = buf);
     redo_relocations_static_linux(false);
     main2();
 }
-
-root_thread_group :: @static(ThreadGroup);
 
 // also called directly by host/user.fr/entry
 main2 :: fn() void = {
@@ -138,33 +137,8 @@ decode_and_run_cmd :: fn(full_command: Str) void = {
                 @case("ps") => {
                     out := u8.list(temp());
                     show_files := parts.len > 1 && parts[1].contains("f");
-                    f(root_thread_group, out&, 0, show_files);
+                    Group'dump(Group.root_thread_group, out&, 0, show_files);
                     print(out.items());
-                    f :: fn(g: *ThreadGroup, out: *List(u8), depth: i64, show_files: bool) void = {
-                        with g.vfs.mutex& {
-                        out.push_repeated(depth*2, " ".ascii());
-                        @fmt(out, "G (threads=%, children=%, files=%, cwd=%)\n", 
-                            g.threads.len, g.children.len, g.vfs.fd.len - g.vfs.free.len, g.vfs.cwd.fd);
-                        for g.threads { it |
-                            out.push_repeated((depth + 1)*2, " ".ascii());
-                            @fmt(out, "T (tid=%, idx=%%)\n", 
-                                it.tid, it.first_environment.thread_index,
-                                @if(it.tid_futex == 0, ", DONE", ""));
-                        };
-                        if show_files {
-                            enumerate g.vfs.fd { i, it |
-                                if it.refs > 0 {
-                                    ::FmtPad(i64);
-                                    out.push_repeated((depth + 1)*2, " ".ascii());
-                                    @fmt(out, "F % >%(#%, %)\n", 
-                                        f_pad(i, 3, .Before), f_pad(it.uid.zext(), 5, .Before), 
-                                        it.refs, => it'vtable'debug(it.data, out));
-                                }
-                            };
-                        };
-                        for(g.children, fn(it) => f(it, out, depth + 1, show_files));
-                        };
-                    };
                 };
                 @default => {
                     break :: local_return;
@@ -429,9 +403,99 @@ LIBC :: @struct {
         old
     }
     
-    FR_debug_write :: fn(ptr: *u8, len: i64) void = 
-        sys_debug_write(ptr.slice(len));
+    pthread_attr_init :: fn(out: *ThreadAttr) i64 = {
+        out[] = zeroed(@type out[]);
+        0
+    };
+    pthread_attr_setstack :: fn(attr: *ThreadAttr, ptr: *u8, len: i64) i64 = {
+        attr := bit_cast_unchecked(*ThreadAttr, *MyAttr, attr);
+        attr.stack = ptr.slice(len);
+        0
+    };
+    pthread_getcpuclockid :: fn() = 0;  // TODO
+    
+    wait4 :: Group.wait4;
+    posix_spawn :: Group.posix_spawn;
+    pthread_join :: Group.pthread_join;
+    exit :: Group.exit;
+    FR_wasm_jit_event :: fn(e: WasmJitEvent) = host_platform'FR_wasm_jit_event(e);
+    pthread_create :: Group.pthread_create;
 };
+
+WasmJitEvent :: import("@/backend/wasm/jit.fr").Event;
+
+// impl depends if running via [../kernel, ../host/web, ../host/user]
+host_platform :: @static(@struct {
+    create_thread: @FnPtr(t: *Thread) void;
+    nanosleep: @FnPtr(duration: *TimeSpec, remainder: *TimeSpec) void;
+    debug_write: @FnPtr(msg: Str) void;
+    clock_gettime: @FnPtr(clock_id: i64, time_spec: *TimeSpec) i64;
+    mmap: @FnPtr(len: i64, prot: i64) rawptr;
+    munmap: @FnPtr(addr: rawptr, len: i64) i64;
+    mprotect: @FnPtr(addr: rawptr, len: i64, prot: i64) i64;
+    exit_thread: @FnPtr(status: i64) Never;
+    FR_wasm_jit_event: (@FnPtr(event: WasmJitEvent) i64) = (fn(_) = unreachable());
+});
+
+kernel_platform : (@type host_platform[]) : (
+create_thread = fn(thread: *Thread) void = {
+    ctx := zeroed MContext;
+    ctx.elr = bit_cast_unchecked(rawptr, i64, franca_runtime_init_thread);
+    ctx.gpr&[0] = bit_cast_unchecked(@type thread, i64, thread);
+    ctx.gpr&[30] = int_from_rawptr(fn() void = {
+        args: Array(i64, 6) = (0, 0, 0, 0, 0, 0);
+        Syscall'perform_syscall(args&, 94);  // exit
+        unreachable()
+    });
+    ctx.gpr&[31] = bit_cast_unchecked(*u8, i64, thread.stack.usable.end_pointer());
+    
+    t: ThreadConfig = (
+        signal_handler = handle_signal,
+        signal_stack_buf = thread.allocate_signal_stack(),
+        exit_futex = thread.tid_futex&,
+    );
+    args: Array(i64, 6) = (MContext.int_from_ptr(ctx&), ThreadConfig.int_from_ptr(t&), 0, 0, 0, 0);
+    id, _ := Syscall'perform_syscall(args&, 0xFFFF0005);  // spawn_thread
+    @if(id < 0) panic("failed to create thread");
+    thread.tid = id.intcast();
+},
+// TODO: do this more efficiently. 
+//       if multiple threads are sleeping, just have one yield like this for the shortest duration and the rest futex wait.
+nanosleep = fn(duration, remainder) void = {
+    @debug_assert(remainder.is_null(), "todo: sleep remainder");
+    ticks_per_s := i64.sys_get(.CNTFRQ_EL0);
+    s, ns := (duration.seconds, duration.nanoseconds);
+    ticks := (s * ticks_per_s) + ((ns * ticks_per_s) / NS_PER_S);
+    until := i64.sys_get(.CNTVCT_EL0) + ticks;
+    args: Array(i64, 6) = (until, 0, 0, 0, 0, 0);
+    _ := Syscall'perform_syscall(args&, 0xFFFF0002);  // yield
+},
+debug_write = fn(msg) = {
+    @if(msg.len == 0) return();
+    args: Array(i64, 6) = (u8.int_from_ptr(msg.ptr), msg.len, 0, 0, 0, 0);
+    _ := Syscall'perform_syscall(args&, 0xFFFF0009);  // debug_write
+},
+clock_gettime = fn(clock_id, time_spec) = {
+    // TODO: other clock_id's
+    time_spec[] = system_counter_uptime();
+    0
+},
+mmap = fn(len: i64, prot: i64) rawptr = {
+    rawptr_from_int(with_syscalls {
+        flags := @or(Posix'MAP'PRIVATE, LinuxLibc'MAP'ANON);
+        Syscall'mmap(zeroed(rawptr), len, prot, flags, (fd = -1), 0)
+    })
+},
+munmap = fn(addr: rawptr, len: i64) i64 = with_syscalls {
+    result := Syscall'munmap(addr, len);
+    result.value
+},
+mprotect = fn(addr: rawptr, len: i64, prot: i64) i64 = 0,
+exit_thread = fn(status) = {
+    with_syscalls(=> Syscall'exit(status));
+    unreachable()
+},
+);
 
 fn get_current_tls() *ThreadData = 
     get_tls(Thread.ptr_from_raw(tls(.thread)[]));
@@ -486,35 +550,9 @@ fn trace(arg: FatExpr) FatExpr #macro = @{
 ThreadData :: @struct {
     signal_handler: SignalHandler.F; 
     known_wasm_jit_event: i64;
-    thread_group: *ThreadGroup;
+    thread_group: *Group.ThreadGroup;
     _: Array(i64, 2);
 };
-
-ThreadGroup :: @rec @struct {
-    vfs: Vfs.Fs;
-    threads: RawList(*Thread);
-    parent: ?*ThreadGroup;
-    children: RawList(*ThreadGroup);
-    // TODO: track mmaps so they can be released when all threads exit 
-};
-
-setup_root_thread_group :: fn() void = {
-    t := get_current_thread();
-    t.tid = 1; t.tid_futex = 1;
-    g := root_thread_group;
-    g.parent = .None;
-    get_current_tls()[].thread_group = g;
-    g.threads = init(general_allocator(), 1);
-    g.threads&.push_assume_capacity(t);
-};
-
-add_to_current_thread_group :: fn(thread: *Thread) void = {
-    g := get_current_tls()[].thread_group;
-    with g.vfs.mutex& {
-        thread.get_tls()[].thread_group = g;
-        g.threads&.push(thread, g.vfs.allocator);
-    };
-}
 
 // signal stack must be in the same franca_required_stack_bits aligned chunk for tls to work. 
 // see threads/allocate_stack.
@@ -525,6 +563,7 @@ fn allocate_signal_stack(t: *Thread) []u8 = {
     buf
 }
 
+Group :: import("@/examples/os/user/group.fr");
 Term :: import("@/lib/sys/terminal.fr");
 #use("@/lib/sys/threads.fr");
 #use("@/lib/sys/sync/mutex.fr");

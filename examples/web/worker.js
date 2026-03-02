@@ -129,7 +129,6 @@ export const imports = {
                 i += 1;
             }
         },
-        FR_debug_write: (ptr, len) => show(get_wasm_string(ptr, len)),
         write: (id, ptr, len) => {
             show("CALLED WRITE TOO EARLY\n");
             show(get_wasm_string(ptr, len));

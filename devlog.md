@@ -1,3 +1,10 @@
+
+## (Mar 2)
+
+- the way i override the libc_exports in the different hosts is overly confusing. 
+  better is for the libc code to be explicit about what functions are specific to the kernel host. 
+  now only have to remember to @trace, etc. in once place. 
+
 ## (Mar 1)
 
 - to use the normal test running in examples/os i need "processes", this shall be a long road. 
@@ -13,6 +20,7 @@
 - something's fucked with one specific cas when using host/user??
   yikes, arm/isel/sel_inst/cas1(cls=Kw) was doing fixarg(Kw) on the pointer as well, 
   this was the first time i did it on a constant i guess. :(
+- started a hacky wait()
 
 ## (Feb 28)
 

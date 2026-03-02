@@ -18,11 +18,12 @@ GRAPHICS_TARGET_WEB :: true;
 #export
 fn main(argc: i64, argv: *CStr, envp: *CStr, sp: i64) void = {
     init_the_memory();
+    host_platform[] = web_platform;
     
     // must be done early so mmap works in allocate_stack
     globals.startup_table_assign = from_capacity(@run ast_alloc().alloc_uninit(Ty(i32, i32), 64));
     for_wasm_imports { i, name |
-        if wasm_libc_exports.get(name) { addr |
+        if libc_exports.get(name) { addr |
             dest, src := (i.intcast(), addr.int_from_rawptr().intcast());
             table_assign(dest, src);
             push_assume_capacity(globals.startup_table_assign&, (dest, src));
@@ -98,11 +99,6 @@ reach_webgpu_imports :: fn() []rawptr #noinline = @run {
     force_reachable.items()
 };
 
-wasm_libc_exports :: {  // note: evaluating this mutates libc_exports as well
-    @run collect_from_scope(libc_exports, Type.scope_of(Overrides), true);
-    libc_exports
-};
-
 for_wasm_imports :: fn($body: @Fn(i: i64, name: Str) void) void = {
     import_names_raw := @import_symbol("__franca_wasm_import_names");
     import_names_raw := u8.ptr_from_raw(import_names_raw).slice(1.shift_left(16));
@@ -149,11 +145,11 @@ fn wasm_init_thread(franca_userdata: rawptr, known_wasm_jit_event: i64) i64 #exp
     
     get_current_tls()[].known_wasm_jit_event = known_wasm_jit_event;
     tls(.panic_hook)[] = fn(msg) = {
-        Overrides'FR_debug_write(msg.ptr, msg.len);
-        Overrides'exit(123);
+        host_platform'debug_write(msg);
+        host_platform'exit_thread(123);
         unreachable()
     };
-    Overrides'FR_wasm_jit_event(.Sync);
+    host_platform'FR_wasm_jit_event(.Sync);
     franca_runtime_init_thread(franca_userdata);
     get_current_tls()[].known_wasm_jit_event
 }
@@ -184,8 +180,8 @@ fn close_modules(events: []i64) void = {
 }
 
 Jit :: import("@/backend/wasm/jit.fr");
-Overrides :: @struct {
-    FR_wasm_jit_event :: fn(event: Jit.Event) i64 = {
+web_platform : (@type host_platform[]) : (
+    FR_wasm_jit_event = fn(event) = {
         fs := Vfs'get_vfs();
         @match(event&) {
             fn Grow(it) => @assert(it.delta != 0, "can't check the size like that because i don't store results");
@@ -224,18 +220,12 @@ Overrides :: @struct {
 
         };
         result
-    }
-    
-    yield_file :: fn(ptr: *u8, len: i64) void = {
-        r := Host'js_write(0xBBBB0001, ptr, len);
-        @assert_eq(r, len, "failed yield_file");
-    }
-    
-    FR_debug_write :: fn(ptr: *u8, len: i64) void = {
-        Host'js_write(0xBBBB0000, ptr, len);
-    };
+    },
+    debug_write = fn(msg) = { 
+        Host'js_write(0xBBBB0000, msg.ptr, msg.len); 
+    },
 
-    mmap :: fn(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, off: i64) rawptr = {
+    mmap = fn(len, _prot) rawptr = {
         if !globals.ready {
             len := len.ualign_to(wasm_page_size);
             prev := memory_grow(len.udiv(wasm_page_size).intcast()).intcast();
@@ -262,11 +252,10 @@ Overrides :: @struct {
             @assert(prev != -1, "oom");
             result = rawptr_from_int(prev * wasm_page_size);
         };
-        @trace("mmap(%) = %", len, result);
         result
-    };
+    },
     
-    munmap :: fn(addr: rawptr, len: i64) i64 = {
+    munmap = fn(addr: rawptr, len: i64) i64 = {
         @if(globals.ready) with globals.grow& {
             break :: local_return;
             buf := u8.ptr_from_raw(addr).slice(len.ualign_to(wasm_page_size));
@@ -278,51 +267,36 @@ Overrides :: @struct {
             globals.free&.insert(i, buf);
             check_merges(i);
         };
-        @trace("munmap(%, %)", addr, len);
         0
-    };
+    },
+    mprotect = fn(a, b, c) = 0,
     
-    mprotect :: fn(addr: i64, len: i64, prot: i64) i64 = {
-        0
-    };
-    
-    clock_gettime :: fn(clock_id: i64, time_spec: *TimeSpec) i64 = {
+    clock_gettime = fn(clock_id: i64, time_spec: *TimeSpec) i64 = {
         ms := Host'js_performace_now();
         s := int(ms) / 1000;
         xxx := (ms - float(s*MS_PER_S));
         time_spec[] = (seconds = s, nanoseconds = int(xxx * NS_PER_MS));
         0
-    };
-    
-    abort :: fn() void = exit(1);  // TODO: signal or whatever
-    
-    exit :: fn(status: i64) void = {
-        @trace("exit(%)", status);
-        Host'js_worker_stop(status);
-    };
+    },
+    exit_thread = fn(status) = { 
+        Host'js_worker_stop(status); 
+        unreachable() 
+    },
 
-    nanosleep :: fn(duration: *TimeSpec, nullable_remainder_out: i64) i64 = {
+    nanosleep = fn(duration, remainder) = {
         ns := duration.seconds * NS_PER_S + duration.nanoseconds;
         zero: u32 = 0;
         _ := import("@/lib/sys/sync/futex.fr")'wasm_atomic_wait(zero&, zero, ns);
-        0
-    };
-    
-    #use("@/lib/sys/threads.fr");
-    pthread_create :: fn(out: *pthread_t, attr: *ThreadAttr, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) i64 = {
-        attr := bit_cast_unchecked(*ThreadAttr, *MyAttr, attr);
-        thread := Thread.ptr_from_raw(userdata);
+    },
+    create_thread = fn(thread) = {
         id: i32 = thread.first_environment.thread_index.intcast();
         @debug_assert_gt(id, 0, "too many threads");
         thread.tid_futex = id.bitcast();
         thread.tid = id;
-        add_to_current_thread_group(thread);
-        Host'js_worker_spawn(userdata, attr.stack.end_pointer(), thread.tid_futex&);
-        out.opaque = userdata;
-        @trace("pthread_create(%) = %", userdata, id);
-        0
-    };
-};
+        it := bit_cast_unchecked(*Thread, rawptr, thread);
+        Host'js_worker_spawn(it, thread.stack.usable.end_pointer(), thread.tid_futex&);
+    },
+);
 
 check_merges :: fn(i: i64) void = {
     free := globals.free&;

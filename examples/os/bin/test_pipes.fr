@@ -25,14 +25,14 @@ multi_thread :: fn() void = {
     buf.len = Syscall'read(fd, buf.ptr, buf.len).unwrap();
     @assert_eq(poll(fd), Posix.POLL.HUP);
     @assert_eq(buf, msg);
-    each(pipes, fn(it) => for(it, fn(it) => Syscall'close(it)));
+    each(pipes, fn(it) => for(it, fn(it) => { Syscall'close(it); }));
     println(buf);
     msg :: "Hello World!";
 }
 
 // TODO: implement the normal subprocess.fr interface with this somehow
 multi_process :: fn() void = {
-    S :: import("@/examples/os/user/libc/impl/spawn.fr");
+    S :: import("@/examples/os/user/group.fr");
     Attr :: S.Attr; FileActions :: S.FileActions; 
     posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CStr, envp: *CStr) voidResult #libc;
     out := zeroed(pid_t);
@@ -45,11 +45,18 @@ multi_process :: fn() void = {
     a&.push_assume_capacity(Dup2 = (old = pipe&[1], new = STD_OUT));
     
     posix_spawn(out&, path.as_cstr(), @ref a, @ref zeroed(Attr), argv.ptr, tls(.environment_variables)[]).unwrap();
-    @println("spawned %", out);
+    Syscall'close(pipe&[1]);
+    
+    status: i32 = 0;
+    res := Posix'waitpid(out, status&, 0);
+    @assert(res.is_ok() && status == 0, "pid=% err=% status=%", out, res.Err._, status);
     
     buf := temp().alloc_zeroed(u8, 64);
     buf.len = Syscall'read(pipe&[0], buf.ptr, buf.len).unwrap();
-    @println("from pipe[%][%]", buf.len, buf);
+    // TODO: wait4 should close all fds 
+    // @assert_eq(poll(pipe&[0]), Posix.POLL.HUP);
+    Syscall'close(pipe&[0]);
+    @println("from %'s pipe[%][%]", out, buf.len, buf);
 }
 
 poll :: fn(fd: Fd) i64 = {

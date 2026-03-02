@@ -103,14 +103,10 @@ entry :: fn() void = {
         };
     };
     
-    override :: fn(name, $f) => libc_exports.insert(name, f, panicking_allocator);
-    override("pthread_create", user_pthread_create);
-    override("nanosleep", fn(a: *TimeSpec, b: *TimeSpec) = 
-        with_syscalls {| Syscall'nanosleep(a, b); 0 });
-    if query_current_arch() != .aarch64 {
+    host_platform[] = user_platform;
+    if query_current_arch() == .aarch64 {
         // TODO: fast system_counter_uptime asm for amd,rv
-       override("clock_gettime", fn(a: i64, b: *TimeSpec) = 
-            with_syscalls {| Syscall'clock_gettime(a, b) });
+        host_platform.clock_gettime = { x := kernel_platform; x.clock_gettime };
     };
     
     // pretending to pass on information from the boot loader. 
@@ -213,10 +209,6 @@ user_handle_syscall :: fn(args: *Array(i64, 6), n: i64) Ty(i64, u8) = {
         @case(0xFFFF0003) => { // sig_action
             result = 0;  // TODO
         };
-        @case(0xFFFF0009) => {
-            debug_write2(u8.ptr_from_int(args[0]).slice(args[1]));
-            result = args[1];
-        };
         @default => {
             // redirect back to my fake libc. just using the syscalls as a stable abi that doesn't use varargs. 
             if query_current_arch() == .x86_64 {  // :HostUserNightmare
@@ -232,14 +224,27 @@ user_handle_syscall :: fn(args: *Array(i64, 6), n: i64) Ty(i64, u8) = {
     (result, 0)
 }
 
-user_pthread_create :: fn(out: *pthread_t, _0: rawptr, _1: rawptr, userdata: rawptr) i64 = {
-    t := Thread.ptr_from_raw(userdata);
-    add_to_current_thread_group(t);
-    with_syscalls {| raw_create_thread(t); 0 };  // perform_clone doesn't go through perform_syscall so won't get intercepted
-    out.opaque = userdata;
-    @trace("pthread_create(%) = %", userdata, t.tid);
-    0
-};
+user_platform : (@type host_platform[]) : (
+    create_thread = fn(t) = {
+        with_syscalls {| raw_create_thread(t); 0 };  // perform_clone doesn't go through perform_syscall so won't get intercepted
+    },
+    nanosleep = fn(a, b) = {
+        with_syscalls {| Syscall'nanosleep(a, b); 0 };
+    },
+    debug_write = fn(msg) void = {
+        write := host_syscalls.fns.write.libc;
+        write := bit_cast_unchecked(rawptr, @FnPtr(Fd, *u8, i64) i64, write);
+        write(STD_OUT, msg.ptr, msg.len);
+    },
+    clock_gettime = fn(a, b) = 
+        with_syscalls {| Syscall'clock_gettime(a, b) },
+    mmap = { x := kernel_platform; x.mmap },
+    munmap = { x := kernel_platform; x.munmap },
+    mprotect = fn(a, b, c) = {
+        with_syscalls {| x := Syscall'mprotect(a, b, c); x.value }
+    },
+    exit_thread = { x := kernel_platform; x.exit_thread },
+);
 
 user_io_poll_in :: fn(q: *UQueue, who: i64) void = {
     fs := Vfs'get_vfs();
@@ -274,9 +279,3 @@ user_io_poll_in :: fn(q: *UQueue, who: i64) void = {
     @assert(work.claimed.kiki == work.committed.kiki);
     q.pipe.done&.push(entry);
 }
-
-debug_write2 :: fn(msg: Str) void = {
-    write := host_syscalls.fns.write.libc;
-    write := bit_cast_unchecked(rawptr, @FnPtr(Fd, *u8, i64) i64, write);
-    write(STD_OUT, msg.ptr, msg.len);
-};

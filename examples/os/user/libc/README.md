@@ -15,6 +15,7 @@ the impl folder is for my operating system
 ---
 
 Each .fr file here corrisponds to one .h file in a classic c distribution. 
+- ish. it's getting ridiculous so TODO: reorganize. 
 
 Annotations:
 - #static are things that don't access any global libc state (even transitively). 

@@ -1,0 +1,303 @@
+// all thread groups share one address space. 
+
+root_thread_group :: @static(ThreadGroup);
+
+ThreadGroup :: @rec @struct {
+    vfs: Vfs.Fs;
+    threads: RawList(*Thread);
+    parent: ?*ThreadGroup;
+    children: RawList(*ThreadGroup);
+    // TODO: track mmaps so they can be released when all threads exit 
+};
+
+setup_root_thread_group :: fn() void = {
+    t := get_current_thread();
+    t.tid = 1; t.tid_futex = 1;
+    g := root_thread_group;
+    g.parent = .None;
+    get_current_tls()[].thread_group = g;
+    g.threads = init(general_allocator(), 1);
+    g.threads&.push_assume_capacity(t);
+};
+
+add_to_current_thread_group :: fn(thread: *Thread) void = {
+    g := get_current_tls()[].thread_group;
+    with g.vfs.mutex& {
+        thread.get_tls()[].thread_group = g;
+        g.threads&.push(thread, g.vfs.allocator);
+    };
+}
+
+Attr :: @struct {  // posix_spawnattr_t
+    flags: i64;
+    sigmask: Array(i64, 16);
+};
+FileActions :: RawList(FileAction);  // posix_spawn_file_actions_t
+FileAction :: @tagged(
+    Close: @struct(fd: Fd), 
+    Dup2: @struct(old: Fd, new: Fd),
+    Open: @struct {
+        fd: Fd;
+        path: CStr;
+        flags: i64;
+        mode: i64;
+    },
+);
+// TODO: posix_spawn_file_actions_add*
+
+posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CStr, envp: *CStr) i64 = {
+    out[] = -1;
+    @assert(a.flags == 0 && a.sigmask&[0] == 0, "TODO: spawn attrs");
+    argv := slice_strings(argv);
+    ::display_slice(CStr);
+    @trace("posix_spawn(%%)", @if(path.str() != argv[0].str(), path, ""), argv);
+    @assert_eq(path.str(), "/dev/shell.fr", "TODO: exec aot elf/wasm binaries");
+    
+    Spawn :: @struct {
+        waiting: u32;
+        f: FileActions;
+    };
+    exec_worker :: fn(it: *Spawn) void = {
+        it2 := it[]; 
+        tmp := it.waiting;
+        while => tmp != 1 {
+            Futex'wait(it.waiting&, tmp);
+            tmp = it.waiting;
+        };
+        
+        it.waiting = 2;
+        Futex'wake(it.waiting&, 1);
+        it := it2&;  // don't look at arg again so caller can return
+        
+        fs := Vfs'get_vfs();
+        for it.f { it |
+            @match(it) {
+                fn Close(it) => {
+                    Syscall'close(it.fd)
+                        || Syscall'exit(127);
+                }
+                fn Dup2(it) => {
+                    Syscall'dup2(it.old, it.new) 
+                        || Syscall'exit(127);
+                }
+                fn Open(it) => {
+                    _ := Syscall'close(it.fd);
+                    fd := Syscall'openat(Posix'AT'FDCWD(), it.path, it.flags, it.mode);
+                    @if(fd < 0) Syscall'exit(127);
+                    @assert_eq(fd, it.fd.fd, "TODO: force fd");
+                }
+            }
+        };
+        it.f&.drop(fs.allocator);
+        // TODO: close-on-exec 
+        
+        @println("TODO: run the thing somehow");
+    };
+    task: Spawn = (
+        waiting = 0,
+        f = f[],
+    ); it := task&;
+    t := start_thread(Spawn, exec_worker, it);
+    pid := t.tid;
+    
+    // create a new thread group (with a new Vfs instance) and move `t` into it
+    parent := get_current_tls()[].thread_group;
+    fs := parent.vfs&;
+    with fs.mutex& {
+        a := fs.allocator;
+        child := a.box_zeroed(ThreadGroup);
+        fs2 := child.vfs&;
+        with fs2.mutex& {
+            fs2.allocator = a;  // TODO: everyone should get their own so less contention
+            child.parent = (Some = parent);
+            child.threads&.push(t, a);
+            ::ptr_utils(Thread);
+            i := parent.threads.index_of(fn(it) => identical(it[], t))
+                .expect("thread in thread group");
+            parent.threads&.ordered_remove(i);
+            t.get_tls()[].thread_group = child;
+            parent.children&.push(child, a);
+            fs2.root_dir = fs.root_dir;
+            fs2.cwd = fs.cwd;
+            // TODO: next_fuse_request_id should be global?
+            
+            // TODO: more locks, the FileVTable impls assume they aren't racing. 
+            each fs.fd& { it |
+                if it.refs != 0 {
+                    i32.atomic_add(it.refs&, 1);
+                };  // else: already closed
+            };
+            fs2.fd = fs.fd&.clone();
+            fs2.free = fs.free&.clone(a);
+            
+            e := t.first_environment&;
+            e.environment_variables = copy_strings(slice_strings(envp), a).as_ptr();
+            e.cli_arguments = copy_strings(argv, a);
+            e.panic_hook = print_and_exit1;
+        };
+    };
+    // TODO: this back and forth is over complicated. 
+    //       but i can't call init_thread_data and raw_create_thread seperately 
+    //       because i need the setup in pthread_create to happen earlier
+    //       so i can undo which thread group it's in. kl
+    it.waiting = 1;
+    Futex'wake(it.waiting&, 1);
+    
+    // don't leave until it's done looking at our stack
+    tmp := it.waiting;
+    while => tmp != 2 {
+        Futex'wait(it.waiting&, tmp);
+        tmp = it.waiting;
+    };
+    
+    out[] = pid;
+    0
+};
+
+wait4 :: fn(pid: pid_t, status: *i32, options: i64, usage: *Posix.rusage) i32 = {
+    @trace("waiting(%)", pid);
+    @assert_eq(options, 0, "TODO: wait(flags)");
+    ::ptr_utils(@type usage[]);
+    @debug_assert(!usage.is_null(), "wait(null); macos doesn't accept this either");
+    status[] = -1;
+    usage[] = zeroed(@type usage[]);  // TODO
+    t: ?*Thread = .None;
+    parent := get_current_tls()[].thread_group;
+    with parent.vfs.mutex& {
+        child := parent.children.find(fn(it) => it.threads.len > 0 && it.threads[0].tid == pid);
+        // don't hold the mutex while waiting but don't race reading child.threads[0] outside
+        if child { child |
+            with child.vfs.mutex& {
+                t = (Some = child.threads[0]);
+            };
+        };
+    };
+    t := t || return(-1);
+    child := t.get_tls()[].thread_group;
+    @assert(t.tid != 0, "TODO: already joined");
+    ::ptr_utils(ThreadGroup);
+    @debug_assert(identical(child.parent.unwrap(), parent));
+    
+    // TODO: normal join asserts it's not the main thread so i manually free stack at the end
+    t.sys_join();  
+    
+    // TODO: force other threads to stop instead of waiting for them. 
+    dowhile {
+        // might still have threads running and those threads might spawn new threads
+        child.vfs.mutex&.lock();  
+        child_threads := child.threads.items().rest(1).shallow_copy(temp());
+        child.vfs.mutex&.unlock();
+        for child_threads { it |
+            it.join();
+        };
+        child.threads.len != 1
+    };
+
+    // TODO: release any memory child leaked
+    // TODO: close files but can't just do Syscall'close because they're in a different thread group. 
+    // TODO: it would be nice if the child did this cleanup in exit()
+    // TODO: poison if it panicked in vfs code?
+    // TODO: do child groups get waited or reparented to init?
+
+    // child has no more live threads
+    with parent.vfs.mutex& {
+        a := child.vfs.allocator;
+        child.vfs.fd&.drop();
+        child.vfs.free&.drop(a);
+        child.threads&.drop(a);
+        child.children&.drop(a);
+        // because sys_join-ed main
+        t.first_temporary_allocator&.deinit();
+        page_allocator.dealloc(u8, t.stack.padded);
+        parent.children&.unordered_retain(fn(it) => !identical(it[], child));
+        a.dealloc_one(ThreadGroup, child);
+    };
+    
+    status[] = 0;  // TODO
+    @trace("wait(%) = %", pid, status);
+    
+    0
+}
+
+exit :: fn(status: i64) Never = {
+    @trace("exit(%)", status);
+    // TODO: stop all threads
+    // TODO: exit the main thread of the thread group
+    host_platform'exit_thread(status)
+};
+
+// note: this requires that userdata/callee be as called by raw_create_thread
+pthread_create :: fn(out: *pthread_t, attr: *ThreadAttr, _callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) i64 = {
+    attr := bit_cast_unchecked(*ThreadAttr, *MyAttr, attr);
+    t := Thread.ptr_from_raw(userdata);
+    @debug_assert(identical(attr.stack.ptr, t.stack.usable.ptr.offset(t.stack_reserved_size)), "caller must be raw_create_thread");
+    @debug_assert_eq(t.tid_futex, MAX_u32);
+    add_to_current_thread_group(t);
+    host_platform'create_thread(t);
+    out.opaque = userdata;
+    @trace("pthread_create(%) = %", userdata, t.tid);
+    0
+};
+
+pthread_join :: fn(thread: pthread_t, value_ptr: *rawptr) i64 = {
+    t := Thread.ptr_from_raw(thread.opaque);
+    // not the same as `with_syscalls { t.join(); 0 };` because that would free the stack twice
+    @if(t.tid_futex != 0) @trace("joining(%)", t.tid);
+    t.sys_join();
+    // caller (lib/sys/threads.fr/join()) will free the stack when pthread_join returns. 
+    
+    ::ptr_utils(Thread);
+    g := get_current_tls()[].thread_group;
+    with g.vfs.mutex& {
+        i := g.threads.index_of(fn(it) => identical(it[], t))
+            .expect("thread in thread group");
+        @debug_assert_ne(i, 0, "cannot join main thread");
+        g.threads&.ordered_remove(i);
+    };
+    // TODO: don't :leak signal_stack_buf
+    
+    @trace("joined(%)", t.tid);
+    value_ptr[] = zeroed rawptr; // TODO
+    0
+};
+
+dump :: fn(g: *ThreadGroup, out: *List(u8), depth: i64, show_files: bool) void = {
+    with g.vfs.mutex& {
+    out.push_repeated(depth*2, " ".ascii());
+    @fmt(out, "G (threads=%, children=%, files=%, cwd=%)\n", 
+        g.threads.len, g.children.len, g.vfs.fd.len - g.vfs.free.len, g.vfs.cwd.fd);
+    for g.threads { it |
+        out.push_repeated((depth + 1)*2, " ".ascii());
+        @fmt(out, "T (tid=%, idx=%%)\n", 
+            it.tid, it.first_environment.thread_index,
+            @if(it.tid_futex == 0, ", DONE", ""));
+    };
+    if show_files {
+        enumerate g.vfs.fd { i, it |
+            if it.refs > 0 {
+                ::FmtPad(i64);
+                out.push_repeated((depth + 1)*2, " ".ascii());
+                @fmt(out, "F % >%(#%, %)\n", 
+                    f_pad(i, 3, .Before), f_pad(it.uid.zext(), 5, .Before), 
+                    it.refs, => it'vtable'debug(it.data, out));
+            }
+        };
+    };
+    for(g.children, fn(it) => dump(it, out, depth + 1, show_files));
+    };
+};
+
+slice_strings :: fn(argv: *CStr) []CStr = {
+    n := 0;
+    while => !argv.offset(n)[].ptr.is_null() {
+        n += 1;
+    };
+    argv.slice(n)
+};
+copy_strings :: fn(argv: []CStr, a: Alloc) []CStr = {
+    out := a.alloc_zeroed(CStr, argv.len + 1);
+    enumerate argv { i, it |
+        out[i] = it[].str().alloc_cstr(a);
+    };
+    out
+};
