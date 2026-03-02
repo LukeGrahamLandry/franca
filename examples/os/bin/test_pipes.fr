@@ -1,5 +1,10 @@
 
 main :: fn() void = {
+    multi_thread();
+    multi_process();
+}
+
+multi_thread :: fn() void = {
     pipes :: @static(Array(Array(Fd, 2), 2));
     each pipes { p |
         Syscall'pipe(p).unwrap();
@@ -23,6 +28,28 @@ main :: fn() void = {
     each(pipes, fn(it) => for(it, fn(it) => Syscall'close(it)));
     println(buf);
     msg :: "Hello World!";
+}
+
+// TODO: implement the normal subprocess.fr interface with this somehow
+multi_process :: fn() void = {
+    S :: import("@/examples/os/user/libc/impl/spawn.fr");
+    Attr :: S.Attr; FileActions :: S.FileActions; 
+    posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CStr, envp: *CStr) voidResult #libc;
+    out := zeroed(pid_t);
+    path := "/dev/shell.fr";
+    argv := import("@/lib/sys/subprocess.fr")'make_args_for_exec(path, @slice("toy/hello"), temp());
+    
+    pipe := zeroed Array(Fd, 2);
+    Syscall'pipe(pipe&).unwrap();
+    a: FileActions = init(general_allocator(), 3);
+    a&.push_assume_capacity(Dup2 = (oldfd = STD_OUT, newfd = pipe&[1]));
+    
+    posix_spawn(out&, path.as_cstr(), @ref a, @ref zeroed(Attr), argv.ptr, tls(.environment_variables)[]).unwrap();
+    @println("spawned %", out);
+    
+    buf := temp().alloc_zeroed(u8, 64);
+    buf.len = Syscall'read(pipe&[0], buf.ptr, buf.len).unwrap();
+    @println("from pipe[%][%]", buf.len, buf);
 }
 
 poll :: fn(fd: Fd) i64 = {

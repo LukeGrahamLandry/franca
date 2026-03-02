@@ -1,3 +1,6 @@
+- each thread expose an allocator that allocates from the other end of the stack for things that last forever?
+- should give my ring buffer thing a more sane api for doing multiple entries at once 
+  and nonblocking instead of always poking at the (confusingly named) fields.
 - i do a lot of redundant work moving symbols/types between modules 
   when you have layers like tests/exe/ffi_c.fr. instead just be able to reference. 
   have a list of child ones inside it. would also make disk space of target/franca/cache less offensive 

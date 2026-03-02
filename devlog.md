@@ -1,6 +1,13 @@
 ## (Mar 1)
 
 - to use the normal test running in examples/os i need "processes", this shall be a long road. 
+- building blocks: dumb pipes, fs pointer in a thread local, track threads that will exit together. 
+- web: im sure i don't close_modules enough for it to matter 
+  but i'd feel much better without having the shitty graph traversal of Jit.Event.Assign.
+  - started down the path of including got slots with `__franca_wasm_import_names` so 
+    it would be more similar to native but that became a bit of a nightmare because of aliases so 
+    each symbol can have multiple got slots and i don't want to add back more special cases to unify them.
+  - just commit to only doing assign at startup and then close doesn't care because imports can't be unloaded
 
 ## (Feb 28)
 
