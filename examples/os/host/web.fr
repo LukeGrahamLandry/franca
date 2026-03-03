@@ -50,6 +50,7 @@ main2 :: fn() void = {
     tls(.deny_syscalls)[] = true;
     globals.jit_events = list(4096, general_allocator());
     globals.free = list(4096, general_allocator());
+    Vfs'image[] = fetch_root_fs(cli_args());
     Vfs'init_vfs();
     xxx := Vfs.root_console_stdin;  // :compilerbug ?? Type Error: field 'fs' does not exist
     xxx.poll = fn(a, b) = ();
@@ -332,3 +333,16 @@ table_assign :: AsmFunctionWasmOnly(fn(dest: i32, src: i32) void = (), fn(out) =
     out.push(0x00);  // ^
     out.push(0x0B);  // end
 });
+
+fetch_root_fs :: fn(args: []CStr) []u8 = {
+    i := args.index_of(fn(it) => it[] == "-rootfs_hash").expect("rootfs_hash");
+    rootfs_hash := args[i + 1].str();
+    @assert_eq(rootfs_hash.len, 64);
+    length := Host'js_write(0xBBBB0002, rootfs_hash.ptr, rootfs_hash.len);
+    @assert(length > 64);
+    dest := temp().alloc_uninit(u8, length);
+    dest.slice(0, 64).copy_from(rootfs_hash);
+    length := Host'js_write(0xBBBB0002, dest.ptr, dest.len);
+    @assert_eq(length, dest.len);
+    dest
+}

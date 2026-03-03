@@ -49,7 +49,7 @@ with_deps_skip_rv :: @S(
     @S("tests/external/wuffs.fr"),  // dep:wuffs
 );
 
-fn driver(vtable: *ImportVTable) void = {
+driver :: fn(vtable: *ImportVTable) void = {
     @run(inline_for cli_args() { $it |
         @if(@run(it[] == "fetch")) reach_all_deps();
     });
@@ -58,7 +58,7 @@ fn driver(vtable: *ImportVTable) void = {
     for c {s: CStr|
         do_it(vtable, s.str());
     };
-}
+};
 
 do_it :: fn(vtable: *ImportVTable, s: Str) void = {
     #use("@/lib/sys/process.fr");
@@ -217,13 +217,27 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
                 };
                 
                 if ci {
-                    run(@slice("examples/web/build.fr"));
-                    sh(@slice("node", "target/web/test.js"));
+                    rootfs_hash := build_web_and_get_hash(franca_path);
+                    sh(@slice("node", "target/web/test.js", rootfs_hash));
                     run(@slice("tests/external/other.fr"));
                 };
             };
             @default => @eprintln("IGNORE: %", s);
         };
+};
+
+build_web_and_get_hash :: fn(franca_path: Str) Str = {
+    #use("@/lib/sys/subprocess.fr");
+    ok, out, err := exec_and_catch(franca_path, @slice("examples/web/build.fr"), temp());
+    err := err.items();
+    @assert(ok, "%%", out.items(), err);
+    prefix := "rootfs_hash=";
+    while => !err.starts_with(prefix) {
+        err = err.rest(1);
+    };
+    err = err.rest(prefix.len);
+    rootfs_hash := err.slice(0, 64);
+    rootfs_hash
 };
 
 #use("@/backend/lib.fr")

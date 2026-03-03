@@ -1,4 +1,4 @@
-let manifest_version = Math.floor(new Date().valueOf());
+let manifest_version = "----------------------------------------------------------------";
 if (typeof WebAssembly === "undefined")
     alert("Your browser does not support web assembly.");
 if (typeof Worker === "undefined")
@@ -73,7 +73,7 @@ const handle = (resolve) => (_msg) => {
 
 function get_worker() {
     if (thread_pool.length == 0) {
-        let w = new Worker(`worker.js?v=${version}`, { type: "module" });
+        let w = new Worker(`worker.js?v=${manifest_version}`, { type: "module" });
         w.onerror = (e) => {
             console.error(e);
             show(e.message);
@@ -140,6 +140,8 @@ const toggle_worker = (resolve) => {
             compiler.name,
             "-target",
             document.getElementById("target").value,
+            "-rootfs_hash",
+            manifest_version,
             ...(dbg.length == 0 ? [] : (dbg.includes("-") ? dbg.split(" ") : ["-d", dbg])),
         ];
         worker = get_worker();
@@ -192,7 +194,7 @@ const toggle_worker = (resolve) => {
 // eventually i'll have the worker be persistant and everything just live in one canvas 
 async function get_file(path) {
     return new Promise((resolve) => {
-        const args = ["demo.wasm", "-yield", path];
+        const args = ["demo.wasm", "-yield", path, "-rootfs_hash", manifest_version];
         let w = get_worker(); 
         w.onmessage = async (msg) => {
             if (msg.data.tag != "download") {
@@ -219,8 +221,14 @@ function new_memory() {
     }); 
 }
 
-let manifest = await (await fetch("target/manifest.json?v=" + manifest_version)).json();
-const version = manifest.commit.slice(0, 8);
+// _: my hope is that i can ask it to prefetch everything i want and then it will be faster on the workers via magic.   
+let [wasm_module, manifest, _rootfs, _worker_script] = await Promise.all([
+    load_wasm(),
+    fetch("target/manifest.json?v=" + manifest_version).then(async (it) => await it.json()),
+    fetch(`mirror/${manifest_version}`),
+    fetch(`worker.js?v=${manifest_version}`),
+]);
+
 console.log(manifest);
 document.getElementById("version").innerText = manifest.commit;
 
@@ -279,9 +287,8 @@ document.getElementById("example").onchange = function () {
 };
 show_compilers();
 
-let wasm_module = await load_wasm();
 async function load_wasm() {
-    let res = await fetch(`target/demo.wasm?v=${version}`);
+    let res = await fetch(`target/demo.wasm?v=${manifest_version}`);
     if (res.status !== 200) document.getElementById("err").innerText = res.status;
     // TODO: this is the compressed size but progress is uncompressed :(
     const total = res.headers.get("content-length");

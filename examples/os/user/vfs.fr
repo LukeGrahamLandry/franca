@@ -60,24 +60,12 @@ FStatOut :: @struct {
 
 IoctlErased :: @FnPtr(self: rawptr, data: rawptr) i64;
 
+image :: @static([]u8);
 init_vfs :: fn() void = {
     // :leak everything here but there's only one
     Group'setup_root_thread_group();
     fs := get_vfs();
     fs.allocator = general_allocator();
-    Pair :: Ty(u32, u32);
-    fs_i, contents := @run {
-        fs, contents := import("@/examples/web/build.fr")'collect_fs(ast_alloc());
-        fs_i := Pair.list(fs.len_including_tombstones * 2, ast_alloc());
-        each fs& { name, info |
-            off := contents.len;
-            contents&.push_all(name);
-            push(fs_i&, (off.trunc(), name.len.trunc()));
-            push(fs_i&, (info._0.trunc(), info._1.trunc()));
-        };
-        @assert_lt(contents.len, MAX_u32);
-        (fs_i.items(), contents.items())
-    };
     
     io := fs.allocator.box_zeroed(@struct(stdin: UQueue, stdout: UQueue));  
     io.stdin.pipe = init(fs.allocator, 2);
@@ -122,6 +110,11 @@ init_vfs :: fn() void = {
     };
     // else :leak
     
+    image := image[];
+    length, off_indices := image.peek_type(Ty(u32, u32))[];
+    @assert_eq(image.len, length.zext());
+    contents := image.rest(8);
+    fs_i := Ty(u32, u32).reinterpret_bytes(contents.rest(off_indices.zext()));
     // TODO: deduplicate with follow_path
     while => fs_i.len > 0 {
         continue :: local_return;

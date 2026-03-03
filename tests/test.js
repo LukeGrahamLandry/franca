@@ -31,6 +31,8 @@ const worker_path = "./node_worker.js";
 const worker_src = readFileSync("./worker.js");
 writeFileSync(worker_path, prelude + worker_src);
 const franca_path = "target/franca.out";
+const rootfs_hash = process.argv[2];
+assert(rootfs_hash.length == 64, "expected argv[2] = rootfs_hash");
 
 // TODO: test more and stop duplicating this list everywhere. 
 const tests = [
@@ -96,7 +98,7 @@ const start_worker = (args, resolve) => {
     worker = get_worker();
     worker.onmessage = handle(resolve);
     const memory = new WebAssembly.Memory({ initial: 300, maximum: 1 << (32 - 16), shared: true, });
-    worker.postMessage({ tag: "start", args: ["demo.wasm", ...args], memory }, []);
+    worker.postMessage({ tag: "start", args: ["demo.wasm", "-rootfs_hash", rootfs_hash, ...args], memory }, []);
 };
 
 async function run_tests() {

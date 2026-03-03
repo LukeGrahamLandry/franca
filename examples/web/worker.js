@@ -337,13 +337,17 @@ function get_wasm_string(ptr, len) {
     return new TextDecoder().decode(wasteofmytime);
 }
 
+const sync_fetch_cache = {};
 function sync_fetch(url) {
+    if (sync_fetch_cache[url] === undefined) {
     let it = new XMLHttpRequest();
     it.responseType = "arraybuffer";
     it.open("GET", url, false);
     it.send(null);
     if (it.status !== 200) return null;
-    return it.response;
+    sync_fetch_cache[url] = it.response;
+    }
+    return sync_fetch_cache[url];
 }
 
 

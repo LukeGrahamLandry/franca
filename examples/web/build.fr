@@ -47,25 +47,30 @@ driver :: fn(vtable: *ImportVTable) void = {
     // just for running the tests in node but has to be in the same place for relative path imports in the worker 
     copy("target/web/test.js", "tests/test.js");
     
+    mirror_path := "target/web/mirror";
+    cache_path := "target/franca/fetch";
+    make_dirs_or_crash(mirror_path);
+    make_dirs_or_crash(cache_path);
+    root_fs := flatten_fs(temp());
+    hash := Sha256'hex(root_fs);
+    write_entire_file_or_crash(@tfmt("%/%", mirror_path, hash), root_fs);
+    // TODO: don't leak the old one on the file system when developing. 
+    commit = hash;
+    @eprint("rootfs_hash=%\n", hash);  // parsed by the test runner
+    copy(@tfmt("%/%.out", cache_path, hash), @tfmt("%/%", mirror_path, hash));
+    
     // TODO: this is slowly approching crazy town...
-    if ci {
-        default := "Math.floor(new Date().valueOf())";
+        default := "\"----------------------------------------------------------------\"";
         prefix := "let manifest_version = ";
         main_js := read_entire_file_or_crash(temp(), "target/web/main.js");
         dest := main_js.rest(prefix.len).slice(0, default.len);
-        @assert(main_js.starts_with(prefix) && dest == default);
-        commit.len = min(commit.len, dest.len - 2);
-        dest[0] = "\"".ascii();
-        dest[dest.len - 1] = "\"".ascii();
+        @assert(main_js.starts_with(prefix) && dest == default && commit.len == dest.len - 2);
         dest.slice(1, commit.len + 1).copy_from(commit);
-        dest.slice(commit.len + 1, dest.len - 1).set_bytes("-".ascii());
         write_entire_file_or_crash("target/web/main.js", main_js);
-        
+    if ci {
         // mirror any deps used by the examples so the web demo can get them from its own domain to get around CORS
         _ := run_cmd_blocking(franca, @slice("tests/run_tests.fr", "fetch"));
-        mirror_path := "target/web/mirror";
-        cache_path := "target/franca/fetch";
-        make_dirs_or_crash(mirror_path);
+        
         walk_directory_unordered(cache_path.as_cstr()) { entry | 
             if entry.name.ends_with(".out") && entry.type == .File {
                 src := @tfmt("%/%", cache_path, entry.name);
@@ -116,6 +121,27 @@ manifest :: fn(commit: Str) Manifest = (
         "High precision timers are considered unsafe.",
     ),
 );
+
+// all numbers u32, offsets are relative to the blob (so start+8)
+// (length, off(indices), [blob; indices=[off(name), length(name), off(data), length(data)]])
+flatten_fs :: fn(a: Alloc) []u8 = {
+    Pair :: Ty(u32, u32);
+    fs, contents := collect_fs(temp());
+    fs_i := Pair.list(fs.len_including_tombstones * 2, temp());
+    each fs& { name, info |
+        off := contents.len;
+        contents&.push_all(name);
+        push(fs_i&, (off.trunc(), name.len.trunc()));
+        push(fs_i&, (info._0.trunc(), info._1.trunc()));
+    };
+    out := u8.list(a);
+    out&.reserve_type(u32)[] = 8 + contents.len.trunc() + (size_of(@type fs_i[0]) * fs_i.len).trunc();
+    out&.reserve_type(u32)[] = contents.len.trunc();
+    out&.push_all(contents.items());
+    out&.push_all(fs_i.items().interpret_as_bytes());
+    @assert(out.len < MAX_u32, "flatten_fs > 4gb");
+    out.items()
+}
 
 collect_fs :: fn(a: Alloc) Ty(Fs, List(u8)) = {
     paths := collect_paths(a, @const_slice("lib", "compiler", "backend", "examples", "graphics", "tests", "boot/src"));
