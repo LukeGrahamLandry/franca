@@ -43,34 +43,36 @@ FileAction :: @tagged(
         mode: i64;
     },
 );
-// TODO: posix_spawn_file_actions_add*
 
 posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CStr, envp: *CStr) i64 = {
     out[] = -1;
-    @assert(a.flags == 0 && a.sigmask&[0] == 0, "TODO: spawn attrs");
+    ::ptr_utils(@type a[]);
+    ::ptr_utils(@type f[]);
+    @assert(a.is_null(), "TODO: spawn attrs");
     argv := slice_strings(argv);
     ::display_slice(CStr);
     @trace("posix_spawn(%%)", @if(path.str() != argv[0].str(), path, ""), argv);
     @assert_eq(path.str(), "franca", "TODO: exec aot elf/wasm binaries");
     
+    if f.is_null() {| f = @ref zeroed(FileActions); };
     Spawn :: @struct {
         waiting: u32;
         f: FileActions;
     };
     exec_worker :: fn(it: *Spawn) void = {
-        it2 := it[]; 
         tmp := it.waiting;
         while => tmp != 1 {
             Futex'wait(it.waiting&, tmp);
             tmp = it.waiting;
         };
         
+        actions := it.f.items().shallow_copy(temp());
         it.waiting = 2;
         Futex'wake(it.waiting&, 1);
-        it := it2&;  // don't look at arg again so caller can return
+        it := ();  // don't look at arg again so caller can return
         
         fs := Vfs'get_vfs();
-        for it.f { it |
+        for actions { it |
             @match(it) {
                 fn Close(it) => {
                     Syscall'close(it.fd)
@@ -88,7 +90,6 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
                 }
             }
         };
-        it.f&.drop(fs.allocator);
         with fs.mutex& {  // doesn't matter, no children yet
             // includes new ones if Open(flag=CLOEXEC) was in actions which i think is what you want, just never would happen.
             for fs.cloexec& { i |  
@@ -104,6 +105,15 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
             @panic("file not found in path: |%|\n", parts[0]);
         cmd := general_allocator().boxed(Command, (command = command, parts = parts));
         run_command(cmd);
+        
+        // close everything (makes pipes poll as HUP)
+        // TODO: wait for children but also have to do this on early exit()
+        with fs.mutex& { 
+            // rev to delay closing stderr until almost done. 
+            range_rev(0, fs.fd.len) { i |
+                _ := Syscall'close(@as(Fd) (fd = i.intcast()));
+            };
+        };
     };
     task: Spawn = (
         waiting = 0,
@@ -111,6 +121,7 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
     ); it := task&;
     t := start_thread(Spawn, exec_worker, it);
     pid := t.tid;
+    // TODO: when groups track mmaps, the thread's stack and temp() will be in the wrong one. 
     
     // create a new thread group (with a new Vfs instance) and move `t` into it
     parent := get_current_tls()[].thread_group;
@@ -173,9 +184,10 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
     0
 };
 
-wait4 :: fn(pid: pid_t, status: *i32, options: i64, usage: *Posix.rusage) i32 = {
+wait4 :: fn(pid: pid_t, status: *i32, flags: i64, usage: *Posix.rusage) i32 = {
     @trace("waiting(%)", pid);
-    @assert_eq(options, 0, "TODO: wait(flags)");
+    nohang := flags.bit_and(Posix.W.NOHANG) != 0;
+    @assert_eq(flags.bit_and(bit_not(Posix.W.NOHANG)), 0, "TODO: wait(flags=%)", flags);
     ::ptr_utils(@type usage[]);
     @debug_assert(!usage.is_null(), "wait(null); macos doesn't accept this either");
     status[] = -1;
@@ -192,6 +204,9 @@ wait4 :: fn(pid: pid_t, status: *i32, options: i64, usage: *Posix.rusage) i32 = 
         };
     };
     t := t || return(-1);
+    if nohang && t.tid_futex != 0 {
+        return 0;  // still running
+    };
     child := t.get_tls()[].thread_group;
     @assert(t.tid != 0, "TODO: already joined");
     ::ptr_utils(ThreadGroup);
@@ -236,7 +251,7 @@ wait4 :: fn(pid: pid_t, status: *i32, options: i64, usage: *Posix.rusage) i32 = 
     status[] = 0;  // TODO
     @trace("wait(%) = %", pid, status);
     
-    0
+    pid
 }
 
 exit :: fn(status: i64) Never = {
@@ -284,8 +299,8 @@ pthread_join :: fn(thread: pthread_t, value_ptr: *rawptr) i64 = {
 dump :: fn(g: *ThreadGroup, out: *List(u8), depth: i64, show_files: bool) void = {
     with g.vfs.mutex& {
     out.push_repeated(depth*2, " ".ascii());
-    @fmt(out, "G (threads=%, children=%, files=%, cwd=%)\n", 
-        g.threads.len, g.children.len, g.vfs.fd.len - g.vfs.free.len, g.vfs.cwd.fd);
+    @fmt(out, "G (threads=%, children=%, files=%, cwd=%, free=%)\n", 
+        g.threads.len, g.children.len, g.vfs.fd.len - g.vfs.free.len, g.vfs.cwd.fd, g.vfs.free.len);
     for g.threads { it |
         out.push_repeated((depth + 1)*2, " ".ascii());
         @fmt(out, "T (tid=%, idx=%%)\n", 

@@ -115,7 +115,6 @@ init_vfs :: fn() void = {
     @assert_eq(image.len, length.zext());
     contents := image.rest(8);
     fs_i := Ty(u32, u32).reinterpret_bytes(contents.rest(off_indices.zext()));
-    // TODO: deduplicate with follow_path
     while => fs_i.len > 0 {
         continue :: local_return;
         off, len := fs_i[0];
@@ -130,17 +129,11 @@ init_vfs :: fn() void = {
         };
         
         cwd := root_dir;
-        i := 0;
-        while => i < name.len {
-            continue :: local_return;
-            start := i;
-            while => i < name.len && name[i] != PATH_SEP.ascii() {
-                i += 1;
-            };
-            part := name.slice(start, i);
-            i += 1;
+        while => name.len > 0 {
+            part, rest := pop_dir_prefix(name) || (name, "");
+            name = rest;
             self := MemDir.ptr_from_raw(cwd.data);
-            if i >= name.len {  // file
+            if name.len == 0 {  // file
                 off, len := info;
                 _ := create_child(self, part, MemFileRO, (
                     contents = contents.subslice(off.zext(), len.zext()),
@@ -258,6 +251,7 @@ MemFileRO :: @struct {
     };
     poll :: fn(self) = Posix.POLL.IN;
     // close: not freeing contents because it's owned by the directory but unlink needs to deal with this :leak
+    // also they can be created pointing to static data in rootfs image.
 };
 
 MemFile :: @struct {
@@ -963,6 +957,7 @@ fn follow_path_prefix(fd: Fd, path: Str) Result(Ty(Fd, CStr), i64) = {
 }
 
 // "a/b/c" -> ("a", "b/c")
+// returns None if path does not contain a slash
 fn pop_dir_prefix(path: Str) ?Ty(Str, Str) = {
     @if(path.len == 0) return(.None);
     i := 0;

@@ -14,6 +14,8 @@
   dup2 doesn't preserve it. which i guess makes sense because it means you can have your pipe be cloexec
   so you're not racing other threads that might steal it and prevent you from getting HUP. 
   - also close has to recycle fds even when not ready to free the instance. 
+- make size of wasm module more clear. split all the source code into a seperate file. 
+- do subprocess api with posix_spawn. wait(nohang). close at the end of child so pipes HUP. 
 
 ## (Mar 1)
 

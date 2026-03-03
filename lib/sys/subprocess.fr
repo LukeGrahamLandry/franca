@@ -1,12 +1,18 @@
 // TODO: better error handling. 
-// TODO: use posix_spawnp instead? that makes it easier to return an error to the caller. using fork is a pain. 
 fn run_cmd_blocking(path: Str, args: Slice(Str)) bool = {
     cargs := make_args_for_exec(path, args, temp());
     envp := tls(.environment_variables)[];
-    exe := search_path(envp, cargs[0]);
-    pid := Syscall'fork();
-    if pid == 0 {
-        exec(exe, cargs);
+    pid: i32 = -1;
+    if tls(.deny_syscalls)[] {
+        #use(Syscall);
+        posix_spawnp(pid&, cargs[0], zeroed(*PosixSpawnActions), zeroed(*PosixSpawnAttr), cargs.ptr, envp)
+            || return(false);
+    } else {
+        exe := search_path(envp, cargs[0]);
+        pid = Syscall'fork();
+        if pid == 0 {
+            exec(exe, cargs);
+        };
     };
     
     status: i32 = 0;
@@ -79,9 +85,25 @@ sys_capture_exec :: fn(args: []CStr) Result(RunningProcess, Str) = {
     };
     @debug_assert(args[args.len - 1].ptr.is_null());
     envp := tls(.environment_variables)[];
-    exe := search_path(envp, args[0]);
     
-    pid := Syscall'fork();
+    pid: i32 = -1;
+    if tls(.deny_syscalls)[] {  // i.e. wasm
+        #use(Syscall);
+        a := @uninitialized PosixSpawnActions;
+        fail :: fn() => return(Err = "failed posix_spawn setup");
+        posix_spawn_file_actions_init(a&) || fail();
+        posix_spawn_file_actions_addclose(a&, pipes&[0]&[1]) || fail();
+        posix_spawn_file_actions_addclose(a&, pipes&[1]&[0]) || fail();
+        //posix_spawn_file_actions_addclose(a&, pipes&[2]&[0]) || fail();
+        posix_spawn_file_actions_adddup2(a&, pipes&[0]&[0], STD_IN) || fail();
+        posix_spawn_file_actions_adddup2(a&, pipes&[1]&[1], STD_OUT) || fail();
+        //posix_spawn_file_actions_adddup2(a&, pipes&[2]&[1], STD_ERR) || fail();
+        r := posix_spawnp(pid&, args[0], a&, zeroed(*PosixSpawnAttr), args.ptr, envp);
+        _ := posix_spawn_file_actions_destroy(a&);
+        r || fail();
+    } else {
+    exe := search_path(envp, args[0]);
+    pid = Syscall'fork();
     if pid == 0 { // Child
         // The important thing is that the child closes it's copy of the write end of its standard-input
         // so when the parent closes its copy too, the child will read it as EOF so a program 
@@ -100,6 +122,7 @@ sys_capture_exec :: fn(args: []CStr) Result(RunningProcess, Str) = {
         exec(exe, args);
     };
     // else: Parent
+    };
 
     Syscall'close(pipes&[0]&[0]).unwrap();  // close the read end
     Syscall'close(pipes&[1]&[1]).unwrap();  // close the write end

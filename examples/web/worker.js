@@ -250,6 +250,9 @@ let weak_imports = [
     "FR_wasm_jit_event",
     "getpid", "gettid", 
     "pread", 
+    "posix_spawnp", 
+    "posix_spawn_file_actions_init", "posix_spawn_file_actions_destroy",
+    "posix_spawn_file_actions_adddup2", "posix_spawn_file_actions_addclose", 
 ];
 
 for (const it of weak_imports) {

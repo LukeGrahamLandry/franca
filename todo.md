@@ -1,3 +1,4 @@
+- deal with `franca examples/web/build.fr && node target/web/test.js` needs to get rootfs_hash somehow
 - each thread expose an allocator that allocates from the other end of the stack for things that last forever?
 - should give my ring buffer thing a more sane api for doing multiple entries at once 
   and nonblocking instead of always poking at the (confusingly named) fields.
