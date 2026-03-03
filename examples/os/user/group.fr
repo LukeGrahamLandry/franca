@@ -51,7 +51,7 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
     argv := slice_strings(argv);
     ::display_slice(CStr);
     @trace("posix_spawn(%%)", @if(path.str() != argv[0].str(), path, ""), argv);
-    @assert_eq(path.str(), "/dev/shell.fr", "TODO: exec aot elf/wasm binaries");
+    @assert_eq(path.str(), "franca", "TODO: exec aot elf/wasm binaries");
     
     Spawn :: @struct {
         waiting: u32;
@@ -89,9 +89,21 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
             }
         };
         it.f&.drop(fs.allocator);
-        // TODO: close-on-exec 
-        
-        @println("TODO: run the thing somehow");
+        with fs.mutex& {  // doesn't matter, no children yet
+            // includes new ones if Open(flag=CLOEXEC) was in actions which i think is what you want, just never would happen.
+            for fs.cloexec& { i |  
+                @eprintln("CLOEXEC i=%", i);
+                _ := Syscall'close(@as(Fd) (fd = i.intcast()));
+            };
+            fs.cloexec&.clear();
+        };
+
+        args := cli_args().rest(1);
+        parts := temp().alloc_init(Str, args.len(), fn(i) => args[i].str());
+        command := search_path(parts[0]) || 
+            @panic("file not found in path: |%|\n", parts[0]);
+        cmd := general_allocator().boxed(Command, (command = command, parts = parts));
+        run_command(cmd);
     };
     task: Spawn = (
         waiting = 0,
@@ -129,11 +141,18 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
             };
             fs2.fd = fs.fd&.clone();
             fs2.free = fs.free&.clone(a);
+            // not preserved, these will be closed then cleared in the child after running the actions.  
+            fs2.cloexec.bits = fs.cloexec.bits&.clone();
             
             e := t.first_environment&;
             e.environment_variables = copy_strings(slice_strings(envp), a).as_ptr();
             e.cli_arguments = copy_strings(argv, a);
-            e.panic_hook = print_and_exit1;
+            e.cli_arguments.len -= 1;  // no null terminator
+            e.panic_hook = fn(msg) = {
+                tls(.panic_hook)[] = print_and_exit1;
+                Crash'report_backtrace(fp = Crash'trace_start(), ip = 0.rawptr_from_int());
+                print_and_exit1(msg)
+            };
         };
     };
     // TODO: this back and forth is over complicated. 
@@ -204,6 +223,7 @@ wait4 :: fn(pid: pid_t, status: *i32, options: i64, usage: *Posix.rusage) i32 = 
         a := child.vfs.allocator;
         child.vfs.fd&.drop();
         child.vfs.free&.drop(a);
+        child.vfs.cloexec.bits&.drop();
         child.threads&.drop(a);
         child.children&.drop(a);
         // because sys_join-ed main
@@ -235,7 +255,7 @@ pthread_create :: fn(out: *pthread_t, attr: *ThreadAttr, _callee: @FnPtr(userdat
     add_to_current_thread_group(t);
     host_platform'create_thread(t);
     out.opaque = userdata;
-    @trace("pthread_create(%) = %", userdata, t.tid);
+    @trace("pthread_create(%) = (tid=%, idx=%)", userdata, t.tid, t.first_environment.thread_index);
     0
 };
 
@@ -277,8 +297,9 @@ dump :: fn(g: *ThreadGroup, out: *List(u8), depth: i64, show_files: bool) void =
             if it.refs > 0 {
                 ::FmtPad(i64);
                 out.push_repeated((depth + 1)*2, " ".ascii());
-                @fmt(out, "F % >%(#%, %)\n", 
+                @fmt(out, "F % >%(%#%, %)\n", 
                     f_pad(i, 3, .Before), f_pad(it.uid.zext(), 5, .Before), 
+                    @if(g.vfs.cloexec&.get(i), "E", " "),
                     it.refs, => it'vtable'debug(it.data, out));
             }
         };

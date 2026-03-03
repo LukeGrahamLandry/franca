@@ -140,6 +140,30 @@ decode_and_run_cmd :: fn(full_command: Str) void = {
                     Group'dump(Group.root_thread_group, out&, 0, show_files);
                     print(out.items());
                 };
+                @case("tree") => {
+                    out := u8.list(temp());
+                    fs := Vfs'get_vfs();
+                    use_file fs.root_dir { fd |
+                        root: Vfs.MemDir.Entry = (name = "/", handle = fd[]);
+                        f(root&, out&, 0);
+                    };
+                    f :: fn(it: *Vfs.MemDir.Entry, out: *List(u8), depth: i64) void = {
+                        @if(it.name == ".." || it.name == ".") return();
+                        out.push_repeated(depth*2, " ".ascii());
+                        @fmt(out, "- %", it.name);
+                        ::ptr_utils(Vfs.FileVTable);
+                        if identical(it.handle.vtable, Vfs'get_vtable(Vfs.MemDir)) {
+                            it := bit_cast_unchecked(rawptr, *Vfs.MemDir, it.handle.data);
+                            @fmt(out, "\n");
+                            each it.files { it |
+                                f(it, out, depth + 1);
+                            };
+                        } else {
+                            @fmt(out, " %\n", => it'handle'vtable'debug(it.handle.data, out));
+                        };
+                    }
+                    print(out.items());
+                };
                 @default => {
                     break :: local_return;
                     spawn := parts[0] == "spawn";
@@ -539,8 +563,8 @@ fn trace(arg: FatExpr) FatExpr #macro = @{
         tls(.prefer_syscalls)[] = false;
         shell.strace = false;
         tls(.temporary_allocator_i)[] = Arena'stack_alloc(1024);
-        @print("%) ", tls(.thread_index)[]);
-        @[println arg];
+        @eprint("%) ", tls(.thread_index)[]);
+        @[eprintln arg];
         tls(.temporary_allocator_i)[] = t;
         shell.strace = old;
         tls(.prefer_syscalls)[] = old_sys;
@@ -585,6 +609,7 @@ nocache <on, off>    (recompile every time instead of saving .frc)
 uptime               (read the system counter)
 devicetree           (show hardware info from the boot loader)
 ps [-f]              (list running threads)
+tree                 (list virtual file system)
 
 example programs:
 test_fuse

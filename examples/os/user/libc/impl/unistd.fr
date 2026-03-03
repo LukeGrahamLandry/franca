@@ -38,17 +38,13 @@ close :: fn(f: Fd) i64 = {
     fs := get_vfs();
     @if(f.fd == { xxx := LinuxLibc.AT_FDCWD; xxx.fd }) return(-1);
     fd := get_file(f) || return(-1);
-    old_refs: i32 = -1;
-    use_file f { f |
-        old_refs = i32.atomic_add(f.refs&, -1);
-    };  
     ::ptr_utils(@type fd.vtable[]);
     @if(identical(fd.vtable, closed_file_vtable)) return(-1);
+    old_refs := i32.atomic_add(fd.refs&, -1);
     @trace("close(%)", f.fd);
-    @if(old_refs > 1) return(0);
-    @debug_assert_eq(old_refs, 1);
-    fd'vtable'close(fd.data);
-    fs.mutex&.lock();
+    if old_refs == 1 {
+        fd'vtable'close(fd.data);
+    };
     // default impl for everything to just error
     closed_file_vtable :: @static(FileVTable) { 
         it: FileVTable = ();
@@ -56,11 +52,14 @@ close :: fn(f: Fd) i64 = {
         it 
     };
     closed_file_instance :: @static(FileInstance) (vtable = closed_file_vtable, data = zeroed(rawptr), refs = 0);
+    with fs.mutex& {
+    fs.cloexec&.unset(f.fd.intcast());
     fs.fd[f.fd.intcast()] = closed_file_instance;
     fs.free&.push_back(f, fs.allocator);
-    fs.allocator.dealloc_one(FileInstance, fd);
-    fs.mutex&.unlock();
-    // note: not freeing fd.data because it's owned by the directory.
+    if old_refs == 1 {
+        fs.allocator.dealloc_one(FileInstance, fd);
+    };
+    };
     0
 };
 
@@ -126,7 +125,7 @@ fstat :: fn(f: Fd, out: *Syscall.SysStat) i64 = {
 };
 
 fstatat :: fn(fd: Fd, path: CStr, out: *Syscall.SysStat, _: i64) i64 = {
-    fd := FR_openat(fd, path, 0, 0);
+    fd := FR_openat(fd, path, LinuxLibc.O_arm.CLOEXEC, 0);
     @if(fd < 0) return(fd);
     fd: Fd = (fd = fd.intcast());
     result := fstat(fd, out);
@@ -148,7 +147,7 @@ mkdirat :: fn(parent: Fd, path: CStr, mode: i64) i64 = {
 }
 
 access :: fn(path: CStr, mode: i64) i64 = {
-    fd := FR_openat(Posix'AT'FDCWD(), path, 0, 0);
+    fd := FR_openat(Posix'AT'FDCWD(), path, LinuxLibc.O_arm.CLOEXEC, 0);
     @if(fd < 0) return(fd);
     fd: Fd = (fd = fd.intcast());
     f := get_file(fd) || return(-1);
@@ -195,10 +194,13 @@ getpid :: fn() i32 = 42;  // needed for anon_temp_path
 
 dup2 :: fn(old: Fd, new: Fd) Fd = {
     fs := get_vfs();
-    @if(old.fd == new.fd) return(new);
+    @if(old.fd == new.fd || new.fd < 0) return(new);
     old := get_file(old) || return(fd = -1);
     with fs.mutex& {
-        _ := close(new);
+        close(new);
+        free_new := fs.free&.pop_back().unwrap();
+        @debug_assert_eq(new.fd, free_new.fd, "dup2 failed to recycle dest?");
+        @debug_assert(!fs.cloexec&.get(new.fd.intcast()), "close must unset cloexec on the slot");
         i32.atomic_add(old.refs&, 1);
         fs.fd[new.fd.intcast()] = old;
     };

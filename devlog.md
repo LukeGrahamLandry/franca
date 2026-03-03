@@ -4,6 +4,16 @@
 - the way i override the libc_exports in the different hosts is overly confusing. 
   better is for the libc code to be explicit about what functions are specific to the kernel host. 
   now only have to remember to @trace, etc. in once place. 
+- let posix_spawn actually run programs. suddenly it's almost looking like a computer. 
+- dumb RawDeque.clone mistake. 
+- FR_openat doesn't work in the jitted code for user host because it does real syscall. 
+  whatever, add a field to tls for now. of course that's why test_fuse was broken. 
+  also lets me move DUMB_EMIT_IR out of openat into boot/ which is great improvement. 
+  eventually will want to hook jitting more aggressively. 
+- started doing cloexec wrong, it's on the FileHandle not the FileInstance. 
+  dup2 doesn't preserve it. which i guess makes sense because it means you can have your pipe be cloexec
+  so you're not racing other threads that might steal it and prevent you from getting HUP. 
+  - also close has to recycle fds even when not ready to free the instance. 
 
 ## (Mar 1)
 

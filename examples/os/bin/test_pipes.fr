@@ -5,6 +5,7 @@ main :: fn() void = {
 }
 
 multi_thread :: fn() void = {
+    poll :: pollXX;
     pipes :: @static(Array(Array(Fd, 2), 2));
     each pipes { p |
         Syscall'pipe(p).unwrap();
@@ -36,13 +37,15 @@ multi_process :: fn() void = {
     Attr :: S.Attr; FileActions :: S.FileActions; 
     posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CStr, envp: *CStr) voidResult #libc;
     out := zeroed(pid_t);
-    path := "/dev/shell.fr";
-    argv := import("@/lib/sys/subprocess.fr")'make_args_for_exec(path, @slice("toy/hello"), temp());
+    path := "franca";
+    argv := import("@/lib/sys/subprocess.fr")'make_args_for_exec(path, @slice("toy/hello2"), temp());
     
     pipe := zeroed Array(Fd, 2);
     Syscall'pipe(pipe&).unwrap();
     a: FileActions = init(general_allocator(), 3);
     a&.push_assume_capacity(Dup2 = (old = pipe&[1], new = STD_OUT));
+    a&.push_assume_capacity(Close = (fd = pipe&[1]));
+    a&.push_assume_capacity(Close = (fd = pipe&[0]));
     
     posix_spawn(out&, path.as_cstr(), @ref a, @ref zeroed(Attr), argv.ptr, tls(.environment_variables)[]).unwrap();
     Syscall'close(pipe&[1]);
@@ -57,9 +60,10 @@ multi_process :: fn() void = {
     // @assert_eq(poll(pipe&[0]), Posix.POLL.HUP);
     Syscall'close(pipe&[0]);
     @println("from %'s pipe[%][%]", out, buf.len, buf);
+    @assert_eq(buf, "Hello World!\n");
 }
 
-poll :: fn(fd: Fd) i64 = {
+pollXX :: fn(fd: Fd) i64 = {
     fd := @slice(@as(Posix.pollfd) (fd = fd, events = @or(Posix.POLL.IN, Posix.POLL.OUT), revents = 0));
     Posix'poll(fd, 0).unwrap();
     fd[0].revents.zext()

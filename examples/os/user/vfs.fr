@@ -12,6 +12,7 @@
 Fs :: @struct {
     fd: List(FileHandle); // indexed by Fd
     free: RawDeque(Fd);  // TODO: posix wants it to always reuse the lowest value not the oldest closed
+    cloexec: DynamicBitSet;  // [Fd]. not on FileInstance because not preserved by dup2. 
     mutex: Mutex;  // locked when push to fd / reading an entry from fd. TODO: RWLock
     // TODO: decide which other things care about being thread safe
     root_dir: Fd;
@@ -97,6 +98,7 @@ init_vfs :: fn() void = {
     };
     
     fs.fd = list(fs.allocator);
+    fs.cloexec = empty(fs.allocator);
     push_file(StdinFile, (queue = io.stdin&));
     push_file(StdoutFile, (queue = io.stdout&));
     push_file(StdoutFile, (queue = io.stdout&));
@@ -262,6 +264,7 @@ MemFileRO :: @struct {
         0
     };
     poll :: fn(self) = Posix.POLL.IN;
+    // close: not freeing contents because it's owned by the directory but unlink needs to deal with this :leak
 };
 
 MemFile :: @struct {
@@ -295,6 +298,7 @@ MemFile :: @struct {
         self.contents.len = 0;
     }
     poll :: fn(self) = @or(Posix.POLL.IN, Posix.POLL.OUT);
+    // close: not freeing contents because it's owned by the directory but unlink needs to deal with this :leak
 };
 
 StdoutFile :: @struct {
@@ -372,7 +376,7 @@ MemDir :: @struct {
             @debug_assert(!identical(it.vtable, get_vtable(PipeFile)), "TODO: allow pipe in dir, don't free when refs=0?");
             it.refs = 0;
             it.uid = get_next_file_id();
-            fd := push_file(fs.allocator.boxed(FileInstance, it));
+            fd := push_file(flags, fs.allocator.boxed(FileInstance, it));
             return fd.fd.intcast();
         };
         
@@ -449,7 +453,6 @@ MemDir :: @struct {
         };
         capacity - buf.len
     };
-    
 };
 
 PipeFile :: @struct {
@@ -460,7 +463,7 @@ PipeFile :: @struct {
         refs: i64;
     };
     
-    debug :: fn(self, out) = @fmt(out, "Pipe(%, %)", @if(self.is_read, "R", "W"), self.it.refs);
+    debug :: fn(self, out) = @fmt(out, "Pipe(%, %, %)", @if(self.is_read, "R", "W"), self.it.refs, fmt_hex(self.it));
     read :: fn(self, dest, _) = {
         @debug_assert(self.is_read, "read from write end of pipe");
         i := 0;
@@ -478,8 +481,8 @@ PipeFile :: @struct {
         src.len
     };
     close :: fn(self) = {
-        self.it.refs -= 1;
-        if self.it.refs == 0 {
+        old_refs := i64.atomic_add(self.it.refs&, -1);
+        if old_refs == 1 {
             fs := get_vfs();
             fs.allocator.dealloc(u8, self.it.q.ring);
             fs.allocator.dealloc_one(PipeFile.Backing, self.it);
@@ -510,15 +513,21 @@ create_pipe :: fn() Array(Fd, 2) = {
      Vfs'push_file(Vfs.PipeFile, (is_read = false, it = p)))
 }
 
-fn push_file($T: Type, data: T) Fd #generic = {
+fn push_file($T: Type, data: T) Fd #generic = 
+    push_file(0, T, data);
+
+fn push_file(flags: i64, $T: Type, data: T) Fd #generic = {
     fs := get_vfs();
     data := fs.allocator.boxed(T, data);
     f := fs.allocator.boxed(FileInstance, (vtable = get_vtable(T), data = T.raw_from_ptr(data)));
     f.uid = get_next_file_id();
-    push_file(f)
+    push_file(flags, f)
 }
 
-fn push_file(it: FileHandle) Fd = {
+fn push_file(it: FileHandle) Fd = 
+    push_file(0, it);
+
+fn push_file(flags: i64, it: FileHandle) Fd = {
     fs := get_vfs();
     fs.mutex&.lock();
     i32.atomic_add(it.refs&, 1);
@@ -529,6 +538,9 @@ fn push_file(it: FileHandle) Fd = {
     } else {
         fs.fd&.push(it);
         @assert_ne(fd, MAX_i32, "TODO: wrap");
+    };
+    if flags.bit_and(LinuxLibc.O_arm.CLOEXEC) != 0 {
+        fs.cloexec&.set(fd);
     };
     fs.mutex&.unlock();
     (fd = fd.intcast())
@@ -636,7 +648,7 @@ FuseFile :: @struct {
                 (result.open.fh, result.lookup.nodeid)
             }
         };
-        fd := push_file(FuseFile, (q = q, nodeid = node, fh = fh, is_dir = directory));
+        fd := push_file(flags, FuseFile, (q = q, nodeid = node, fh = fh, is_dir = directory));
         fd.fd.intcast()
     };
     fstat :: fn(self, out) = {
@@ -926,6 +938,7 @@ fn follow_path_prefix(fd: Fd, path: Str) Result(Ty(Fd, CStr), i64) = {
     
     first := true;
     buf := u8.list(1024, Arena'stack_alloc(1024));
+    flag := @or(LinuxLibc.O_arm.CLOEXEC, Posix.O.RDONLY);
     loop {
         dir, rest := pop_dir_prefix(path) || {
             @assert(path != "", "TODO: special %", full_path);
@@ -937,7 +950,7 @@ fn follow_path_prefix(fd: Fd, path: Str) Result(Ty(Fd, CStr), i64) = {
         buf&.push_all(dir);
         buf&.push(0);
         unistd :: import("@/examples/os/user/libc/impl/unistd.fr");
-        result := unistd'FR_openat(fd, (ptr = buf&.as_ptr()), Posix.O.RDONLY, 0);
+        result := unistd'FR_openat(fd, (ptr = buf&.as_ptr()), flag, 0);
         if result < 0 {
             if !first {
                 _ := unistd'close(fd);
