@@ -39,24 +39,28 @@ QParseCtx :: @struct(
     allow_unterminated_block := false, // for comptime templates
 );
 
-fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(m: *Qbe.Module, d: Dat2) void, yield_func: @FnPtr(*Qbe.Fn) void) Result(void, Str) = {
+fn parse_and_compile(m: *QbeModule, src: Str) Result(void, Str) = {
     self: QParseCtx = init(m, src);
     
     mark := mark_temporary_storage();
     loop {
         reset_temporary_storage(mark);
         @match(self&.parse_one()) {
-            fn Func(f) => yield_func(f);
-            fn Data(dat) => yield_data(m, dat);
+            fn Func(f) => Qbe'backend'compile_fn(f);
+            fn Data(dat) => Qbe'backend'compile_dat(m, dat);
             fn Type(_) => ();
             fn Err(msg) => return(Err = msg);
             fn Section(_) => ();  // not implemented
             fn Eof() => return(.Ok);
+            fn Asm(it) => {
+                m.add_code_bytes(it.lnk.id, it.code&);  
+                @assert(!it.lnk.export, "TODO: export asm $%", m.str(it.lnk.id));
+            }
         };
     };
 }
 
-Item :: @tagged(Func: *Qbe.Fn, Data: Qbe.Dat2, Type: i64, Section: Section, Err: Str, Eof);
+Item :: @tagged(Func: *Qbe.Fn, Data: Qbe.Dat2, Type: i64, Section: Section, Err: Str, Eof, Asm: @struct(code: MultiArchAsm, lnk: *Qbe.Lnk));
 Section :: @struct(name: Str, flags: Str);
 
 fn parse_one(self: *QParseCtx) Item = {
@@ -130,6 +134,9 @@ fn parse_one(self: *QParseCtx) Item = {
         if self.eat("dbgfile") {  // not implemented!
             self.eat_line();
             return(self.parse_one());
+        };
+        if self.eat("asm") {
+            return(self.parse_asm(export));
         };
         
         if self.cursor >= self.input.len {
@@ -590,6 +597,11 @@ fn parse_ref(self: *QParseCtx) Qbe.Ref = {
     call := self.eat("C");
     negative := self.eat("-");
     if !self.input[self.cursor].is_ascii_digit() {
+        @if(is_float || double) if self.eat("NaN") || self.eat("inf") {
+             @fmt(self.error&, "nan/inf: you shouldn't be trusting me with float parsing.\njust bitcast to an integer and put that in the ir instead.\n");
+             return Qbe.Null;
+        };
+    
         if int || is_float || double || slot || negative || call {
             @fmt(self.error&, "expected a number because of the prefix");
             if self.eat(".") {
@@ -710,8 +722,8 @@ fn parse_data(self: *QParseCtx, export: bool) Result(Dat2, Str) = {
             @if(cls.f == .FTyp) return(Err = ":Type syntax is only for abi. not valid in constants");
             @if(cls.f == .FPad) return(Err = "p syntax is only for lossless dump of struct padding. not valid in constants");
             dat_type = cls.size;
+            self.skip_lines();
         };
-        self.skip_blanks();
         if self.input[self.cursor] == "\"".ascii() {
             if(dat_type != 1, => return(Err = @tfmt("expected 'b' prefix for string literal in %", name)));
             s := @try(self.consume_string()) return;
@@ -1141,6 +1153,35 @@ fn where_am_i(self: *QParseCtx) void = {
     };
     @fmt(self.error&, "on line %", self.line);
 }
+
+fn parse_asm(self: *QParseCtx, export: bool) Item = {
+    self.f = temp().box_uninit(Qbe.Fn);   // :NeedFunctionInitForData
+    self.f.default_init(self.m);
+
+    @if(!self.eat("$")) return(Err = "expected '$name' after 'asm'");
+    self.f.lnk.id = self.m.intern(self.eat_word());
+    @if(!self.eat("=") || !self.eat("{")) return(Err = "expected '= {' after 'asm $name'");
+    self.f.lnk.export = export;
+    
+    code := zeroed(MultiArchAsm);
+    self.skip_lines();
+    while => !self.eat("}") {
+        @if(!self.eat("data")) return(Err = "expected 'data' inside asm block");
+        dat := @try(self.parse_data(export)) return;
+        self.skip_lines();
+        arch: Arch = @switch(self.m.str(dat.id)) {
+            @case("amd64") => .x86_64;
+            @case("arm64") => .aarch64;
+            @case("rv64") => .rv64;
+            @case("wasm32") => .wasm32;
+            @default fn(it) => return(Err = @tfmt("invalid arch=% (expected amd64/arm64/rv64/wasm32)", it));
+        };
+        @if(dat.relocations.len != 0) return(Err = "relocations are not supported in asm");
+        @if(!dat.template&.is(.Bytes)) return(Err = "all zeroes in asm seems like a mistake");
+        code&[arch] = dat.template.Bytes;
+    };
+    (Asm = (code = code, lnk = self.f.lnk&))
+};
 
 #use("@/lib/collections/map.fr");
 #use("@/backend/lib.fr");
