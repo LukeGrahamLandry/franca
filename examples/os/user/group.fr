@@ -52,7 +52,6 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
     argv := slice_strings(argv);
     ::display_slice(CStr);
     @trace("posix_spawn(%%)", @if(path.str() != argv[0].str(), path, ""), argv);
-    @assert_eq(path.str(), "franca", "TODO: exec aot elf/wasm binaries");
     
     if f.is_null() {| f = @ref zeroed(FileActions); };
     Spawn :: @struct {
@@ -72,20 +71,24 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
         it := ();  // don't look at arg again so caller can return
         
         fs := Vfs'get_vfs();
-        for actions { it |
+        enumerate actions { i, it |
+            fail :: fn() => {
+                @trace("err(spawn action i=%)", i);
+                Syscall'exit(127);
+            };
             @match(it) {
                 fn Close(it) => {
                     Syscall'close(it.fd)
-                        || Syscall'exit(127);
+                        || fail();
                 }
                 fn Dup2(it) => {
                     Syscall'dup2(it.old, it.new) 
-                        || Syscall'exit(127);
+                        || fail();
                 }
                 fn Open(it) => {
                     _ := Syscall'close(it.fd);
                     fd := Syscall'openat(Posix'AT'FDCWD(), it.path, it.flags, it.mode);
-                    @if(fd < 0) Syscall'exit(127);
+                    @if(fd < 0) fail();
                     @assert_eq(fd, it.fd.fd, "TODO: force fd");
                 }
             }
@@ -93,27 +96,32 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
         with fs.mutex& {  // doesn't matter, no children yet
             // includes new ones if Open(flag=CLOEXEC) was in actions which i think is what you want, just never would happen.
             for fs.cloexec& { i |  
-                @eprintln("CLOEXEC i=%", i);
                 _ := Syscall'close(@as(Fd) (fd = i.intcast()));
             };
             fs.cloexec&.clear();
         };
-
-        args := cli_args().rest(1);
-        parts := temp().alloc_init(Str, args.len(), fn(i) => args[i].str());
-        command := search_path(parts[0]) || 
-            @panic("file not found in path: |%|\n", parts[0]);
-        cmd := general_allocator().boxed(Command, (command = command, parts = parts));
-        run_command(cmd);
         
-        // close everything (makes pipes poll as HUP)
-        // TODO: wait for children but also have to do this on early exit()
-        with fs.mutex& { 
-            // rev to delay closing stderr until almost done. 
-            range_rev(0, fs.fd.len) { i |
-                _ := Syscall'close(@as(Fd) (fd = i.intcast()));
+        path := cli_args()[0].str();
+        if path != "franca" {
+            bytes := import("@/lib/sys/fs.fr")'read_entire_file(temp(), path) || {
+                @trace("err(posix_spawn failed read exe %)", path);
+                Syscall'exit(127);
             };
+            entry, _ := import("@/examples/elf_loader.fr")'load_elf_segments(bytes, false);
+            entry := bit_cast_unchecked(@type entry, @FnPtr(u64, u64, u64) void, entry);
+            // ask franca_runtime_init to inherit our tls. 
+            // TODO: allow non-franca binaries
+            entry(FRHOSTED_MAGIC, FRHOSTED_MAGIC, FRHOSTED_MAGIC);
+        } else {
+            args := cli_args().rest(1);
+            parts := temp().alloc_init(Str, args.len(), fn(i) => args[i].str());
+            command := search_path(parts[0]) || 
+                @panic("file not found in path: |%|\n", parts[0]);
+            cmd := general_allocator().boxed(Command, (command = command, parts = parts));
+            run_command(cmd);
         };
+        
+        cleanup_thread_group("returned from main");
     };
     task: Spawn = (
         waiting = 0,
@@ -164,6 +172,7 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
                 Crash'report_backtrace(fp = Crash'trace_start(), ip = 0.rawptr_from_int());
                 print_and_exit1(msg)
             };
+            e.comptime = zeroed(rawptr);
         };
     };
     // TODO: this back and forth is over complicated. 
@@ -182,6 +191,45 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
     
     out[] = pid;
     0
+};
+
+cleanup_thread_group :: fn(debug_why: Str) void = {
+    g := get_current_tls()[].thread_group;
+    with g.vfs.mutex& {
+        if g.threads.len != 1 || g.children.len != 0 {
+            @trace("WARN(% with % unjoined threads and % unwaited children)", debug_why, g.threads.len, g.children.len);
+        };
+        
+        leak := false;
+        for g.threads { it |
+            @if(!identical(it, get_current_thread()))
+            if it.tid_futex == 0 {
+                it.join();
+            } else {
+                leak = true;
+                @eprintln("TODO: leaked a thread");
+            };
+        };
+        
+        for g.children { it |
+            with it.vfs.mutex& {
+                if it.threads[0].tid_futex == 0 {
+                    _ := wait4(it.threads[0].tid, @ref @as(i32) 0, 0, @ref zeroed(Posix.rusage));
+                } else {
+                    leak = true;
+                    @eprintln("TODO: leaked a process");
+                };
+            };
+        };
+        
+        if !leak {
+            // close everything (makes pipes poll as HUP)
+            // rev to delay closing stderr until almost done. 
+            range_rev(0, g.vfs.fd.len) { i |
+                _ := Syscall'close(@as(Fd) (fd = i.intcast()));
+            };
+        };
+    };
 };
 
 wait4 :: fn(pid: pid_t, status: *i32, flags: i64, usage: *Posix.rusage) i32 = {
@@ -256,8 +304,7 @@ wait4 :: fn(pid: pid_t, status: *i32, flags: i64, usage: *Posix.rusage) i32 = {
 
 exit :: fn(status: i64) Never = {
     @trace("exit(%)", status);
-    // TODO: stop all threads
-    // TODO: exit the main thread of the thread group
+    cleanup_thread_group("called exit");
     host_platform'exit_thread(status)
 };
 

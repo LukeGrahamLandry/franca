@@ -16,7 +16,7 @@ multi_thread :: fn() void = {
     t := start_thread_nodata {
         buf := msg;
         fd := pipes[0]&[1];
-        @assert_eq(poll(fd), Posix.POLL.OUT);
+        @assert_eq(poll(fd), Posix.POLL.OUT, "out?");
         Syscall'write(fd, buf.ptr, buf.len).unwrap();
         Syscall'close(fd);
         pipes[0]&[1].fd = -1;
@@ -25,30 +25,30 @@ multi_thread :: fn() void = {
     @assert_eq(poll(fd), @or(Posix.POLL.IN, Posix.POLL.HUP));
     buf := temp().alloc_zeroed(u8, 64);
     buf.len = Syscall'read(fd, buf.ptr, buf.len).unwrap();
-    @assert_eq(poll(fd), Posix.POLL.HUP);
+    @assert_eq(poll(fd), Posix.POLL.HUP, "hup?");
     @assert_eq(buf, msg);
     each(pipes, fn(it) => for(it, fn(it) => { Syscall'close(it); }));
     println(buf);
     msg :: "Hello World!";
 }
 
-// TODO: implement the normal subprocess.fr interface with this somehow
 multi_process :: fn() void = {
-    S :: import("@/examples/os/user/group.fr");
-    Attr :: S.Attr; FileActions :: S.FileActions; 
-    posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CStr, envp: *CStr) voidResult #libc;
+    #use(Syscall);
     out := zeroed(pid_t);
     path := "franca";
     argv := import("@/lib/sys/subprocess.fr")'make_args_for_exec(path, @slice("toy/hello2"), temp());
     
     pipe := zeroed Array(Fd, 2);
     Syscall'pipe(pipe&).unwrap();
-    a: FileActions = init(general_allocator(), 3);
-    a&.push_assume_capacity(Dup2 = (old = pipe&[1], new = STD_OUT));
-    a&.push_assume_capacity(Close = (fd = pipe&[1]));
-    a&.push_assume_capacity(Close = (fd = pipe&[0]));
     
-    posix_spawn(out&, path.as_cstr(), @ref a, zeroed(*Attr), argv.ptr, tls(.environment_variables)[]).unwrap();
+    // error handling is when we don't get the right answer at the end. 
+    a := @uninitialized PosixSpawnActions;
+    posix_spawn_file_actions_init(a&);
+    posix_spawn_file_actions_adddup2(a&, pipe&[1], STD_OUT);
+    posix_spawn_file_actions_addclose(a&, pipe&[0]);
+    posix_spawn_file_actions_addclose(a&, pipe&[1]);
+    posix_spawnp(out&, path.as_cstr(), a&, zeroed(*PosixSpawnAttr), argv.ptr, tls(.environment_variables)[]).unwrap();
+    posix_spawn_file_actions_destroy(a&);
     Syscall'close(pipe&[1]);
     
     status: i32 = 0;
@@ -57,8 +57,7 @@ multi_process :: fn() void = {
     
     buf := temp().alloc_zeroed(u8, 64);
     buf.len = Syscall'read(pipe&[0], buf.ptr, buf.len).unwrap();
-    // TODO: wait4 should close all fds 
-    // @assert_eq(poll(pipe&[0]), Posix.POLL.HUP);
+    @assert_eq(pollXX(pipe&[0]), Posix.POLL.HUP, "hup?");
     Syscall'close(pipe&[0]);
     @println("from %'s pipe[%][%]", out, buf.len, buf);
     @assert_eq(buf, "Hello World!\n");
@@ -75,3 +74,5 @@ pollXX :: fn(fd: Fd) i64 = {
     Posix'poll(fd, 0).unwrap();
     fd[0].revents.zext()
 };
+
+// TODO: test cloexec

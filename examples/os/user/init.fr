@@ -7,6 +7,7 @@ main :: fn() void = {
     _ := set_signal_handler(callee = handle_signal, stack = buf);
     redo_relocations_static_linux(false);
     Vfs'image[] = @run import("@/examples/web/build.fr")'flatten_fs(ast_alloc());
+    tls(.deny_syscalls)[] = true;  // a) faster to not go through the signal handler. b) need to use posix_spawn instead of fork. 
     main2();
 }
 
@@ -26,13 +27,13 @@ main2 :: fn() void = {
             fs.strace = false;
             @if(panicking[]) Crash'backtracing_panic_handler(s);
             panicking[] = true;
-            println(s);
+            eprintln(s);
             Crash'report_backtrace(fp = Crash'trace_start(), ip = 0.rawptr_from_int());
             panicking[] = false;
             fs.strace = old;
             // TODO: don't leak the compiler, etc.
             @if(tls(.thread_index)[] != 1) {
-                @println("child thread % panicked", tls(.thread_index)[]);
+                @eprintln("child thread % panicked", tls(.thread_index)[]);
                 Syscall'exit(1); 
             };
             throw(jumpbuf);
@@ -55,6 +56,7 @@ main2 :: fn() void = {
         };
         
         sync_vaddr();
+        update_global_stdlib_path();
         run_startup_commands();
         
         // TODO: this shell should share some logic with examples/terminal.fr
@@ -99,6 +101,9 @@ run_startup_commands :: fn() void = {
 
 decode_and_run_cmd :: fn(full_command: Str) void = {
     fs := Vfs'get_vfs();
+    if full_command.starts_with("franca") {
+        full_command = full_command.rest("franca".len());
+    };
     while => full_command.len > 0 && full_command[0].is_ascii_whitespace() {
         full_command = full_command.rest(1);
     };
@@ -419,8 +424,8 @@ MyAttr :: @struct {
 };
 
 LIBC :: @struct {
-    // TODO: this needs to be threadlocal
-    __errno_location :: fn() *i64 = @static(i64);
+    // TODO: i never actually write to this from the libc
+    __errno_location :: fn() *i32 = get_current_tls()[].errno&;
     
     FR_set_signal_handler :: fn(callee: SignalHandler.F) SignalHandler.F = {
         thread := get_current_tls();
@@ -576,7 +581,9 @@ ThreadData :: @struct {
     signal_handler: SignalHandler.F; 
     known_wasm_jit_event: i64;
     thread_group: *Group.ThreadGroup;
-    _: Array(i64, 2);
+    errno: i32; 
+    __: u32;
+    _: Array(i64, 1);
 };
 
 // signal stack must be in the same franca_required_stack_bits aligned chunk for tls to work. 

@@ -25,6 +25,19 @@ https://github.com/DenialAdams/roland
   which is the sane thing, i just never thought about it before. 
 - dump_wasm: less spammy empty sections (mostly for -d D in web demo)
 
+---
+
+- yesterday started trying to get web examples/terminal.fr to work with the new exec. 
+  web/b.fr is doing something important that compiler/main.fr isn't. 
+  doesn't help that pressing the slash key in firefox opens a search bar which somehow resizes my webgpu canvas in a way that hangs the browser for 10s of seconds. 
+  i'd rather get host/user to a point that i can run some of my normal tests first.
+- plug elf_loader into posix_spawn. can do the first 6 of run_and_check in tests/compiler.fr. 
+- very error prone that if i don't give a libc function it falls back to a real linux syscall. 
+- carefully always use the system allocator
+- fix posix_getdents.d_type for collect_tests. STDLIB_PATH for use_import test.  
+  MemDir.openat(O_DIR) needs to check child is a MemDir. symptom of not doing that was overload not found in 'skip_whitespace' because it decided import(lib/tokenize.fr) was an empty directory.
+- now it crashes but that's progress kinda. 
+
 ## (Mar 2)
 
 - the way i override the libc_exports in the different hosts is overly confusing. 

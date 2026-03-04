@@ -25,7 +25,7 @@ main :: fn() void = {
     ));
 }
 
-load_elf_file :: fn(bytes: []u8, init: InitArgs) void = {
+load_elf_segments :: fn(bytes: []u8, allow_new_stack: bool) Ty(*u8, []u8) = {
     h := bytes.peek_type(Elf.Header);
     @assert_eq(h.magic, Elf.MAGIC, "invalid magic. expected an elf program");
     @assert(h.program_header_num != 0, "no program headers. expected an executable");
@@ -86,7 +86,7 @@ load_elf_file :: fn(bytes: []u8, init: InitArgs) void = {
             prot := prot_elf_to_posix(it.prot);
             Syscall'mprotect(u8.raw_from_ptr(dest.ptr), dest.len, prot); 
         }
-        if it.type == .Stack {
+        if it.type == .Stack && allow_new_stack {
             prot := prot_elf_to_posix(it.prot);
             stack = my_mmap(it.mem_size, prot);
         }
@@ -103,7 +103,7 @@ load_elf_file :: fn(bytes: []u8, init: InitArgs) void = {
             // note: im ignoring the requested path
         }
     };
-    @assert(stack.len > 0, "missing STACK program header");
+    @assert(!allow_new_stack || stack.len > 0, "missing STACK program header");
     
     // This is the part where the kernel would call the interpreter you asked for, 
     // but instead of that im just going to start doing relocations and hope for the best.
@@ -150,7 +150,11 @@ load_elf_file :: fn(bytes: []u8, init: InitArgs) void = {
         };
         @assert(ok, "entry point is not in executable memory");
     };
-    
+    (entry, stack)
+}
+
+load_elf_file :: fn(bytes: []u8, init: InitArgs) void = {
+    entry, stack := load_elf_segments(bytes, true);
     // TODO: don't waste our old stack's memory
     sp := write_argc_argv_envp(stack, init);
     //@eprintln(">>> calling entry point: %", u8.int_from_ptr(entry));

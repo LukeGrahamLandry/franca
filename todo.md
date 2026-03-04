@@ -1,3 +1,5 @@
+- :SLOW? did i seriously posix_getdents each import()? thats not acceptable for a feature i can't even use in the compiler because the bootstrap compiler doesn't have it. 
+- is my baking robust against dlsym returning the same non-null pointer for multiple symbols?
 - finish examples/os spawn on host/web. 
   TODO: toy/hello2.fr works but toy/hello.fr the comptime part works but then CompileError: WebAssembly.Module(): Compiling function #1 failed: extra bits in varint @+45
 - deal with `franca examples/web/build.fr && node target/web/test.js` needs to get rootfs_hash somehow

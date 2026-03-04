@@ -135,6 +135,8 @@ Dyn :: import("@/lib/dynamic_lib.fr");
 
 fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) = {
     no_cache = no_cache || DUMB_EMIT_IR;
+    @if(TODOWASM) if query_current_arch() == .wasm32 {| no_cache = true; }; // TODO
+    
     mark := mark_temporary_storage();
     F :: @FnPtr(*ImportVTable) void;
     callee: ?F = .None;
@@ -147,6 +149,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
     to_free_c: ?*SelfHosted = .None;
     
     if !path.ends_with(".fr") {
+        @if(TODOWASM) @assert(query_current_arch() != .wasm32, "TODO: jitted aot on wasm");
         if Dyn'open(path) { handle |
             ref := handle.get("driver") || 
                 (handle.get("main") ||
@@ -204,6 +207,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
         zone_end(z);
     };
     
+    driver: ?FuncId = .None;
     if callee.is_none() {
         break :: local_return;
         safe :: safety_check_enabled(.DebugAssertions);
@@ -251,7 +255,8 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
         apple_thread_jit_write_protect(true);  // :JitMemProtect this thread wants to execute
         
         c := self;
-        f := c.get_unique_named("driver") 
+        driver = c.get_unique_named("driver");
+        f := driver
             || c.get_unique_named("main") 
             || panic("expected a function called main or driver.");
         
@@ -261,6 +266,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
             done := main_thread_pump(self, shared, @slice(f), false);
             self.debug_deny_jit_shim_calls = !DUMB_EMIT_IR;
             if no_cache {
+                @if(!TODOWASM || query_current_arch() != .wasm32)
                 seal_debug_info(m, empty(), false, empty());
                 each self.comptime_libraries& { _, lib |
                     @assert(!abi_shift_easy_to_native);
@@ -341,7 +347,12 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
         self.vm.eval(callee, void.cast_to_bytes(r&), cast_to_bytes(*ImportVTable, a&));
     }, {
         push_as_tls(.comptime, zeroed(rawptr)) {
-            callee(vtable);
+            if query_current_arch() == .wasm32 && !driver.is_some() {  // signetures matter
+                callee := bit_cast_unchecked(@type callee, @FnPtr() void, callee);
+                callee();
+            } else {
+                callee(vtable);
+            };
         };
     });
     

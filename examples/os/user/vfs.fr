@@ -367,17 +367,20 @@ MemDir :: @struct {
             return fd.fd.intcast();
         };
         
+        directory := flags.bit_and(LinuxLibc.O_arm.DIRECTORY) != 0;
         for self.files { it |
             if it.name == path {
                 ::ptr_utils(FileVTable);
                 if trunc {
                     it'handle'vtable'truncate(it.handle.data, 0);
                 };
+                if directory && !identical(it.handle.vtable, get_vtable(MemDir)) {
+                    return(-1);
+                };
                 return_fresh_handle(it.handle);
             };
         };
         create := flags.bit_and(LinuxLibc.O_arm.CREAT) != 0;
-        directory := flags.bit_and(LinuxLibc.O_arm.DIRECTORY) != 0;
         @if(!create) return(-1);
         if directory {
             @trace("ERR: can't O_CREAT a directory");
@@ -434,7 +437,13 @@ MemDir :: @struct {
             it.d_reclen = size_of(LinuxLibc.DirEnt);
             it.d_name&.items().slice(0, fd.name.len).copy_from(fd.name);
             it.d_name&[fd.name.len] = 0;
-            // TODO: d_type
+            
+            // TODO: should fstat instead
+            v := fd.handle.vtable;
+            is_dir := identical(v, get_vtable(MemDir));
+            is_reg := identical(v, get_vtable(MemFileRO)) || identical(v, get_vtable(MemFile));
+            if is_dir {| it.d_type = .Directory; };
+            if is_reg {| it.d_type = .File; };
 
             pos[] += 1;
         };

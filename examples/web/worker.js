@@ -10,7 +10,11 @@ function handle_child_thread(child) {
     const [userdata, stack, exit_futex] = child;
     Franca.__stackbase.value = Number(stack);
     current_exit_futex = exit_futex;
-    known_wasm_jit_event = Franca.wasm_init_thread(userdata, known_wasm_jit_event);
+    try {
+        known_wasm_jit_event = Franca.wasm_init_thread(userdata, known_wasm_jit_event);
+    } catch (e) {
+        show_error(e);
+    };
     set_zero_and_wake(exit_futex);
     self.postMessage({ tag: "recycle" });
 }
@@ -267,7 +271,7 @@ function handle(_msg) {
     switch (msg.tag) {
         case "start": {
             if (known_wasm_jit_event != 0n) {
-                if (msg.child === undefined) throw "expected to be a child thread";
+                if (msg.child === undefined) throw new Error("expected to be a child thread");
                 handle_child_thread(msg.child);
                 return;
             }
