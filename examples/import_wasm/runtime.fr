@@ -217,10 +217,17 @@ fn instantiate(engine: *Engine, mod: *Module, imports: *ExportsEnv) *Instance = 
     for mod.w.memories { it |
         // max=MAX_u32 means no max was specified, clamp to 2^16 pages = 4gb
         len, cap := (it.min.zext() * wasm_page_size, it.max.zext().min(wasm_page_size) * wasm_page_size);
-        buf := page_allocator.alloc_uninit(u8, cap);  // page allocator always gives zeros
-        engine.memories&.push(buf, a);
-        buf := a.boxed(SaneRawList(u8), (ptr = buf.ptr, cap = buf.len, len = len));
+        buf := imports.get("main", "memory") || {  // i only support one memory anyway and Globals.memory needs to be it even if the module doesn't export it so the imports can see it. 
+            buf := page_allocator.alloc_uninit(u8, cap);  // page allocator always gives zeros
+            engine.memories&.push(buf, a);
+            buf := a.boxed(SaneRawList(u8), (ptr = buf.ptr, cap = buf.len, len = len));
+            (Memory = buf)
+        };
+        @assert(buf&.is(.Memory)); buf := buf.Memory;
         instance.memory = buf;
+        @assert(buf.cap >= cap, "TODO: always oversize the memory");
+        @assert_le(len, cap, "malformed module");
+        buf.len = max(buf.len, len);  // relies on the extra being zeroed (i always use page_allocator so it's fine)
     };
 
     found := zeroed Instance.Counts;
@@ -314,6 +321,7 @@ fn run_initializers(self: *Instance, mod: *Module) void = {
         if it.active_at { off |
             src := mod.datas[i];
             self.memory.len = max(self.memory.len, off + src.len);
+            @debug_assert_le(self.memory.len, self.memory.cap);
             self.memory_init(src.ptr, self.memory, off.trunc(), 0, src.len.trunc());
         };
     };
@@ -482,15 +490,14 @@ memory_grow :: fn(ctx: *Instance, memory: *SaneRawList(u8), delta_pages: i32) i3
 }
 
 #wasm(0x3F, .memory)
-memory_size :: fn(ctx: *Instance, memory: *SaneRawList(u8)) i32 = {
+memory_size :: fn(_: *Instance, memory: *SaneRawList(u8)) i32 = {
     memory.len.intcast().shift_right_arithmetic(16)
 }
 
 #wasm(0xFC, 0x08, .data, .memory)
-memory_init :: fn(ctx: *Instance, data_start: *u8, _: *SaneRawList(u8), dest: u32, src_offset: u32, size: u32) void = {
-    ctx := ctx.memory.ptr;
+memory_init :: fn(_: *Instance, data_start: *u8, memory: *SaneRawList(u8), dest: u32, src_offset: u32, size: u32) void = {
     src := data_start.offset(src_offset.zext()).slice(size.zext());
-    dest := ctx.offset(dest.zext()).slice(size.zext());
+    dest := memory.ptr.offset(dest.zext()).slice(size.zext());
     dest.copy_from(src);
 }
 

@@ -254,7 +254,8 @@ BlockEntry :: @struct(continue: *Qbe.Blk, break: *Qbe.Blk, current: *Qbe.Blk, lo
 fn emit_the_code(self: *LoadWasm) void = {
     IfNode :: @struct(src: *Qbe.Blk, block_type: i64 /* needed for op else */);
     if_stack := list(IfNode, temp());
-    while => self.cursor < self.src.len {
+    // @must_return just because i keep forgetting to continue() instead of return()
+    @must_return(while => self.cursor < self.src.len {
         continue :: local_return;
         
         start_cursor := self.cursor;
@@ -513,6 +514,22 @@ fn emit_the_code(self: *LoadWasm) void = {
             }
             fn PrefixFC() => {
                 opcode := @as(u64) self.read_u();
+                
+                if opcode <= 7 {   // iCC.trunc_sat_A_fBB
+                    unsigned, from_f64, to_i64 := (opcode.bit_and(0b1) != 0, opcode.bit_and(0b10) != 0, opcode.bit_and(0b100) != 0);
+                    a := self.stack&.pop().expect("stack for cas-old");
+                    // TODO: i think this is only right on arm. nan->0. 
+                    //       amd64/isel/sel_ftoi is already doing a bunch of shit. do i also want it to make it saturate?
+                    k: Qbe.Cls = @if(to_i64, .Kl, .Kw);
+                    o: Qbe.O = @if(unsigned,
+                        @if(from_f64, .dtoui, .stoui),
+                        @if(from_f64, .dtosi, .stosi));
+                    r := self.f.newtmp("k", k);
+                    self.f.emit(o, k, r, a, Qbe.Null);
+                    self.stack&.push(r);
+                    continue();
+                };
+                
                 if opcode == 10 {  // memory.copy
                     @debug_assert(self.src[self.cursor] == 0 && self.src[self.cursor + 1] == 0);
                     self.cursor += 2;
@@ -536,7 +553,7 @@ fn emit_the_code(self: *LoadWasm) void = {
             fn I64_EqZero() => self.eqz(.ceql);
             @default => self.choose_runtime_call(start_cursor);
         }
-    }
+    });
 }
 
 fn do_select(self: *LoadWasm, k: Qbe.Cls) void = {
@@ -1003,9 +1020,13 @@ fn skip_current_instruction(self: *LoadWasm) void = {
                 return();
             };
         }
-        fn PrefixFC() => if self.read_u() == 10 {  // memory.copy
-            self.cursor += 2;
-            return();
+        fn PrefixFC() => {
+            opcode := self.read_u();
+            @if(opcode <= 7) return();
+            if opcode == 10 {  // memory.copy
+                self.cursor += 2;
+                return();
+            };
         };
         fn BrTable() => {
             range(0, self.read_u().bitcast() + 1) { _ |

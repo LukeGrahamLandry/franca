@@ -13,6 +13,7 @@ WasmModule :: @struct(
     globals: List(Wasm.Global),
     elements: List(Wasm.Element),
     import_count := zeroed EnumMap(Wasm.ImportType, i64),
+    custom: List(@struct(name: RawList(u8), data: []u8)),
 );
 
 ParseWasm :: @struct(w: *WasmModule, src: []u8, cursor := 0);
@@ -25,6 +26,7 @@ fn parse_wasm(self: *ParseWasm) Result(void, Str) = {
     self.cursor += 8;
     
     section_count := 0;
+    data_count: ?i64 = .None;
     while => self.cursor < self.src.len {
         section_index := @try(self.read_byte_enum(Wasm.Section)) return;
         byte_size := @try(self.read_u()) return;
@@ -113,6 +115,7 @@ fn parse_wasm(self: *ParseWasm) Result(void, Str) = {
                     flags := @try(self.read_u()) return;
                     data := Wasm.Data.zeroed();
                     active := flags.bit_and(0b1) == 0;
+                    @if(flags.shift_right_logical(2) != 0) return(Err = @tfmt("TODO: Data[%] flags=%", i, flags));
                     if active && flags.bit_and(0b10) == 0b10 {
                         data.active_mem = (id = trunc(@try(self.read_u()) return));
                     };
@@ -155,25 +158,31 @@ fn parse_wasm(self: *ParseWasm) Result(void, Str) = {
                 self.w.elements&.reserve(count);
                 range(0, count) { i |
                     flags := @try(self.read_u()) return;
-                    if flags != 0 {
-                        return(Err = "TODO: parse more Element kinds. currently only flags=0 is supported.");
+                    passive, explicit, has_type := (flags.bit_and(1) != 0, flags.bit_and(2) != 0, flags.bit_and(4) != 0);
+                    if passive || has_type || flags.shift_right_logical(3) != 0 {
+                        return(Err = @tfmt("TODO: parse more Element kinds. flags=%.", flags));
                     };
+                    table_index := @if(explicit, @try(self.read_u()) return, 0);
                     off := @try(self.read_expr()) return;
+                    if explicit {
+                        kind := @try(self.read_u()) return;
+                        @if(kind != 0) return(Err = "TODO: non funcref table");
+                    };
                     func_count := @try(self.read_u()) return;
                     funcs := Wasm.FuncIdx.list(func_count, self.w.elements.gpa);
                     range(0, func_count) { i |
                         idx := @try(self.read_u()) return;
                         funcs&.push(id = idx.trunc());
                     };
-                    self.w.elements&.push(table = (id = 0), active_offset_expr = off, funcs = funcs.as_raw());
+                    self.w.elements&.push(table = (id = table_index.trunc()), active_offset_expr = off, funcs = funcs.as_raw());
                 };
             }
             fn DataCount() => {
-                _ := @try(self.read_u()) return;
+                data_count = (Some = @try(self.read_u()) return);
             }
             fn Custom() => {
-                // TODO: collect them. show the name in dump_wasm
-                @eprintln("skipping custom section");
+                name := @try(self.read_str()) return;
+                push(self.w.custom&, (name = name, data = self.src.slice(self.cursor, end_of_section)));
                 self.cursor = end_of_section;
             }
             @default => return(Err = @tfmt("Unhandled section type % (section index % in module)", section_index, section_count));
@@ -183,6 +192,9 @@ fn parse_wasm(self: *ParseWasm) Result(void, Str) = {
             return(Err = @tfmt("Did not consume declared section size. (type %, section index % in module) expected to stop: (at byte index %) but stopped:", section_index, section_count, end_of_section));
         };
         section_count += 1;
+    };
+    if data_count { data_count |
+        @if(data_count != self.w.data.len) return(Err = "bad DataCount section");
     };
     .Ok
 }
@@ -215,16 +227,23 @@ fn read_code_section(self: *ParseWasm) Result(void, Str) = {
 }
 
 // use for constants like data size / global init.
-// TODO: this is wrong because you're allowed nesting but you're such an asshole if you do that in this context. 
 fn read_expr(self: *ParseWasm) Result(RawList(u8), Str) = {
+    x := @ref zeroed(import("@/examples/import_wasm/convert.fr")'LoadWasm);
     start := self.cursor;
-    while => (@try(self.pop()) return) != 0x0B {
-        // spin
-    };
+    x.src = self.src;
+    x.cursor = self.cursor;
+    
+    // TODO: ugh read_expr takes 25ms to compile because it pulls in match_runtime_call even tho that's not going to be a valid thing in a const expr. 
+    //       if fix that also don't compile the whole LoadWasm struct (since that also requires collect_runtime_calls() for sizing)
+    // TODO: loop and count depth
+    x.skip_current_instruction();
+    @assert(x.src[x.cursor] == 0x0B, "TODO: complex constant");
+    x.skip_current_instruction();
+    
+    self.cursor = x.cursor;
     e := self.cursor - start;
     (Ok = (ptr = self.src.index(start), len = e, cap = e))
 }
-
 
 fn read_byte_enum(self: *ParseWasm, $T: Type) Result(T, Str) #generic = {
     b := @try(self.pop()) return;
@@ -275,7 +294,7 @@ fn empty(a: Alloc) WasmModule = {
     (types = list(a), functions = list(a), exports = list(a), 
     code = list(a), imports = list(a), data = list(a), 
     tables = list(a), memories = list(a), globals = list(a),
-    elements = list(a))
+    elements = list(a), custom = list(a))
 }
 
 fn cls(t: Wasm.ValType) import("@/backend/ir.fr").Cls = {

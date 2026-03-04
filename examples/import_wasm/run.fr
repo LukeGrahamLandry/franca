@@ -89,6 +89,7 @@ AugmentedExports :: {
         @struct {
             env :: wrap_fns_with_load_memory(Globals, Type.scope_of(E.env));
             webgpu :: wrap_fns_with_load_memory(Globals, Type.scope_of(E.webgpu));
+            wasi_snapshot_preview1 :: wrap_fns_with_load_memory(Globals, Type.scope_of(E.wasi_snapshot_preview1));
         }
 };
 
@@ -144,6 +145,7 @@ fn exec_wasm_file($Exports: Type, rt: *Rt.Engine, mod: *Wasm.Module, args: []CSt
     
     // TODO: there's a segment where it tells you the entry point
     func := instance.exports&.get("main")
+        || instance.exports&.get("_start") 
         || @panic("expected export called 'main'");
     @debug_assert(func&.is(.Function));
     func := func.Function;
@@ -152,11 +154,7 @@ fn exec_wasm_file($Exports: Type, rt: *Rt.Engine, mod: *Wasm.Module, args: []CSt
     result := @match(try(globals.exit_thread&)) {
         fn Try() => {
             // TODO: if return type is void, result is a junk register
-            result := f(func.context, argc.trunc(), argv.trunc(), 0, 0);
-            if result != 0 {
-                @eprintln(">>> returned %", result);
-            };
-            result
+            f(func.context, argc.trunc(), argv.trunc(), 0, 0)
         }
         fn Catch() => globals.exit_status;
     };
@@ -231,6 +229,7 @@ weak_imports :: @const_slice(
 WellKnown :: import("@/examples/os/user/libc/string.fr");
 
 // TODO: make it easy to ship these as a binary form of the ir so you can inline accross host calls. 
+// note: AugmentedExports rewrites these. must be updated when adding a new module. 
 Exports :: @struct {
     env :: @struct {
         // (same reasoning as the webgpu ones. see comment above.)
@@ -421,7 +420,22 @@ Exports :: @struct {
         null :: fn(ctx: *u8) void = {
             @panic("wasm guest called a null function pointer");
         }
-    }
+    };
+    
+    wasi_snapshot_preview1 :: @struct {
+        fd_write :: fn(ctx: *Globals, _handle: i32, s: u32, n: u32, out: u32) i32 #ctx = {
+            m := ctx.memory.items();
+            IoVec :: @struct(ptr: u32, len: u32);
+            vec := m.subslice(s.zext(), n.zext() * size_of(IoVec));
+            vec := IoVec.reinterpret_bytes(vec);
+            n := 0;
+            for vec { it |
+                n += env'write(ctx, 1, it.ptr, it.len);
+            };
+            m.subslice(out.zext(), 4).peek_type(u32)[] = n.trunc();
+            0
+        };
+    };
 }
 
 fn log(ctx: *Globals, err: bool, msg: Str) void = {

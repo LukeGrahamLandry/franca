@@ -23,6 +23,23 @@ dump :: fn(input: []u8) void = {
     f_count := min(w.functions.len, w.code.len);
     function_names := temp().alloc_zeroed(Str, f_count + w.import_count&[.Func]);
     
+    start := out.len;
+    @fmt(out, "EMPTY SECTIONS: [");
+    inline_for WasmModule.get_fields() { $f |
+        @if(@run has_const_field(f.ty, @symbol Element)) {
+            it := WasmModule.get_field_ptr(w, f);
+            @if(it.len == 0) @fmt(out, "%, ", @run f.name.str());
+        };
+    };
+    @fmt(out, "];\n\n");
+    
+    if w.custom.len > 0 {
+        @fmt(out, "=== BEGIN CUSTOM SECTION ===\n");
+        each w.custom { it |
+            @fmt(out, " - [size=%] %\n", it.data.len, it.name.items());
+        };
+        @fmt(out, " === END CUSTOM SECTION ===\n\n");
+    };
     if w.imports.len > 0 {
         @fmt(out, "=== BEGIN IMPORT SECTION ===\n");
         n := 0;
@@ -38,8 +55,6 @@ dump :: fn(input: []u8) void = {
         };
         @fmt(out, " === END IMPORT SECTION ===\n\n");
         @debug_assert_eq(n, w.import_count&[.Func]);
-    } else {
-        @fmt(out, "=== NO IMPORTS ===\n\n");
     };
     
     if w.exports.len > 0 {
@@ -59,8 +74,6 @@ dump :: fn(input: []u8) void = {
         };
         @fmt(out, " === END EXPORT SECTION ===\n\n");
         print(out.items()); out.clear();
-    } else {
-        @fmt(out, "=== NO EXPORTS ===\n\n");
     };
     
     if w.data.len > 0 {
@@ -76,8 +89,6 @@ dump :: fn(input: []u8) void = {
             };
         };
         @fmt(out, " === END DATA SECTION ===\n\n");
-    } else {
-        @fmt(out, "=== NO DATAS ===\n\n");
     };
     
     if w.tables.len > 0 {
@@ -86,8 +97,6 @@ dump :: fn(input: []u8) void = {
             @fmt(out, " - % (min = %, max = %)\n", it.type, it.limits.min, it.limits.max);
         };
         @fmt(out, " === END TABLE SECTION ===\n\n");
-    } else {
-        @fmt(out, "=== NO TABLES ===\n\n");
     };
 
     if w.elements.len > 0 {
@@ -107,8 +116,6 @@ dump :: fn(input: []u8) void = {
             @fmt(out, "]\n");
         };
         @fmt(out, " === END ELEMENT SECTION ===\n\n");
-    } else {
-        @fmt(out, "=== NO ELEMENTS ===\n\n");
     };
     
     if w.memories.len > 0 {
@@ -126,8 +133,6 @@ dump :: fn(input: []u8) void = {
             dump_wasm_expr(w, input, it.init_expr.items(), out, import_types);
         };
         @fmt(out, " === END GLOBAL SECTION ===\n\n");
-    } else {
-        @fmt(out, "=== NO GLOBALS ===\n\n");
     };
     
     @fmt(out, "=== BEGIN TYPE SECTION ===\n");
@@ -151,7 +156,7 @@ dump :: fn(input: []u8) void = {
         continue :: local_return;
         abs_index := i + w.import_count&[.Func];
         name := function_names[abs_index];
-        @fmt(out, "[F%]: %\n- signeture ", abs_index, name);
+        @fmt(out, " [F%]: %\n  - signeture ", abs_index, name);
         if i < w.functions.len {
             ty := w.functions[i];
             if !show_type(out, w, ty) {
@@ -166,9 +171,9 @@ dump :: fn(input: []u8) void = {
         };
         @fmt(out, "\n");
         if code.locals.len == 0 {
-            @fmt(out, "- only argument locals\n");
+            @fmt(out, "  - only argument locals\n");
         } else {
-            @fmt(out, "- (non-argument) locals: ");
+            @fmt(out, "  - (non-argument) locals: ");
             each code.locals { it |
                 @fmt(out, "(% x %), ", it.type, it.count);
                 locals&.push_repeated(it.count, it.type);
@@ -176,11 +181,11 @@ dump :: fn(input: []u8) void = {
             @fmt(out, "\n");
         };
         
-        @fmt(out, "- code ");
+        @fmt(out, "  - code ");
         dump_wasm_expr(w, input, code.insts.items(), out, import_types, locals.items());
         locals&.clear();
     };
-    @fmt(out, "=== END FUNCTION/CODE SECTION ===\n");
+    @fmt(out, " === END FUNCTION/CODE SECTION ===\n");
     
     if errors[] != 0 {
         @fmt(out, "!!! found % errors !!!\n", errors[]);
@@ -309,6 +314,7 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8),
                 @case(10) => @fmt(out, "MemoryCopy(%, %);", read_leb(false), read_leb(false));
                 @case(8) => @fmt(out, "MemoryInit(%, %);", read_leb(false), read_leb(false));
                 @case(15) => @fmt(out, "TableGrow(%);", read_leb(false));
+                @inclusive(0, 7) => @fmt(out, "TruncSat(%)", opcode);
                 @default => @fmt(out, "TodoMultiByte(0xFC, %);", opcode);
             };
             continue();

@@ -1,4 +1,30 @@
 
+
+## (Mar 3)
+
+https://github.com/DenialAdams/roland
+- another language that does qbe or wasm. seems like a good source of tests, 
+  link my backend so the qbe target can be self contained. good incentive for less panicking.
+- tiny .s file for syscalls and sqrt. i have an op for sqrt and if i add syntax for add_code_bytes
+  i can do their tests without linker. sure builds faster after putting wild behind a feature. 
+- i fail ryu_f(32, 64). qbe accepts (d/d)_(NaN/inf) as literals, but even with that i get the wrong answers. 
+  they're testing fancy float parsing and i do dumbest possible float parsing so when they 
+  put the right answers as numbers in the ir text i get the wrong bits. can cheat by just writing ints in emit_expr_as_val. 
+- run their wasm modules in my import_wasm
+  - noticed something sketchy. comptime_exports always called with same scope so way too many. 
+    `Type.const_eval(@{ @struct {  } })` doesn't do what i want. 
+  - fail 17. elem with explicit table index. fail 10. 
+  - lol!! `(@try(self.pop()) return) != 0x0B` what if that byte is in your number...! fail 5. 
+    didn't come up for mine because i use one big data segment. read_expr needs to skip opcodes properly.
+  - hack in an incorrect trunc_sat just to see if it works. fail 3.
+  - external_procedure_pointer.rol passes 0 as the out parameter to fd_write and then later reads the active data segment at offset 0. 
+    wasted a while on trying to find wasmtime's wasi impl and where they don't write to it if it's zero. gave up. 
+    reassured that https://www.brick.codes/roland/ behaves the same as mine. 
+- the problems i've been having with all the wasm_spec float tests is that the 
+  when the test's json of the tests has float literals as a string of digits, they're bits. 
+  which is the sane thing, i just never thought about it before. 
+- dump_wasm: less spammy empty sections (mostly for -d D in web demo)
+
 ## (Mar 2)
 
 - the way i override the libc_exports in the different hosts is overly confusing. 

@@ -41,7 +41,7 @@ function, native code should also let you do that.
 - traps
 - validation
 - float: trunc, ceil, floor, nearest, copysign
-- saturating conversions
+- correct saturating conversions on non-arm
 - memory.copy: allow non-constant size. allow overlapping where you need to copy backwards. 
 - memory ops: fill/drop
 - more atomic ops

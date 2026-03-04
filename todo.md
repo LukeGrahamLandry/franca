@@ -1,3 +1,5 @@
+- finish examples/os spawn on host/web. 
+  TODO: toy/hello2.fr works but toy/hello.fr the comptime part works but then CompileError: WebAssembly.Module(): Compiling function #1 failed: extra bits in varint @+45
 - deal with `franca examples/web/build.fr && node target/web/test.js` needs to get rootfs_hash somehow
 - each thread expose an allocator that allocates from the other end of the stack for things that last forever?
 - should give my ring buffer thing a more sane api for doing multiple entries at once 
@@ -352,7 +354,7 @@ cset	w0, eq
   - examples/os/bin (i.e. doom)
   - examples/toy
   - tests/external
-    - raylib
+    - raylib amd
     - wasm_spec
     - todo/musl
     - todo/coremark
@@ -376,6 +378,7 @@ cset	w0, eq
 - boot/src/driver.fr
 - things in lib/encoding are used by the autotest so won't silently break
   but don't have standalone tests so if it breaks it will cause a confusing failure elsewhere. 
+- round trip ir text/frc
 
 ## remaining nondeterminism
 
@@ -929,7 +932,6 @@ but then need to deal with including build options in the cache (like -unsafe, -
 - do automatic caching for big comptime things (like import_c'include)
 - allow smaller compilation units. like not making you recompile the backend when you work on the frontend. 
 - test that .frc files repro and that you can pass them directly
-- dump_bin: print segment.MachineCode as something qbe_frontend.fr can parse so it can round trip
 - clear cache before tests just in case
 - caching an invalid thing i think? if you Compile Error: we hit a dynamicimport ('puts_unlocked' from 'libc') with no comptimeaddr for jit
 (happening with import_c)

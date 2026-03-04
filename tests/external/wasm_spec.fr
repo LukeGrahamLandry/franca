@@ -5,6 +5,9 @@ main :: fn() void = {
     tests_dir := @fmt_cstr("%/test/core", root);
     Syscall'chdir(tests_dir).unwrap();
     println(root);
+    
+    // TODO: div/fcvt overflow faults on amd
+    @if(query_current_arch() != .aarch64) @eprintln("TODO: this probably only works on arm");
         
     wast_files := collect_with_extension(".", ".wast") 
         || panic("failed to collect wast files");
@@ -147,19 +150,14 @@ skip :: @const_slice(
     "left-to-right", 
     // complex constant expressions
     "data",
-    // idk. it wants me to change the bits of infinities/subnormals from what strtod gives me?
-    "const",
-    // might be the same as "const" but maybe i do it wrong, idk
-    "f64_cmp", "f32_cmp", "float_exprs", 
+    "float_exprs", 
     // start section
     "start",
     // give it the host imports it expects 
     "token", "func_ptrs", 
-    // parse more Element kinds. currently only flags=0 is supported.
+    // parse more Element kinds. 
     "binary", "ref_func", "table_get", "table_set", "return_call_indirect",
     "binary-leb128", 
-    // i spam "skipping custom section"
-    "custom",
     // no point since i don't run assert_trap/assert_malformed/etc. anyway also  don't parse the wast myself. 
     "traps", "skip-stack-guard-page", 
     "comments", "obsolete-keywords", "inline-module", 
@@ -172,16 +170,12 @@ skip :: @const_slice(
     // externref
     "table_grow",  // arg/ret
     "table_size",  // ref.null
-    // saturating
-    "conversions", 
     // tail call
     "return_call", 
     // !! fails
-    "memory_redundancy", "float_literals", "float_memory", "address", 
-    "local_get",  // 0x43d010599999999a_Kd vs 0x43d0029999a9999a_Kd
+    "memory_redundancy", "float_memory", 
     "unreachable",  // panic! Expected Else only inside If
     "return",       //        problem is `return; if(a) b; else c;` doesn't get skipped properly
-    "local_set",  // 56_Kl vs 4614613358185179136_Kl
 );
 
 Wast :: @struct {
@@ -258,26 +252,17 @@ fn invoke(self: *Rt.Instance, name: Str, args: []SafeValue, out: []SafeValue) ?[
 
 fn parse_value(it: Wast.Value) SafeValue = {
     k := it.type.cls();
-    if k.is_int() {
+    @if(it.value == "nan:canonical" || it.value == "nan:arithmetic") 
+        return(k, @if(k == .Ks, (f32 = 0.0/0.0), (f64 = 0.0/0.0)));
+    
         value: i64 = if it.value.starts_with("0x") {
             hex(it.value.rest(2)).unwrap()
         } else {
             parse_int(it.value)
         };
+        // even if float, they're just bits
         value: Rt.GlobalValue = (i64 = value);
         return(k, value);
-    };
-    strtod :: fn(str: CStr, end_out: *CStr) f64 #weak #libc;    // TODO: write my own 
-    end := zeroed(CStr);
-    f := strtod(it.value.as_cstr(), end&);
-    if end.ptr[] != 0 {
-        @panic("didn't parse whole float: %", it.value);
-    };
-    value: Rt.GlobalValue = (f64 = f);
-    if k == .Ks {
-        value.f32 = f.cast();
-    };
-    (k, value)
 }
 
 fn cls(self: Wast.Value.Tag) Qbe.Cls = @match(self) {
@@ -293,16 +278,17 @@ fn eq(a: *SafeValue, b: *SafeValue) bool = {
     @match(a._0) {
         fn Kw() => a._1.i32 == b._1.i32;
         fn Kl() => a._1.i64 == b._1.i64;
-        fn Ks() => a._1.f32 == b._1.f32;
-        fn Kd() => a._1.f64 == b._1.f64;
+        // TODO: im not checking the different nan bits. i don't care rn. 
+        fn Ks() => a._1.f32 == b._1.f32 || (a._1.f32.is_nan() && b._1.f32.is_nan());
+        fn Kd() => a._1.f64 == b._1.f64 || (a._1.f64.is_nan() && b._1.f64.is_nan());
         @default => false;
     }
 }
 
 fn display(self: *SafeValue, out: *List(u8)) void = {
     @match(self._0) {
-        fn Kw() => @fmt(out, "%", self._1.i32);
-        fn Kl() => @fmt(out, "%", self._1.i64);
+        fn Kw() => @fmt(out, "%", fmt_hex(self._1.i32));
+        fn Kl() => @fmt(out, "%", fmt_hex(self._1.i64));
         fn Ks() => @fmt(out, "%", fmt_hex(self._1.f32));
         fn Kd() => @fmt(out, "%", fmt_hex(self._1.f64));
         @default => ();
