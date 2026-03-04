@@ -1,4 +1,9 @@
 
+## (Mar 4)
+
+- immediate of i32.const is signed 32 bit. push_bits is correctly extending but push(RCon) jit literal isn't. 
+  makes an invalid module when you jit after using 2gb of memory. which, yikes i need to be not using that much memory. 
+  but now toy/hello.fr works in web terminal.
 
 ## (Mar 3)
 

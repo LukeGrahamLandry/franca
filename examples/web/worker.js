@@ -124,7 +124,13 @@ export const imports = {
             
             const wasteofmytime = new ArrayBuffer(buffer.byteLength);  // firefox
             new Uint8Array(wasteofmytime).set(new Uint8Array(buffer));
-            const module = new WebAssembly.Module(wasteofmytime);
+            let module;
+            try {
+                module = new WebAssembly.Module(wasteofmytime);
+            } catch (e) {
+                yield_file(wasteofmytime, "error.wasm");
+                throw e;
+            }
             const instance = new WebAssembly.Instance(module, { main: Franca });
 
             let i = Number(first_export);
@@ -152,11 +158,7 @@ export const imports = {
                     );
                     const wasteofmytime = new ArrayBuffer(bytes.byteLength);
                     new Uint8Array(wasteofmytime).set(new Uint8Array(bytes));
-                    self.postMessage({
-                        tag: "download",
-                        content: new Blob([wasteofmytime], { type: "octet/stream" }),
-                        name: "a.out",
-                    });
+                    yield_file(wasteofmytime, "a.out");
                     return len;
                 }
                 case 0xBBBB0002n: {
@@ -202,6 +204,14 @@ export const imports = {
         }
     },
 };
+
+function yield_file(bytes, name) {
+    self.postMessage({
+        tag: "download",
+        content: new Blob([bytes], { type: "octet/stream" }),
+        name: name,
+    });
+}
 
 let weak_imports = [
     "malloc",

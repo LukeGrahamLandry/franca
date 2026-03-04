@@ -279,43 +279,43 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
             fn RCon() => {
                 c := e.f.get_constant(i.arg&[0]);
                 @match(c.type()) {
-                    fn CBits() => e.push_bits(c, i.cls());
+                    fn CBits() => e.push_bits(c.bits(), i.cls());
                     fn CAddr() => {
                         use_symbol(e.m, c.sym) { symbol | 
                             break :: local_return;
                             if e.m.goal.type == .JitOnly {
                                 if !symbol.jit_addr.is_null() {
-                                    e.op(@if(i.cls().is_wide(), .I64_Const, .I32_Const));
-                                    leb128_signed(e.a&, symbol.jit_addr.int_from_rawptr() + c.bits());
+                                    e.push_bits(symbol.jit_addr.int_from_rawptr() + c.bits(), i.cls());
                                     break();
                                 };
                                 if ensure_got_slot(e.m, symbol, symbol.jit_addr) { it |
                                     push_fixup(e.m, symbol, it);
                                 };
                                 got := e.m.segment_address(.ConstantData, symbol.got_lookup_offset);  // :GotAtConstantDataBase 
-                                e.op(.I32_Const);
-                                leb128_signed(e.a&, got.int_from_rawptr());
+                                e.push_bits(got.int_from_rawptr(), .Kw);
                                 e.emit(@ref make_ins(.load, i.cls(), Qbe.Null, INT(0), Qbe.Null));
                                 
                                 if c.bits() != 0 {
-                                    e.op(@if(i.cls().is_wide(), .I64_Const, .I32_Const));
-                                    leb128_signed(e.a&, c.bits());
+                                    e.push_bits(c.bits(), i.cls());
                                     e.emit(@ref make_ins(.add, i.cls(), Qbe.Null, Qbe.Null, Qbe.Null));
                                 };
                                 break();
                             };
                             
-                            e.op(@if(i.cls().is_wide(), .I64_Const, .I32_Const));
                             // if it's a function address we have to wait until the end to know its index in the table. 
                             if symbol.kind == .Local && symbol.segment == .MutableData {
-                                leb128_signed(e.a&, symbol.offset + c.bits());
+                                e.push_bits(symbol.offset + c.bits(), i.cls());
                             } else {
                                 @debug_assert(symbol.segment != .ConstantData, "TODO: ConstantData");
+                                e.op(.I64_Const);
                                 push_fixup(e.m, symbol, (
                                     patch_at = (u8 = e.a.maybe_uninit.ptr.offset(e.a.len)), 
                                     type = (WasmAddr = (increment = c.bits().trunc())),
                                 ));
                                 e.pad(WASM_INDEX_PADDING);
+                                if !i.cls().is_wide() {  // my WasmAddr rel is always Kl
+                                    e.emit(@ref make_ins(.truncl, .Kw, Qbe.Null, Qbe.Null, Qbe.Null));
+                                };
                             };
                         };
                     }
@@ -393,23 +393,23 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
     };
 }
 
-fn push_bits(e: *EmitWasmFn, c: *Qbe.Con, k: Qbe.Cls) void = @match(k) {
+fn push_bits(e: *EmitWasmFn, c: i64, k: Qbe.Cls) void = @match(k) {
     fn Ks() => {
         e.op(.F32_Const);
-        e.a&.reserve_type(u32)[] = c.bits().trunc();  // f32
+        e.a&.reserve_type(u32)[] = c.trunc();  // f32
     }
     fn Kd() => {
         e.op(.F64_Const);
-        e.a&.reserve_type(i64)[] = c.bits(); // f64
+        e.a&.reserve_type(i64)[] = c; // f64
     }
     fn Kw() => {
         e.op(.I32_Const);
-        i := c.bits().intcast().intcast();
+        i := c.intcast().intcast();  // sign extend!
         leb128_signed(e.a&, i);
     }
     fn Kl() => {
         e.op(.I64_Const);
-        leb128_signed(e.a&, c.bits());
+        leb128_signed(e.a&, c);
     }
     @default => unreachable();
 };

@@ -43,7 +43,7 @@ const handle = (resolve) => (_msg) => {
             let a = document.createElement("a");
             let url = window.URL.createObjectURL(msg.content);
             a.href = url;
-            a.download = "a.out";
+            a.download = msg.name;
             a.click();
             window.URL.revokeObjectURL(url);
             break;
@@ -372,6 +372,7 @@ document.getElementById("all").onclick = async () => {
             let ok = err.innerText.length == 0;
             results += " " + (ok ? "ok" : "FAIL") + "\n";
             if (!ok) errors += "\n\n" + it + "\n";
+            if (!ok) errors += document.getElementById("out").value + "\n";
             errors += err.innerText;
             if (ok) passed += 1;
             err.innerText = "";
