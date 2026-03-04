@@ -37,14 +37,26 @@ munmap :: fn(addr: i64, len: i64) i64 #n(215) = {
     0
 }
 
-exit :: fn(status: i64) i64 #n(94) = {
-    task := get_current_task();
-    if status == 81 {  // :temporarystacktraceonexithack
-        task.mcontext.esr = 0;
-        send_signal(task);
+terminate :: fn(thread_id: i64) i64 #n(0xFFFF000B) = {
+    caller_task := get_current_task();
+    if caller_task.thread_id == thread_id {
+        // suicide
+        kill_task(caller_task);
+        return_to_scheduler();  // yield
     };
-    kill_task(task);
-    return_to_scheduler()  // yield
+    task := kernel.tasks&.items().find(fn(it) => it.state != .Uninit && it.thread_id == thread_id)
+        || return(@as(i64) TerminateResult.NotFound);
+    @if(identical(task, caller_task)) kpanic("corrupt tid");
+    // we know the other thread isn't in a syscall because we have the syscall_lock. 
+    
+    if Task.State.cas(task.state&, .Runnable, .Suspended) == .Runnable {
+        // it wasn't running on another core, so this is easy, simply never schedule it again. 
+        kill_task(task);
+        return(@as(i64) TerminateResult.Ok);
+    };
+    
+    // TODO: how do i send an interrupt to another cpu?
+    @as(i64) TerminateResult.StillRunning
 }
 
 futex :: fn(addr: i64, op: i64, val: i64, timeout: i64) i64 #n(98) = {

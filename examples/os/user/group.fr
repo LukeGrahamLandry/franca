@@ -7,6 +7,7 @@ ThreadGroup :: @rec @struct {
     threads: RawList(*Thread);
     parent: ?*ThreadGroup;
     children: RawList(*ThreadGroup);
+    exit_status: ?i32;
     // TODO: track mmaps so they can be released when all threads exit 
 };
 
@@ -15,6 +16,7 @@ setup_root_thread_group :: fn() void = {
     t.tid = 1; t.tid_futex = 1;
     g := root_thread_group;
     g.parent = .None;
+    g.exit_status = .None;
     get_current_tls()[].thread_group = g;
     g.threads = init(general_allocator(), 1);
     g.threads&.push_assume_capacity(t);
@@ -121,7 +123,7 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
             run_command(cmd);
         };
         
-        cleanup_thread_group("returned from main");
+        cleanup_thread_group("returned from main", 0);
     };
     task: Spawn = (
         waiting = 0,
@@ -141,6 +143,7 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
         with fs2.mutex& {
             fs2.allocator = a;  // TODO: everyone should get their own so less contention
             child.parent = (Some = parent);
+            child.exit_status = .None;
             child.threads&.push(t, a);
             ::ptr_utils(Thread);
             i := parent.threads.index_of(fn(it) => identical(it[], t))
@@ -193,35 +196,56 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
     0
 };
 
-cleanup_thread_group :: fn(debug_why: Str) void = {
+cleanup_thread_group :: fn(debug_why: Str, status: i32) void = {
     g := get_current_tls()[].thread_group;
     with g.vfs.mutex& {
         if g.threads.len != 1 || g.children.len != 0 {
             @trace("WARN(% with % unjoined threads and % unwaited children)", debug_why, g.threads.len, g.children.len);
         };
-        
-        leak := false;
-        for g.threads { it |
-            @if(!identical(it, get_current_thread()))
-            if it.tid_futex == 0 {
-                it.join();
-            } else {
-                leak = true;
-                @eprintln("TODO: leaked a thread");
-            };
+        if g.exit_status.is_some() {
+            @trace("WARN(called cleanup_thread_group multiple times)");
         };
         
-        for g.children { it |
-            with it.vfs.mutex& {
-                if it.threads[0].tid_futex == 0 {
-                    _ := wait4(it.threads[0].tid, @ref @as(i32) 0, 0, @ref zeroed(Posix.rusage));
+        leak := false;
+        ::ptr_utils(Thread);
+        threads := g.threads.items().shallow_copy(temp());  // mutated by join
+        myself := threads.index_of(fn(it) => identical(it[], get_current_thread()));
+        threads&.unordered_remove_discard(myself.unwrap());
+        for threads { it |
+            tid := it.tid_futex;
+            // TODO: tid=-1 means not started yet
+            if tid == 0 {
+                // already finished running, just never joined.
+                it.join();
+            } else {
+                @eprintln("TODO: leaked a thread tid=%", tid);
+                // it wont be holding vfs.mutex because we have it. 
+                // TODO: this is fragile if i do more fine grained mutexes
+                if terminate(tid) == .Ok {
+                    it.join();
                 } else {
                     leak = true;
-                    @eprintln("TODO: leaked a process");
                 };
             };
         };
         
+        children := g.children.items().shallow_copy(temp());  // mutated by wait
+        for children { it |
+            with it.vfs.mutex& {
+                if it.threads[0].tid_futex == 0 {
+                    // its main thread exited, just never waited(). 
+                    @if(it.threads.len != 1) @trace("WARN(child had unjoined threads)");
+                    @if(it.children.len != 0) @trace("WARN(child had unwaited children)");
+                    _ := wait4(it.threads[0].tid, @ref @as(i32) 0, 0, @ref zeroed(Posix.rusage));
+                } else {
+                    leak = true;
+                    @eprintln("TODO: leaked a thread group");
+                    // TODO: do child groups get waited or reparented to init?
+                };
+            };
+        };
+        
+        g.exit_status = (Some = status);
         if !leak {
             // close everything (makes pipes poll as HUP)
             // rev to delay closing stderr until almost done. 
@@ -230,6 +254,13 @@ cleanup_thread_group :: fn(debug_why: Str) void = {
             };
         };
     };
+};
+
+terminate :: fn(tid: u32) TerminateResult = {
+    @assert_ne(tid, get_current_thread()[].tid_futex, "suicide");
+    r := host_platform'terminate(tid.zext());
+    @trace("terminate(%) = %", tid, r);
+    r
 };
 
 wait4 :: fn(pid: pid_t, status: *i32, flags: i64, usage: *Posix.rusage) i32 = {
@@ -262,26 +293,13 @@ wait4 :: fn(pid: pid_t, status: *i32, flags: i64, usage: *Posix.rusage) i32 = {
     
     // TODO: normal join asserts it's not the main thread so i manually free stack at the end
     t.sys_join();  
+    // it's the other guy's job to cleanup_thread_group and make sure the main thread is the last to exit. 
+    child.vfs.mutex&.lock();  // leak the lock. 
+    @if(child.exit_status.is_none()) @trace("WARN(child's cleanup_thread_group didn't set exit status"); 
+    child_status := (child.exit_status || 255).bit_and(255).shift_left(8);
     
-    // TODO: force other threads to stop instead of waiting for them. 
-    dowhile {
-        // might still have threads running and those threads might spawn new threads
-        child.vfs.mutex&.lock();  
-        child_threads := child.threads.items().rest(1).shallow_copy(temp());
-        child.vfs.mutex&.unlock();
-        for child_threads { it |
-            it.join();
-        };
-        child.threads.len != 1
-    };
-
     // TODO: release any memory child leaked
-    // TODO: close files but can't just do Syscall'close because they're in a different thread group. 
-    // TODO: it would be nice if the child did this cleanup in exit()
     // TODO: poison if it panicked in vfs code?
-    // TODO: do child groups get waited or reparented to init?
-
-    // child has no more live threads
     with parent.vfs.mutex& {
         a := child.vfs.allocator;
         child.vfs.fd&.drop();
@@ -296,16 +314,16 @@ wait4 :: fn(pid: pid_t, status: *i32, flags: i64, usage: *Posix.rusage) i32 = {
         a.dealloc_one(ThreadGroup, child);
     };
     
-    status[] = 0;  // TODO
-    @trace("wait(%) = %", pid, status);
+    status[] = child_status;
+    @trace("wait(%) = (status=%)", pid, status);
     
     pid
 }
 
 exit :: fn(status: i32) Never = {
     @trace("exit(%)", status);
-    cleanup_thread_group("called exit");
-    host_platform'exit_thread(status)
+    cleanup_thread_group("called exit", status);
+    host_platform'exit_thread()
 };
 
 // note: this requires that userdata/callee be as called by raw_create_thread

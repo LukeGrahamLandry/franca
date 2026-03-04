@@ -257,7 +257,7 @@ VirtFuse :: import("@/examples/os/drivers/fs/virtio.fr");
 alloc_task :: fn(tt: *TranslationTable) *Task = {
     each kernel.tasks& { it |
         if Task.State.cas(it.state&, .Free, .Suspended) == .Free {
-            it.slice(1).set_zeroed();
+            it.slice(1).set_zeroed();  // it.state = .Uninit;
             it.state = .Suspended;
             it.thread_id = i64.atomic_inc(kernel.next_task_to_spawn&);
             it.mem.root = tt;
@@ -299,17 +299,17 @@ init_root_task :: fn(tt: *TranslationTable, elf_bytes: []u8, device_tree_bytes: 
 
 fn kill_task(task: *Task) void = {
     task.state = .Uninit;
-    // TODO: deallocate its pages and stuff
-    //       (but for now everything is thread-like not process-like)
     if task.thread_id == 1 {
         stop();
     };
     @if(task.thread_id == 0) kpanic("tried to kill idle_task");
-    @if(task.exit_futex[] != task.thread_id.trunc()) kprint("WARN: corrupt exit_futex");
+    @if(task.exit_futex[] != task.thread_id.trunc()) kprint_label("WARN: corrupt exit_futex ", task.exit_futex[].zext());
     task.exit_futex[] = 0;
     futex_wake(u32.int_from_ptr(task.exit_futex), MAX_i32);
     task.state = .Free;
-    sys_set(*Task, .TPIDR_EL1, kernel.idle_task&.current());
+    if identical(task, get_current_task()) {
+        sys_set(*Task, .TPIDR_EL1, kernel.idle_task&.current());
+    };
 }
 
 get_current_task :: fn() *Task = 

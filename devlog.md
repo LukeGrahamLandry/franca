@@ -4,6 +4,11 @@
 - immediate of i32.const is signed 32 bit. push_bits is correctly extending but push(RCon) jit literal isn't. 
   makes an invalid module when you jit after using 2gb of memory. which, yikes i need to be not using that much memory. 
   but now toy/hello.fr works in web terminal.
+- with kernel, tests/compiler.fr gets farther. "wrong number of dots". 
+  have wait4() pass on status from exit(), now it can tell which tests fail properly. 
+- kernel expose a way to try to stop another thread. because exiting a thread group should kill the rest. 
+
+TODO: `test_fuse;tests/compiler.fr` corrupts something and dies sooner than `tests/compiler.fr`
 
 ## (Mar 3)
 

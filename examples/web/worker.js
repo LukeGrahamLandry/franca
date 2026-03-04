@@ -110,9 +110,8 @@ export const imports = {
             if (current_exit_futex !== undefined) set_zero_and_wake(current_exit_futex);
             let G = get_G();
             if (status == 0n) throw "called exit 0";
-            cancelAnimationFrame(G.animation_id);
-            console.trace();
-            throw new Error("called exit " + Number(status));
+            throw new Error("unreachable stop call");
+            // TODO: expose cancelAnimationFrame(G.animation_id); somehow
         },
         jit_instantiate_module: (ptr, len, first_export, table_index) => {
             if (table_index != 0) throw new Error("table_index");
@@ -138,11 +137,6 @@ export const imports = {
                 Franca.__indirect_table.set(i, instance.exports[func]);
                 i += 1;
             }
-        },
-        write: (id, ptr, len) => {
-            show("CALLED WRITE TOO EARLY\n");
-            show(get_wasm_string(ptr, len));
-            return len;
         },
         js_write: (id, ptr, len) => { 
             switch(id){

@@ -18,27 +18,6 @@ main2 :: fn() void = {
         
         Crash'push_aot_debug_resolver();
         
-        #use("@/lib/sys/jump.fr");
-        jumpbuf :: @static(JumpBuf);
-        throw_panic_hook :: fn(s: Str) Never = {
-            fs := shell;
-            panicking :: @static(bool);
-            old := fs.strace;
-            fs.strace = false;
-            @if(panicking[]) Crash'backtracing_panic_handler(s);
-            panicking[] = true;
-            eprintln(s);
-            Crash'report_backtrace(fp = Crash'trace_start(), ip = 0.rawptr_from_int());
-            panicking[] = false;
-            fs.strace = old;
-            // TODO: don't leak the compiler, etc.
-            @if(tls(.thread_index)[] != 1) {
-                @eprintln("child thread % panicked", tls(.thread_index)[]);
-                Syscall'exit(1); 
-            };
-            throw(jumpbuf);
-        };
-        
         shell.device_tree_bytes = {
             devicetree := tls(.cli_arguments)[0].ptr;
             h := bit_cast_unchecked(*u8, *DT.Header, devicetree)[];
@@ -68,13 +47,7 @@ main2 :: fn() void = {
             print("\n");
             shell.strace = old;
             
-            push_tls_value(.panic_hook, throw_panic_hook) {
-                @match(try(jumpbuf)) {
-                    fn Try() => decode_and_run_cmd(buf.items());
-                    fn Catch() => println("main thread panicked.");
-                };
-            };
-            // TODO: reset panic_hook even if jumped
+            decode_and_run_cmd_with_jumpbuf(buf.items());
             
             buf&.clear();
             temp().reset(mark);
@@ -94,10 +67,40 @@ run_startup_commands :: fn() void = {
     };
     run :: fn(bootargs: Str) => {
         init := bootargs.split(";", temp()).items();
-        for(init, decode_and_run_cmd);
+        for(init, decode_and_run_cmd_with_jumpbuf);
         count += init.len;
     };
 }
+
+decode_and_run_cmd_with_jumpbuf :: fn(full_command: Str) void = {
+    #use("@/lib/sys/jump.fr");
+    jumpbuf :: @static(JumpBuf);
+    throw_panic_hook :: fn(s: Str) Never = {
+        fs := shell;
+        panicking :: @static(bool);
+        old := fs.strace;
+        fs.strace = false;
+        @if(panicking[]) Crash'backtracing_panic_handler(s);
+        panicking[] = true;
+        eprintln(s);
+        Crash'report_backtrace(fp = Crash'trace_start(), ip = 0.rawptr_from_int());
+        panicking[] = false;
+        fs.strace = old;
+        // TODO: don't leak the compiler, etc.
+        @if(tls(.thread_index)[] != 1) {
+            @eprintln("child thread % panicked", tls(.thread_index)[]);
+            Syscall'exit_thread(0); 
+        };
+        throw(jumpbuf);
+    };
+
+    push_tls_value(.panic_hook, throw_panic_hook) {
+        @match(try(jumpbuf)) {
+            fn Try() => decode_and_run_cmd(full_command);
+            fn Catch() => println("main thread panicked.");
+        };
+    };
+};
 
 decode_and_run_cmd :: fn(full_command: Str) void = {
     fs := Vfs'get_vfs();
@@ -111,10 +114,15 @@ decode_and_run_cmd :: fn(full_command: Str) void = {
     unordered_retain shell.reap& { it |
         done := it.tid_futex == 0;
         if done {
-            // TODO: processes as well
             @trace("reap(tid=%)", it.tid_futex);
             it[].join();
         };
+        !done
+    };
+    unordered_retain shell.reap_wait& { pid |
+        status: i32 = -1;
+        done := (Posix'waitpid(pid[], status&, Posix'W.NOHANG) || 0) > 0;
+        @if(done) @trace("reap(pid=%)", pid[]);
         !done
     };
     
@@ -164,6 +172,13 @@ decode_and_run_cmd :: fn(full_command: Str) void = {
                         };
                     }
                     print(out.items());
+                };
+                @case("exec") => {
+                    #use(Syscall);
+                    out: i32 = -1; 
+                    args := import("@/lib/sys/subprocess.fr")'make_args_for_exec(parts[1], parts.rest(2), temp());
+                    _ := posix_spawnp(out&, args[0], zeroed(*PosixSpawnActions), zeroed(*PosixSpawnAttr), args.ptr, tls(.environment_variables)[]);
+                    shell.reap_wait&.push(out, general_allocator());
                 };
                 @default => {
                     break :: local_return;
@@ -255,6 +270,7 @@ shell :: @static(@struct {
     nocache: bool;
     device_tree_bytes: []u8;
     reap: RawList(*Thread);
+    reap_wait: RawList(i32);
 });
 
 pl011_int_poll :: fn(q: *UQueue, who: i64) void = {
@@ -349,6 +365,9 @@ get_libc_syscall_callee :: fn(syscall_number: i64) ?rawptr = {
         @case(79) => { x :: unistd.fstatat; @as(rawptr) x };
         @case(64) => { x :: unistd.write; @as(rawptr) x };
         @case(61) => { x :: dirent.posix_getdents; @as(rawptr) x };       
+        @case(93) => (fn(x: i32) Never = host_platform'exit_thread());
+        @case(94) => { x :: LIBC.exit; @as(rawptr) x };
+        @case(57) => { x :: unistd.close; @as(rawptr) x };
         @default => return(.None);
     })
 }
@@ -463,8 +482,9 @@ host_platform :: @static(@struct {
     mmap: @FnPtr(len: i64, prot: i64) rawptr;
     munmap: @FnPtr(addr: rawptr, len: i64) i64;
     mprotect: @FnPtr(addr: rawptr, len: i64, prot: i64) i64;
-    exit_thread: @FnPtr(status: i32) Never;
+    exit_thread: @FnPtr() Never;
     FR_wasm_jit_event: (@FnPtr(event: WasmJitEvent) i64) = (fn(_) = unreachable());
+    terminate: @FnPtr(tid: i64) TerminateResult;
 });
 
 kernel_platform : (@type host_platform[]) : (
@@ -473,8 +493,7 @@ create_thread = fn(thread: *Thread) void = {
     ctx.elr = bit_cast_unchecked(rawptr, i64, franca_runtime_init_thread);
     ctx.gpr&[0] = bit_cast_unchecked(@type thread, i64, thread);
     ctx.gpr&[30] = int_from_rawptr(fn() void = {
-        args: Array(i64, 6) = (0, 0, 0, 0, 0, 0);
-        Syscall'perform_syscall(args&, 94);  // exit
+        host_platform'exit_thread();
         unreachable()
     });
     ctx.gpr&[31] = bit_cast_unchecked(*u8, i64, thread.stack.usable.end_pointer());
@@ -521,9 +540,14 @@ munmap = fn(addr: rawptr, len: i64) i64 = with_syscalls {
     result.value
 },
 mprotect = fn(addr: rawptr, len: i64, prot: i64) i64 = 0,
-exit_thread = fn(status) = {
-    with_syscalls(=> Syscall'exit(status));
+exit_thread = fn() = {
+    host_platform'terminate(get_current_thread()[].tid.zext());
     unreachable()
+},
+terminate = fn(tid) = {
+    args: Array(i64, 6) = (tid, 0, 0, 0, 0, 0);
+    r, _ := Syscall'perform_syscall(args&, 0xFFFF000B);  // terminate
+    bit_cast_unchecked(i64, TerminateResult, r)
 },
 );
 
@@ -618,6 +642,7 @@ uptime               (read the system counter)
 devicetree           (show hardware info from the boot loader)
 ps [-f]              (list running threads)
 tree                 (list virtual file system)
+exec <exe>           (new thread group. `franca <path>.fr` or `elf.out`)
 
 example programs:
 test_fuse
