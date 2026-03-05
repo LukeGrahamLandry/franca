@@ -98,6 +98,22 @@ fn declare_functions(m: *Qbe.Module, w: *WasmModule, a: Alloc) Ty([]Qbe.Sym, []W
     ids := a.alloc_uninit(Qbe.Sym, count); // :Leak
     types := a.alloc_uninit(Wasm.TypeIdx, count);
     names := a.alloc_zeroed(Str, count);
+    
+    // the names don't matter for correctness but they're useful when looking at the ir
+    each w.custom& { it |
+        if it.name.items() == "name" {
+            try_load_name_section(it.data, names);
+        };
+    };
+    
+    // another source of names is the exports
+    each w.exports& { it |
+        i: i64 = it.id.zext();
+        if it.type == .Func && i >= w.import_count&[.Func] && names[i] == "" {
+            names[i] = it.name.items();
+        };
+    };
+    
     f_i := 0;
     each w.imports& { import |
         @if_let(import.desc&) fn Function(id) => {
@@ -108,22 +124,15 @@ fn declare_functions(m: *Qbe.Module, w: *WasmModule, a: Alloc) Ty([]Qbe.Sym, []W
         };
     };
     range(0, w.functions.len) { i |
-        id := m.intern(@tfmt("F%@W", f_i));;
+        // my symbols must be unique in the module but the names from debug info might not be so mangle
+        name := @if(names[f_i] == "", @tfmt("F%@W", f_i), @tfmt("%@W%", names[f_i], f_i));
+        id := m.intern(name);
         ids[f_i] = id;
         names[f_i] = m.str(id);
         types[f_i] = w.functions[i];
         f_i += 1;
     };
     @debug_assert_eq(count, f_i);    
-    
-    // actually, if it's an export it's nicer to use the real names. TODO: same thing for globals
-    each w.exports& { it |
-        if it.type == .Func && it.id.zext() >= w.import_count&[.Func] {
-            id := m.intern(it.name.items());
-            ids[it.id.zext()] = id;
-            names[it.id.zext()] = m.str(id);
-        };
-    };
     
     (ids, types, names)
 }

@@ -24,9 +24,6 @@ fn record_wasm_function_index(m: *Qbe.Module, id: Qbe.Sym) void = {
             s.index_in_module = m.local_needs_reloc.len; 
         }; // else, AOT: there can be imports so real index can't be assigned yet. 
     };
-    if !export && m.goal.exe_debug_symbol_table {
-        m.exports&.push(id);
-    };
     m.local_needs_reloc&.push(id);
 }
 
@@ -810,6 +807,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
         };
         chunks&.push(data);
     };
+    push_buf(fn(buf) => write_name_section(m, buf));
     
     total_size := 0;
     for chunks { c |
@@ -829,6 +827,29 @@ fn write_function_section(m: *Qbe.Module, buf: *List(u8)) void = {
             use_symbol(m, id) { s |
                 @debug_assert_ge(s.wasm_type_index, 0, "unknown type for local function $%", s.name);
                 leb128_unsigned(buf, s.wasm_type_index.intcast()); 
+            };
+        };
+    };
+}
+
+// this makes names show in the browser profilers (which just exporting everything doesn't)
+// https://webassembly.github.io/spec/core/appendix/custom.html#name-section
+// "only after the data section"
+fn write_name_section(m: *Qbe.Module, buf: *List(u8)) void = {
+    @if(!m.goal.exe_debug_symbol_table && m.goal.type != .JitOnly) return();
+    buf.push(@as(u8) Wasm.Section.Custom);
+    uleb_patch_delta buf {
+        leb128_unsigned(buf, 4); 
+        buf.push_all("name");
+        buf.push(1);  // function names
+        uleb_patch_delta buf {
+            leb128_unsigned(buf, m.local_needs_reloc.len); 
+            enumerate m.local_needs_reloc& { i, id |
+                use_symbol(m, id[]) { s |
+                    leb128_unsigned(buf, m.imports.len + i); 
+                    leb128_unsigned(buf, s.name.len);
+                    buf.push_all(s.name);
+                };
             };
         };
     };
@@ -965,6 +986,7 @@ fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
             };
         };
     };
+    push_buf(fn(buf) => write_name_section(m, buf));
     
     // START goes here
     

@@ -37,6 +37,9 @@ dump :: fn(input: []u8) void = {
         @fmt(out, "=== BEGIN CUSTOM SECTION ===\n");
         each w.custom { it |
             @fmt(out, " - [size=%] %\n", it.data.len, it.name.items());
+            if it.name.items() == "name" {
+                try_load_name_section(it.data, function_names);
+            };
         };
         @fmt(out, " === END CUSTOM SECTION ===\n\n");
     };
@@ -109,11 +112,18 @@ dump :: fn(input: []u8) void = {
                 @fmt(out, "active at offset ");
                 dump_wasm_expr(w, input, it.active_offset_expr.items(), out, import_types);
             };
+            start, in_order := (out.len, true);
             @fmt(out, "  Functions: [");
-            for it.funcs { id |
+            enumerate it.funcs { i, id |
                 @fmt(out, "%, ", id.id);
+                in_order = in_order && i == id.id.zext();
             };
             @fmt(out, "]\n");
+            if in_order && it.funcs.len > 0 {
+                // this is always true for my modules so show it in a less spammy way
+                out.len = start;
+                @fmt(out, "  Functions: (indexes in order 0..<%)\n", it.funcs.len);
+            };
         };
         @fmt(out, " === END ELEMENT SECTION ===\n\n");
     };
@@ -182,7 +192,7 @@ dump :: fn(input: []u8) void = {
         };
         
         @fmt(out, "  - code ");
-        dump_wasm_expr(w, input, code.insts.items(), out, import_types, locals.items());
+        dump_wasm_expr(w, input, code.insts.items(), out, import_types, locals.items(), function_names);
         locals&.clear();
     };
     @fmt(out, " === END FUNCTION/CODE SECTION ===\n");
@@ -195,9 +205,9 @@ dump :: fn(input: []u8) void = {
 
 // TODO: this sucks. should allow default parameter values. :Compiler
 fn dump_wasm_expr(w: *WasmModule, i: []u8, is: []u8, o: *List(u8), it: []Wasm.TypeIdx) void = 
-    dump_wasm_expr(w, i, is, o, it, empty());
+    dump_wasm_expr(w, i, is, o, it, empty(), empty());
 
-fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8), import_types: []Wasm.TypeIdx, local_types: []Wasm.ValType) void = {
+fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8), import_types: []Wasm.TypeIdx, local_types: []Wasm.ValType, function_names: []Str) void = {
     Qbe :: import("@/backend/lib.fr").Qbe;    
     
     start := ptr_diff(full_input.ptr, insts.ptr);
@@ -390,12 +400,10 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8),
         
         if inst == .Call {
             v := push_leb(false);
-            @fmt(out, "); ");
+            @fmt(out, "); // %; ", @if(v < function_names.len, function_names[v], ""));
             if v < w.import_count&[.Func] {
-                @fmt(out, "  // import; ");
                 show_type(out, w, import_types[v]);
             } else {
-                @fmt(out, "  // F%; ", v);
                 id := v - w.import_count&[.Func];
                 show_type(out, w, w.functions[id]);
             };

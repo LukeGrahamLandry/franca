@@ -1,4 +1,11 @@
 
+## (Mar 5)
+
+- wasm: before i was trying to get names to show by just exporting everything. 
+  instead use the "name" custom section. now it actually shows names in chrome devtools profiler.
+  firefox only shows for the main module not jitted ones but that's still an improvement. 
+  - support that in dump_wasm and import_wasm. 
+
 ## (Mar 4)
 
 - immediate of i32.const is signed 32 bit. push_bits is correctly extending but push(RCon) jit literal isn't. 
