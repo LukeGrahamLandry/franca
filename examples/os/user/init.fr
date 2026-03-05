@@ -27,8 +27,6 @@ main2 :: fn() void = {
         };
         
         Vfs'init_vfs();
-        buf := u8.list(general_allocator());
-        timer := false;
         if false {
         boottime := timestamp();
         @println("The system took %ms to boot.", boottime);
@@ -36,9 +34,20 @@ main2 :: fn() void = {
         };
         
         sync_vaddr();
-        run_startup_commands();
+        start_thread_nodata(shell_input_loop);
         
+        // the init thread only services interrupts. 
+        // so the interrupt handler won't run while that thread is trying to use the pipe already. 
+        Futex'wait_while(@ref @as(u32) 0, fn(tmp) => tmp == 0);
+};
+
+shell_thread_tid :: @static(u32);
+shell_input_loop :: fn() void = {
+    shell_thread_tid[] = get_current_thread()[].tid_futex;
+    run_startup_commands();
+    
         // TODO: this shell should share some logic with examples/terminal.fr
+        buf := u8.list(general_allocator());
         loop {
             mark := temp().mark();
             old := shell.strace;  // TODO: not thread safe
@@ -87,7 +96,7 @@ decode_and_run_cmd_with_jumpbuf :: fn(full_command: Str) void = {
         panicking[] = false;
         fs.strace = old;
         // TODO: don't leak the compiler, etc.
-        @if(tls(.thread_index)[] != 1) {
+        @if(get_current_thread()[].tid_futex != shell_thread_tid[]) {
             @eprintln("child thread % panicked", tls(.thread_index)[]);
             Syscall'exit_thread(0); 
         };
@@ -126,8 +135,8 @@ decode_and_run_cmd :: fn(full_command: Str) void = {
     
             parts := full_command.split(" ", temp()).items();
             @switch(parts[0]) {
-                @case("exit") => Syscall'exit(0);
-                @case("quit") => Syscall'exit(0);
+                @case("exit") => host_platform'shutdown(true);
+                @case("quit") => host_platform'shutdown(true);
                 @case("uptime") => {   
                     @println("%ms", timestamp());
                 };
@@ -274,29 +283,6 @@ shell :: @static(@struct {
     reap_wait: RawList(i32);
 });
 
-pl011_int_poll :: fn(q: *UQueue, who: i64) void = {
-    // if polling after work.push, do nothing, wait for an interrupt.
-    @if(who == 0) return();  
-    // else, polling before done.pop
-    work := q.pipe.work&;
-    
-    // handle_signal doesn't done.push, it claims from work without committing. 
-    // so instead of being able to wait in done.pop, we need to wait for 
-    // a claim in work, commit it, and done.push, then the next call to pop won't block. 
-    // need the claim-commit separation becuase handle_signal isn't allowed 
-    // to block on work.pop, and it gets bytes one at a time. 
-    // it can't block because the interrupt is allowed to be on the same thread as the read. 
-    value := work.claimed.kiki;
-    while => work.committed.kiki == value {
-        Futex'wait(work.claimed.kiki&, value);
-        value = work.claimed.kiki;
-    };
-    entry := work[work.committed.kiki];
-    work.committed.kiki += 1;
-    @assert(work.claimed.kiki == work.committed.kiki);
-    q.pipe.done&.push(entry);
-}
-
 // note: you can't use a mutex here because it has the same thread_index as the interrupted task
 handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) Ty(i64, *MContext) = {
 
@@ -311,16 +297,14 @@ handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) Ty(i64, *MContext) = 
     // TODO: don't hardcode the 33. get it from device tree. 
     //       the kernel side now knows the right numbers. just have to use them here. 
     if intid == 33 {
-        work := Vfs.root_console_stdin[].pipe.work&;
-        if work.claimed.kiki == work.committed.kiki {
-            work.claimed.kiki += 1;
+        @debug_assert_eq(get_current_thread()[].tid, 1);
+        data: u8 = data.trunc();
+        if data == "\r".ascii() {
+            data = "\n".ascii();
         };
-        entry := work[work.committed.kiki]&;
-        i := u32.atomic_inc(entry.n.bytes_written&).zext();
-        if i < entry.bufs[0].len {
-            entry.bufs[0][i] = data.trunc();
-            Futex'wake(work.committed.kiki&, 1);
-        };  // else, silently drop the bytes :(
+        buf := data&.slice(1);
+        file: Vfs.PipeFile = (is_read = false, it = Vfs.root_console_stdin[]);
+        Vfs'PipeFile'write(file&, buf, 0);
         return(intid, ctx);
     };
     
@@ -486,6 +470,7 @@ host_platform :: @static(@struct {
     exit_thread: @FnPtr() Never;
     FR_wasm_jit_event: (@FnPtr(event: WasmJitEvent) i64) = (fn(_) = unreachable());
     terminate: @FnPtr(tid: i64) TerminateResult;
+    shutdown: @FnPtr(ok: bool) Never;
 });
 
 kernel_platform : (@type host_platform[]) : (
@@ -549,6 +534,10 @@ terminate = fn(tid) = {
     args: Array(i64, 6) = (tid, 0, 0, 0, 0, 0);
     r, _ := Syscall'perform_syscall(args&, 0xFFFF000B);  // terminate
     bit_cast_unchecked(i64, TerminateResult, r)
+},
+shutdown = fn(_) = {
+    host_platform'terminate(1);  // kill the init thread
+    unreachable()
 },
 );
 

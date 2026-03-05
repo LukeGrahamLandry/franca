@@ -68,13 +68,8 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
         f: FileActions;
     };
     exec_worker :: fn(it: *Spawn) void = {
-        tmp := it.waiting;
-        while => tmp != 1 {
-            Futex'wait(it.waiting&, tmp);
-            tmp = it.waiting;
-        };
+        Futex'wait_while(it.waiting&, fn(tmp) => tmp != 1);
         
-        mark := temp().mark();
         actions := it.f.items().shallow_copy(temp());
         it.waiting = 2;
         Futex'wake(it.waiting&, 1);
@@ -118,9 +113,13 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
         if !franca {
             path = search_path(path) || 
                 @panic("file not found in path: |%|\n", path);
+            mark := temp().mark();
             if import("@/lib/sys/fs.fr")'read_entire_file(temp(), path) { bytes |
                 break :: local_return;
+                msg :: "TODO: exec aot wasm (fn web demo can only exec franca scripts)";
+                @assert(!bytes.starts_with(import("@/backend/wasm/bits.fr").version_magic), msg);
                 @if(bytes.peek_type(u32)[] != Loader.Elf.MAGIC) break();
+                @assert_ne(query_current_arch(), .wasm32, msg);
                 Loader :: import("@/examples/elf_loader.fr");
                 entry, _ := Loader'load_elf_segments(bytes, false);
                 entry := bit_cast_unchecked(@type entry, @FnPtr(u64, u64, u64) void, entry);
@@ -132,6 +131,7 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
                 };
                 done = true;
             };
+            temp().reset(mark);
         };
         
         if !done {
@@ -205,11 +205,7 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
     Futex'wake(it.waiting&, 1);
     
     // don't leave until it's done looking at our stack
-    tmp := it.waiting;
-    while => tmp != 2 {
-        Futex'wait(it.waiting&, tmp);
-        tmp = it.waiting;
-    };
+    Futex'wait_while(it.waiting&, fn(tmp) => tmp != 2);
     
     out[] = pid;
     0

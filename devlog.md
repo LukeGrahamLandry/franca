@@ -5,6 +5,9 @@
   instead use the "name" custom section. now it actually shows names in chrome devtools profiler.
   firefox only shows for the main module not jitted ones but that's still an improvement. 
   - support that in dump_wasm and import_wasm. 
+- can't keep typing the futex loop
+- replace the UQueue pl011_int_poll and user_io_poll_in with writing to a pipe from another thread when not using virtio. 
+  big simplicity win over poking at the ring fields all over the place. 
 
 ## (Mar 4)
 
@@ -18,7 +21,7 @@
   less convoluted thing than my Tube. ring buffers are kindof a curse, it's easier to write new ones than reuse them. 
 - move the special case to use js_write out of fetch_one, just pretend to have curl
 - start tracking which thread group mapped everything. unfinished. 
-- elf_loader: add Elf.MYSTERY_SPICE to local relocations. should have looked at which tests were failing sooner. 
+- elf_loader: i add Elf.MYSTERY_SPICE when emitting local relocations. should have looked at which tests were failing sooner. 
   why was mostly working on kernel but not host/user? i spread out mmaps less so it happens to not be unmapped? i also only do RWX or nothing.
 
 ## (Mar 3)

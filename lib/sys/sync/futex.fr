@@ -29,15 +29,7 @@ if query_current_arch() == .wasm32 {
 
 //
 // If addr==expect, sleep the thread until wake() is called on the same addr. 
-//
-// correct usage looks like:
-//     tmp := p[];
-//     while => do_i_want_to_sleep(tmp) {
-//         Futex'wait(p, tmp);
-//         tmp = p[];
-//     };
-// note the temporary variable that avoids a race between
-// the value you check and the value passed to the futex syscall. 
+// (see wait_while() at the end of this file for correct usage)
 //
 wait :: fn(addr: *u32, expect: u32) void = {
 @if(SLOW_USERSPACE_THREADS) return(import("@/lib/sys/sync/green.fr")'wait(addr, expect));
@@ -95,3 +87,13 @@ wasm_atomic_wait :: AsmFunctionWasmOnly(fn(addr: *u32, expect: u32, timeout_nano
 });
 
 #use("@/lib/sys/process.fr");
+
+// note the temporary variable that avoids a race between
+// the value you check and the value passed to the futex syscall. 
+wait_while :: fn(futex: *u32, $should_sleep: @Fn(tmp: u32) bool) void = {
+    tmp := futex[];
+    while => should_sleep(tmp) {
+        wait(futex, tmp);
+        tmp = futex[];
+    };
+};

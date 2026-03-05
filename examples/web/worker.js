@@ -108,10 +108,14 @@ export const imports = {
 
         js_worker_stop: (status) => {
             if (current_exit_futex !== undefined) set_zero_and_wake(current_exit_futex);
+            throw "called exit 0";
+        },
+        js_shutdown: (ok) => {
             let G = get_G();
-            if (status == 0n) throw "called exit 0";
-            throw new Error("unreachable stop call");
-            // TODO: expose cancelAnimationFrame(G.animation_id); somehow
+            cancelAnimationFrame(G.animation_id);
+            if (ok == 0) self.postMessage({ tag: "err", text: "shutdown(error)" });
+            self.postMessage({ tag: "done" });
+            throw "called exit 0";
         },
         jit_instantiate_module: (ptr, len, first_export, table_index) => {
             if (table_index != 0) throw new Error("table_index");

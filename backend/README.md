@@ -14,6 +14,7 @@ You can still print out the ir as human readable text between passes and modify 
 - Wasm   (../examples/import_wasm/convert.fr)
 - Kaleidoscope (../examples/kaleidoscope.fr)
 - BrainFuck    (../examples/bf/bf2ir.fr)
+- Rustc MIR (incomplete) <https://git.sr.ht/~lukegrahamlandry/rustc_codegen_ferb>
 
 ## Changes from Qbe
 

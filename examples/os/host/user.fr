@@ -89,21 +89,6 @@ entry :: fn() void = {
         };
     };
     
-    if host_syscalls.prefer_syscalls {
-        inline_for T.get_fields() { $f | 
-            fid :: get_constant(FuncId, Syscall, f.name);
-            xxx :: f;  // :compilerbug
-            @if(@run fid.is_some()) {
-                wrap :: fn(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) i64 = {
-                    args: Array(i64, 6) = (a, b, c, d, e, f);
-                    vtable := T.get_field_ptr(fns, xxx);
-                    Syscall'choose_syscall(args&, vtable, host_syscalls.prefer_syscalls, @as(Os) @as(i64) host_syscalls.current_os.zext(), real_perform_syscall)
-                };
-                T.get_field_ptr(fns, f)[].libc = wrap;  // stomp but that's fine because choose_syscall won't choose it
-            };
-        };
-    };
-    
     host_platform[] = user_platform;
     if query_current_arch() == .aarch64 {
         // TODO: fast system_counter_uptime asm for amd,rv
@@ -135,12 +120,27 @@ entry :: fn() void = {
     general_allocator: A = init(page_allocator);
     tls(.general_allocator)[] = general_allocator&.borrow();
     
+    _ := start_thread_nodata(user_io_poll_in);
     tls(.current_os)[] = trunc @as(i64) Os.linux;
     // TODO: why is skew different on riscv???? HACK !!
     redo_relocations_static_linux(!host_syscalls.prefer_syscalls && query_current_arch() != .rv64);
     host_syscalls.intercept = true;
     tls(.deny_syscalls)[] = true;
     main2();
+}
+
+user_io_poll_in :: fn() void = {
+    buf := temp().alloc_uninit(u8, 256);
+    loop {
+        args: Array(i64, 6) = (0, u8.int_from_ptr(buf.ptr), buf.len, 0, 0, 0);
+        result := Syscall'choose_syscall(args&, host_syscalls.fns.read&, 
+            host_syscalls.prefer_syscalls, @as(Os) @as(i64) host_syscalls.current_os.zext(), real_perform_syscall);
+        if result > 0 {
+            buf := buf.slice(0, result);
+            file: Vfs.PipeFile = (is_read = false, it = Vfs.root_console_stdin[]);
+            Vfs'PipeFile'write(file&, buf, 0);
+        };
+    };
 }
 
 host_syscalls :: @static(@struct {
@@ -162,6 +162,7 @@ host_syscalls :: @static(@struct {
         // note: import_c's __builtin___clear_cache does riscv_flush_icache directly in asm so won't be intercepted by that but the franca one will.
     };
 });
+pass_through_syscalls :: @const_slice("mmap", "munmap", "mprotect", "sys_futex", "exit_thread", "clock_gettime", "nanosleep", "riscv_flush_icache");
 
 // body can't just be = (); because then it's not marked BodyIsSpecial. 
 real_perform_syscall :: AsmFunction(fn(args: *Array(i64, 6), n: i64) Ty(i64, u8) = (), 
@@ -185,11 +186,10 @@ user_handle_syscall :: fn(args: *Array(i64, 6), n: i64) Ty(i64, u8) = {
     @debug_assert(n != 259 || query_current_arch() == .rv64);
     inline_for T.get_fields() { $f | 
         vtable := T.get_field_ptr(fns, f);
-        @if(@run(f.name != @symbol exit))
+        
+        @if(@run(pass_through_syscalls.contains(f.name.str())))
         if vtable.n&[arch_index] == n {
             // trivial; just pass it through to the host system. 
-            // redundant with entry()'s wrap() but easier to call because can just pass the array
-            // and wrap is needed because i call read/write directly for debug_write2/user_io_poll_in
             result := Syscall'choose_syscall(args, vtable, 
                 host_syscalls.prefer_syscalls, @as(Os) @as(i64) host_syscalls.current_os.zext(), real_perform_syscall);
             return(result, 0);
@@ -198,16 +198,7 @@ user_handle_syscall :: fn(args: *Array(i64, 6), n: i64) Ty(i64, u8) = {
     
     result := -1;
     @switch(n) {
-        @case(0xFFFF0008) => {  // virtq_create
-            q, p, l, n := (UQueue.ptr_from_int(args[0]), u8.ptr_from_int(args[1]), args[2], args[3]);
-            label := p.slice(l);
-            if label == "stdio.console" && n == 0 {
-                // if n == 1; sys_debug_write_poll is fine 
-                q.system_handle = rawptr_from_int(0x12345);
-                q.poll = user_io_poll_in;
-                result = 0;
-            };
-        };
+        @case(0xFFFF0008) => ();  // virtq_create
         @case(0xFFFF0003) => { // sig_action
             result = 0;  // TODO
         };
@@ -235,10 +226,10 @@ user_platform : (@type host_platform[]) : (
     nanosleep = fn(a, b) = {
         with_syscalls {| Syscall'nanosleep(a, b); 0 };
     },
-    debug_write = fn(msg) void = {
-        write := host_syscalls.fns.write.libc;
-        write := bit_cast_unchecked(rawptr, @FnPtr(Fd, *u8, i64) i64, write);
-        write(STD_OUT, msg.ptr, msg.len);
+    debug_write = fn(buf) void = {
+        args: Array(i64, 6) = (1, u8.int_from_ptr(buf.ptr), buf.len, 0, 0, 0);
+        _ := Syscall'choose_syscall(args&, host_syscalls.fns.write&, 
+            host_syscalls.prefer_syscalls, @as(Os) @as(i64) host_syscalls.current_os.zext(), real_perform_syscall);
     },
     clock_gettime = fn(a, b) = 
         with_syscalls {| Syscall'clock_gettime(a, b) },
@@ -252,38 +243,11 @@ user_platform : (@type host_platform[]) : (
         unreachable()
     },
     terminate = fn(tid) = .StillRunning,  // TODO
-);
-
-user_io_poll_in :: fn(q: *UQueue, who: i64) void = {
-    fs := Vfs'get_vfs();
-    // if polling after work.push, do nothing, wait for an interrupt.
-    @if(who == 0) return();  
-    // else, polling before done.pop
-    work := q.pipe.work&;
     
-    {
-        if work.claimed.kiki == work.committed.kiki {
-            work.claimed.kiki += 1;
-        };
-        
-        read := host_syscalls.fns.read.libc;
-        read := bit_cast_unchecked(rawptr, @FnPtr(Fd, *u8, i64) i64, read);
-        
-        data: u8 = 0;
-        dowhile {
-            n := read(STD_IN, data&, 1);
-            n == 0
-        };
-        
-        entry := work[work.committed.kiki]&;
-        i := u32.atomic_inc(entry.n.bytes_written&).zext();
-        if i < entry.bufs[0].len {
-            entry.bufs[0][i] = data;
-        };  // else, silently drop the bytes :(
-    };
-
-    entry := work[work.committed.kiki];
-    work.committed.kiki += 1;
-    @assert(work.claimed.kiki == work.committed.kiki);
-    q.pipe.done&.push(entry);
-}
+    shutdown = fn(ok) = {
+        args: Array(i64, 6) = (@if(ok, 0, 1), 0, 0, 0, 0, 0);
+        _ := Syscall'choose_syscall(args&, host_syscalls.fns.exit&, 
+            host_syscalls.prefer_syscalls, @as(Os) @as(i64) host_syscalls.current_os.zext(), real_perform_syscall);
+        unreachable()
+    },
+);

@@ -1,6 +1,6 @@
 // Virtual File System
 // it's all in userspace, the kernel doesn't know anything about file descriptors. 
-// some files are backed by a UQueue (which might be a Virt.Queue in the kernel). 
+// some files are backed by a UQueue (a Virt.Queue in the kernel). 
 // libc functions that operate on file descriptors forward to a FileVTable. 
 
 // TODO: be consistant about whose job it is to free the FileHandle.data memory.
@@ -20,7 +20,7 @@ Fs :: @struct {
     next_fuse_request_id: u64;
     allocator: Alloc;
 };
-root_console_stdin :: @static(*UQueue);
+root_console_stdin :: @static(*PipeFile.Backing);
 
 FileHandle :: *FileInstance;
 FileInstance :: @rec @struct {
@@ -68,30 +68,36 @@ init_vfs :: fn() void = {
     Group'setup_root_thread_group();
     fs := get_vfs();
     fs.allocator = general_allocator();
-    
-    io := fs.allocator.box_zeroed(@struct(stdin: UQueue, stdout: UQueue));  
-    io.stdin.pipe = init(fs.allocator, 2);
-    if !virtq_create(io.stdin&, "stdio.console", 0) {
-        io.stdin.poll = pl011_int_poll;
-    };
-    
-    root_console_stdin[] = io.stdin&;
-    range(0, 2) { _ |
-        bufs := fs.allocator.alloc_init([]u8, 1, fn(_) => fs.allocator.alloc_zeroed(u8, 256));
-        io.stdin.pipe.work&.push(bufs = bufs, n = (bufs_readable = 0));
-    };
-    io'stdin'poll(io.stdin&, 0);
-    
-    io.stdout.pipe = init(fs.allocator, 1);
-    if !virtq_create(io.stdout&, "stdio.console", 1) {
-        io.stdout.poll = sys_debug_write_poll;
-    };
-    
     fs.fd = list(fs.allocator);
     fs.cloexec = empty(fs.allocator);
-    push_file(StdinFile, (queue = io.stdin&));
-    push_file(StdoutFile, (queue = io.stdout&));
-    push_file(StdoutFile, (queue = io.stdout&));
+    
+    // always used when running in kernel+vzf. optional on kernel+qemu (they also have pl011). never on web or user.
+    io := @static(@struct(stdin: UQueue, stdout: UQueue));
+    
+    io.stdin.pipe = init(fs.allocator, 2);
+    if virtq_create(io.stdin&, "stdio.console", 0) {
+        range(0, 2) { _ |
+            bufs := fs.allocator.alloc_init([]u8, 1, fn(_) => fs.allocator.alloc_zeroed(u8, 256));
+            io.stdin.pipe.work&.push(bufs = bufs, n = (bufs_readable = 0));
+        };
+        io'stdin'poll(io.stdin&, 0);
+        push_file(UQueueFile, (queue = io.stdin&, is_read = true));
+    } else {
+        // a worker thread will wait for interrupts and write to this pipe. 
+        // (qemu p011: handle_signal(intid=33)), (host/user: user_io_poll_in)
+        in_pipe := alloc_pipe();
+        root_console_stdin[] = in_pipe;
+        push_file(PipeFile, (is_read = true, it = in_pipe, blocking_read = true));
+    };
+    
+    io.stdout.pipe = init(fs.allocator, 1);
+    if virtq_create(io.stdout&, "stdio.console", 1) {
+        push_file(UQueueFile, (queue = io.stdout&, is_read = false));
+    } else {
+        xxx: DebugWriteFile = ();  // :compilerbug
+        push_file(DebugWriteFile, xxx);
+    };
+    push_file(fs.fd[1]);  // dup2(stdout, stderr)
     
     // build a tree of MemDir with MemFileRO leaves containing all the baked files. 
     fs.root_dir = push_file(MemDir, (files = empty()));
@@ -290,33 +296,15 @@ MemFile :: @struct {
     // close: not freeing contents because it's owned by the directory but unlink needs to deal with this :leak
 };
 
-StdoutFile :: @struct {
-    queue: *UQueue;
-    
-    debug :: fn(self, out) = @fmt(out, "Console(out)");
-    write :: fn(self, src, _) = {
-        q := self.queue;
-        q'poll(q, 1);
-        old := q.pipe.done.committed.bouba;
-        q.pipe.work&.push(bufs = @slice(src), n = (bufs_readable = 1));
-        while => q.pipe.done.committed.bouba == old {
-            // TODO: can i get an interrupt for this instead of spinning?
-            q'poll(q, 0);
-        };
-        done := q.pipe.done&.pop();
-        @assert(identical(done.bufs[0].ptr, src.ptr));
-        src.len
-    };
-    poll :: fn(self, _0, _1) = Posix.POLL.OUT;
-};
-
-StdinFile :: @struct {
+UQueueFile :: @struct {
     queue: *UQueue;
     bufs: [][]u8 = empty();
     buf: []u8 = empty();
+    is_read: bool;
     
-    debug :: fn(self, out) = @fmt(out, "Console(in)");
+    debug :: fn(self, out) = @fmt(out, "Console(%)", @if(self.is_read, "R", "W"));
     read :: fn(self, dest, _) = {
+        @if(!self.is_read) return(-1);
         // TODO: don't hardcode blocking + MIN=1 + timeout=infinity (which is what interactive_read_line wants)
         
         if self.buf.len == 0 {
@@ -340,7 +328,32 @@ StdinFile :: @struct {
         };
         dest.len
     };
-    poll :: fn(self, _0, _1) = @panic("TODO: StdinFile.poll");
+    
+    write :: fn(self, src, _) = {
+        @if(self.is_read) return(-1);
+    
+        q := self.queue;
+        q'poll(q, 1);
+        old := q.pipe.done.committed.bouba;
+        q.pipe.work&.push(bufs = @slice(src), n = (bufs_readable = 1));
+        while => q.pipe.done.committed.bouba == old {
+            // TODO: can i get an interrupt for this instead of spinning?
+            q'poll(q, 0);
+        };
+        done := q.pipe.done&.pop();
+        @assert(identical(done.bufs[0].ptr, src.ptr));
+        src.len
+    };
+    poll :: fn(self, _0, _1) = @if(self.is_read, @panic("TODO: StdinFile.poll"), Posix.POLL.OUT);
+};
+
+DebugWriteFile :: @struct {
+    debug :: fn(self, out) = @fmt(out, "DebugWriteFile()");
+    poll :: fn(self, _0, _1) = Posix.POLL.OUT;
+    write :: fn(self, src, _) = {
+        host_platform'debug_write(src);
+        src.len
+    };
 };
 
 MemDir :: @struct {
@@ -456,19 +469,35 @@ MemDir :: @struct {
 
 PipeFile :: @struct {
     is_read: bool;
+    blocking_read := false;
     it: *Backing #use;
     Backing :: @struct {
-        buf: []u8;
+        buf: []u8;  // ring
         read: i64;
         written: i64;
         mutex: Mutex;
-        refs: i64;
+        // rn having two is useless because dup increments the refcount on the FileInstance so these are always 0 or 1
+        readers: i32;
+        writers: i32;
         waiters: FixedList(*u32, 16);
     };
     
-    debug :: fn(self, out) = @fmt(out, "Pipe(%, %, R%, W%, %)", @if(self.is_read, "R", "W"), self.it.refs, self.read, self.written, fmt_hex(self.it));
+    fn wait(self: *PipeFile) void = {
+        futex: u32 = 0;
+        result := poll(self, futex&, .AddWaiter);
+        if result == 0 {  // poll() already only sets the flag for this end of the pipe
+            Futex'wait_while(futex&, fn(tmp) => tmp == 0);
+        };
+        poll(self, futex&, .RemoveWaiter);
+    }
+    
+    debug :: fn(self, out) = @fmt(out, "Pipe(%, R%;%, W%;%, %)", @if(self.is_read, "R", "W"), self.readers, self.read, self.writers, self.written, fmt_hex(self.it));
     read :: fn(self, dest, _) = {
         @debug_assert(self.is_read, "read from write end of pipe");
+        
+        if self.blocking_read {  // HACK        
+            wait(self);  // TODO: race
+        };
         
         space := 0;
         with self.mutex& {
@@ -485,7 +514,7 @@ PipeFile :: @struct {
         };
         space
     };
-    write :: fn(self, src, _) = {
+    write :: fn(self: *PipeFile, src: []u8, _: i64) = {
         @debug_assert(!self.is_read, "wrote to read end of pipe");
         n := 0;
         dowhile {
@@ -504,30 +533,32 @@ PipeFile :: @struct {
                 
                 wake_all(self.it.waiters&, 2);
             };
-            // TODO: wait
-            
-            src.len > 0 && self.refs > 1
+            @if(src.len > 0) wait(self);
+            src.len > 0 && self.readers > 0
         };
         n
     };
     close :: fn(self) = {
-        old_refs := i64.atomic_add(self.it.refs&, -1);
+        end := @if(self.is_read, self.readers&, self.writers&);
+        old_refs := i32.atomic_add(end, -1);
         wake_all(self.it.waiters&, 3);
-        if old_refs == 1 {
+        if old_refs == 1 && self.readers == 0 && self.writers == 0 {
             fs := get_vfs();
             fs.allocator.dealloc(u8, self.it.buf);
             fs.allocator.dealloc_one(PipeFile.Backing, self.it);
         }
     };
-    poll :: fn(self, futex, action) = {
+    poll :: fn(self: *PipeFile, futex: *u32, action: PollAction) = {
         r := 0;
-        @if(self.it.refs < 2) { r = r.bit_or(Posix.POLL.HUP); };  // closed
+        other_end := @if(!self.is_read, self.readers, self.writers);
+        @if(other_end <= 0) { r = r.bit_or(Posix.POLL.HUP); };  // closed
         
         with self.it.mutex& {
             i := self.it.waiters&.items().index_of(fn(it) => identical(it[], futex));
             @match(action) {
                 fn AddWaiter() => if i.is_none() { 
-                    self.it.waiters&.push(futex);  // TODO: what if full
+                    @debug_assert_lt(self.it.waiters.len, self.it.waiters&.cap(), "TODO: too many waiters");
+                    self.it.waiters&.push(futex);
                 }
                 fn RemoveWaiter() => if i { i |
                     self.it.waiters&.unordered_remove(i);
@@ -557,11 +588,17 @@ fn wake_all(waiters, value: u32) void #where = {
     };
 }
 
-create_pipe :: fn() Array(Fd, 2) = {
+alloc_pipe :: fn() *PipeFile.Backing = {
     fs := get_vfs();
     p := fs.allocator.box_zeroed(PipeFile.Backing);
-    p.refs = 2;
+    p.readers = 1;
+    p.writers = 1;
     p.buf = fs.allocator.alloc_uninit(u8, page_size());
+    p
+}
+
+create_pipe :: fn() Array(Fd, 2) = {
+    p := alloc_pipe();
     (Vfs'push_file(Vfs.PipeFile, (is_read = true, it = p)),
      Vfs'push_file(Vfs.PipeFile, (is_read = false, it = p)))
 }
@@ -1033,14 +1070,5 @@ fn pop_dir_prefix(path: Str) ?Ty(Str, Str) = {
     };
     (Some = (path.slice(0, i), path.rest(i + 1)))
 }
-
-sys_debug_write_poll :: fn(q, who) = {
-    @if(who == 1) return();
-    entry := q.pipe.work&.pop();
-    for entry.bufs { msg |
-        host_platform'debug_write(msg);
-    };
-    q.pipe.done&.push(entry);
-};
 
 get_vfs :: fn() *Fs = get_current_tls()[].thread_group.vfs&;

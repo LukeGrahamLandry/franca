@@ -54,8 +54,6 @@ main2 :: fn() void = {
     globals.free.memory = list(4096, general_allocator());
     Vfs'image[] = fetch_root_fs(cli_args());
     Vfs'init_vfs();
-    xxx := Vfs.root_console_stdin;  // :compilerbug ?? Type Error: field 'fs' does not exist
-    xxx.poll = fn(a, b) = ();
     
     // the reverse: anything we imported from js and didn't override should still be accessible with dlopen 
     _ := reach_webgpu_imports();
@@ -68,6 +66,7 @@ main2 :: fn() void = {
     globals.ready = true;
     tls(.prefer_syscalls)[] = false;
     import("@/examples/web/demo.fr")'main();
+    host_platform'shutdown(true);
 }
 
 reach_webgpu_imports :: fn() []rawptr #noinline = @run {
@@ -121,6 +120,7 @@ Host :: @struct {
     js_write :: fn(id: i64, ptr: *u8, len: i64) i64 #weak #import("libc");
     js_worker_spawn :: fn(userdata: rawptr, stack: *u8, exit_futex: *u32) void #weak #import("libc");
     js_worker_stop :: fn(status: i64) void #weak #import("libc");
+    js_shutdown :: fn(ok: bool) void #weak #import("libc");
 };
 
 #use("@/lib/sys/sync/mutex.fr");
@@ -148,7 +148,6 @@ fn wasm_init_thread(franca_userdata: rawptr, known_wasm_jit_event: i64) i64 #exp
     };
     
     get_current_tls()[].known_wasm_jit_event = known_wasm_jit_event;
-    tls(.panic_hook)[] = print_and_exit1;
     host_platform'FR_wasm_jit_event(.Sync);
     franca_runtime_init_thread(franca_userdata);
     get_current_tls()[].known_wasm_jit_event
@@ -287,6 +286,10 @@ web_platform : (@type host_platform[]) : (
         Host'js_worker_spawn(it, thread.stack.usable.end_pointer(), thread.tid_futex&);
     },
     terminate = fn(tid) = .StillRunning,  // TODO
+    shutdown = fn(ok) = {
+        Host'js_shutdown(ok);
+        unreachable()
+    },
 );
 
 // returns old size
