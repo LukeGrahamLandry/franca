@@ -49,9 +49,11 @@ FileVTable :: @struct {
     ioctl: @FnPtr(self: rawptr, op: i64, data: rawptr) i64 = (fn(_0, _1, _2) = -1);
     ioctls: []Ty(i64, IoctlErased) = empty();
  truncate: @FnPtr(self: rawptr, a: i64) void = (fn(_0, _1) = ());
-     poll: @FnPtr(self: rawptr) Posix'Mask(Posix.POLL, i64) = (fn(_0) = 0);
+     poll: @FnPtr(self: rawptr, futex: *u32, a: PollAction) Posix'Mask(Posix.POLL, i64) = (fn(_0, _1, _2) = 0);
     debug: @FnPtr(self: rawptr, out: *List(u8)) void = (fn(_0, _1) = ());
 };
+
+PollAction :: @enum(u8) (AddWaiter, RemoveWaiter, None);
 
 FStatOut :: @struct {
     // TODO: rest of the fucking owl
@@ -249,7 +251,7 @@ MemFileRO :: @struct {
         out.st_mode = Posix.S.IFREG;
         0
     };
-    poll :: fn(self) = Posix.POLL.IN;
+    poll :: fn(self, _0, _1) = Posix.POLL.IN;
     // close: not freeing contents because it's owned by the directory but unlink needs to deal with this :leak
     // also they can be created pointing to static data in rootfs image.
 };
@@ -284,7 +286,7 @@ MemFile :: @struct {
     truncate :: fn(self, a) = {
         self.contents.len = 0;
     }
-    poll :: fn(self) = @or(Posix.POLL.IN, Posix.POLL.OUT);
+    poll :: fn(self, _0, _1) = @or(Posix.POLL.IN, Posix.POLL.OUT);
     // close: not freeing contents because it's owned by the directory but unlink needs to deal with this :leak
 };
 
@@ -305,7 +307,7 @@ StdoutFile :: @struct {
         @assert(identical(done.bufs[0].ptr, src.ptr));
         src.len
     };
-    poll :: fn(self) = Posix.POLL.OUT;
+    poll :: fn(self, _0, _1) = Posix.POLL.OUT;
 };
 
 StdinFile :: @struct {
@@ -338,7 +340,7 @@ StdinFile :: @struct {
         };
         dest.len
     };
-    poll :: fn(self) = @panic("TODO: StdinFile.poll");
+    poll :: fn(self, _0, _1) = @panic("TODO: StdinFile.poll");
 };
 
 MemDir :: @struct {
@@ -453,58 +455,112 @@ MemDir :: @struct {
 
 PipeFile :: @struct {
     is_read: bool;
-    it: *Backing;
+    it: *Backing #use;
     Backing :: @struct {
-        q: UQueue'QRing'Tube(u8);  // :SLOW don't do 1 byte at a time
+        buf: []u8;
+        read: i64;
+        written: i64;
+        mutex: Mutex;
         refs: i64;
+        waiters: FixedList(*u32, 16);
     };
     
-    debug :: fn(self, out) = @fmt(out, "Pipe(%, %, %)", @if(self.is_read, "R", "W"), self.it.refs, fmt_hex(self.it));
+    debug :: fn(self, out) = @fmt(out, "Pipe(%, %, R%, W%, %)", @if(self.is_read, "R", "W"), self.it.refs, self.read, self.written, fmt_hex(self.it));
     read :: fn(self, dest, _) = {
         @debug_assert(self.is_read, "read from write end of pipe");
-        i := 0;
-        while => i < dest.len && self.it.q.committed.bouba > self.it.q.claimed.kiki {
-            dest[i] = self.it.q&.pop();
-            i += 1;
+        
+        space := 0;
+        with self.mutex& {
+            space = self.written - self.read;
+            space = min(space, dest.len);
+            
+            i := self.read.mod(self.buf.len);
+            right := min(space, self.buf.len - i);
+            dest.slice(0, right).copy_from(self.buf.subslice(i, right));
+            dest.subslice(right, space - right).copy_from(self.buf.subslice(0, space - right));
+            self.read += space;
+            
+            wake_all(self.it.waiters&, 1);
         };
-        i
+        space
     };
     write :: fn(self, src, _) = {
         @debug_assert(!self.is_read, "wrote to read end of pipe");
-        for src { it |
-            self.it.q&.push(it);
+        n := 0;
+        dowhile {
+            with self.mutex& {
+                space := self.buf.len - (self.written - self.read);
+                space = min(space, src.len);
+                
+                i := self.written.mod(self.buf.len);
+                right := min(space, self.buf.len - i);
+                self.buf.subslice(i, right).copy_from(src.slice(0, right));
+                self.buf.subslice(0, space - right).copy_from(src.subslice(right, space - right));
+                
+                self.written += space;
+                src = src.rest(space);
+                n += space;
+                
+                wake_all(self.it.waiters&, 2);
+            };
+            // TODO: wait
+            
+            src.len > 0 && self.refs > 1
         };
-        src.len
+        n
     };
     close :: fn(self) = {
         old_refs := i64.atomic_add(self.it.refs&, -1);
+        wake_all(self.it.waiters&, 3);
         if old_refs == 1 {
             fs := get_vfs();
-            fs.allocator.dealloc(u8, self.it.q.ring);
+            fs.allocator.dealloc(u8, self.it.buf);
             fs.allocator.dealloc_one(PipeFile.Backing, self.it);
         }
     };
-    poll :: fn(self) = {
+    poll :: fn(self, futex, action) = {
         r := 0;
         @if(self.it.refs < 2) { r = r.bit_or(Posix.POLL.HUP); };  // closed
         
+        with self.it.mutex& {
+            i := self.it.waiters&.items().index_of(fn(it) => identical(it[], futex));
+            @match(action) {
+                fn AddWaiter() => if i.is_none() { 
+                    self.it.waiters&.push(futex);  // TODO: what if full
+                }
+                fn RemoveWaiter() => if i { i |
+                    self.it.waiters&.unordered_remove(i);
+                }
+                fn None() => ();  // :SLOW don't bother finding `i` first
+            };
+        
         @if(self.is_read)
-        @if(self.it.q.committed.bouba > self.it.q.claimed.kiki) 
+        @if(self.it.written != self.it.read) 
         { r = r.bit_or(Posix.POLL.IN); };
         
         @if(!self.is_read)
-        @if(self.it.q.committed.kiki - self.it.q.claimed.bouba != self.it.q.ring.len.trunc()) 
+        @if(self.it.written - self.it.read < self.it.buf.len) 
             { r = r.bit_or(Posix.POLL.OUT); };
+            
+        };
         
         r
     }
 };
 
+fn wake_all(waiters, value: u32) void #where = {
+    waiters: []*u32 = waiters.items();
+    for waiters { it |
+        it[] = value;
+        Futex'wake(it, 1);
+    };
+}
+
 create_pipe :: fn() Array(Fd, 2) = {
     fs := get_vfs();
     p := fs.allocator.box_zeroed(PipeFile.Backing);
     p.refs = 2;
-    p.q.ring = fs.allocator.alloc_uninit(u8, 2048);
+    p.buf = fs.allocator.alloc_uninit(u8, page_size());
     (Vfs'push_file(Vfs.PipeFile, (is_read = true, it = p)),
      Vfs'push_file(Vfs.PipeFile, (is_read = false, it = p)))
 }

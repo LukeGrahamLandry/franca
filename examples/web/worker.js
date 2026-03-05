@@ -13,7 +13,7 @@ function handle_child_thread(child) {
     try {
         known_wasm_jit_event = Franca.wasm_init_thread(userdata, known_wasm_jit_event);
     } catch (e) {
-        show_error(e);
+        if (e !== "called exit 0") show_error(e);
     };
     set_zero_and_wake(exit_futex);
     self.postMessage({ tag: "recycle" });

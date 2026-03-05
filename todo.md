@@ -1,3 +1,4 @@
+- wasm: instead of exporting everything for exe_debug_symbol_table use https://webassembly.github.io/spec/core/appendix/custom.html
 - :SLOW? did i seriously posix_getdents each import()? thats not acceptable for a feature i can't even use in the compiler because the bootstrap compiler doesn't have it. 
 - is my baking robust against dlsym returning the same non-null pointer for multiple symbols?
 - finish examples/os spawn on host/web. 

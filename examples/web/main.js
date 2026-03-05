@@ -350,6 +350,8 @@ document.getElementById("all").onclick = async () => {
     let all = 0;
     let passed = 0;
     
+    results += "TODO: THIS IS WRONG. now that i handle exit(1) internally\n";
+    
     // (safari) this avoids "Unhandled Promise Rejection: SecurityError: Attempt to use history.replaceState() more than 100 times per 10 seconds"
     doing_test = true;
     let compiler = document.getElementById("compiler");

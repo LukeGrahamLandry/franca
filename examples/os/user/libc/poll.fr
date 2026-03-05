@@ -6,22 +6,48 @@ ppoll :: fn(fd_p: *Posix.pollfd, fd_n: i64, timeout: *TimeSpec, sigmask: i64) i6
     @debug_assert(blocking || (timeout.seconds == 0 && timeout.nanoseconds == 0), "TODO: poll timeout");
     ::[]@type fd_p[];
     fd := fd_p.slice(fd_n);
-    @trace("poll(hang=%)", blocking);
+    @if(blocking) @trace("poll(hang=%)", blocking);
     n := 0;
+    futex: u32 = 0;
+    all_pipes := true;
     dowhile {
         each fd { it |
             if get_file(it.fd) { f |
                 mask := it.events.bit_or(Posix.POLL.HUP);
-                result := f'vtable'poll(f.data);
+                result := f'vtable'poll(f.data, futex&, @if(blocking, .AddWaiter, .None));
                 it.revents = mask.bit_and(result.trunc());
                 n += int(it.revents != 0);
+                ::ptr_utils(@type f.vtable[]);
+                all_pipes = all_pipes && identical(f.vtable, Vfs'get_vtable(Vfs.PipeFile));
+                @if(it.revents != 0) @trace("- ready fd=% revents=%", it.fd.fd, it.revents);
             };
             if it.fd.fd < 0 {
                 it.revents = 0;
             };
         };
-        // TODO: don't busy wait
+        
+        if blocking && n == 0 {
+            @trace("sleep on pipes");
+            @assert(all_pipes, "TODO: i only track waiters on pipes so this will hang forever");
+            tmp := futex;
+            while => tmp == 0 {
+                Futex'wait(futex&, tmp);
+                tmp = futex;
+            };
+        };
+        
         blocking && n == 0
     };
+    
+    if blocking {
+        each fd { it |
+            if get_file(it.fd) { f |
+                _ := f'vtable'poll(f.data, futex&, .RemoveWaiter);
+            };
+        };
+    } else {
+        @trace("poll(hang=%) = %", blocking, n);
+    };
+    
     n
 }

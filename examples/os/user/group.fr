@@ -104,18 +104,16 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
         };
         
         path := cli_args()[0].str();
-        if path != "franca" {
-            bytes := import("@/lib/sys/fs.fr")'read_entire_file(temp(), path) || {
-                @trace("err(posix_spawn failed read exe %)", path);
-                Syscall'exit(127);
-            };
+        if import("@/lib/sys/fs.fr")'read_entire_file(temp(), path) { bytes |
             entry, _ := import("@/examples/elf_loader.fr")'load_elf_segments(bytes, false);
             entry := bit_cast_unchecked(@type entry, @FnPtr(u64, u64, u64) void, entry);
             // ask franca_runtime_init to inherit our tls. 
             // TODO: allow non-franca binaries
-            entry(FRHOSTED_MAGIC, FRHOSTED_MAGIC, FRHOSTED_MAGIC);
+            push_tls_value(.comptime, zeroed(rawptr)) {
+                entry(FRHOSTED_MAGIC, FRHOSTED_MAGIC, FRHOSTED_MAGIC);
+            };
         } else {
-            args := cli_args().rest(1);
+            args := cli_args().rest(int(path == "franca"));
             parts := temp().alloc_init(Str, args.len(), fn(i) => args[i].str());
             command := search_path(parts[0]) || 
                 @panic("file not found in path: |%|\n", parts[0]);
@@ -170,11 +168,7 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
             e.environment_variables = copy_strings(slice_strings(envp), a).as_ptr();
             e.cli_arguments = copy_strings(argv, a);
             e.cli_arguments.len -= 1;  // no null terminator
-            e.panic_hook = fn(msg) = {
-                tls(.panic_hook)[] = print_and_exit1;
-                Crash'report_backtrace(fp = Crash'trace_start(), ip = 0.rawptr_from_int());
-                print_and_exit1(msg)
-            };
+            e.panic_hook = print_and_exit1;
             e.comptime = zeroed(rawptr);
         };
     };
@@ -197,6 +191,8 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
 };
 
 cleanup_thread_group :: fn(debug_why: Str, status: i32) void = {
+    @trace("cleanup_thread_group(%, %)", status, debug_why);
+    
     g := get_current_tls()[].thread_group;
     with g.vfs.mutex& {
         if g.threads.len != 1 || g.children.len != 0 {

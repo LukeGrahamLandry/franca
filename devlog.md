@@ -7,8 +7,9 @@
 - with kernel, tests/compiler.fr gets farther. "wrong number of dots". 
   have wait4() pass on status from exit(), now it can tell which tests fail properly. 
 - kernel expose a way to try to stop another thread. because exiting a thread group should kill the rest. 
-
-TODO: `test_fuse;tests/compiler.fr` corrupts something and dies sooner than `tests/compiler.fr`
+- no more busy wait in poll. each pipe keeps a list of futexes to wake when something changes. 
+  less convoluted thing than my Tube. ring buffers are kindof a curse, it's easier to write new ones than reuse them. 
+- move the special case to use js_write out of fetch_one, just pretend to have curl
 
 ## (Mar 3)
 

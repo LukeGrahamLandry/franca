@@ -1,0 +1,35 @@
+
+// TODO: spawning for this one function call is super inefficient 
+//       but i'd rather the special case be here than in fetch.fr
+main :: fn() void = {
+    @assert_eq(query_current_arch(), .wasm32);
+    
+    sha256_hash := "";
+    for cli_args() { it |
+        it := it.str();
+        if it.ends_with(".out") {
+            it = it.slice(it.len - 4, it.len);
+        };
+        if it.len > 64 {
+            sha256_hash = it.slice(it.len - 64, it.len);
+        };
+    };
+    for(sha256_hash, fn(c) => @assert(hex_digit(c).is_some(), "expected hash at end of url"));
+    
+    js_write :: fn(id: i64, ptr: *u8, len: i64) i64 #weak #import("libc");
+    dest := temp().alloc_uninit(u8, 1.shift_left(16));
+    dest.slice(0, sha256_hash.len).copy_from(sha256_hash);
+    result := js_write(0xBBBB0002, sha256_hash.ptr, sha256_hash.len);
+    @if(result == -1) panic("failed js fetch");
+    if result <= sha256_hash.len {
+        print(sha256_hash);
+    } else {
+        dest = temp().alloc_uninit(u8, result);
+        dest.slice(0, sha256_hash.len).copy_from(sha256_hash);
+        result := js_write(0xBBBB0002, dest.ptr, dest.len);
+        @if(result != dest.len) panic("failed js fetch");
+        print(dest.slice(0, result));
+    };
+}
+
+#use("@/lib/sys/process.fr");
