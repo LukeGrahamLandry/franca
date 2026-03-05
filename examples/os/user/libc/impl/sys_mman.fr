@@ -1,14 +1,23 @@
 
 mmap :: fn(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) i64 = with_syscalls {
+    len = len.ualign_to(page_size());
     result := host_platform'mmap(len, prot);
-    @trace("mmap(%, %) = %", len, prot, result);
+    @trace("mmap(%, %) = %", fmt_hex(len), prot, fmt_hex(result));
     @assert(!result.is_null(), "some sort of corruption is going on because i over commit and can't null");
+    if enable_memory_tracking[] {
+        get_current_tls()[].thread_group.mapped&.insert(u8.ptr_from_raw(result).slice(len));
+    };
     result.int_from_rawptr()
 };
 
 munmap :: fn(addr: rawptr, len: i64) i64 = with_syscalls {
+    len = len.ualign_to(page_size());
+    if enable_memory_tracking[] {
+        ok := get_current_tls()[].thread_group.mapped&.remove(u8.ptr_from_raw(addr).slice(len));
+        @if(!ok) @trace("ERROR(munmap which is not owned by this thread group)");
+    };
     result := host_platform'munmap(addr, len);
-    @trace("mumap(%, %)", addr, len);
+    @trace("mumap(%, %)", fmt_hex(addr), fmt_hex(len));
     @assert_eq(result, 0, "some sort of corruption is going on. munmap(%) can't fail", addr);
     0
 };

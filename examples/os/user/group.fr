@@ -8,7 +8,12 @@ ThreadGroup :: @rec @struct {
     parent: ?*ThreadGroup;
     children: RawList(*ThreadGroup);
     exit_status: ?i32;
-    // TODO: track mmaps so they can be released when all threads exit 
+    // TODO: fucked if this needs to reallocate inside mmap
+    // TODO: need to be consistant about always freeing in the group that allocated it. 
+    //       big problem is that everyone's vfs.allocator is the same 
+    //       so it will reuse memory between all groups so can't free. 
+    // TODO: unmap all in cleanup_thread_group
+    mapped: PageSet;
 };
 
 setup_root_thread_group :: fn() void = {
@@ -20,6 +25,8 @@ setup_root_thread_group :: fn() void = {
     get_current_tls()[].thread_group = g;
     g.threads = init(general_allocator(), 1);
     g.threads&.push_assume_capacity(t);
+    g.mapped.memory = list(page_size() / 8, general_allocator());
+    //enable_memory_tracking[] = true;  // TODO
 };
 
 add_to_current_thread_group :: fn(thread: *Thread) void = {
@@ -67,6 +74,7 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
             tmp = it.waiting;
         };
         
+        mark := temp().mark();
         actions := it.f.items().shallow_copy(temp());
         it.waiting = 2;
         Futex'wake(it.waiting&, 1);
@@ -104,20 +112,36 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
         };
         
         path := cli_args()[0].str();
-        if import("@/lib/sys/fs.fr")'read_entire_file(temp(), path) { bytes |
-            entry, _ := import("@/examples/elf_loader.fr")'load_elf_segments(bytes, false);
-            entry := bit_cast_unchecked(@type entry, @FnPtr(u64, u64, u64) void, entry);
-            // ask franca_runtime_init to inherit our tls. 
-            // TODO: allow non-franca binaries
-            push_tls_value(.comptime, zeroed(rawptr)) {
-                entry(FRHOSTED_MAGIC, FRHOSTED_MAGIC, FRHOSTED_MAGIC);
+        done := false;
+        franca := path == "franca";
+        
+        if !franca {
+            path = search_path(path) || 
+                @panic("file not found in path: |%|\n", path);
+            if import("@/lib/sys/fs.fr")'read_entire_file(temp(), path) { bytes |
+                break :: local_return;
+                @if(bytes.peek_type(u32)[] != Loader.Elf.MAGIC) break();
+                Loader :: import("@/examples/elf_loader.fr");
+                entry, _ := Loader'load_elf_segments(bytes, false);
+                entry := bit_cast_unchecked(@type entry, @FnPtr(u64, u64, u64) void, entry);
+                temp().reset(mark);
+                // ask franca_runtime_init to inherit our tls. 
+                // TODO: allow non-franca binaries
+                push_tls_value(.comptime, zeroed(rawptr)) {
+                    entry(FRHOSTED_MAGIC, FRHOSTED_MAGIC, FRHOSTED_MAGIC);
+                };
+                done = true;
             };
-        } else {
-            args := cli_args().rest(int(path == "franca"));
+        };
+        
+        if !done {
+            @assert(franca || path.ends_with(".fr"), "tried to execute unknown file type: %", path);
+            args := cli_args();
+            if franca {
+                path = args[1].str();
+            };
             parts := temp().alloc_init(Str, args.len(), fn(i) => args[i].str());
-            command := search_path(parts[0]) || 
-                @panic("file not found in path: |%|\n", parts[0]);
-            cmd := general_allocator().boxed(Command, (command = command, parts = parts));
+            cmd := general_allocator().boxed(Command, (command = path, parts = parts));
             run_command(cmd);
         };
         
@@ -143,6 +167,7 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
             child.parent = (Some = parent);
             child.exit_status = .None;
             child.threads&.push(t, a);
+            child.mapped.memory = list(page_size() / 8, a);
             ::ptr_utils(Thread);
             i := parent.threads.index_of(fn(it) => identical(it[], t))
                 .expect("thread in thread group");
@@ -303,6 +328,7 @@ wait4 :: fn(pid: pid_t, status: *i32, flags: i64, usage: *Posix.rusage) i32 = {
         child.vfs.cloexec.bits&.drop();
         child.threads&.drop(a);
         child.children&.drop(a);
+        child.mapped.memory&.drop();
         // because sys_join-ed main
         t.first_temporary_allocator&.deinit();
         page_allocator.dealloc(u8, t.stack.padded);
@@ -357,7 +383,7 @@ pthread_join :: fn(thread: pthread_t, value_ptr: *rawptr) i64 = {
     0
 };
 
-dump :: fn(g: *ThreadGroup, out: *List(u8), depth: i64, show_files: bool) void = {
+dump :: fn(g: *ThreadGroup, out: *List(u8), depth: i64, show_files: bool, show_memory: bool) void = {
     with g.vfs.mutex& {
     out.push_repeated(depth*2, " ".ascii());
     @fmt(out, "G (threads=%, children=%, files=%, cwd=%, free=%)\n", 
@@ -380,7 +406,14 @@ dump :: fn(g: *ThreadGroup, out: *List(u8), depth: i64, show_files: bool) void =
             }
         };
     };
-    for(g.children, fn(it) => dump(it, out, depth + 1, show_files));
+    if show_memory {
+        out.reserve(g.mapped.memory.len * ((depth+1)*2 + 50));
+        each g.mapped.memory& { it |
+            out.push_repeated((depth + 1)*2, " ".ascii());
+            @fmt(out, "M %..+%\n", fmt_hex(it.ptr), fmt_hex(it.len));
+        };
+    };
+    for(g.children, fn(it) => dump(it, out, depth + 1, show_files, show_memory));
     };
 };
 

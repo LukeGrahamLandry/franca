@@ -1,3 +1,4 @@
+enable_memory_tracking :: @static(bool);
 
 // called by kernel/start.fr/user_exec via examples/elf_loader.fr
 main :: fn() void = {
@@ -99,13 +100,11 @@ decode_and_run_cmd_with_jumpbuf :: fn(full_command: Str) void = {
             fn Catch() => println("main thread panicked.");
         };
     };
+    tls(.prefer_syscalls)[] = false;
 };
 
 decode_and_run_cmd :: fn(full_command: Str) void = {
     fs := Vfs'get_vfs();
-    if full_command.starts_with("franca") {
-        full_command = full_command.rest("franca".len());
-    };
     while => full_command.len > 0 && full_command[0].is_ascii_whitespace() {
         full_command = full_command.rest(1);
     };
@@ -147,7 +146,7 @@ decode_and_run_cmd :: fn(full_command: Str) void = {
                     import("@/examples/dump_devicetree.fr")'dump(out&, shell.device_tree_bytes);
                     print(out.items());
                 };
-                @case("ps") => run_ps_cmd(parts.len > 1 && parts[1].contains("f"));
+                @case("ps") => run_ps_cmd(@if(parts.len > 1, parts[1], ""));
                 @case("tree") => {
                     out := u8.list(temp());
                     fs := Vfs'get_vfs();
@@ -187,6 +186,7 @@ decode_and_run_cmd :: fn(full_command: Str) void = {
                     };
                     fs.cwd = fs.root_dir;  // TODO: this is why i need more official processes
                     command := search_path(parts[0]) || {
+                        @if(full_command.starts_with("franca")) @print("(help: remove 'franca' prefix or add 'exec' prefix)\n");
                         @print("unknown command: |%|\n", full_command);
                         break()
                     };
@@ -210,9 +210,11 @@ decode_and_run_cmd :: fn(full_command: Str) void = {
             };
 }
 
-run_ps_cmd :: fn(show_files: bool) void = {
+run_ps_cmd :: fn(arg: Str) void = {
+    show_files, show_memory := (arg.contains("f"), arg.contains("m"));
+
     out := u8.list(temp());
-    Group'dump(Group.root_thread_group, out&, 0, show_files);
+    Group'dump(Group.root_thread_group, out&, 0, show_files, show_memory);
     eprint(out.items());
 };
 
@@ -250,15 +252,15 @@ run_command :: fn(cmd: *Command) void = {
 }
 
 search_path :: fn(command: Str) ?Str = {
-    if !command.ends_with(".fr") {
-        command = @tfmt("%.fr", command);
-    };
     path := @slice("", "examples/", "examples/os/bin/");
     for path { it |
         check := @tfmt("%%", it, command);
         if file_exists(check) {
             return(Some = check);
         };
+    };
+    if !command.ends_with(".fr") {
+        return(search_path(@tfmt("%.fr", command)));
     };
     .None
 }
@@ -456,12 +458,12 @@ LIBC :: @struct {
         out[] = zeroed(@type out[]);
         0
     };
+    pthread_attr_destroy :: fn(out: *ThreadAttr) i64 = 0;
     pthread_attr_setstack :: fn(attr: *ThreadAttr, ptr: *u8, len: i64) i64 = {
         attr := bit_cast_unchecked(*ThreadAttr, *MyAttr, attr);
         attr.stack = ptr.slice(len);
         0
     };
-    pthread_getcpuclockid :: fn() = 0;  // TODO
     
     wait4 :: Group.wait4;
     pthread_join :: Group.pthread_join;
@@ -587,14 +589,11 @@ fn with_syscalls($body: @Fn() i64) i64 = {
 fn trace(arg: FatExpr) FatExpr #macro = @{
     if shell.strace {
         t := tls(.temporary_allocator_i)[];
-        old := shell.strace;    // TODO: not thread safe
-        shell.strace = false;
         out := @ref u8.list(1024, Arena'stack_alloc(1024));
         @fmt(out, "%) ", tls(.thread_index)[]);
         @[format_into(@{ out }, arg&.items(), arg.loc)];
         @fmt(out, "\n");
         host_platform'debug_write(out.items());
-        shell.strace = old;
     };
 };
 
@@ -617,6 +616,7 @@ fn allocate_signal_stack(t: *Thread) []u8 = {
 }
 
 Group :: import("@/examples/os/user/group.fr");
+PageSet :: import("@/lib/collections/page_map.fr").PageSet;
 Term :: import("@/lib/sys/terminal.fr");
 #use("@/lib/sys/threads.fr");
 #use("@/lib/sys/sync/mutex.fr");
@@ -639,7 +639,7 @@ uptime               (read the system counter)
 devicetree           (show hardware info from the boot loader)
 ps [-f]              (list running threads)
 tree                 (list virtual file system)
-exec <exe>           (new thread group. `franca <path>.fr` or `elf.out`)
+exec <exe>           (new thread group. `franca <path>.fr <args>` or `<path>.out <args>`)
 
 example programs:
 test_fuse

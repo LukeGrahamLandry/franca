@@ -39,22 +39,22 @@ The later is used (as an emscripten alternative) by the
   - console
   - fs (FUSE)
   - gpu (2d framebuffer for software rendering)
-- virtual file system in userspace 
-  - makes it easy to port programs that expect a unix-like everything-is-a-file interface
-- a subset of libc
 - use multiple cores
+- a subset of libc
+  - virtual file system in userspace 
+    - makes it easy to port programs that expect a unix-like everything-is-a-file interface
+  - pthread create/join
+  - thread groups: posix_spawnp, wait4, pipe
 
 ## incomplete
 
+- posix_spawnattr_t (i only do file_actions)
 - MemDir ref counts / shallow copying children is very sketchy
-- mprotect
+- mprotect (rn i only have unmapped or RWX)
 - multiple address spaces
 - block device
 - persistant file system
-- clean up resources when main thread in a group exits
-- wait, exit_group vs exit_thread
-- posix_spawn an actual program not just a stub that prints something useless
-- don't busy wait in poll
+- munmap when a thread group exits
 - don't recycle tid so fast
 - @trace into its own pipe so it doesn't stomp on your processes output. 
   also needs to be thread local since i toggle it in the shell
@@ -82,8 +82,6 @@ The later is used (as an emscripten alternative) by the
    "readlinkat",
    "sigaction",
    "localtime_r", 
-   "snprintf", 
-   "execve",
    fmodf, fmod, sinf, cosf
 ```
 - compile with import_c and mount it in the vfs:

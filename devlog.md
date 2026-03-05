@@ -10,6 +10,9 @@
 - no more busy wait in poll. each pipe keeps a list of futexes to wake when something changes. 
   less convoluted thing than my Tube. ring buffers are kindof a curse, it's easier to write new ones than reuse them. 
 - move the special case to use js_write out of fetch_one, just pretend to have curl
+- start tracking which thread group mapped everything. unfinished. 
+- elf_loader: add Elf.MYSTERY_SPICE to local relocations. should have looked at which tests were failing sooner. 
+  why was mostly working on kernel but not host/user? i spread out mmaps less so it happens to not be unmapped? i also only do RWX or nothing.
 
 ## (Mar 3)
 

@@ -246,6 +246,7 @@ let weak_imports = [
     "dlclose", "dlerror",
     "sigaction",
     "pthread_attr_init",
+    "pthread_attr_destroy",
     "strtod", "localtime_r", "time",
     "snprintf",
     "ppoll", "execve",

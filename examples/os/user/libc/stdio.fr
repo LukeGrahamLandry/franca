@@ -61,11 +61,12 @@ vsnprintf :: fn(dest: *u8, n: i64, fmt: CStr, va: *CVariadicArgumentList) i32 = 
             @case("i".ascii()) => (i = va.next(i32).intcast());
             @case("p".ascii()) => (i = va.next(i64));
             @case("x".ascii()) => {
-                arg.hex = true;  // TODO
+                arg.hex = true;
                 (i = va.next(i64))
             };
             @case("s".ascii()) => (s = va.next(CStr));
             @case("g".ascii()) => (f = va.next(f64));
+            @case("c".ascii()) => (c = va.next(u32).trunc());
             @default => {
                 @panic("TODO: printf fmt %\n%", arg.specifier, fmt);
             };
@@ -74,15 +75,26 @@ vsnprintf :: fn(dest: *u8, n: i64, fmt: CStr, va: *CVariadicArgumentList) i32 = 
         @match(value) {
             fn i(value) => {
                 size := write_int_to_buffer(dest.rest(j), value);
+                if arg.hex {
+                    size = (64 - value.leading_zeros().align_back(8)) / 4;
+                };
                 if arg.precision { precision |
                     precision: i64 = precision.zext();
                     if size < precision {
                         range(0, precision - size) { i |
                             dest[j] = "0".ascii(); j += 1;
                         };
-                        write_int_to_buffer(dest.rest(j), value);
+                        if !arg.hex {
+                            write_int_to_buffer(dest.rest(j), value);
+                        };
                     }
                 };
+                if arg.hex {
+                    out := fixed_list(dest.subslice(j, size));
+                    for_rev i64.cast_to_bytes(value&).slice(0, size/2) { c |
+                        push_hex_byte(out&, c, false);
+                    };
+                }
                 j += size;
             }
             fn f(value) => {
@@ -92,6 +104,10 @@ vsnprintf :: fn(dest: *u8, n: i64, fmt: CStr, va: *CVariadicArgumentList) i32 = 
                 value := value.str();
                 dest.subslice(j, value.len).copy_from(value);
                 j += value.len;
+            }
+            fn c(value) => {
+                dest[j] = value;
+                j += 1;
             }
         };
     };
@@ -115,7 +131,7 @@ FormatArg :: @struct {
     hash := false;
     zero_pad := false;
     hex := false;
-    Value :: @tagged(f: f64, i: i64, s: CStr);
+    Value :: @tagged(f: f64, i: i64, s: CStr, c: u8);
 };
 
 // TODO: this is unbuffered :SLOW :SLOW :SLOW

@@ -51,7 +51,7 @@ main2 :: fn() void = {
     tls(.deny_syscalls)[] = true;
     tls(.current_os)[] = trunc(@as(i64) Os.linux);
     globals.jit_events = list(4096, general_allocator());
-    globals.free = list(4096, general_allocator());
+    globals.free.memory = list(4096, general_allocator());
     Vfs'image[] = fetch_root_fs(cli_args());
     Vfs'init_vfs();
     xxx := Vfs.root_console_stdin;  // :compilerbug ?? Type Error: field 'fs' does not exist
@@ -126,7 +126,7 @@ Host :: @struct {
 #use("@/lib/sys/sync/mutex.fr");
 #use("@/lib/sys/threads.fr");
 globals :: @static(@struct {
-    free: List([]u8);  // sorted by address
+    free: PageSet;
     grow: Mutex;
     ready: bool;
     
@@ -238,14 +238,10 @@ web_platform : (@type host_platform[]) : (
             break :: local_return;
             len := len.ualign_to(wasm_page_size);
             
-            enumerate_rev globals.free.items() { i, buf |
-                if buf.len >= len {
-                    result = u8.raw_from_ptr(buf.ptr);
-                    buf[].slice(0, len).set_zeroed();  // this is kinda unfortunate
-                    buf[] = buf[].rest(len);
-                    check_merges(i);
-                    break();
-                };
+            if globals.free&.find_and_remove_at_least(len) { buf |
+                result = u8.raw_from_ptr(buf.ptr);
+                buf.slice(0, len).set_zeroed();  // this is kinda unfortunate
+                break();
             };
             
             prev := memory_grow(len.udiv(wasm_page_size).intcast()).intcast();
@@ -259,13 +255,7 @@ web_platform : (@type host_platform[]) : (
         @if(globals.ready) with globals.grow& {
             break :: local_return;
             buf := u8.ptr_from_raw(addr).slice(len.ualign_to(wasm_page_size));
-            
-            i := 0;  // TODO: binary search
-            while => i < globals.free.len && buf.ptr.in_memory_after(globals.free[i].ptr) {
-                i += 1;
-            };
-            globals.free&.insert(i, buf);
-            check_merges(i);
+            globals.free&.insert(buf);
         };
         0
     },
@@ -298,16 +288,6 @@ web_platform : (@type host_platform[]) : (
     },
     terminate = fn(tid) = .StillRunning,  // TODO
 );
-
-check_merges :: fn(i: i64) void = {
-    free := globals.free&;
-    range(i-1, i+1) { i |
-        while => i > 0 && i < free.len - 1 && free[i].end_pointer().identical(free[i + 1].ptr) {
-            free[i].len += free[i + 1].len;
-            free.ordered_remove(i + 1);
-        }
-    };
-};
 
 // returns old size
 memory_grow :: AsmFunctionWasmOnly(fn(page_delta: i32) i32 = (), fn(out) = {

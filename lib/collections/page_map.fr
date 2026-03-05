@@ -150,3 +150,77 @@ fn PageMap($T: Type) Type = {
     
     PageMap
 }
+
+PageSet :: @struct {
+    memory: List([]u8);  // sorted by address
+};
+
+fn find_and_remove_at_least(self: *PageSet, len: i64) ?[]u8 = {
+    enumerate_rev self.memory.items() { i, buf |
+        if buf.len >= len {
+            result := buf[].slice(0, len);
+            buf[] = buf[].rest(len);
+            self.check_merges(i);
+            return(Some = result);
+        };
+    };
+    .None
+}
+
+fn insert(self: *PageSet, buf: []u8) void = {
+    free := self.memory&;
+    i := 0;  // TODO: binary search
+    while => i < free.len && buf.ptr.in_memory_after(free[i].ptr) {
+        i += 1;
+    };
+    free.insert(i, buf);
+    self.check_merges(i);
+}
+
+// TODO: test this seperately i have low faith
+fn remove(self: *PageSet, buf: []u8) bool = {
+    free := self.memory&;
+    @if(free.len == 0) return(false);
+    i := 0;  // TODO: binary search
+    while => ptr_diff(free[i].end_pointer(), buf.ptr) >= 0 {
+        i += 1;
+        @if(i >= free.len) return(false);
+    };
+    old := free[i];
+    if buf.end_pointer().in_memory_after(old.end_pointer()) {
+        return false;  // not in the set. relies on check_merges. 
+    };
+    
+    if identical(buf.ptr, old.ptr) {
+        free[i] = old.rest(buf.len);
+        if old.len == buf.len {
+            free.ordered_remove(i);
+            self.check_merges(i);
+            self.check_merges(i+1);
+        };
+        return true;
+    };
+    if identical(buf.end_pointer(), old.end_pointer()) {
+        @debug_assert(buf.len < old.len);
+        free[i].len -= buf.len;
+        return true;
+    };
+    
+    // split to remove the middle. 
+    left := old.slice(0, ptr_diff(old.ptr, buf.ptr));
+    free[i] = old.slice(ptr_diff(old.ptr, buf.end_pointer()), old.len);
+    free.insert(i, left);
+    self.check_merges(i);
+    self.check_merges(i+1);
+    true
+}
+
+fn check_merges(self: *PageSet, i: i64) void = {
+    free := self.memory&;
+    range(i-1, i+1) { i |
+        while => i >= 0 && i < free.len - 1 && free[i].end_pointer().identical(free[i + 1].ptr) {
+            free[i].len += free[i + 1].len;
+            free.ordered_remove(i + 1);
+        }
+    };
+};
