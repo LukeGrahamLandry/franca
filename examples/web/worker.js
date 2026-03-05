@@ -98,11 +98,10 @@ export const imports = {
         fmod: (a, b) => a % b,
         sinf: (a) => Math.sin(a),
         cosf: (a) => Math.cos(a),
-        sqrt: (a) => Math.sqrt(a),
         pow: (a, b) => Math.pow(a, b),
         acos: (a) => Math.acos(a),
         cos: (a) => Math.cos(a),
-        fabs: (a) => Math.fabs(a),
+        sin: (a) => Math.sin(a),
         floor: (a) => Math.floor(a),
         ceil: (a) => Math.ceil(a),
 
@@ -284,6 +283,7 @@ function handle(_msg) {
                 handle_child_thread(msg.child);
                 return;
             }
+            get_G().show_error = show_error;
             imports.main.memory = msg.memory;
             canvas = msg.canvas;
             current_exit_futex = undefined;

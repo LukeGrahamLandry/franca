@@ -53,7 +53,8 @@ export function create() { return {
     },
     M: function() {
         return this.wasm_instance.exports.memory.buffer;
-    }
+    },
+    show_error: function() {},
 }};
 
 export const webgpu_wasm_exports = webgpu;
@@ -88,7 +89,12 @@ webgpu.francaRequestState = (I, frame_callback_p, francaSaveState) => {
     G.animation_id = requestAnimationFrame(call_frame);
     const frame_callback = G.wasm_instance.exports.__indirect_table.get(Number(frame_callback_p));
     function call_frame() {
-        frame_callback(I) != 0;
+        try {
+            frame_callback(I);
+        } catch(e) {
+            G.show_error(e);
+            throw e;
+        }
         G.animation_id = requestAnimationFrame(call_frame);
     }
     

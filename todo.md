@@ -628,7 +628,6 @@ different subsets of the same resources.
   - ugly=false
 - examples/gpu/viewer.fr doesn't work in wasm 
   - FEAT_PNG "stbi__hdr_load panic! missing br target @64 -> @62"
-  - !FEAT_PNG "Uncaught RuntimeError: function signature mismatch"
 
 ## import_wasm 
 
