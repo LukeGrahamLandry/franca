@@ -162,14 +162,12 @@ fn fmt_event(out: *List(u8), event: *Sapp.Event, sapp: *Sapp.Self) void = {
         @fmt(out, "(%, %) (%, %) ", sapp.window_width, sapp.window_height, sapp.framebuffer_width, sapp.framebuffer_height);
     };
     if @is(event.type, .CLIPBOARD_PASTED) {
-        s := sapp.get_clipboard_string().items();
-        @fmt(out, "(%) \n%", s.len, s);
+        s := event.pasted;
+        @fmt(out, "% (%)\n%", event.fake, s.len, s);
     };
     if @is(event.type, .FILES_DROPPED) {
-        n: i64 = sapp.drop.num_files;
-        @fmt(out, "%", n);
-        range(0, n) { i |
-            s := sapp.get_dropped_file_path(i);
+        @fmt(out, "%", event.drop.len);
+        for event.drop { s |
             @fmt(out, "\n- (%) %", s.len, s);
         };
     }
@@ -201,7 +199,7 @@ do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
     
     // The user pressing the X button is actually just an event you're free to ignore. 
     if state.deny_quit && event.type == .QUIT_REQUESTED {
-        sapp.quit_requested = false;  // say we changed our mind... 
+        sapp.requests.quit = false;  // say we changed our mind... 
         report red { out |
             @fmt(out, "press 6 to enable quit events");
         };
@@ -214,7 +212,7 @@ do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
         fn W() => if event.modifiers.get(.super) != 0 {
             // Exit the application after sending a QUIT_REQUESTED event.
             // You could also call exit(0) but that won't call your cleanup callback. 
-            sapp.quit_requested = true;
+            sapp.requests.quit = true;
         }
         fn _1() => {
             // Change the text in the title bar. 
@@ -286,10 +284,8 @@ do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
         }
         fn _8() => {
             // You don't need to wait for a paste event to read the system clipboard. 
-            report red { out |
-                s := sapp.get_clipboard_string();
-                @fmt(out, "read clipboard (%)\n%", s.len, s.items());
-            };
+            // but it won't come until the next frame.
+            sapp.requests.fake_paste_event = true;
         }
         fn _9() => {
             sapp.toggle_fullscreen();

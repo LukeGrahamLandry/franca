@@ -1,4 +1,16 @@
 
+## (Mar 6)
+
+graphics/app
+i don't like that it's up to the platform when in the frame events happen.
+if i batch events and your requests back and do them all at specific time in the frame
+you can choose to write your code as though it were the main loop and run it in another thread. 
+i think the only iffy thing is web clipboard but im sure theres a way to cope, it's not worth making everything inside out. 
+also web consume_event, but i think that isn't a big deal if i only care about when you have one canvas that's the whole screen. 
+memory to store a list of ~3 events is not a big deal. 
+and all the requests you send back are actually set-whatever so they're a struct not a list. 
+now don't need to check events_enabled all the time because they're always collected so sent after init anyway.
+
 ## (Mar 5)
 
 - wasm: before i was trying to get names to show by just exporting everything. 

@@ -268,9 +268,9 @@ fn set_window_title(web: *Impl, title: Str) void = {
     eprintln("TODO: set_window_title");
 }
 
-fn get_clipboard_string(web: *Impl) *RawList(u8) = {
-    sapp := web.common();
-    sapp.clipboard.buffer&
+fn get_clipboard_string(web: *Impl) []u8 = {
+    eprintln("TODO: get_clipboard_string (outside paste event)");
+    ""
 }
 
 fn set_clipboard_string(web: *Impl, str: Str) void = {
@@ -302,7 +302,6 @@ fn keytable(web: *Impl) []Sapp.Keycode = {
 #export
 fn mouse_event(web: *Impl, type: Sapp.EventType, button: u32, x: f32, y: f32, dx: f32, dy: f32) void = {
     sapp := web.common();
-    if(!sapp.events_enabled(), => return());
     sapp.mouse.x = x * sapp.dpi_scale;
     sapp.mouse.y = y * sapp.dpi_scale;
     sapp.mouse.dx = dx * sapp.dpi_scale;
@@ -324,7 +323,6 @@ fn mouse_event(web: *Impl, type: Sapp.EventType, button: u32, x: f32, y: f32, dx
 #export
 fn key_event(web: *Impl, type: Sapp.EventType, key: u32, alt: bool, ctrl: bool, meta: bool, shift: bool, repeat: bool) void = {
     sapp := web.common();
-    if(!sapp.events_enabled(), => return());
     sapp.init_event(type);
     sapp.event.key_code = @as(Sapp.Keycode) @as(u16) key.trunc();
     sapp.event.key_code = @switch(key) {
@@ -358,7 +356,6 @@ fn key_event(web: *Impl, type: Sapp.EventType, key: u32, alt: bool, ctrl: bool, 
 #export
 fn resize_event(web: *Impl, type: Sapp.EventType, w: f64, h: f64,devicePixelRatio: f64) void = {
     sapp := web.common();
-    if(!sapp.events_enabled(), => return());
     sapp.init_event(type);
     sapp.window_width = w.int();
     sapp.window_height = h.int();
@@ -375,7 +372,6 @@ fn resize_event(web: *Impl, type: Sapp.EventType, w: f64, h: f64,devicePixelRati
 #export
 fn scroll_event(web: *Impl, dx: f64, dy: f64) void = {
     sapp := web.common();
-    if(!sapp.events_enabled(), => return());
     sapp.init_event(.MOUSE_SCROLL);
     sapp.event.scroll_x = dx.cast();
     sapp.event.scroll_y = dy.cast();
@@ -386,17 +382,14 @@ fn scroll_event(web: *Impl, dx: f64, dy: f64) void = {
 #export 
 fn paste_event(web: *Impl, length: f64, handle: rawptr) void = {
     sapp := web.common();
-    @if(!sapp.clipboard.enabled) return();
+    @if(!sapp.desc.enable_clipboard) return();
     length := length.int();
     js_write :: fn(id: rawptr, ptr: *u8, len: i64) i64 #weak #import("libc");
-    buf := sapp.clipboard.buffer&;
-    buf.len = 0;
-    buf.reserve(length, sapp.desc.allocator);
-    // :SLOW really should just copy in get_clipboard_string but this way don't have to keep the handle and free it later (js frees it after this function returns)
+    buf := temp().alloc_uninit(u8, length);
     result := js_write(handle, buf.ptr, length);
     @if(result != length) return();
-    buf.len = length;
-    sapp.init_event(.CLIPBOARD_PASTED);
+    e := sapp.init_event(.CLIPBOARD_PASTED);
+    e.pasted = buf;
     sapp.event.modifiers = web.modifiers;
     sapp.call_event(sapp.event&);
 }

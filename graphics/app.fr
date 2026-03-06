@@ -11,12 +11,14 @@ Wgpu :: import("@/graphics/web/app.fr");
 
 max_icon_images :: 8;
 
+// system -> user
 Event :: @struct(
     frame_count: u64,
     type: EventType,
     key_code: Keycode,
     char_code: u32,
     key_repeat: bool,
+    fake: bool,  // was sent for a Request.fake_paste_event, not caused by user interaction. 
     modifiers: Modifiers,
     mouse_button: Mousebutton,
     mouse_x: f32,
@@ -26,6 +28,22 @@ Event :: @struct(
     scroll_x: f32,
     scroll_y: f32,
     // window/framebuffer width/height are on the Sapp.Self struct
+    data: (@union(
+        pasted: []u8, 
+        drop: [][]u8,
+    )) #use,
+);
+// user -> system
+Request :: @struct(
+    set_clipboard: ?Str,
+    fake_paste_event: bool,  // ask for a fake paste event next frame so you can read the clipboard contents
+    mouse_shown: bool,
+    mouse_locked: bool,
+    quit: bool,
+    cursor: MouseCursor,
+    icon: []ImageDesc,
+    window_title: ?Str,
+    fullscreen: bool,
 );
 Desc :: @struct(
     init_cb: @FnPtr(userdata: rawptr) void,
@@ -66,37 +84,26 @@ Self :: @rec @struct(
     first_frame: bool,
     init_called: bool,
     cleanup_called: bool,
-    quit_requested: bool,
     quit_ordered: bool,
-    event_consumed: bool,  // only used on web
-    onscreen_keyboard_shown: bool,
     window_width: i64,
     window_height: i64,
     framebuffer_width: i64,
     framebuffer_height: i64,
-    sample_count: i64,
-    swap_interval: i64,
+    sample_count: i64,  // TODO: unused
+    swap_interval: i64,  // TODO: unused
     dpi_scale: f32,
     frame_count: i64,
-    timing: Timing,
     event: Event,
+    // TODO: clarify that these aren't in sync because events are delayed to be handled all at once at start of frame
     mouse: Mouse,
-    clipboard: Clipboard,
-    drop: Drop,
     // For most platforms, this is just some constant data. 
     keycodes: []Keycode,
     // Not part of impl_storage because it can be used together with a native backend. 
     webgpu: Wgpu.GraphicsState,
-);
-Clipboard :: @struct(
-    enabled: bool,
-    buffer: RawList(u8),
-);
-Drop :: @struct(
-    enabled: bool,
-    num_files: i64,
-    buffer: RawList(u8),
-    starts: RawList(i64),
+    // the order of operations is such that requests sent in your frame/event callbacks can use temp() allocator. 
+    events: List(Event),      // passed to user event handler before render
+    requests: Request,        // handled by system after render
+    mark: Alloc.Mark,         // reset at the end of each frame
 );
 Mouse :: @struct(
     x: f32,
@@ -108,7 +115,6 @@ Mouse :: @struct(
     pos_valid: bool,
     cursor: MouseCursor,
 );
-Timing :: void; // TODO
 
 // SAFETY: impl_storage is the first field so the pointers are interchangeable. 
 fn impl(s: *Self) *Backend.Impl = ptr_cast_unchecked(Self, Backend.Impl, s);
@@ -123,9 +129,7 @@ fn call_init(sapp: *Self) void = {
 
 fn call_frame(sapp: *Self) void = {
     if(!sapp.init_called || sapp.cleanup_called, => return()); 
-    mark := mark_temporary_storage();
     sapp'desc'frame_cb(sapp.desc.user_data);
-    reset_temporary_storage(mark);
 }
 
 fn call_cleanup(sapp: *Self) void = {
@@ -134,15 +138,8 @@ fn call_cleanup(sapp: *Self) void = {
     sapp.cleanup_called = true;
 }
 
-fn call_event(sapp: *Self, e: *Event) bool = {
-    if !sapp.cleanup_called {
-        mark := mark_temporary_storage();
-        sapp'desc'event_cb(sapp.desc.user_data, e);
-        reset_temporary_storage(mark);
-    };
-    prev := sapp.event_consumed;
-    sapp.event_consumed = false;
-    prev
+fn call_event(sapp: *Self, e: *Event) void = {
+    sapp.events&.push(e[]);
 }
 
 fn init_state(sapp: *Self, desc: *Desc) void = {
@@ -162,28 +159,18 @@ fn init_state(sapp: *Self, desc: *Desc) void = {
     sapp.sample_count = sapp.desc.sample_count.intcast();
     sapp.swap_interval = sapp.desc.swap_interval.intcast();
     ASSERT_NOT_HTML(); // TODO: copy html5_canvas_selector to buffer. html5_ask_leave_site
-    sapp.clipboard.enabled = sapp.desc.enable_clipboard;
-    sapp.drop.enabled = sapp.desc.enable_dragndrop;
     sapp.dpi_scale = 1.0;
     sapp.fullscreen = sapp.desc.fullscreen;
     sapp.mouse.shown = true;
-    // TODO: timing
-    //sapp.timing_init(sapp.timing&);
+    sapp.events = list(temp());
 }
 
 // this will get called automatically when the application quits. do not call it directly. 
 fn discard_state(sapp: *Self) void = {
-    if sapp.clipboard.enabled {
-        sapp.clipboard.buffer&.drop(sapp.desc.allocator);
-    }
-    if sapp.drop.enabled {
-        sapp.drop.buffer&.drop(sapp.desc.allocator);
-        sapp.drop.starts&.drop(sapp.desc.allocator);
-    }
     sapp.valid = false;
 }
 
-fn init_event(sapp: *Self, type: EventType) void = {
+fn init_event(sapp: *Self, type: EventType) *Event = {
     e := sapp.event&;
     ::[]Event;
     e.slice(1).set_zeroed();
@@ -194,9 +181,8 @@ fn init_event(sapp: *Self, type: EventType) void = {
     e.mouse_y = sapp.mouse.y;
     e.mouse_dx = sapp.mouse.dx;
     e.mouse_dy = sapp.mouse.dy;
+    e
 }
-
-fn events_enabled(sapp: *Self) bool = sapp.init_called;
 
 SAPP_MAX_KEYCODES :: 512; 
 
@@ -207,17 +193,75 @@ fn translate_key(sapp: *Self, scan_code: i64) Keycode = {
 }
 
 fn frame(sapp: *Self) void = {
+    if sapp.requests.fake_paste_event {
+        // not in handle_requests so pasted allocated here isn't in reset temp.  
+        sapp.init_event(.CLIPBOARD_PASTED);
+        sapp.event.pasted = sapp.impl().get_clipboard_string();
+        sapp.event.fake = true;
+        sapp.events&.push(sapp.event);
+    };
+    sapp.requests = (
+        set_clipboard = .None,
+        fake_paste_event = false,
+        fullscreen = sapp.fullscreen,
+        mouse_shown = sapp.mouse.shown,
+        mouse_locked = sapp.mouse.locked,
+        cursor = sapp.mouse.cursor,
+        quit = sapp.requests.quit,
+        icon = empty(),
+        window_title = .None,
+    );
+
     if (sapp.first_frame) {
+        sapp.mark = temp().mark();
         sapp.first_frame = false;
         @if(::(SOKOL_BACKEND == .WGPU && !GRAPHICS_TARGET_WEB)) Wgpu'pre_init(sapp);
         sapp.call_init();
     }
     
+    each sapp.events& { e |
+        if !sapp.cleanup_called {
+            sapp'desc'event_cb(sapp.desc.user_data, e);
+        };
+    };
+    sapp.events.len = 0;
+    
     @if(::(SOKOL_BACKEND == .WGPU)) Wgpu'pre_frame(sapp);
     sapp.call_frame();
     @if(::(SOKOL_BACKEND == .WGPU)) Wgpu'post_frame(sapp);
     
+    sapp.handle_requests(sapp.requests&);
     sapp.frame_count += 1;
+    temp().reset(sapp.mark);
+    sapp.events = list(temp());
+}
+
+fn handle_requests(sapp: *Sapp.Self, it: *Request) void = {
+    if sapp.fullscreen != it.fullscreen {
+        sapp.impl().toggle_fullscreen();
+        sapp.fullscreen = it.fullscreen;
+    };
+    if it.set_clipboard { it |
+        sapp.impl().set_clipboard_string(it);
+    };
+    if it.mouse_locked != sapp.mouse.locked {
+        sapp.impl().lock_mouse(it.mouse_locked);
+        sapp.mouse.locked = it.mouse_locked;
+    } 
+    if it.mouse_shown != sapp.mouse.shown || it.cursor != sapp.mouse.cursor {
+        sapp.impl().update_cursor(it.cursor, it.mouse_shown);
+        sapp.mouse.shown = it.mouse_shown;
+        sapp.mouse.cursor = it.cursor;
+    };
+    if it.icon.len != 0 {
+        sapp.impl().set_icon(it.icon);
+    };
+    if it.window_title { it |
+        sapp.impl().set_window_title(it);
+    };
+    if it.quit {
+        sapp.quit_ordered = true;
+    };
 }
 
 fn image_bestmatch(image_descs: []ImageDesc, width: i64, height: i64) *ImageDesc = {
@@ -268,55 +312,36 @@ fn high_dpi(sapp: *Self) bool = {
 }
 
 fn toggle_fullscreen(sapp: *Self) void = {
-    sapp.impl().toggle_fullscreen();
+    sapp.requests.fullscreen = !sapp.fullscreen;
 }
 
 /* NOTE that sapp_show_mouse() does not "stack" like the Win32 or macOS API functions! */
 fn show_mouse(sapp: *Self, show: bool) void = {
-    @debug_assert(sapp.valid);
-    if sapp.mouse.shown != show {
-        sapp.impl().update_cursor(sapp.mouse.cursor, show);
-    };
-    sapp.mouse.shown = show;
+    sapp.requests.mouse_shown = show;
 }
 
 fn lock_mouse(sapp: *Self, lock: bool) void = {
-    @debug_assert(sapp.valid);
-    sapp.impl().lock_mouse(lock);
+    sapp.requests.mouse_locked = lock;
 }
 
 fn set_mouse_cursor(sapp: *Self, cursor: MouseCursor) void = {
-    @debug_assert(sapp.valid);
-    if sapp.mouse.cursor != cursor {
-        sapp.impl().update_cursor(cursor, sapp.mouse.shown);
-    };
-    sapp.mouse.cursor = cursor;
+    sapp.requests.cursor = cursor;
 }
 
-/* NOTE: on HTML5, sapp_set_clipboard_string() must be called from within event handler! */
-fn set_clipboard_string(sapp: *Self, str: CStr) void = {
-    @debug_assert(sapp.valid);
-    if(!sapp.clipboard.enabled, => return());
-    sapp.impl().set_clipboard_string(str);
-}
-
-// SAFETY: Memory valid until next call (you can steal the buffer out of the pointer if you want) 
-fn get_clipboard_string(sapp: *Self) *RawList(u8) = {
-    @debug_assert(sapp.valid);
-    if(!sapp.clipboard.enabled, => return(sapp.clipboard.buffer&));  // empty
-    sapp.impl().get_clipboard_string()
+fn set_clipboard_string(sapp: *Self, s: Str) void = {
+    sapp.requests.set_clipboard = (Some = s);
 }
 
 fn set_window_title(sapp: *Self, title: Str) void = {
     @debug_assert(sapp.valid);
-    sapp.impl().set_window_title(title);
+    sapp.requests.window_title = (Some = title);
 }
 
 fn set_icon(sapp: *Self, desc: []ImageDesc) void = {
     @debug_assert(sapp.valid);
     if(desc.len == 0, => return());
     validate_icon_desc(desc);
-    sapp.impl().set_icon(desc);
+    sapp.requests.icon = desc;
 }
 
 // SAFETY: Memory valid until the next file drop event. 
@@ -355,9 +380,9 @@ EventType :: @enum(i32) (
     RESTORED,
     FOCUSED,
     UNFOCUSED,
-    QUIT_REQUESTED,  // sapp.quit_requested = false; if you want to ignore and keep the app running
-    CLIPBOARD_PASTED,  // sapp.get_clipboard_string()
-    FILES_DROPPED,  // sapp.drop.num_files and sapp.get_dropped_file_path(i)
+    QUIT_REQUESTED,  // sapp.requests.quit = false; if you want to ignore and keep the app running
+    CLIPBOARD_PASTED,
+    FILES_DROPPED,
     // TODO: add back mobile support? TOUCHES_****, SUSPENDED/RESUMED
 );
 Mousebutton :: @enum(i32) (
