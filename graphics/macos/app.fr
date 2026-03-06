@@ -918,7 +918,28 @@ display_link_callback1 :: fn(displayLink: CVDisplayLinkRef, now: rawptr, outputT
 
 display_link_callback2 :: fn(userdata: rawptr) void = {
     macos := Impl.ptr_from_raw(userdata);
+    macos.poll_input_events();
     macos.frame();
+}
+
+// not doing this makes examples/geo unusable while it's loading the model. 
+// idk if im doing something wrong that sokol could get rid of this and i can't. 
+fn poll_input_events(macos: *Impl) void = {
+    mask := -1;  // gimme everything! 
+
+    pool := objc_autoreleasePoolPush();
+    NSApp := macos.classes.NSApp;
+    NSEventTrackingRunLoopMode := ObjCId.ptr_from_raw(@import_symbol("NSEventTrackingRunLoopMode", "AppKit"))[];
+    loop {
+        // NOTE: using NSDefaultRunLoopMode here causes stuttering in the GL backend,
+        // see: https://github.com/floooh/sokol/issues/486
+        event := @objc NSApp.nextEventMatchingMask(mask, untilDate = zeroed ObjCId, inMode = NSEventTrackingRunLoopMode, dequeue = true);
+        if event.is_nil() {
+            objc_autoreleasePoolPop(pool);
+            return();
+        }
+        @objc NSApp.sendEvent(event);
+    }
 }
 
 // helper function to make GL context active
