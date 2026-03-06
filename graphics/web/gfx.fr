@@ -840,7 +840,7 @@ fn create(wgpu: *Impl, buf: *Sg.Buffer.T, desc: *Sg.Buffer.Desc) Sg.ResourceStat
             usage = to_wgpu(buf.cmn.type, buf.cmn.usage),
             size = wgpu_buf_size.zext(),
             mappedAtCreation = to_wgpu (map_at_creation && !GRAPHICS_TARGET_WEB /*:WebBufferInitHack*/),
-            label = str(desc.label),
+            label = desc.label,
         ));
         if buf.mtl.buf._.is_null() {
             _SG_ERROR("WGPU_CREATE_BUFFER_FAILED");
@@ -940,7 +940,7 @@ fn create(wgpu: *Impl, img: *Sg.Image.T, desc: *Sg.Image.Desc) Sg.ResourceState 
         }
     } else {
         wgpu_tex_desc: WGPU.TextureDescriptor = (
-            label = str(desc.label),
+            label = desc.label,
             usage = {
                 u := @or(WGPU.TextureUsage.CopyDst, WGPU.TextureUsage.TextureBinding);
                 if desc.render_target {
@@ -968,7 +968,7 @@ fn create(wgpu: *Impl, img: *Sg.Image.T, desc: *Sg.Image.Desc) Sg.ResourceState 
         }
         wgpu_texview_desc: WGPU.TextureViewDescriptor = (
             usage = (_ = 0),
-            label = str(desc.label),
+            label = desc.label,
             dimension = to_wgpu(img.cmn.type),
             mipLevelCount = bitcast img.cmn.num_mipmaps,
             arrayLayerCount = @match(img.cmn.type) {
@@ -1009,7 +1009,7 @@ fn create(wgpu: *Impl, smp: *Sg.Sampler.T, desc: *Sg.Sampler.Desc) Sg.ResourceSt
     } else {
         @debug_assert_ge(desc.max_lod, desc.min_lod);
         wgpu_desc: WGPU.SamplerDescriptor = (
-            label = str(desc.label),
+            label = desc.label,
             addressModeU = to_wgpu(desc.wrap_u),
             addressModeV = to_wgpu(desc.wrap_v),
             addressModeW = to_wgpu(desc.wrap_w),
@@ -1043,17 +1043,17 @@ fn discard(wgpu: *Impl, smp: *Sg.Sampler.T) void = {
     }
 }
 
-fn create_shader_func(wgpu: *Impl, func: *Sg.ShaderFunction, label: CStr) shader_func_t = {
-    @debug_assert(!func.entry.is_null());
+fn create_shader_func(wgpu: *Impl, func: *Sg.ShaderFunction, label: Str) shader_func_t = {
+    @debug_assert(func.entry != "");
 
     wgpu_shdmod_wgsl_desc: WGPU.ShaderSourceWGSL = (
         chain = (sType = .ShaderSourceWGSL),
-        code = str(func.source),
+        code = func.source,
     );
 
     wgpu_shdmod_desc: WGPU.ShaderModuleDescriptor = (
         nextInChain = wgpu_shdmod_wgsl_desc.chain&,
-        label = str(label),
+        label = label,
     );
 
     // NOTE: if compilation fails we won't actually find out in this call since
@@ -1061,7 +1061,7 @@ fn create_shader_func(wgpu: *Impl, func: *Sg.ShaderFunction, label: CStr) shader
     // is asynchronous
     res: shader_func_t = (
         module = createShaderModule(wgpu.dev, wgpu_shdmod_desc&),
-        entry = func.entry.str().shallow_copy(wgpu.sg.desc.allocator), // :LEAK
+        entry = func.entry.shallow_copy(wgpu.sg.desc.allocator), // :LEAK
     );
     if res.module._.is_null() {
         _SG_ERROR("WGPU_CREATE_SHADER_MODULE_FAILED");
@@ -1105,7 +1105,7 @@ fn create(wgpu: *Impl, shd: *Sg.Shader.T, desc: *Sg.Shader.Desc) Sg.ResourceStat
     // build shader modules
     shd_valid := true;
     
-    X :: fn(func, dest) => if !func.source.is_null() {
+    X :: fn(func, dest) => if func.source != "" {
         dest[] = wgpu.create_shader_func(func, desc.label);
         shd_valid = shd_valid && !dest[].module._.is_null();
     };
@@ -1278,7 +1278,7 @@ fn create(wgpu: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipelin
 
     if pip.cmn.compute {
         pip.mtl.cpip = createComputePipeline(wgpu.dev, @ref @as(WGPU.ComputePipelineDescriptor) (
-            label = str(desc.label),
+            label = desc.label,
             layout = wgpu_pip_layout,
             compute = (
                 module = shd.mtl.compute_func.module,
@@ -1294,7 +1294,7 @@ fn create(wgpu: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipelin
         ::if(*WGPU.FragmentState);
         ::if(*WGPU.DepthStencilState);
         pip.mtl.rpip = createRenderPipeline(wgpu.dev, @ref @as(WGPU.RenderPipelineDescriptor) (
-            label = str(desc.label),
+            label = desc.label,
             layout = wgpu_pip_layout,
             vertex = (
                 module = shd.mtl.vertex_func.module,
@@ -1513,7 +1513,7 @@ fn init_ds_att(action: *Sg.PassAction, fmt: Sg.PixelFormat, view: WGPU.TextureVi
 }
 
 fn begin_compute_pass(wgpu: *Impl, pass: *Sg.Pass) void = {
-    wgpu_pass_desc: WGPU.ComputePassDescriptor = (label = str(pass.label));
+    wgpu_pass_desc: WGPU.ComputePassDescriptor = (label = pass.label);
     cpass_enc := beginComputePass(wgpu.cmd_enc, wgpu_pass_desc&);
     @debug_assert(!cpass_enc._.is_null());
     wgpu.cpass_enc = (Some = cpass_enc);
@@ -1530,7 +1530,7 @@ fn begin_render_pass(wgpu: *Impl, pass: *Sg.Pass) void = {
 
     wgpu_pass_desc := zeroed WGPU.RenderPassDescriptor;
     wgpu_color_att := zeroed Array(WGPU.RenderPassColorAttachment, Sg.SG_MAX_COLOR_ATTACHMENTS);
-    wgpu_pass_desc.label = str(pass.label);
+    wgpu_pass_desc.label = pass.label;
     if !atts.is_null() {
         @debug_assert(atts.slot.state == .VALID);
         range(0, intcast atts.cmn.num_colors) { i | 
@@ -1729,5 +1729,5 @@ fn append_buffer(wgpu: *Impl, buf: *Sg.Buffer.T, data: []u8, _new_frame: bool) v
 fn update_image(wgpu: *Impl, img: *Sg.Image.T, data: *Sg.ImageData) void #once = 
     wgpu.copy_image_data(img, img.wgpu.tex, data);
 
-fn push_debug_group(_: *Impl, __: CStr) void = ();
+fn push_debug_group(_: *Impl, __: Str) void = ();
 fn pop_debug_group(wgpu: *Impl) void = ();

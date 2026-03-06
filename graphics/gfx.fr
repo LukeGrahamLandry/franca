@@ -49,8 +49,10 @@ SG_MAX_SAMPLER_BINDSLOTS :: 16;
 SG_MAX_STORAGEBUFFER_BINDSLOTS :: 8;
 SG_MAX_IMAGE_SAMPLER_PAIRS :: 16;
 
-fn _sg_def(val: ~T, def: T) T #where = 
-    @if(bit_cast_unchecked(T, u32, val) == 0, def, val); 
+fn _sg_def(val: ~T, def: T) T #where = {
+    @if(@run(T == Str)) return(@if(val == "", def, val));
+    @if(bit_cast_unchecked(T, u32, val) == 0, def, val)
+}
 
 BufferCommon :: @struct {
     size: i32;
@@ -150,7 +152,7 @@ ShaderCommon :: @struct {
 };
 
 fn common_init(cmn: *ShaderCommon, desc: *Shader.Desc) void = {
-    cmn.is_compute = !desc.compute_func.source.is_null() || !desc.compute_func.bytecode.ptr.is_null();
+    cmn.is_compute = desc.compute_func.source != "" || desc.compute_func.bytecode != "";
     range(0, SG_MAX_UNIFORMBLOCK_BINDSLOTS) { i |
         src := desc.uniform_blocks&[i]&;
         dst := cmn.uniform_blocks&[i]&;
@@ -808,7 +810,7 @@ V :: fn(a: FatExpr) FatExpr #macro = @{
 };
 
 fn has_source(self: ShaderFunction) bool = 
-    !self.source.is_null();
+    self.source != "";
 
 fn has_bytecode(self: ShaderFunction) bool = 
     !self.bytecode.ptr.is_null();
@@ -1387,7 +1389,7 @@ fn desc_defaults(sg: *Self, desc: *Image.Desc) Image.Desc = {
 }
 
 fn _SG_ERROR(s: Str) void = @debug_log("%", s);
-fn _SG_LOGMSG(s: Str, c: CStr) void = @debug_log("%: %", s, c);
+fn _SG_LOGMSG(s: Str, c: Str) void = @debug_log("%: %", s, c);
 
 fn desc_defaults(_: *Self, desc: *Sampler.Desc) Sampler.Desc = {
     desc[]
@@ -1395,7 +1397,7 @@ fn desc_defaults(_: *Self, desc: *Sampler.Desc) Sampler.Desc = {
 
 fn desc_defaults(_: *Self, desc: *Shader.Desc) Shader.Desc = {
     def := desc[];
-    entry: CStr = @if(SOKOL_BACKEND == .METAL_MACOS, "_main", "main");
+    entry: Str = @if(SOKOL_BACKEND == .METAL_MACOS, "_main", "main");
     def.vertex_func.entry = _sg_def(def.vertex_func.entry, entry);
     def.fragment_func.entry = _sg_def(def.fragment_func.entry, entry);
     def.compute_func.entry = _sg_def(def.compute_func.entry, entry);
@@ -2127,7 +2129,7 @@ fn update_image(sg: *Self, img_id: Image, data: *sg_image_data) void #trace = {
     }
 }
 
-fn push_debug_group(sg: *Self, name: CStr) void #trace = {
+fn push_debug_group(sg: *Self, name: Str) void #trace = {
     @debug_assert(sg.valid);
     sg.impl().push_debug_group(name);
 }
@@ -2548,7 +2550,7 @@ Pass :: @struct(
     action: PassAction,
     attachments: Attachments,
     swapchain: Swapchain,
-    label: CStr,
+    label: Str,
     compute: bool,
 );
 Bindings :: @struct(
@@ -2563,7 +2565,7 @@ BufferDesc :: @struct(
     type := BufferType.STORAGEBUFFER,
     usage := Usage.IMMUTABLE,
     data: []u8 = empty(),
-    label: CStr = "",
+    label: Str = "",
     gl_buffers := zeroed Array(u32, 2),
     mtl_buffers := zeroed Array(rawptr, 2),
     d3d11_buffer := zeroed rawptr,
@@ -2586,7 +2588,7 @@ ImageDesc :: @struct(
     pixel_format := zeroed PixelFormat,
     sample_count := zeroed i32,
     data: ImageData,
-    label := zeroed CStr,
+    label: Str = "",
     gl_textures := zeroed Array(u32, 2),
     gl_texture_target := zeroed u32,
     mtl_textures := zeroed Array(rawptr, 2),
@@ -2614,7 +2616,7 @@ SamplerCommon :: @struct(
 
 SamplerDesc :: @struct {
     common: SamplerCommon #use = ();
-    label: CStr = "";
+    label: Str = "";
     gl_sampler: u32 = 0;
     mtl_sampler := zeroed rawptr;
     d3d11_sampler := zeroed rawptr;
@@ -2628,10 +2630,9 @@ ShaderStage :: @enum(u32) (
 );
 // TODO: @tagged(Source: Str, Bytecode: []u8);
 ShaderFunction :: @struct(
-    source := zeroed CStr,
-    bytecode: []u8 = empty(),
-    entry := zeroed CStr,
-    d3d11_target := zeroed CStr,
+    source := "",
+    bytecode := "",
+    entry := "",
     metal_disable_fast_math: bool,
 );
 GlslShaderUniform :: @struct(
@@ -2676,7 +2677,7 @@ ShaderImageSamplerPair :: @struct(
     stage: ShaderStage,
     image_slot: u8,
     sampler_slot: u8,
-    glsl_name: CStr,
+    glsl_name: Str,
 );
 ShaderDesc :: @struct(
     vertex_func := zeroed ShaderFunction,
@@ -2688,7 +2689,7 @@ ShaderDesc :: @struct(
     samplers := zeroed Array(ShaderSampler, 16),
     image_sampler_pairs := zeroed Array(ShaderImageSamplerPair, 16),
     mtl_threads_per_threadgroup: MtlShaderThreadsPerThreadGroup = (x = 0),
-    label := zeroed CStr,
+    label := "",
 );
 MtlShaderThreadsPerThreadGroup :: @struct {
     x: i32; y: i32 = 1; z: i32 = 1;
@@ -2749,7 +2750,7 @@ PipelineShared :: @struct(
 
 PipelineDesc :: @struct {
     common: PipelineShared #use = ();
-    label: CStr = "";
+    label: Str = "";
 };
 AttachmentDesc :: @struct(
     image: Image,
@@ -2760,7 +2761,7 @@ AttachmentsDesc :: @struct(
     colors: Array(AttachmentDesc, 4),
     resolves: Array(AttachmentDesc, 4),
     depth_stencil: AttachmentDesc,
-    label: CStr,
+    label: Str,
 );
 
 SlotInfo :: @struct(

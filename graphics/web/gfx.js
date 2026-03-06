@@ -81,6 +81,10 @@ export const init_gpu = async (wasm_instance, canvas, devicePixelRatio) => {
 
 export const ESCAPE_MAIN = "escape main";
 
+// user's main calls app.run() which calls this. 
+// to get out, we throw so the wasm main never returns and unwinds its stack pointer.
+// which means the stack frame of main is wasted forever but also any variables there stay live
+// like they would in native code so you can setup global state as stack pointers in main if you want. 
 webgpu.francaRequestState = (I, frame_callback_p, francaSaveState) => {
     if (!G.valid) console.error("called francaRequestState before init_gpu");
     G.I = I;

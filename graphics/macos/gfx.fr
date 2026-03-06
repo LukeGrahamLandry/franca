@@ -398,9 +398,6 @@ fn init_caps(mtl: *Impl) void = {
     );
 }
 
-fn ns_str(s: CStr) id("NSString") = 
-    @objc cls("NSString").stringWithUTF8String(s);
-
 fn setup_backend(mtl: *Impl, desc: *Sg.Desc) void = {
     // assume already zero-initialized
     @debug_assert(!desc.environment.metal.device._.is_nil());
@@ -485,7 +482,7 @@ fn create(mtl: *Impl, buf: *Sg.Buffer.T, desc: *Sg.Buffer.Desc) Sg.ResourceState
             _SG_ERROR("METAL_CREATE_BUFFER_FAILED");
             return(.FAILED);
         }
-        if Sg.SOKOL_DEBUG && !desc.label.is_null() { // :MsgSendVarArgs
+        if Sg.SOKOL_DEBUG && desc.label != "" { // :MsgSendVarArgs
             //mtl_buf.label = [NSString stringWithFormat:@"%s.%d", desc.label, slot];
         }
         buf.mtl.buf&[slot] = mtl.add_resource(mtl_buf);
@@ -629,7 +626,7 @@ fn create(mtl: *Impl, img: *Sg.Image.T, desc: *Sg.Image.Desc) Sg.ResourceState =
             };
             mtl_tex
         }
-        if Sg.SOKOL_DEBUG && !desc.label.is_null() { // :MsgSendVarArgs
+        if Sg.SOKOL_DEBUG && desc.label != "" { // :MsgSendVarArgs
             //mtl_tex.label = [NSString stringWithFormat:@"%s.%d", desc.label, slot];
         }
         img.mtl.tex&[slot] = mtl.add_resource(mtl_tex);
@@ -672,8 +669,8 @@ fn create(mtl: *Impl, smp: *Sg.Sampler.T, desc: *Sg.Sampler.Desc) Sg.ResourceSta
             normalizedCoordinates = true,
             compareFunction = to_mtl desc.compare,
         );
-        if Sg.SOKOL_DEBUG && !desc.label.is_null() {
-            @objc it.setLabel(@objc cls("NSString").stringWithUTF8String(desc.label));
+        if Sg.SOKOL_DEBUG && desc.label != "" {
+            @objc it.setLabel(desc.label.ns_str());
         }
         mtl_smp := @objc mtl.device.newSamplerStateWithDescriptor(it);
         @objc it.release();
@@ -698,10 +695,10 @@ fn Id(classname: Str) Type = i32;  // an index into the idpool
 // a metal api enum. just using this as a comment in case i end up doing more serious bindings. 
 fn M(enumname: Str) Type = u32;
 
-fn create_shader_func(mtl: *Impl, func: *Sg.ShaderFunction, label: CStr, label_ext: CStr, res: *_sg_mtl_shader_func_t) bool = {
+fn create_shader_func(mtl: *Impl, func: *Sg.ShaderFunction, label: Str, label_ext: Str, res: *_sg_mtl_shader_func_t) bool = {
     @debug_assert(res.mtl_lib == null_id);
     @debug_assert(res.mtl_func == null_id);
-    err := zeroed id("NSError");
+    err := zeroed NSError;
     ::if(ObjCId);
     mtl_lib: id("MTLLibrary") = if !func.bytecode.ptr.is_null() {
         // TODO: test this!
@@ -714,7 +711,7 @@ fn create_shader_func(mtl: *Impl, func: *Sg.ShaderFunction, label: CStr, label_e
         release(lib_data);
         lib
     } else {
-        src := @objc cls("NSString").stringWithUTF8String(func.source);
+        src := func.source.ns_str();
         options := new "MTLCompileOptions";
         @objc options.setFastMathEnabled(!func.metal_disable_fast_math);
         lib := @objc mtl.device.newLibraryWithSource(src, options = options, error = err&);
@@ -723,15 +720,15 @@ fn create_shader_func(mtl: *Impl, func: *Sg.ShaderFunction, label: CStr, label_e
     };
     if !err.is_nil() {
         _SG_ERROR("METAL_SHADER_CREATION_FAILED");
-        _SG_LOGMSG("METAL_SHADER_COMPILATION_OUTPUT", @objc @as(CStr) UTF8String(@objc err.localizedDescription()));
+        _SG_LOGMSG("METAL_SHADER_COMPILATION_OUTPUT", err.localizedDescription().as_str());
      }
     if(mtl_lib.is_nil(), => return(false));
-    if Sg.SOKOL_DEBUG && !label.is_null() {  // :MsgSendVarArgs
+    if Sg.SOKOL_DEBUG && label != "" {  // :MsgSendVarArgs
         //@debug_assert(label_ext);
         //mtl_lib.label = [NSString stringWithFormat:@"%s.%s", label, label_ext];
     }
-    @debug_assert(!func.entry.is_null());
-    name := @objc cls("NSString").stringWithUTF8String(func.entry);
+    @debug_assert(func.entry != "");
+    name := func.entry.ns_str();
     mtl_func := @objc mtl_lib.newFunctionWithName(name);
     if mtl_func.is_nil() {
         _SG_ERROR("METAL_SHADER_ENTRY_NOT_FOUND");
@@ -798,7 +795,7 @@ fn create(mtl: *Impl, shd: *Sg.Shader.T, desc: *Sg.Shader.Desc) Sg.ResourceState
     }
 
     
-    has :: fn(func) => !func.bytecode.ptr.is_null() || !func.source.is_null();
+    has :: fn(func) => func.bytecode != "" || func.source != "";
     // create metal library and function objects
     shd_valid := true
         && (!has(desc.vertex_func&)   || mtl.create_shader_func(desc.vertex_func&, desc.label, "vs", shd.mtl.vertex_func&))
@@ -833,7 +830,7 @@ fn create(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipeline
     }
 
     if pip.cmn.compute {
-        err := zeroed id("NSError");
+        err := zeroed NSError;
         cp_desc := new "MTLComputePipelineDescriptor";
         @objc_set(cp_desc) (
             computeFunction = mtl.get_id(shd.mtl.compute_func.mtl_func),
@@ -847,7 +844,7 @@ fn create(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipeline
                 set_immutable(@objc cp_desc.buffers(), mtl_slot);
             }
         }
-        if Sg.SOKOL_DEBUG && !desc.label.is_null() {
+        if Sg.SOKOL_DEBUG && desc.label != "" {
             // :MsgSendVarArgs
             //cp_desc.label = @objc cls("NSString").stringWithFormat(@"%s", desc.label);
         }
@@ -860,7 +857,7 @@ fn create(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipeline
         if mtl_cps.is_nil() {
             @debug_assert(!err.is_nil());
             _SG_ERROR("METAL_CREATE_CPS_FAILED");
-            _SG_LOGMSG("METAL_CREATE_CPS_FAILED", @objc @as(CStr) (@objc err.localizedDescription()).UTF8String());
+            _SG_LOGMSG("METAL_CREATE_CPS_FAILED", err.localizedDescription().as_str());
             return(.FAILED);
         }
         pip.mtl.cps = mtl.add_resource(mtl_cps);
@@ -923,16 +920,16 @@ fn create(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipeline
                 fn NONE()     => ();
             };
         }
-        if Sg.SOKOL_DEBUG && !desc.label.is_null() {  // :MsgSendVarArgs
-            //rp_desc.label = [NSString stringWithFormat:@"%s", desc.label];
+        if Sg.SOKOL_DEBUG && desc.label != "" {
+            @objc rp_desc.setLabel(desc.label.ns_str());
         }
-        err := zeroed id("NSError");
+        err := zeroed NSError;
         mtl_rps := @objc mtl.device.newRenderPipelineStateWithDescriptor(rp_desc, error = err&);
         release(rp_desc);
         if mtl_rps.is_nil() {
             @debug_assert(!err.is_nil());
             _SG_ERROR("METAL_CREATE_RPS_FAILED");
-            _SG_LOGMSG("METAL_CREATE_RPS_FAILED", @objc @as(CStr) (@objc err.localizedDescription()).UTF8String());
+            _SG_LOGMSG("METAL_CREATE_RPS_FAILED", err.localizedDescription().as_str());
             return(.FAILED);
         }
         pip.mtl.rps = mtl.add_resource(mtl_rps);
@@ -961,7 +958,7 @@ fn create(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipeline
                 frontFaceStencil = stencil(desc, desc.stencil.front&),
             );
         }
-        if Sg.SOKOL_DEBUG && !desc.label.is_null() { // :MsgSendVarArgs
+        if Sg.SOKOL_DEBUG && desc.label != "" { // :MsgSendVarArgs
             //ds_desc.label = [NSString stringWithFormat:@"%s.dss", desc.label];
         }
         mtl_dss := @objc mtl.device.newDepthStencilStateWithDescriptor(ds_desc);
@@ -1047,8 +1044,8 @@ fn begin_compute_pass(mtl: *Impl, pass: *Sg.Pass) void = {
         return();
     }
 
-    if Sg.SOKOL_DEBUG && !pass.label.is_null() {
-        @objc mtl.compute_cmd_encoder.setLabel(@objc cls("NSString").stringWithUTF8String(pass.label));
+    if Sg.SOKOL_DEBUG && pass.label != "" {
+        @objc mtl.compute_cmd_encoder.setLabel(pass.label.ns_str());
     }
 }
 
@@ -1194,8 +1191,8 @@ fn begin_render_pass(mtl: *Impl, pass: *Sg.Pass) void = {
         return();
     }
 
-    if Sg.Sg.SOKOL_DEBUG && !pass.label.is_null() {
-        @objc mtl.render_cmd_encoder.setLabel(@objc cls("NSString").stringWithUTF8String(pass.label));
+    if Sg.Sg.SOKOL_DEBUG && pass.label != "" {
+        @objc mtl.render_cmd_encoder.setLabel(pass.label.ns_str());
     }
 }
 
@@ -1583,8 +1580,8 @@ fn update_image(mtl: *Impl, img: *Sg.Image.T, data: *Sg.ImageData) void #once = 
     mtl.copy_image_data(img, mtl_tex, data);
 }
 
-fn push_debug_group(mtl: *Impl, name: CStr) void = {
-    name := @objc cls("NSString").stringWithUTF8String(name);
+fn push_debug_group(mtl: *Impl, name: Str) void = {
+    name := name.ns_str();  // TODO: i always call with constant name, allocate this once?
     @objc mtl.encoder().pushDebugGroup(name);
 }
 
