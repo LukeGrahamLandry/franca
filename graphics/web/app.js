@@ -1,7 +1,7 @@
 // THIS IS UNFINISHED
 
-
-export const add_events = (I, canvas, send) => {
+export const add_events = (canvas, send) => {
+    const I = 0n;  // this is a placeholder for the (web: *Impl) which is patched by send. 
     const removers = [];
     const E = (element, name, f) => {
         element.addEventListener(name, f);
@@ -46,50 +46,64 @@ export const add_events = (I, canvas, send) => {
     event("wheel", (e) => {
         send("scroll_event", I, e.deltaX, e.deltaY);
     });
+    // TODO: this works in chrome but firefox won't send paste to a canvas? 
+    //       doing `E(window, "paste",` works but then you get all not just when the canvas is selected. 
     event("paste", (e) => {
         e.preventDefault();
         let s = (e.clipboardData || window.clipboardData).getData("text");
         s = new TextEncoder().encode(s);
-        send("paste_event", I, s.byteLength, s);
+        send("paste_event", I, s.byteLength, s, 0);
+    });
+    
+    event("dragover", (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+    });
+    event("drop", async (e) => {
+        let files = [...e.dataTransfer.items].filter((it) => it.kind === "file");
+        if (files.length == 0) return; 
+        e.preventDefault();
+        files = await Promise.all(files.map(async (it) => {
+            it = it.getAsFile();
+            return [new TextEncoder().encode(it.name), await it.arrayBuffer()];
+        }));
+        // [(name_len: i64, name: blob, data_len: i64, data: blob)]
+        let size = files.reduce((size, it) => size + 8 + it[0].byteLength + 8 + it[1].byteLength, 0);
+        let buf = new ArrayBuffer(size);
+        let b = new DataView(buf);
+        let off = 0;
+        for (const [name, contents] of files) {
+            b.setBigInt64(off, BigInt(name.byteLength), true); 
+            off += 8;
+            new Uint8Array(buf, off, name.byteLength).set(new Uint8Array(name));
+            off += name.byteLength;
+            b.setBigInt64(off, BigInt(contents.byteLength), true); 
+            off += 8;
+            new Uint8Array(buf, off, contents.byteLength).set(new Uint8Array(contents));
+            off += contents.byteLength;
+        }
+        send("drop_files_event", I, buf.byteLength, new Uint8Array(buf), files.length);
     });
     
     // TODO
     // MOUSE_ENTER, MOUSE_LEAVE,
     // ICONIFIED, RESTORED, FOCUSED, UNFOCUSED, QUIT_REQUESTED,
-    // CLIPBOARD_PASTED, FILES_DROPPED
     
-    return removers;
-}
-
-export const set_icon = () => {
+    const handle_app_request = (data) => {
+        switch (data[0]) {
+            case "set_clipboard_string": {
+                /*await*/ navigator.clipboard.write([new ClipboardItem({ "text/plain": data[1] })]);
+                break
+            }
+            case "get_clipboard_string": {
+                navigator.clipboard.readText().then((s) => {
+                    s = new TextEncoder().encode(s);
+                    send("paste_event", I, s.byteLength, s, 1);
+                });
+            }
+            default: console.error("bad handle_app_request", data);
+        }
+    };
     
-}
-
-export const set_window_title = (cstr) => {
-    
-}
-
-export const get_clipboard_string = () => {
-    
-}
-
-
-export const set_clipboard_string = (cstr) => {
-    
-}
-
-export const lock_mouse = (lock) => {
-    
-}
-
-export const set_mouse_cursor = (cursor) => {
-    
-}
-
-export const toggle_fullscreen = () => {
-    
-}
-
-export const update_cursor = (cursor, shown) => {
-    
+    return [removers, handle_app_request];
 }

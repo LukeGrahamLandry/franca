@@ -7,7 +7,7 @@ if (typeof Worker === "undefined")
 let thread_pool = []
 let running_threads = []
 let doing_test = false;
-const handle = (resolve) => (_msg) => {
+const handle = (resolve, handle_app_request) => (_msg) => {
     const msg = _msg.data;
     switch (msg.tag) {
         case "show": {
@@ -48,6 +48,10 @@ const handle = (resolve) => (_msg) => {
             window.URL.revokeObjectURL(url);
             break;
         }
+        case "handle_app_request": {
+            handle_app_request(msg.data);
+            break;
+        };
         case "ready": break
         // dear google claims you can spawn a worker from a worker but it sure doesn't work so here we are ??
         case "spawn": {
@@ -60,7 +64,7 @@ const handle = (resolve) => (_msg) => {
                     thread_pool.push(w);
                     return;
                 }
-                handle(() => {})(msg);
+                handle(() => {}, handle_app_request)(msg);
             };
             running_threads.push(w);
             w.postMessage({ tag: "start", args: [], child: msg.child, memory: msg.memory });
@@ -145,7 +149,7 @@ const toggle_worker = (resolve) => {
             ...(dbg.length == 0 ? [] : (dbg.includes("-") ? dbg.split(" ") : ["-d", dbg])),
         ];
         worker = get_worker();
-        worker.onmessage = handle(resolve);
+        worker.onmessage = handle(resolve, handle_app_request__);
         let need_canvas = input.includes("graphics/lib.fr");  // :HackyGraphicsDetection
         
         // need to do this extra dance because you can't un-transferControlToOffscreen, 
@@ -169,7 +173,17 @@ const toggle_worker = (resolve) => {
         let surface = canvas.transferControlToOffscreen();
         const send = (handler, ...args) => 
             worker.postMessage({ tag: "event", handler, args });
-        if (need_canvas) removers.push(add_events(0, canvas, send));
+        
+        let handle_app_request = () => console.error("app_request from non-graphics program");
+        if (need_canvas) {
+            let [remove, handle_app_request_] = add_events(canvas, send);
+            removers.push(remove);
+            handle_app_request = handle_app_request_;
+        }
+        
+        function handle_app_request__(data) {
+            handle_app_request(data)
+        }
         
         // TODO: i don't understand why you have to do this but it makes it not suck ass.
         //       (its not the same as multiplying framebuffer_(w/h)

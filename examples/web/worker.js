@@ -187,6 +187,8 @@ export const imports = {
                             const dest = new Uint8Array(Franca.memory.buffer, Number(ptr), result.byteLength);
                             dest.set(new Uint8Array(result));
                             return BigInt(result.byteLength);
+                        } else {
+                            console.log("not an Uint8Array", result);
                         }
                     }
                     
@@ -198,7 +200,19 @@ export const imports = {
         js_performace_now: () => performance.now(),
         js_worker_spawn: (userdata, stack, exit_futex) => {
             self.postMessage({ tag: "spawn", child: [userdata, stack, exit_futex], memory: imports.main.memory });
-        }
+        },
+        js_set_clipboard_string: (ptr, len) => {
+            self.postMessage({ 
+                tag: "handle_app_request", 
+                data: ["set_clipboard_string", get_wasm_string(ptr, len)],
+            });
+        },
+        js_get_clipboard_string: () => {
+            self.postMessage({ 
+                tag: "handle_app_request", 
+                data: ["get_clipboard_string"],
+            });
+        },
     },
 };
 
@@ -302,11 +316,12 @@ function handle(_msg) {
                 canvas.width = clientWidth * devicePixelRatio;
                 canvas.height = clientHeight * devicePixelRatio;
             }
-            if (msg.handler == "paste_event") msg.args[2] = G.push(msg.args[2]); // array buffer
+            let arg2_array = msg.handler == "paste_event" || msg.handler == "drop_files_event";
+            if (arg2_array) msg.args[2] = G.push(msg.args[2]); // array buffer
 
             Franca[msg.handler].apply(Franca, msg.args);
             
-            if (msg.handler == "paste_event") G.release(msg.args[2]);
+            if (arg2_array) G.release(msg.args[2]);
             break;
         }
         case "ready": break

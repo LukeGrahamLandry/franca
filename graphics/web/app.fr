@@ -236,7 +236,13 @@ francaRequestState :: fn(web: *Impl, frame: @FnPtr(web: *Impl) void, francaSaveS
 
 fn run(web: *Impl, desc: *Sapp.Desc) Never = {
     francaRequestState(web, fn(web: *Impl) void = {
-        web.common().frame();
+        sapp := web.common();
+        sapp.frame();
+        if sapp.requests.fake_paste_event {
+            sapp.requests.fake_paste_event = false;
+            js_get_clipboard_string :: fn() void #weak #libc;
+            js_get_clipboard_string();
+        };
     }, francaSaveState);
     unreachable()
 }
@@ -269,12 +275,16 @@ fn set_window_title(web: *Impl, title: Str) void = {
 }
 
 fn get_clipboard_string(web: *Impl) []u8 = {
-    eprintln("TODO: get_clipboard_string (outside paste event)");
+    // :compiler CompileError: WebAssembly.Module(): Compiling function #37:"get_clipboard_string__2543" failed: local.tee[0] expected type i64, found i32.sub of type i32 @+19298
+    if true {
+        panic("don't call get_clipboard_string, frame() reads requests and sends the event");
+    };
     ""
 }
 
 fn set_clipboard_string(web: *Impl, str: Str) void = {
-    eprintln("TODO: set_clipboard_string");
+    js_set_clipboard_string :: fn(ptr: *u8, len: i64) void #weak #libc;
+    js_set_clipboard_string(str.ptr, str.len);
 }
 
 fn lock_mouse(web: *Impl, lock: bool) void = {
@@ -380,16 +390,52 @@ fn scroll_event(web: *Impl, dx: f64, dy: f64) void = {
 }
 
 #export 
-fn paste_event(web: *Impl, length: f64, handle: rawptr) void = {
+fn paste_event(web: *Impl, length: f64, handle: rawptr, fake: bool) void = {
     sapp := web.common();
     @if(!sapp.desc.enable_clipboard) return();
+    buf := read_js_string(handle, length, temp());
+    e := sapp.init_event(.CLIPBOARD_PASTED);
+    e.pasted = buf;
+    e.fake = fake;
+    sapp.event.modifiers = web.modifiers;
+    sapp.call_event(sapp.event&);
+}
+
+// this writes them to the file system at target/drop/<name> so you can use the same file api as native. 
+// TODO: those files are leaked. also they well be stomped if user drops another file with the same name. 
+// TODO: sad how many copies this takes. (event to buffer) -> (maybe between threads) -> (into wasm memory) -> (into MemFile.buf) -> (into user's buf for read)
+#export 
+fn drop_files_event(web: *Impl, length: f64, handle: rawptr, file_count: f64) void = {
+    sapp := web.common();
+    @if(!sapp.desc.enable_dragndrop) return();
+    file_count := file_count.int();
+    buf := read_js_string(handle, length, temp());
+    dir := "target/drop";
+    #use("@/lib/sys/fs.fr");
+    make_dirs_or_crash(dir);
+    names := temp().alloc_init(Str, file_count.int()) { _ |
+        len := buf&.pop_type(i64)[];
+        name := buf.slice(0, len);
+        buf = buf.rest(len);
+        len := buf&.pop_type(i64)[];
+        contents := buf.slice(0, len);
+        buf = buf.rest(len);
+        name := @tfmt("%/%", dir, name);
+        write_entire_file_or_crash(name, contents);
+        name
+    };
+    @debug_assert_eq(buf.len, 0);
+    e := sapp.init_event(.FILES_DROPPED);
+    e.modifiers = web.modifiers;
+    e.drop = names;
+    sapp.call_event(e);
+}
+
+read_js_string :: fn(handle: rawptr, length: f64, a: Alloc) []u8 = {
     length := length.int();
     js_write :: fn(id: rawptr, ptr: *u8, len: i64) i64 #weak #import("libc");
     buf := temp().alloc_uninit(u8, length);
     result := js_write(handle, buf.ptr, length);
-    @if(result != length) return();
-    e := sapp.init_event(.CLIPBOARD_PASTED);
-    e.pasted = buf;
-    sapp.event.modifiers = web.modifiers;
-    sapp.call_event(sapp.event&);
-}
+    @debug_assert_eq(result, length, "read_js_string failed");
+    buf
+};
