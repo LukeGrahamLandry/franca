@@ -1,0 +1,144 @@
+// a trivial window manager for switching between multiple running graphics programs. 
+// CONTROLS: ctrl+(1/2) to cycle active program. 
+// currently only one program has the whole screen at a time. 
+
+State :: @struct {
+    HIGH_DPI :: true;
+    // TODO: wtf??  `Assertion Failed: class Value does not exist` compilation order changes infered name
+    //      aaaaaa my language is so traaaaaash. :( :(
+    xxxxxxxxxx: Sdtx.Self;
+    // children[i].(impl_storage,keycodes,webgpu) are junk. the platform part is only done by the host app. 
+    children: List(*Sapp.Self);
+    i: i64;
+    sg: *Sg.Self;
+    app: *Sapp.Self;
+};
+
+fn on_init(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    a := general_allocator();
+    self.sg = sg;
+    self.app = sapp;
+    self.children = list(a);
+    
+    // TODO: these need to be dynamic eventually. 
+    //       little launchpad program as another demo? 
+    // TODO: for os, each has to have its own controlling thread group so not all die when one panics. 
+    self.add_app("@/examples/mandelbrot_ui.fr");
+    self.add_app("@/examples/gpu/playground.fr");
+    
+    self.xxxxxxxxxx&.setup(
+        sg = sg,
+        allocator = a,
+        fonts = @slice(Sdtx.font.cpc),
+    );
+};
+
+// TODO: be consistant about who has storage for Sg and Sapp. 
+//       Easy'start was trying to be helpful and pass them into the callbacks 
+//       but turns out it's annoying to not have them on your userdata struct anyway 
+//       cause then you have to pass around 3 parameters instead of 1. 
+// TODO: now i need seperation between any config you do in the Desc passed to run() 
+//       and run() taking control of the event loop. 
+//       the desc with callbacks can be a function you export 
+//       so then on examples/os applications can be dlopen and call get_app_desc or whatever. 
+// TODO: update (paste/drop)_enabled on the host
+fn add_app(self: *State, $path: Str) void = {
+    a := general_allocator();
+    app := a.box_zeroed(Sapp.Self);
+    app.events = list(a);  // annoying to reset after temp()
+    user := a.box_zeroed(UserData);
+    // TODO: pass the child app to the callbacks instead of the real one. 
+    //       so can lie about size and where to get swapchain. 
+    instance := a.boxed(Instance, (state = self, app = self.app /*app*/, user = user));
+    UserData :: import(path).State;
+    app.desc.init_cb = fn(it) = {
+        it := Instance.ptr_from_raw(it);
+        it.user.on_init(it.app, it.state.sg);
+    };
+    app.desc.frame_cb = fn(it) = {
+        it := Instance.ptr_from_raw(it);
+        it.user.on_render(it.app, it.state.sg);
+    };
+    app.desc.event_cb = fn(it, e) = {
+        it := Instance.ptr_from_raw(it);
+        
+        if e.type == .RESTORED {  
+            // TODO: do this without it being $const generic over UserData.
+            // programs that only render if changed (i.e. mandelbrot), need to redraw the screen when taking control. 
+            it.user.dirty = true;
+        };
+        it.user.on_event(it.app, e);
+    };
+    Instance :: @struct(state: *State, app: *Sapp.Self, user: *UserData);
+    app.desc.user_data = Instance.raw_from_ptr(instance);
+    app.first_frame = true;
+    self.children&.push(app);
+}
+
+fn on_render(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    child := self.children[self.i];
+    if !child.cleanup_called {
+        if child.first_frame {
+            child.first_frame = false;
+            child.call_init();
+        };
+        
+        // TODO: rn the sapp passed in is the real one so child.requests won't be used anywhere. 
+        //child.requests = sapp.requests;
+        each child.events& { e |
+            child'desc'event_cb(child.desc.user_data, e);
+        };
+        child.events&.clear();
+        child.call_frame();
+        //sapp.requests = child.requests;
+        //if sapp.requests.quit {
+            // TODO: consume requests.quit myself and just quit the one child. 
+            // sapp.requests.quit = false;
+        //};
+    };
+    // TODO: render into a texture and blit it on a portion of the screen. 
+    //       which means having more control over get_swapchain which maybe i can then use to have auto test that draws the first frame and saves to a file.
+    //       when web.is_browser already always draws into a texture so that part is easy perhaps. 
+    //       also have to lie about size/positions in events. 
+    //       then i can have some ui like a tab bar around it. 
+    // TODO: i really don't understand the attachments thing, 
+    //       somehow it's easy to draw on the screen but to draw to a texture 
+    //       you have to bake an attatchments object that does nothing and 
+    //       begin_render_pass has two codepaths that have to overlap. 
+    //       is the whole thing just to avoid wgpuTextureCreateView every frame?
+    //       so that's why sokol could undo attachments being a resource after the sg_view update? 
+};
+
+// TODO: don't keep calling on_render when minimised when running as a standalone program either. 
+//       here it happens naturally that events/renders are only sent to the active program. 
+//       which makes sense, no point rendering. tho sokol does keep sending you frames consistantly
+//       (fallbackTimerFired, etc.), i guess it's bad to randomly pause time but it feels bad that 
+//       the general case is doing extra effort just to burn extra cpu for no reason. 
+//       maybe add Desc.tick_while_iconified as a config option. 
+// TODO: rn this switches self.i part way through so on frames where you switch the events will be split between old and new
+fn on_event(self: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    if event.type == .KEY_DOWN && event.modifiers.get(.control) != 0 {
+        @match(event.key_code) {
+            fn _2() => self.switch_app(1);
+            fn _1() => self.switch_app(-1);
+            @default => ();
+        };
+    };
+    self.children[self.i].events&.push(event[]);
+};
+
+fn switch_app(self: *State, delta: i64) void = {
+    @if(self.children.len <= 1) return();
+    old := self.children[self.i];
+    self.i = self.i.add(delta).add(self.children.len).mod(self.children.len);
+    new := self.children[self.i];
+    
+    e := old.init_event(.ICONIFIED);
+    old'desc'event_cb(old.desc.user_data, e);
+    e := new.init_event(.RESTORED);
+    new'desc'event_cb(new.desc.user_data, e);
+}
+
+#use("@/graphics/lib.fr");
+driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
+main :: fn() void = Easy'start(State);

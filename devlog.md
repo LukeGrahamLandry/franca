@@ -1,4 +1,15 @@
 
+## (Mar 7)
+
+- web drop files and read clipboard. it's really unpleasent the way i have to do the bindings 
+  because there's so many layers. everything has to be in a worker or you can't sync jit big wasm modules 
+  so nothing can talk to html events directly, plus the usual js<->linear memory tediousness. 
+  its so spread out, i need to figure out a way to factor is that doesn't make me hate myself. 
+- tried not precompiling backend+import_c for the webdemo. saves 500kb but then running takes 2 seconds 
+  to jit them. so that needs the system to be persistant so can cache the jitted code, 
+  and for that i want an interface for talking to it that isn't an html input element. 
+- very basic multi-program window manager thingy. more sane now that events/requests are reified so can pass them around. 
+
 ## (Mar 6)
 
 graphics/app
