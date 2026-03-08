@@ -1,4 +1,20 @@
 
+## (Mar 8)
+
+os/kernel
+- problem has to be there's some point you can interrupt inside the syscall sequence 
+  that makes it lose the syscall. that explains both "panic! some sort of corruption is going on" 
+  and the rare hangs (futex). 
+  - happens in vzf,qemu-hvf,qemu-tcg so pretty clearly my bug. `-no_preempt` fixes it. 
+  - had this problem before with the virtio interrupts. 
+  - can it be a race with when i read ICC_IAR1_EL1 somehow? 
+    tried moving that into the asm trampoline, didn't help. 
+  - fixed! don't read ICC_IAR1_EL1 if we're handling a syncronous exception 
+    (which you know based on which slot of the interrupt table was called). 
+    before i was deciding it was a sync exception by checking there was no interrupt ready, 
+    so if there was both syscall+interrupt, and it sent me the syscall first, 
+    it'd process the interrupt then instead. 
+
 ## (Mar 7)
 
 - web drop files and read clipboard. it's really unpleasent the way i have to do the bindings 
@@ -9,6 +25,7 @@
   to jit them. so that needs the system to be persistant so can cache the jitted code, 
   and for that i want an interface for talking to it that isn't an html input element. 
 - very basic multi-program window manager thingy. more sane now that events/requests are reified so can pass them around. 
+- im stupid, fixing basic_libc/walk_dir test on my os was making it die because the next test is catch_signal. 
 
 ## (Mar 6)
 

@@ -1,5 +1,31 @@
 
 driver :: fn(vtable: *ImportVTable) void = {
+    boot_args := "";
+    if cli_args().index_of(fn(it) => it[] == "-append") { i |
+        @assert(i + 1 < cli_args().len(), "usage: -append \"<boot-args>\"");
+        boot_args = cli_args().index(i + 1)[].str();
+    };
+    share_target_dir := cli_args().contains(fn(it) => it[] == "-share");
+    
+    franca := get_executable_path(temp());
+    if cli_args().contains(fn(it) => it[] == "-web") {
+        @assert(!share_target_dir, "only for -vzf");
+        rootfs_hash := import("@/tests/run_tests.fr")'build_web_and_get_hash(franca);
+        args := @ref Str.list(temp());
+        args.push_all(@slice("examples/import_wasm/run.fr", "target/web/target/demo.wasm"));
+        args.push_all(@slice("--", "-rootfs_hash", rootfs_hash));
+        if boot_args != "" {
+            args.push_all(boot_args.split(" ", temp()).items());
+        };
+        args := Subprocess'make_args_for_exec(franca, args.items(), temp());
+        Subprocess'become(args[0], args);
+    };
+    if cli_args().contains(fn(it) => it[] == "-user") {
+        @assert(!share_target_dir, "only for -vzf");
+        args := Subprocess'make_args_for_exec(franca, @slice("examples/os/host/user.fr", "-append", boot_args), temp());
+        Subprocess'become(args[0], args);
+    };
+    
     start := timestamp();
     kernel_elf := "";
     user_elf := "";
@@ -41,16 +67,18 @@ driver :: fn(vtable: *ImportVTable) void = {
         @assert_eq(query_current_os(), .macos, "can't use Virtualization.Framework, try -qemu instead");
         args := Str.list(temp());
         args&.push(vzf_out);
-        args&.push_all(@slice("-kernel", output, "-share", "Host=target"));
+        args&.push_all(@slice("-kernel", output));
+        if share_target_dir {
+            args&.push_all(@slice("-share", "Host=target"));
+        };
         if graphics {
             args&.push("-graphics");
         };
         args&.push("-smp");
         args&.push(@tfmt("%", cores));
-        if cli_args().index_of(fn(it) => it[] == "-append") { i |
-            @assert(i + 1 < cli_args().len(), "usage: -append \"<boot-args>\"");
+        if boot_args != "" {
             args&.push("-append");
-            args&.push(cli_args().index(i + 1)[].str());
+            args&.push(boot_args);
         };
         sh(args.items());
         return();
@@ -60,6 +88,7 @@ driver :: fn(vtable: *ImportVTable) void = {
         @if(!hush) @eprintln(">>> wrote to %; (run with -qemu to run the os as well)", output);
         return();
     };
+    @assert(!share_target_dir, "only for -vzf");
     @if(!hush) @if(!graphics) eprintln("add the -graphics argument if you want more than just the console");
     @if(!hush) eprintln("running...   (to turn it off, ctrl-a then press x)");
     // TODO: on linux it would be friendly to use `-accel kvm` but that doesn't work on orbstack which is the main thing i use
@@ -111,6 +140,7 @@ make_build_options :: fn(vtable: *ImportVTable) *BuildOptions = {
 compile_kernel :: fn(vtable: *ImportVTable) []u8 = {
     env: TargetEnv = (arch = .aarch64, os = .linux);
     src := "#include_std(\"lib/core.fr\");#include_std(\"examples/os/kernel/start.fr\");";
+    @debug_assert(!cli_args().contains(fn(it) => it[] == "-no-preempt"), "no_preempt want underscore not dash");
     no_preempt := cli_args().contains(fn(it) => it[] == "-no_preempt");
     @if(no_preempt) @eprintln("note: NO_PREEMPT is a debugging tool. not all programs will work.");
     src := @tfmt("%;NO_PREEMPT :: %;", src, no_preempt);
@@ -422,3 +452,5 @@ fn start_thread_output(in: ~I, out: ~O, callee: @FnPtr(in: I) Deref(O)) *Thread 
         general_allocator().dealloc_one(IO, io);
     }, io)
 }
+
+Subprocess :: import("@/lib/sys/subprocess.fr");

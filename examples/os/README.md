@@ -4,7 +4,7 @@ currently it's good enough to run the franca compiler on qemu-system-aarch64's v
 it also runs doom (i don't have a keyboard driver yet so just the intro render)
 
 ```
-franca examples/os/build.fr -vzf -append "spawn doom;" -fetch-doom -smp 2 -graphics
+franca examples/os/build.fr -vzf -append "spawn doom;" -fetch-doom -smp 2 -graphics -share
 ```
 
 Many new operating systems exist because their authors have 

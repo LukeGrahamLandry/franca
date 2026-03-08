@@ -1,3 +1,4 @@
+- get rid of the unused code in examples/chess/uci.fr
 - :SLOW? did i seriously posix_getdents each import()? thats not acceptable for a feature i can't even use in the compiler because the bootstrap compiler doesn't have it. 
 - is my baking robust against dlsym returning the same non-null pointer for multiple symbols?
 - finish examples/os spawn on host/web. 

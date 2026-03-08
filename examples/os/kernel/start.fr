@@ -7,6 +7,7 @@ Kernel :: @struct {
     physical: Physical;
     // for now i always increase the virtual addresses being handed out 
     // so you can tell which address space a pointer is in for debugging. 
+    // (i also only do one address space so the heuristic is yes but that's a separate issue)
     next_vaddr: i64;
     tasks: Array(Task, 16);
     next_task_to_run: OnePerCore(i64);
@@ -318,10 +319,16 @@ init_interrupt_vector :: fn() void #use(Arm) = {
     // each slot of the InterruptVector is limited to 32 instructions, 
     // just branch to a seperate function where the size doesn't matter. 
     int_callee := @as(rawptr) interrupt_trampoline;
-    each interrupt_handlers { it |
-        // TODO: tell it which one this is somehow
-        src := u32.raw_from_ptr(it.index(0));
-        it[0] = b(ptr_diff(src, int_callee) / 4, 0);
+    enumerate interrupt_handlers { i, it |
+        // pass 1 bit of information to interrupt_trampoline in the carry flag 
+        // (because can't stomp any of the user's registers yet)
+        it[0] = @if(i.mod(4) == 0, {  // is syncronus exception
+            cmp_im(.X64, 31, 0, 0) // set carry
+        }, {
+            cmn_im(.X64, 31, 0, 0) // clear carry
+        });
+        src := u32.raw_from_ptr(it.index(1));
+        it[1] = b(ptr_diff(src, int_callee) / 4, 0);
         clear_cache(src, src.offset(128));
     };
     
@@ -382,34 +389,45 @@ interrupt_trampoline_code :: {
         off := r * 2;
         emit(stp_so(.X64, a, b, sp, @as(i7) off));
     };
-    emit(add_im(.X64, x0, sp, 0, 0));  
     
-    // since syscall_func never returns, it never unwinds its stack frame, so manually reset sp at the beginning. 
-    // (extra needed now that sp_el1 stores the task while in userspace)
-    off := Task.offset_of(.kernel_sp) / 8;
-    @debug_assert_lt(off, 1.shift_left(12));
-    emit(ldr_uo(.X64, x1, x0, off));
-    emit(add_im(.X64, sp, x1, 0, 0));
+    // without this extra dance (if you decide interrupt vs sync based on reading iar1
+    // instead of table entry) you can lose a syscall if an interrupt becomes available at the same time. 
+    // carry flag is set by the code directly in the init_interrupt_vector before jumping here. 
+    emit(movz(.X64, x1, Gic.null_interrupt_id, .Left0));
+    emit(b_cond(2, .HS));  // jump if carry set (= don't read interrupt reg if it's a sync exeception)
+    /**/emit(mrs(x1, .ICC_IAR1_EL1));  // not restored
     
-    @assert_lt(SavedRegisters.offset_of(.fpr) / 16 + 32, 1.shift_left(6));
-    range(0, 16) { r |
-        a, b := (r*2, r*2+1);
-        off := r * 2 + SavedRegisters.offset_of(.fpr) / 16;
-        emit(f_stp_so(FType.Q128, a, b, x0, @as(i7) off));
-    };
-    
-    // save special registers
-    emit(mrs(x1, .ELR_EL1)); 
+    emit(mrs(x4, .ESR_EL1));  // not restored
+    emit(mrs(x5, .FAR_EL1));  // not restored 
+    emit(mrs(x6, .ELR_EL1)); 
     emit(mrs(x2, .SPSR_EL1)); 
     emit(mrs(x3, .SP_EL0)); 
     off := SavedRegisters.offset_of(.elr);
     @debug_assert_eq(off, SavedRegisters.offset_of(.spsr) - 8);
     off /= 8;
-    emit(stp_so(.X64, x1, x2, x0, @as(i7) off));
+    emit(stp_so(.X64, x6, x2, sp, @as(i7) off));
     @debug_assert_eq(SavedRegisters.offset_of(.gpr), 0);
-    emit(str_uo(.X64, x3, x0, @as(i7) sp));
+    emit(str_uo(.X64, x3, sp, @as(i7) sp));
+    off := SavedRegisters.offset_of(.esr);
+    @debug_assert_eq(off, SavedRegisters.offset_of(.far) - 8);
+    off /= 8;
+    emit(stp_so(.X64, x4, x5, sp, @as(i7) off));
     
-    // call syscall_func(task = x0)
+    @assert_lt(SavedRegisters.offset_of(.fpr) / 16 + 32, 1.shift_left(6));
+    range(0, 16) { r |
+        a, b := (r*2, r*2+1);
+        off := r * 2 + SavedRegisters.offset_of(.fpr) / 16;
+        emit(f_stp_so(FType.Q128, a, b, sp, @as(i7) off));
+    };
+    
+    // sp_el1 stores the task while in userspace, but now we need memory for syscall_func's frame.
+    emit(add_im(.X64, x0, sp, 0, 0));  
+    off := Task.offset_of(.kernel_sp) / 8;
+    @debug_assert_lt(off, 1.shift_left(12));
+    emit(ldr_uo(.X64, x2, sp, off));
+    emit(add_im(.X64, sp, x2, 0, 0));
+    
+    // call syscall_func(task = x0, intid = x1)
     emit(arm_nop);  // :patch
     @debug_assert_eq(out.items().index_of(arm_nop).unwrap(), out.len - 1, "patch must be first nop");
     out.items()
@@ -494,7 +512,10 @@ choose_task_to_run :: fn() *Task = {
     now := i64.sys_get(.CNTVCT_EL0);
     range(0, cap) { _ |
         task := kernel.tasks&[i[]]&;
-        i[] = i[].add(1).mod(cap);
+        i[] += 1;
+        if i[] >= cap {
+            i[] = 0;
+        };
         if task.futex_wait == 0 && task.sleep_until.ule(now) && Task.State.cas(task.state&, .Runnable, .Running) == .Runnable {
             return task;
         };
@@ -566,7 +587,7 @@ Task :: @struct {
 
 SavedRegisters :: MContext;
 // for now im using the same handler for every slot of the InterruptVector
-syscall_func :: fn(task: *Task) void = {
+syscall_func :: fn(task: *Task, intid: i64) void = {
     return :: ();  // must do it via return_to_user
     
     prev := Task.State.cas(task.state&, .Running, .Suspended);
@@ -575,16 +596,7 @@ syscall_func :: fn(task: *Task) void = {
     @if(!on_this_core) kpanic("running on other core");
     args := task.mcontext&;
     
-    // these being in SavedRegisters isn't important because i don't restore them 
-    // but it seems convient to have one context thing you can pass around.
-    // TODO: if i keep these do it in the assembly part instead of as a bunch of calls here. 
-    args.esr = i64.sys_get(.ESR_EL1);
-    args.far = i64.sys_get(.FAR_EL1);
-    intid := i64.sys_get(.ICC_IAR1_EL1).bit_and(0xfff);
-    intid0 := i64.sys_get(.ICC_IAR0_EL1).bit_and(0xfff);
-    if intid0 != Gic.null_interrupt_id {
-        kpanic("intid0");
-    };
+    intid := intid.bit_and(0xfff);
     
     if intid == timer_irq {
         reset_countdown();  // BEFORE

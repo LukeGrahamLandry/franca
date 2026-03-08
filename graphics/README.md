@@ -7,6 +7,8 @@ Various things useful for creating cross platform graphical applications.
 - Some example programs can be found in the franca examples folder. 
   - terminal, farm_game, mandebrot_ui, geo, app_events, depth_test
 
+web demo: <https://franca.lukegrahamlandry.ca> (franca compiler playground using examples/os/host/web.fr)
+
 ## Adapted from https://github.com/floooh/sokol
 
 - gfx: 3D-API abstraction layer (platforms: Metal, wip: WebGPU)
@@ -23,26 +25,28 @@ for now what I have already is enough to draw some pretty pictures.
 - shaders: translate a subset of franca to MSL/WGSL
 - vec: 2/3/4-D linear algebra
 - easy: reduce boilerplate for small example programs
-- replay: record system events to a file and later replay that run of your program
+- replay: record system events to a file and later replay that run of your program (WIP)
 
 ## Changes from Sokol
 
 ### app
 
+- batch events so they're sent at a consistant time in the frame. 
 - removed builtin default app icon
 - removed limits on paste/drop
 - (macos) no dependency on an objective-c compiler
 - (macos) wait until after setActivationPolicy to set the startup icon/fullscreen (otherwise it doesn't work)
-- (macos) use CAMetalLayer directly (instead of MTKView)
 - (macos) removed ios and opengl support
 - (web) no dependency on emscripten
-- glue code for initializing webgpu native (dawn)
-  - convergent evolution: upstream has this now too
+- convergent evolution
+  - (macos) use CAMetalLayer directly (instead of MTKView)
+  - glue code for initializing webgpu native (dawn)
 - UNFINISHED
   - linux, windows
   - don't have timing stuff (frame_duration)
   - (macos) msaa
-  - (web) rest of the owl
+  - (web) fullscreen, mouse show/lock/cursor, icon, window title
+  - (web) seems random what things work in what browsers
 
 ### gfx
 
@@ -53,17 +57,18 @@ for now what I have already is enough to draw some pretty pictures.
 - (macos) no dependency on an objective-c compiler
 - (macos) removed ios, opengl, and macos <13 support
 - (web) no dependency on emscripten
+  - instead uses my own very hacky incomplete js bindings. 
+    it's a win for me not needing to install emscripten but perhaps a net loss for anyone else.
 - UNFINISHED
   - linux, windows
-  - webgpu
   - logging and trace hooks don't work
   - init(Attachments) 
-  - compute shaders
   - validate Shader.Desc `_sg_validate_slot_bits`
   - shutdown (dealloc/deinit/fail resources)
   - clean up defaults
   - append/update buffer/image
   - (macos) im not setting labels
+  - shader translation for wgsl and rosetta's old verion of msl is less finished than for new msl.
 
 ### debugtext
 
