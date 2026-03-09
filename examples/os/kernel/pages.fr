@@ -1,56 +1,49 @@
 
+// free pages are not already zeroed
 Physical :: @struct {
     remaining: []u8;
     free: *Free;
     page_size: i64;
+    available: i64;
     // TODO: have a scheme that represents contiguous chunks better
     Free :: @rec @struct(link: *Free);
 };
 
-fn map(self: *Physical, n: i64) *Physical.Free = {
-    ::ptr_utils(@type self.free[]);
-    if self.free.is_null() {
-        self.free = self.new();
-    };
-    
-    head := self.free;
-    prev := head;
-    while => n > 0 && !self.free.is_null() {
-        prev = self.free;
-        self.free = self.free.link;
-        n -= 1;
-    };
-    while => n > 0 {
-        it := self.new();
-        prev.link = it;
-        prev = it;
-        n -= 1;
-    };
-    prev.link = zeroed(*Physical.Free);
-    head
+fn map_one(self: *Physical) *Physical.Free = {
+    buf := self.map_contiguous(self.page_size, 1);
+    bit_cast_unchecked(*u8, *Physical.Free, buf.ptr)
 }
 
 fn unmap_one(self: *Physical, it: *Physical.Free) void = {
+    self.available += 1;
+    if identical(self.remaining.ptr, bit_cast_unchecked(@type it, *u8, it).offset(self.page_size)) {
+        // kinda dumb, this is basically unreachable
+        self.remaining.len += self.page_size;
+        self.remaining.ptr = self.remaining.ptr.offset(-self.page_size);
+        return();
+    };
     it.link = self.free;
     self.free = it;
 }
 
-fn new(self: *Physical) *Physical.Free #inline = {
-    buf := self.map_contiguous(self.page_size, 1);
-    it := bit_cast_unchecked(*u8, *Physical.Free, buf.ptr);
-    it.link = zeroed(*Physical.Free);
-    it
-}
-
-// TODO: when called directly (not from new()), this should reuse memory
 fn map_contiguous(self: *Physical, n: i64, align: i64) []u8 #inline = {
-    if align > self.page_size {
-        base := u8.int_from_ptr(self.remaining.ptr);
-        waste := base.ualign_to(align) - base;
-        self.remaining = self.remaining.rest(waste);  // TODO: add the gap to .free
+    @if(align > self.page_size) kpanic("map_contiguous over align");
+    @if(n != n.align_to(self.page_size)) kpanic("map_contiguous unaligned");
+    
+    page_count := n / self.page_size;
+    if self.available < page_count {
+        space: AddressSpace = (root = sys_get(*TranslationTable, .TTBR0_EL1));
+        gc_page_tables(space&);
+    };
+    self.available -= page_count;
+    
+    ::ptr_utils(@type self.free[]);
+    if page_count == 1 && !self.free.is_null() && align <= self.page_size {
+        prev := self.free;
+        self.free = self.free.link;
+        return bit_cast_unchecked(*Physical.Free, *u8, prev).slice(n);
     };
     
-    n = n.align_to(self.page_size);
     @if(self.remaining.len < n) kpanic("oom");
     mem := self.remaining.slice(0, n);
     self.remaining = self.remaining.rest(n);
@@ -79,16 +72,19 @@ fn vmap_reserve(addrs: *AddressSpace, page_count: i64) i64 = {
 
 // :SLOW
 fn vunmap(addrs: *AddressSpace, vaddr: i64, page_count: i64) void = {
+    @if(vaddr + page_count*kernel.page_size > kernel.next_vaddr) kpanic("vunmap past next_vaddr");
+    
     range(0, page_count) { _ |
         pte := index_page_table(addrs, vaddr);
         @switch(pte.map.get(.tag)) {
-            @case(0b00) => if pte.res.repr == 0 {
-                kpanic("unmapped a page that was already unmapped");  // todo: just log
+            @case(0b00) => {
+                // todo: just log. passing junk to munmap shouldn't crash the kernel
+                @if(pte.res.repr == 0) kpanic("unmapped a page that was already unmapped");
+                @if(pte.res.get(.fixed) != 0) kpanic("unmapped a fixed page");
             };
             @case(0b11) => {
                 phys := get_pointer(kernel.page_index_bits, pte[], *Physical.Free);
-                phys.link = kernel.physical.free;
-                kernel.physical.free = phys;
+                kernel.physical&.unmap_one(phys);
             };
             @default => kpanic("invalid page table");
         };
@@ -130,6 +126,37 @@ fn vmap_one(addrs: *AddressSpace, vaddr: i64, phys: *Physical.Free, user: bool, 
     }
 }
 
+// :SLOW
+// TODO: at least don't look before the first next_vaddr or after the current next_vaddr
+// TODO: this doesn't solve fragmentation tho, one page will keep alive a whole page table 
+//       so eventually i might have to give up on never reusing virtual addresses. 
+fn gc_page_tables(space: *AddressSpace) void = {
+    prev := kernel.physical.available;
+    _ := iter(space, space.root, kernel.page_index_bits.len - 1);
+    kprint_label("pages reclaimed = ", kernel.physical.available - prev);
+    iter :: fn(space: *AddressSpace, tt: *TranslationTable, level: i64) i64 = {
+        empty := 0;
+        each tt.entries() { e |
+            if level > 1 && e.map.get(.tag) == 0b11 {
+                next := get_pointer(kernel.page_index_bits, e[], *TranslationTable);
+                if iter(space, next, level - 1) == next.entries().len() {
+                    // all children have been unmapped so this table is not needed anymore
+                    e.map.repr = 0;
+                    // not vunmap; page tables are in physical memory. leave them identity mapped. 
+                    phys := bit_cast_unchecked(*TranslationTable, *Physical.Free, next);
+                    kernel.physical&.unmap_one(phys);
+                    // TODO: wasteful that i forget that page is already all zeroes 
+                    //       (because recursively removed entries) so will rezero it when reused. 
+                };
+            };
+            empty += int(e.map.repr == 0);
+        }; 
+        empty
+    };
+}
+
+// lazily allocates enough page tables to get a leaf node for vaddr. 
+// TODO: since vmap_reserve calls this for every page the page tables themselves aren't sparse most of the time.
 fn index_page_table(addrs: *AddressSpace, vaddr: i64) *PTE = {
     bits := kernel.page_index_bits;
     level := bits.len - 1;
@@ -139,19 +166,22 @@ fn index_page_table(addrs: *AddressSpace, vaddr: i64) *PTE = {
         L := make_level_index(bits[level] - 1, bits[level - 1]);
         
         i := L.get(vaddr);
-        e := tt.entries&[i].map;
+        entry := tt.entries().index(i);
+        e := entry.map;
         if e.repr == 0 {
-            //table_size := 1.shift_left(L.len);  // TODO: use this to map the right amount
+            // mark it used so if this is the first entry used and we run out of memory trying to allocate
+            // the next page table, it isn't eaten by gc_page_tables.  
+            entry.res&.set(.fixed, 1);  
+            
             // this is the first page on this chunk, need to make a next level table for it. 
-            mem := kernel.physical&.map_contiguous(size_of(TranslationTable), size_of(TranslationTable));
-            mem.set_zeroed();
+            mem := allocate_translation_table();
             // stored address points to the next level of table
-            attr: PageTableEntry = (repr = u8.int_from_ptr(mem.ptr).bitcast());
+            attr: PageTableEntry = (repr = TranslationTable.int_from_ptr(mem).bitcast());
             attr&.set(.tag, 0b11);  // table entry
             // attrs don't matter here, set for individual pages latter. 
     
             e = attr;
-            tt.entries&[i].map = e;
+            entry.map = e;
         } else {
             if e.get(.tag) != 0b11 {
                 kpanic("L2 table not a table");
@@ -163,7 +193,7 @@ fn index_page_table(addrs: *AddressSpace, vaddr: i64) *PTE = {
     };
     L := make_level_index(bits[level] - 1, bits[level - 1]);
     i := L.get(vaddr);
-    tt.entries&[i]&
+    tt.entries().index(i)
 }
 
 // TODO: does doing this from vunmap,vmap_reserve,map_identity matter? it makes qemu -accel tcg much slower
@@ -197,7 +227,7 @@ fn commit_if_reserved(mem: *AddressSpace, vaddr: i64, pte: *PTE) bool = {
     new := pte.res.get(.tag) == 0b00 && pte.res.get(.reserved) == 0b1;
     if new {
         pte.res.repr = 0;  // TODO: store permissions there and pass them to vmap_one
-        vmap_one(mem, vaddr, kernel.physical&.map(1), true, true, false, true);
+        vmap_one(mem, vaddr, kernel.physical&.map_one(), true, true, false, true);
         clear_tlb(vaddr);
     };
     new
@@ -205,7 +235,10 @@ fn commit_if_reserved(mem: *AddressSpace, vaddr: i64, pte: *PTE) bool = {
 
 // the table controls the range [vbase..+step*8192].
 // step depends on its level in the tree, vbase depends on its position in the tree. 
-TranslationTable :: @struct(entries: Array(PTE, 8192));
+TranslationTable :: @struct(/*Array(PTE, N)*/);
+fn entries(self: *TranslationTable) []PTE = {
+    bit_cast_unchecked(*TranslationTable, *PTE, self).slice(kernel.page_size.udiv(size_of(PTE)))
+}
 
 BitRange :: @struct(off: i64, len: i64);
 fn get(range: BitRange, addr: i64) i64 = {
@@ -229,17 +262,20 @@ fn map_identity(addrs: *AddressSpace, mem: []u8, user: bool, pxn: bool, device: 
     };
 }
 
+allocate_translation_table :: fn() *TranslationTable = {
+    // almost always of the time the table size = the page size.
+    // this only wastes a tiny amount space for the top most level when using 64kb pages, doesn't matter. 
+    mem := kernel.physical&.map_contiguous(kernel.page_size, kernel.page_size);
+    mem.set_zeroed();
+    bit_cast_unchecked(*u8, *TranslationTable, mem.ptr)
+}
+
 setup_virtual_memory :: fn(ram: []u8, pci: ?Pci.MemoryRegion) *TranslationTable = {
     page_size := kernel.page_size;
     
     // translation tables must be aligned to the size of the table.
-    mem: AddressSpace = (root = {
-        // TODO: not all page tables are full size when not using 64kb pages
-        mem := kernel.physical&.map_contiguous(size_of(TranslationTable), size_of(TranslationTable));
-        mem.set_zeroed();
-        bit_cast_unchecked(*u8, *TranslationTable, mem.ptr)
-    });
-    tt := mem.root.entries&.items();
+    mem: AddressSpace = (root = allocate_translation_table());
+    tt := mem.root.entries();
     
     // map everything below ram as device memory for kernel
     map_identity(mem&, u8.ptr_from_int(0).slice(u8.int_from_ptr(ram.ptr)), false, true, true);
@@ -277,7 +313,9 @@ setup_virtual_memory :: fn(ram: []u8, pci: ?Pci.MemoryRegion) *TranslationTable 
     // unmap the low addresses to make sure null pointers fault. 
     unmapped := 1.shift_left(20);
     range(0, unmapped / page_size) { i |
-        index_page_table(mem&, i * page_size)[].map.repr = 0;
+        e := index_page_table(mem&, i * page_size);
+        e.res.repr = 0;
+        e.res&.set(.fixed, 1);
     };
     
     set_mmu_reg(tt);
@@ -468,7 +506,8 @@ PageTableEntry :: @bit_fields(
 PagePlaceholder :: @bit_fields(
     tag := 2,
     reserved := 1,
-    _ := 61,
+    fixed := 1,     // ie. low unmapped for fault, never removed by gc_page_tables
+    _ := 60,
 );
 
 #use("@/lib/bit_fields.fr");

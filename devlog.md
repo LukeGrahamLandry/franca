@@ -14,6 +14,19 @@ os/kernel
     before i was deciding it was a sync exception by checking there was no interrupt ready, 
     so if there was both syscall+interrupt, and it sent me the syscall first, 
     it'd process the interrupt then instead. 
+- oom if spam_mmap more iterations
+  - since i always advance next_vaddr, have to go back and free page tables 
+    once all children are unmapped or eventually all the memory is on old page tables. 
+  - they do have to be contigous tho and rn im always allocating 8192 slots per page table 
+    (which is what you need for 64k granule) but free list of pages not tracking contigous-ness,
+    so i can only use from the Physical.remaining block. but actually, the size needed for 
+    one page table is always `<=` the page size, so if i do that and waste less memory, 
+    i also don't have to deal with map_contigous of multiple pages after initialization. 
+  - map(Physical) only ever wants one page since that i reserve on fault.
+  - woes with "unmapped a page that was already unmapped" after gc_page_tables. 
+    problem is in vmap_reserve you might need to ask for a new page table 
+    and if that's when you run out of memory, while walking down the chain 
+    in index_page_table before setting any to nonzero, it will be stolen out from under you. 
 
 ## (Mar 7)
 
