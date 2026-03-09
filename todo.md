@@ -11,7 +11,6 @@ TODO: examples/lambda.fr.on_render.stack isn't thread safe if i want to have mul
 TODO: not passing around macho_loader.OUTPUT is lazy
 TODO: const destructure. `a, b :: foo()` for doom.IWAD
 TODO: either use import_objc_value.CLASS or get rid of it 
-TODO: hopefully this fixes explicit_void_macro_target with ss := @static @as(S) () but that probably won't compile because there's no 1 arg @as
 TODO: i want `(?T).None` instead of `@as(?T) (.None)`
 TODO: document the mistake of `f :: fn() = (); a := @static f; a[]();` 
       (you need to explicitly @as(AsFnPtr(f)) or you get a funcid that can't be called at runtime)

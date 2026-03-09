@@ -12,6 +12,10 @@
 - rv: fix same problem as qbe did for arm in https://c9x.me/git/qbe.git/commit/?id=73f0accb45f80d697e054ee95e9c82adbc512c99
   fixes the faulting wuffs c tests.
 - change @static to emphasize the value over the type and be explicit if you want it zeroed. 
+- bit of redundant code: all_zeroes(Values), is_tag_only. more `u`div_mod. 
+  - make the builtin opaque_index types based on struct instead of enum so can't @as them away. 
+      - annoying for #redirect on emit_c but i kinda should get rid of #redirect anyway so i don't care that much. 
+      it's useful internally for things like the import_module hack but its too error prone to expose with easy syntax. 
 
 ## (Mar 8)
 

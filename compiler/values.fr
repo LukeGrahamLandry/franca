@@ -76,7 +76,7 @@ fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type, loc: Span,
         unreachable()  // TODO: this shouldn't be needed
     };
     
-    if value.all_zeroes() {
+    if value.is_all_zeroes() {
         finish(template = (Zeroes = value.len()), loc = loc);
     };
     
@@ -611,29 +611,22 @@ fn init_fixed_types(self: *SelfHosted) void = {
     self.opaque_index(.Symbol);
     
     opaque_index :: fn(self: *SelfHosted, name: Flag) void = {
-        //self.intern_type(Struct = (
-        //    fields = {
-        //        f := Field.list(self.get_alloc());
-        //        f&.push(
-        //            name = Flag._.ident(),
-        //            ty = from_index(10),
-        //            nullable_tag = zeroed(*Annotations),
-        //            default = zeroed(Var),
-        //            byte_offset = 0,
-        //        );
-        //        f.as_raw()
-        //    },
-        //    layout_done = true,
-        //    is_tuple = false,
-        //    is_union = false,
-        //    scope = NOSCOPE,
-        //));
-        // TODO: the struct version would make more sense but then i have to take out 
-        //       a few places where i do @as(u32)FuncId, etc. 
-        self.intern_type(Enum = (
-            fields = empty(),
-            raw = from_index(10),
-            sequential = false,
+        self.intern_type(Struct = (
+            fields = {
+                f := Field.list(self.get_alloc());
+                f&.push(
+                    name = Flag._.ident(),
+                    ty = from_index(10),
+                    nullable_tag = zeroed(*Annotations),
+                    default = zeroed(Var),
+                    byte_offset = 0,
+                );
+                f.as_raw()
+            },
+            layout_done = true,
+            is_tuple = false,
+            is_union = false,
+            scope = NOSCOPE,
         ));
     };
 }
@@ -644,7 +637,6 @@ fn get_info_is_ready(self: *SelfHosted, ty: Type) bool = {
     old.is_sized 
 }
 
-:: as_ref(TypeMeta);
 // You can't call log_type in here (like in the debug_asserts) because log_type calls this and you'll get stuck recursing!
 fn get_info(self: *SelfHosted, ty_original: Type) *TypeMeta #inline = {
     // there are a lot of Enum / Placeholder -> Named which always have the same repr. 
@@ -924,25 +916,6 @@ AddressSpace :: @struct {
     }
 };
 
-fn all_zeroes(value: *Values) bool = 
-    (value.is(.Small) && value.Small._0 == 0) || value.bytes().all_zeroes();
-
-fn all_zeroes(b: []u8) bool = {
-    for b { b |
-        if(b != 0, => return(false));
-    };
-    true
-}
-
-fn is_tag_only(self: *SelfHosted, t: *TypeInfo.get_variant_type(.Tagged)) bool = {
-    each t.cases { case | 
-        if case._1 != void {  // :get_or_create_type
-            return(false);
-        };
-    };
-    true
-}
-
 fn repr_transparent(self: *SelfHosted, it: *TypeInfo.get_variant_type(.Struct)) ?Type = {
     @switch(it.fields.len) {
         @case(0) => (Some = void); // :get_or_create_type
@@ -986,7 +959,7 @@ fn load_store_op(self: *SelfHosted, ty: Type) Ty(Qbe.O, Qbe.Cls, Qbe.O) = @match
     fn Enum(it)  => self.load_store_op(it.raw);
     fn Bool()    => (.loadub, .Kw, .storeb);
     fn Tagged(it) => {
-        if self.is_tag_only(it) {
+        if self.get_info(ty)[].stride_bytes == 8 {  // tag=i64 so all payloads are void
             return(.load, .Kl, .storel);
         };
         (.nop, .Ke, .Oxxx)
