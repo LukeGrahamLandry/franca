@@ -1,7 +1,9 @@
 // This is a test of examples: elf_loader/macho_loader and dump_elf/dump_macho. 
 // TODO: for now it mostly tests the native target (not cross compiling)
 
-driver :: fn() void = {
+driver :: fn(_: *ImportVTable) void = {
+    @if(tls(.deny_syscalls)[]) return(eprintln("SKIP: examples/os can't use elf_loader standalone because it's strict about how callstacks are allocated"));
+
     macos := query_current_os() == .macos;
     loader := @if(macos, "examples/macho_loader.fr", "examples/elf_loader.fr");
     dump := @if(macos, "examples/dump_macho.fr", "examples/dump_elf.fr");
@@ -11,10 +13,8 @@ driver :: fn() void = {
     
     {  // === dynamic .fr ===
     sh(@slice(franca, "examples/default_driver.fr", "build", "examples/toy/hello2.fr", "-o", exe&.s_name()));
-    if query_current_arch() != .rv64 {
         a := sh(@slice(franca, loader, exe&.s_name()));
         @assert_eq(a, "Hello World!\n");
-    }
     text := sh(@slice(franca, dump, exe&.s_name()));
     if macos {
         @assert(!text.contains("imports_count = 0") && text.contains(") _write") && text.contains(") _exit"));
@@ -26,7 +26,7 @@ driver :: fn() void = {
     {  // === static .fr ===
         sh(@slice(franca, "examples/default_driver.fr", "build", "examples/toy/hello2.fr", "-o", exe&.s_name(), 
             "-syscalls", "-os", "linux"));
-        if !macos  && query_current_arch() != .rv64 {
+        if !macos {
             a := sh(@slice(franca, loader, exe&.s_name()));
             @assert_eq(a, "Hello World!\n");
         };
@@ -34,9 +34,6 @@ driver :: fn() void = {
         @assert(!text.contains("Interp"), "expected static executable:\n%", text);
     };
     
-    if query_current_arch() == .rv64 {
-        return();
-    };
     // === static .fr ===
     // this checks that do_relocations_static_linux works with skew != 0 (on my loader that assumes PIC)
     sh(@slice(franca, "examples/default_driver.fr", "build", "examples/toy/reloc.fr", "-o", exe&.s_name(), "-syscalls"));

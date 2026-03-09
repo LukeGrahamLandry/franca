@@ -23,6 +23,7 @@ rv64_emitfn :: fn(f: *Qbe.Fn) []Ty(Fixup, Qbe.Sym) = {
 }
 
 rv_scratch_int :: TMP(RvReg.T6);
+rv_scratch_float :: TMP(RvReg.FT11);
 
 // TODO: stop calling getcon here, it might reallocate when loading a cache file which seems sad  
 emit_the_code :: fn(e: *EmitRv) void = {
@@ -162,7 +163,7 @@ fixmem :: fn(e: *EmitRv, pr: *Qbe.Ref) void = {
     r := pr[];
     if rtype(r) == .RSlot {
         s := e.f.slot(r);
-        if s < -2048 || s > 2047 {
+        if !s.fits_sign_ext(11) {
             e.emit(.copy, .Kl, rv_scratch_int, e.f.getcon(s), Qbe.Null);
             e.emit(.add, .Kl, rv_scratch_int, TMP(RvReg.FP), rv_scratch_int);
             pr[] = rv_scratch_int;
@@ -186,9 +187,18 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
             if(i.to == a0, => return());
             if rtype(i.to) == .RSlot {
                 if rtype(i.arg&[0]) != .RTmp {
-                    @debug_assert(i.cls().is_int(), "TODO: copy slot float");
-                    e.emit(.copy, i.cls(), rv_scratch_int, i.arg&[0], Qbe.Null);
-                    i.arg&[0] = rv_scratch_int;
+                    break :: local_return;
+                    // prefer float so don't conflict with fixmem for large frame.
+                    kf, ki := (@if(i.cls().is_wide(), Qbe.Cls.Kd, .Ks), @if(i.cls().is_wide(), Qbe.Cls.Kl, .Kw));
+                    if rtype(i.arg&[0]) == .RCon {
+                        e.emit(.copy, ki, rv_scratch_int, i.arg&[0], Qbe.Null);
+                        e.emit(.cast, kf, rv_scratch_float, rv_scratch_int, Qbe.Null);
+                    } else {
+                        @debug_assert_eq(rtype(i.arg&[0]), .RSlot);
+                        e.emit(.copy, kf, rv_scratch_float, i.arg&[0], Qbe.Null);
+                    };
+                    i.set_cls(kf);
+                    i.arg&[0] = rv_scratch_float;
                 };
                 e.emit(i.cls().store_op(), .Kw, Qbe.Null, i.arg&[0], i.to);
                 return();
@@ -290,9 +300,8 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
         fn cles() => e.float_cmp(i, .le, false);
         fn cled() => e.float_cmp(i, .le, true);
         fn swap() => {
-            // TODO: this is the only place the reserved _FT11 is used,
-            //       is it worth the weirdness over just using cast to int and back to use rv_scratch_int for both cases here?  
-            t := @if(i.cls().is_int(), rv_scratch_int, TMP(RvReg.FT11));
+            // TODO: this is still wrong because slot copy can stomp scratch for large frame?
+            t := @if(i.cls().is_int(), rv_scratch_int, rv_scratch_float);
             e.emit(.copy, i.cls(), t, i.arg&[0], Qbe.Null); 
             e.emit(.copy, i.cls(), i.arg&[0], i.arg&[1], Qbe.Null); 
             e.emit(.copy, i.cls(), i.arg&[1], t, Qbe.Null); 
@@ -595,12 +604,12 @@ fn inst(e: *EmitRv, opcode: u32) void = {
 }
 
 fn emit_store_off(e: *EmitRv, value: Qbe.Ref, addr: Qbe.Ref, off: i64) void = {
-    @debug_assert(off <= 2047 && off >= -2048);
+    @debug_assert(off.fits_sign_ext(11));
     e.inst(store(value.rv(), addr.rv(), @as(i12) off, 8, value.val() >= 32));
 }
 
 fn emit_load_off(e: *EmitRv, dest: Qbe.Ref, addr: Qbe.Ref, off: i64) void = {
-    @debug_assert(off <= 2047 && off >= -2048);
+    @debug_assert(off.fits_sign_ext(11));
     e.inst(load(dest.rv(), addr.rv(), @as(i12) off, 8, false, dest.val() >= 32));
 }
 

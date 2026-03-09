@@ -1,4 +1,17 @@
 
+## (Mar 9)
+
+- linux: tried setting FUTEX_PRIVATE_FLAG but makes it hang but only with -syscalls,
+  which doesn't make any sense because there's no libc futex wrapper function anyway. 
+  must be some flag for clone that's making it count me as a process instead of a thread? 
+  ptrace agrees im setting CLONE_THREAD so its not that. 
+  oh it's when the kernel wakes for CHILD_CLEARTID, that doesn't count as private to my process?
+  zig agrees: https://codeberg.org/ziglang/zig/src/commit/6be202f46633d02e20d0f068a32296113ecb95ca/lib/std/Thread.zig#L1507
+  also doesn't work if i do it in wake but not wait, maybe they have to be symmetrical. 
+- rv: elf_loader.call_in_stack
+- rv: fix same problem as qbe did for arm in https://c9x.me/git/qbe.git/commit/?id=73f0accb45f80d697e054ee95e9c82adbc512c99
+  fixes the faulting wuffs c tests.
+
 ## (Mar 8)
 
 os/kernel

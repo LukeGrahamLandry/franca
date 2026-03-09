@@ -819,15 +819,13 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 - ssa test that uses the constant 9223372036854775807
 - `thread backtrace` doesn't work in lldb. is my stack layout wrong? 
 - riscv_flush_icache syscall vs FENCE.I instruction for clear_instruction_cache
-- :TodoRiscv
-- panic! TODO: copy slot float
+- :TodoRiscv tests/fr/(inline_asm_jit, intrins).fr
 
 ## don't rely on libc
 
 - import_c/tokenize: strtod
 - import_wasm/run.fr: 
   - (because .ssa test calls it): snprintf, strncmp
-- prospero: atof
 - (epicyles, geo): fmod
 - (graphics): cosf, sinf
 - dlsym, dlopen, dlclose
