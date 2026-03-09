@@ -918,10 +918,6 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
                 };
             };
             
-            if func.arg.bindings.len == 1 {
-                arg := func.arg.bindings.index(0);
-            };
-            
             if func.ret&.is(.Infer) {
                 // TODO: this change is sketch if we're just exploring to resolve an overload  -- Aug 5
                 @match(requested) {
@@ -3930,7 +3926,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     // TODO: this should work on non-int types but it seems to get confused by Never.  -- Nov 12
     //       still doesnt work for everything but need FnPtr for import_c scope experiments -- Feb 3, 2025
     //       :FUCKED sometimes things really really need the coerce but won't get it!
-    if expr.expr&.is(.Value) && expr.ty != ret_ty && ((@is(self.get_type(ret_ty).tag(), .Int, .FnPtr)) || expr.ty == OverloadSet) {
+    if expr.expr&.is(.Value) && expr.ty != ret_ty && ((@is(self.get_type(ret_ty).tag(), .Int, .FnPtr, .F32, .F64)) || expr.ty == OverloadSet) {
         @check(self.coerce_const_expr(expr, (Specific = ret_ty), false)) return;
     };
     
@@ -4093,6 +4089,9 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
                 // Required since deconstruct_values (which we use for dyn_call) expects correctly aligned fields. 
                 self.aligned_append_value(all&, val, part.ty);
             };
+            info := self.get_info(ret_ty);
+            all&.zero_pad_len_to_align(info.align_bytes.zext());
+            @debug_assert_eq(all.len, info.stride_bytes.zext());
             (Some = (Big = all.as_raw()))
         }
         fn Call(it) => {

@@ -16,6 +16,9 @@
   - make the builtin opaque_index types based on struct instead of enum so can't @as them away. 
       - annoying for #redirect on emit_c but i kinda should get rid of #redirect anyway so i don't care that much. 
       it's useful internally for things like the import_module hack but its too error prone to expose with easy syntax. 
+- @const_slice without the big expression not working was just stupid not allocating the whole slice. 
+  new way is (ir_ops 449207->443925) but (lit_fn 1858->1927). seems about same speed (even on wasm).
+  but this way means it doesn't have to jit one O(N) function if you want to generate a big literal as a @const_slice. 
 
 ## (Mar 8)
 
