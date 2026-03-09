@@ -1,4 +1,4 @@
-enable_memory_tracking :: @static(bool);
+enable_memory_tracking :: @static_mut false;
 
 // called by kernel/start.fr/user_exec via examples/elf_loader.fr
 main :: fn() void = {
@@ -41,7 +41,7 @@ main2 :: fn() void = {
         Futex'wait_while(@ref @as(u32) 0, fn(tmp) => tmp == 0);
 };
 
-shell_thread_tid :: @static(u32);
+shell_thread_tid :: @static_mut @as(u32) 0;
 shell_input_loop :: fn() void = {
     shell_thread_tid[] = get_current_thread()[].tid_futex;
     run_startup_commands();
@@ -83,10 +83,10 @@ run_startup_commands :: fn() void = {
 
 decode_and_run_cmd_with_jumpbuf :: fn(full_command: Str) void = {
     #use("@/lib/sys/jump.fr");
-    jumpbuf :: @static(JumpBuf);
+    jumpbuf :: @static_mut zeroed(JumpBuf);
     throw_panic_hook :: fn(s: Str) Never = {
         fs := shell;
-        panicking :: @static(bool);
+        panicking :: @static_mut false;
         old := fs.strace;
         fs.strace = false;
         @if(panicking[]) Crash'backtracing_panic_handler(s);
@@ -274,7 +274,7 @@ search_path :: fn(command: Str) ?Str = {
     .None
 }
 
-shell :: @static(@struct {
+shell :: @static_mut zeroed(@struct {
     strace: bool;
     timer: bool;
     nocache: bool;
@@ -311,7 +311,7 @@ handle_signal :: fn(ctx: *MContext, intid: i64, data: i64) Ty(i64, *MContext) = 
     ec := ctx.esr.shift_right_logical(26).bit_and(0b111111);
     // TODO: import Gic.null_interrupt_id
     if intid != 1023 || ec != 0b010101 {
-        crashing :: @static(bool);
+        crashing :: @static_mut false;
         shell.strace = false;
         if !crashing[] {
             crashing[] = true;
@@ -368,7 +368,7 @@ redo_relocations_static_linux :: fn(no_unpacked_skew: bool) void = {
     };
 };
 
-libc_exports :: @static(RawHashMap(Str, rawptr)) {
+libc_exports :: @static_mut {
         it := ScopeId.list(temp());
         it&.push(Type.scope_of(LIBC));
         dirs := @slice("examples/os/user/libc", "examples/os/user/libc/impl");
@@ -459,7 +459,7 @@ LIBC :: @struct {
 WasmJitEvent :: import("@/backend/wasm/jit.fr").Event;
 
 // impl depends if running via [../kernel, ../host/web, ../host/user]
-host_platform :: @static(@struct {
+host_platform :: @static_mut zeroed(@struct {
     create_thread: @FnPtr(t: *Thread) void;
     nanosleep: @FnPtr(duration: *TimeSpec, remainder: *TimeSpec) void;
     debug_write: @FnPtr(msg: Str) void;

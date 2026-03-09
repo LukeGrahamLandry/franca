@@ -1,3 +1,23 @@
+
+---
+
+things i found when looking at all uses of @static
+TODO: STDLIB_PATH in SelfHosted instead of a static
+TODO: opts :: @static { xxx: Search.StratOpts = (); xxx };  try @static @as(Search.StratOpt) ()
+TODO: use ClearOnAotBake in examples/chess/precalc.fr
+TODO: dump_wasm.dump isn't thread safe because of `errors` global
+TODO: examples/lambda.fr.on_render.stack isn't thread safe if i want to have multiple from the same dylib in multiplexer
+      but same problem for any graphcis program with @static(State).
+TODO: not passing around macho_loader.OUTPUT is lazy
+TODO: const destructure. `a, b :: foo()` for doom.IWAD
+TODO: either use import_objc_value.CLASS or get rid of it 
+TODO: hopefully this fixes explicit_void_macro_target with ss := @static @as(S) () but that probably won't compile because there's no 1 arg @as
+TODO: i want `(?T).None` instead of `@as(?T) (.None)`
+TODO: document the mistake of `f :: fn() = (); a := @static f; a[]();` 
+      (you need to explicitly @as(AsFnPtr(f)) or you get a funcid that can't be called at runtime)
+TODO: shouldn't need to delay eveal import_c/compile/rules to avoid InProgressMacro
+
+---
 - get rid of the unused code in examples/chess/uci.fr
 - :SLOW? did i seriously posix_getdents each import()? thats not acceptable for a feature i can't even use in the compiler because the bootstrap compiler doesn't have it. 
 - is my baking robust against dlsym returning the same non-null pointer for multiple symbols?

@@ -483,34 +483,34 @@ fn enum(names: FatExpr) FatExpr = {
 
 ::@if(IS_BOOTSTRAPPING, {
 
-#macro fn static(T: FatExpr) FatExpr = {
-    @{ :: box_zeroed(ast_alloc(), @[@literal const_eval(Type)(T)]) }
-}
-
-#macro fn static(T: FatExpr, value: FatExpr) FatExpr = {
+#macro fn static(value: FatExpr) FatExpr = {
+    value = compile_ast(value);
     @{ :: {
-        mem := ast_alloc().box_uninit(@[@literal const_eval(Type)(T)]);
+        mem := ast_alloc().box_uninit(@[@literal value.ty]);
         mem[] = @[value];
         mem
     }}
 }
 },{
-#macro fn static(T: FatExpr) FatExpr = {
-    t := const_eval(Type)(T);
-    p := alloc_raw(ast_alloc(), size_of(t), align_of(t));
-    p.set_bytes(0);
-    p := u8.raw_from_ptr(p.ptr);
-    @{ @run ptr_from_raw(@[@literal t], @[@literal p]) }
-}
-
-#macro fn static(T: FatExpr, value: FatExpr) FatExpr = {
-    t := const_eval(Type)(T);
+#macro fn static(value: FatExpr) FatExpr = {
+    // debug_log_ast(value);
+    loc := value.loc;
+    value = compile_ast(value);
+    t := value.ty;
     p := alloc_raw(ast_alloc(), size_of(t), align_of(t));
     p := u8.raw_from_ptr(p.ptr);
     const_eval(value, t, p);
-    @{ @run ptr_from_raw(@[@literal t], @[@literal p]) }
+    // TODO: error points here if value doesn't compile? (ex. @static_mut (?Str).None;)
+    (@{ @run ptr_from_raw(@[@literal t], @[@literal p]) }).with_loc(loc)
 }
 });
+
+// TODO: the non-mut version should call into the compiler to mark it as constant in the PageMap, ditto
+// TODO: do that with string literals too. expose it for your own arrays. 
+// TODO: do that for @const_slice too
+// @static is mutable at comptime but not at runtime
+// TODO: backend ConstantData is only readonly for mach-o targets because elf permissions are done before relocations so it's a pain
+static_mut :: static;
 
 // @array(1, 2, 3) creates an Array(i64, 3)
 // because was a pain to make a constant one before you could coerce from tuple. 
@@ -604,7 +604,7 @@ fn enum_name_from_ordinal($E: Type, i: i64) Str #inline = {
 }
 
 packed_enum_names :: fn($E: Type) *PackedStrings #fold = {
-    @static(PackedStrings) pack_strings(get_enum_names(E))
+    @static pack_strings(get_enum_names(E))
 };
 
 PackedStrings :: Ty(Str, []u16);

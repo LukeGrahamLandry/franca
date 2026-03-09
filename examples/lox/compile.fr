@@ -24,20 +24,13 @@ ParseRule :: @struct(
     prec   : Prec,
 );
 
-// TODO: array literal syntax for constants would be nice. 
-// TODO: square bracket index syntax doesn't work??
 // TODO: should be able to assign to a fn ptr with an overload set. 
-// TODO: show find_const on the debug_trace.
-// TODO: better mutual recursion. to construct the table you need the fn ptr values, 
-//       so it thinks you might want to call them in that expression, so it needs to compile them first,
-//       but those functions need to reference the rules array.  
-//       the get_rule indirection is enough to fix it for c but not for me :\
-rules :: @static(Slice(ParseRule));
+
 null_rule : ParseFn : fn(self: *Parser, can_assign: bool) void = {
     self.error_at(self.current, "expected expression");
 };
 
-::{ // HACK -- May 19
+rules :: {
     table := ast_alloc().alloc_init(ParseRule, TokenType.enum_count(), fn(_) => 
         (prefix = null_rule, infix = null_rule, prec = .None));
     
@@ -64,7 +57,7 @@ null_rule : ParseFn : fn(self: *Parser, can_assign: bool) void = {
     
     T :: fn(t: TokenType, prefix: ParseFn, infix: ParseFn, prec: Prec) => 
         table.set(@as(i64) t, (prefix = prefix, infix = infix, prec = prec));
-    rules[] = table;
+    table
 };
 
 fn compile(vm: *Vm, source: Str) ?*ObjFunction = {
@@ -530,7 +523,10 @@ fn ident_const(self: *Parser, token: Token) i64 = {
     self.make_constant(s.to_value())
 }
 
-fn get_rule(type: TokenType) *ParseRule = rules[].index(@as(i64) type);
+fn get_rule(type: TokenType) *ParseRule = {
+    rules := rules;
+    rules[@as(i64) type]&
+}
 
 fn advance(self: *Parser) void = {
     self.previous = self.current;

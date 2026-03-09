@@ -11,6 +11,7 @@
 - rv: elf_loader.call_in_stack
 - rv: fix same problem as qbe did for arm in https://c9x.me/git/qbe.git/commit/?id=73f0accb45f80d697e054ee95e9c82adbc512c99
   fixes the faulting wuffs c tests.
+- change @static to emphasize the value over the type and be explicit if you want it zeroed. 
 
 ## (Mar 8)
 

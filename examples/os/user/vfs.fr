@@ -20,7 +20,7 @@ Fs :: @struct {
     next_fuse_request_id: u64;
     allocator: Alloc;
 };
-root_console_stdin :: @static(*PipeFile.Backing);
+root_console_stdin :: @static_mut zeroed(*PipeFile.Backing);
 
 FileHandle :: *FileInstance;
 FileInstance :: @rec @struct {
@@ -31,7 +31,7 @@ FileInstance :: @rec @struct {
     uid: u32 = 0;  // only used for debug printing
 };
 
-global_next_file_id :: @static(u32);
+global_next_file_id :: @static_mut @as(u32) 0;
 get_next_file_id :: fn() u32 = u32.atomic_inc(global_next_file_id);
 
 FileVTable :: @struct {
@@ -62,7 +62,7 @@ FStatOut :: @struct {
 
 IoctlErased :: @FnPtr(self: rawptr, data: rawptr) i64;
 
-image :: @static([]u8);
+image :: @static_mut "";
 init_vfs :: fn() void = {
     // :leak everything here but there's only one
     Group'setup_root_thread_group();
@@ -72,7 +72,7 @@ init_vfs :: fn() void = {
     fs.cloexec = empty(fs.allocator);
     
     // always used when running in kernel+vzf. optional on kernel+qemu (they also have pl011). never on web or user.
-    io := @static(@struct(stdin: UQueue, stdout: UQueue));
+    io := @static_mut zeroed(@struct(stdin: UQueue, stdout: UQueue));
     
     io.stdin.pipe = init(fs.allocator, 2);
     if virtq_create(io.stdin&, "stdio.console", 0) {
@@ -195,7 +195,7 @@ fn create_child(self: *MemDir, name: Str, $T: Type, data: T) FileHandle #generic
 }
 
 // mechanisms, not policies :)
-get_vtable :: fn($T: Type) *FileVTable = @static(FileVTable) {
+get_vtable :: fn($T: Type) *FileVTable = @static {
     vtable: FileVTable = ();
     S :: Type.scope_of(T);
 

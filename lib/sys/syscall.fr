@@ -102,7 +102,7 @@ fork :: fn() i32 = {
 
 // this won't work if you call fork without exec, but really nothing works if you call fork without exec. 
 // (could clear it in the fork wrapper above but it still wouldn't work if foreign code did it). 
-my_cached_process_id :: @static(ClearOnAotBake(i32)) (it = 0);
+my_cached_process_id :: @static_mut @as(ClearOnAotBake(i32)) (it = 0);
 getpid_cached :: fn() i32 = {
     p := my_cached_process_id[].it&;
     if p[] == 0 {
@@ -250,13 +250,12 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
                 bit_cast_unchecked(rawptr, @[@literal AsFnPtr(fid)], @as(rawptr) @[@literal vtable.libc]));
             callee(@[arg_expr])
         }, {
-            // TODO: you really really want these to be read only
-            //       (but i don't have a language feature to ask for that)
-            vtable := @static(SyscallVTable) {
+            vtable := @static {
                 vtable := @[@literal vtable];
                 @if(old) { vtable.libc = zeroed(rawptr); };
                 vtable
             };
+            // old compiler didn't have const static anyway so don't have to use @static_mut
             @if(old) { vtable.libc = @as(rawptr) @[legacy_callee]; };
             args := @array(@[arg_expr_padded]);
             result := choose_syscall(args&, vtable, @[perfer_sys], @[os], perform_syscall);
