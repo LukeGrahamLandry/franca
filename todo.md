@@ -684,7 +684,6 @@ convert.fr:
 
 - better error messages for abusing FPad. also for lying about Typ size in frc file (giving too many fields).
 - macho/emit.fr/emplace_fixup() allow negative offset for DataAbsolute of dynamic import in .Exe
-- rm64/emit.fr/fixup_arm64(): offset from dynamic import
 - isel5.ssa -w: fails with inlining disabled
 - (mem3.ssa, isel5.ssa) -w: fails when constant folding is disabled. 
   `IR failed typecheck: invalid type for first operand RTmp:144 of add in block @4`
@@ -706,8 +705,6 @@ convert.fr:
 need to be careful about the refs which have tags in the high bits so won't leb well directly. 
 - why does llvm-mc disassembler arm think my cas is invalid instruction encoding? (check with cas.ssa -d D). 
   objdump thinks it's fine and it clearly runs correctly. 
-- TODO: harec/src/gen.c: `[arm64/emit.fr/fixup_arm64] offset from dynamic import builtin_type_nomem+4` but would work when done as one compilation unit.
-  when doing .Relocatable, i shouldn't complain early because it might be local. need to leave it for the linker to deal with. 
 - mem3.ssa fails without opt/load.fr/loadopt()
 - some instructions don't have a .ssa test: float(sqrt, min, max, swap, truncd), int(extsb, extsh, extuh)
 - support fini/init sections in elf (and macho i think has a special load command for them)
