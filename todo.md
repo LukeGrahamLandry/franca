@@ -2,7 +2,6 @@
 ---
 
 things i found when looking at all uses of @static
-TODO: STDLIB_PATH in SelfHosted instead of a static
 TODO: opts :: @static { xxx: Search.StratOpts = (); xxx };  try @static @as(Search.StratOpt) ()
 TODO: use ClearOnAotBake in examples/chess/precalc.fr
 TODO: dump_wasm.dump isn't thread safe because of `errors` global
@@ -17,6 +16,7 @@ TODO: document the mistake of `f :: fn() = (); a := @static f; a[]();`
 TODO: shouldn't need to delay eveal import_c/compile/rules to avoid InProgressMacro
 
 ---
+- make run_franca_file less insane
 - compiler/emit_ir.fr should use b/h arg/par but it only matters for apple-arm and only 
   if you're calling an extern-c thing and run out of 8 registers and are still passing u8/u16's. 
   (the backend does it right). would love to find a real program where this matters. 
@@ -684,6 +684,7 @@ convert.fr:
 
 - better error messages for abusing FPad. also for lying about Typ size in frc file (giving too many fields).
 - macho/emit.fr/emplace_fixup() allow negative offset for DataAbsolute of dynamic import in .Exe
+- macho ChainedReloc added is very limitted
 - isel5.ssa -w: fails with inlining disabled
 - (mem3.ssa, isel5.ssa) -w: fails when constant folding is disabled. 
   `IR failed typecheck: invalid type for first operand RTmp:144 of add in block @4`

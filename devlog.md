@@ -1,4 +1,9 @@
 
+## (Mar 10)
+
+- don't like STDLIB_PATH, but then its dumb to re-guess_library_path if a driver inits a lot of compilers, 
+  so pass it around in vtable/opts. 
+
 ## (Mar 9)
 
 - linux: tried setting FUTEX_PRIVATE_FLAG but makes it hang but only with -syscalls,

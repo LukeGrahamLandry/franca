@@ -96,6 +96,7 @@ SelfHosted :: @rec @struct(
         slots := zeroed Array(WipJitShim, 32);
     } = (),
     hack_order_types_were_sized: *List(Type),
+    library_path: Str,
     have_jit_shim := @if(IS_BOOTSTRAPPING, (), zeroed(RawList(FuncId))),
     vm := @if(@run(!DUMB_EMIT_IR), (), zeroed(*Vm.Vm)),
 );
@@ -117,8 +118,7 @@ WhereKey :: @struct(template: FuncId, arg: Values);
 
 PRes :: Result(void, *CompileError);
 
-fn load_file_in_compiler(vtable: *ImportVTable, path: Str, opts: *BuildOptions) *SelfHosted = {
-    self := init_self_hosted(opts);
+fn load_file_in_compiler(self: *SelfHosted, path: Str) void = {
     c := self.comp();
     s := u8.list(self.get_alloc());
     @fmt(s&, """#include_std("lib/core.fr");#include_std("%");""", path);
@@ -128,18 +128,29 @@ fn load_file_in_compiler(vtable: *ImportVTable, path: Str, opts: *BuildOptions) 
     stmts := self.unwrap_report_error([]FatStmt, stmts); 
     // TODO: you want to be able to return an error but they can't do anything with a CompileError because they don't have the compiler instance. 
     self.unwrap_report_error(void, self.make_top_level(stmts));
-    self
 }
 
 Dyn :: import("@/lib/dynamic_lib.fr");
 
 fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) = {
-    @if(STDLIB_PATH[].is_none()) update_global_stdlib_path();
-    
+    mark := mark_temporary_storage();
     no_cache = no_cache || DUMB_EMIT_IR;
     @if(TODOWASM) if query_current_arch() == .wasm32 {| no_cache = true; }; // TODO
     
-    mark := mark_temporary_storage();
+    opts := vtable.default_build_options(); 
+    opts.retain_function_names = true;
+    opts.no_cache = no_cache;
+    
+    // HACK: inherit safety mode just because it's really slow if running in the vm
+    @if(DUMB_EMIT_IR && !@run safety_check_enabled(.DebugAssertions)) {
+        it := opts.safety_checks&;
+        it.insert(.Bounds, false);
+        it.insert(.DebugAssertions, false);
+        it.insert(.InvalidTag, false);
+    };
+    // TODO: creating this early is dumb on wasm once i want to run cache files there because mmap+munmap is super expensive because have to zero even if untouched. 
+    self := init_self_hosted(opts);
+    
     F :: @FnPtr(*ImportVTable) void;
     callee: ?F = .None;
     cachepath := choose_cache_filename(path);
@@ -148,7 +159,6 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
     a := general_allocator();
     to_free: ?Ty(*QbeModule, *Crash'LocationResolverNode) = .None;
     to_free_h: ?*Incremental.Header = .None;
-    to_free_c: ?*SelfHosted = .None;
     
     if !path.ends_with(".fr") {
         @if(TODOWASM) @assert(query_current_arch() != .wasm32, "TODO: jitted aot on wasm");
@@ -197,7 +207,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
             //       because it was overwritten by the exe. 
             @if(header.get(header.entry_source) != "") break();
             
-            if(!files_unchanged(header, get_include_std, Incr.self_hash), => break());
+            if(!files_unchanged(header, get_library_file_text, Incr.self_hash), => break());
             middle := timestamp();
             callee = (Some = compile_cached(header, to_free&));
             end := timestamp();
@@ -214,22 +224,8 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
         break :: local_return;
         safe :: safety_check_enabled(.DebugAssertions);
         start := timestamp();
-        opts := vtable.default_build_options(); 
-        opts.retain_function_names = true;
         
-        // HACK: inherit safety mode just because it's really slow if running in the vm
-        @if(DUMB_EMIT_IR && !@run safety_check_enabled(.DebugAssertions)) {
-            it := opts.safety_checks&;
-            it.insert(.Bounds, false);
-            it.insert(.DebugAssertions, false);
-            it.insert(.InvalidTag, false);
-        };
-        
-        // this needs to be set based on the host. 
-        // ie. if you build the compiler targetting an environment without a libc, 
-        // we can't just produce a libc when loading a driver program. 
-        opts.no_cache = no_cache;
-        self := vtable.load_file_in_compiler(path, opts);
+        self.load_file_in_compiler(path);
         env := self.env;
         @if(show_backend_stats())
         @eprintln(">>> compiler configuration: threads=%, debug_assertions=%, host = (%, %), nocache=%, syscalls=%", 
@@ -324,15 +320,13 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
             to_free_h = (Some = header);
             drop(m);
             general_allocator().dealloc_one(QbeModule, m);
-            c.drop();
-
+            
             // this doesn't re-read the files to check if they changed since you started compiling, that would feel a bit creepy. 
             z := zone_begin(.CheckCache);
             callee = (Some = compile_cached(header, to_free&));
             zone_end(z);
             break();
         };
-        to_free_c = (Some = c);
             to_free = (Some = (m, zeroed(*Crash'LocationResolverNode)));
             cc = m.get_addr(name) || @panic("ICE: lost %", name);
         
@@ -344,9 +338,10 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
         callee := bit_cast_unchecked(@type callee, i64, callee);
         r, a := ((), init_driver_vtable(true));
         @assert(!abi_shift_easy_to_native, "wrap_vtable_with_native");
-        self := to_free_c.unwrap();
         self.vm.eval(callee, void.cast_to_bytes(r&), cast_to_bytes(*ImportVTable, a&));
     }, {
+        @if(!IS_BOOTSTRAPPING)  // :UpdateBoot
+        self.drop();
         push_as_tls(.comptime, zeroed(rawptr)) {
             if query_current_arch() == .wasm32 && !driver.is_some() {  // signetures matter
                 callee := bit_cast_unchecked(@type callee, @FnPtr() void, callee);
@@ -364,9 +359,6 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, no_cache: bool) CRes(void) 
     };
     if to_free_h { it |
         a.dealloc(u8, it.as_bytes());
-    };
-    if to_free_c { it |
-        it.drop();
     };
     reset_temporary_storage(mark);
     .Ok
@@ -431,7 +423,18 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         got_indirection_instead_of_patches = true,  // comptime needs to be more flexible with late bound references.
         jit_via_dlopen = Foreign.ENV.FRANCA_JIT_VIA_DLOPEN.get_environment_variable().is_some(),
     ));
-    
+
+    // this is mostly just to chain from the host compiler when a driver does multiple so don't have to re-search. 
+    // so the extra dir_exists check avoids caching the wrong thing if it's relative and changed cwd. kinda dumb, idk. 
+    if !(opts.library_path.len > 0 && __driver_abi_version > 1512 && dir_exists(opts.library_path)) {
+        library_path := guess_library_path(a)
+            || panic("Could not find franca standard library.");
+        opts.library_path = library_path.items();
+        opts.library_path.len -= int(opts.library_path.ends_with("/"));
+    } else {
+        opts.library_path = opts.library_path.shallow_copy(a);
+    };
+
     self := a.box_uninit(SelfHosted);
     self[] = (
         pool = pool,
@@ -465,7 +468,9 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         log = list(a),
         comptime_prefer_syscalls = prefer_syscalls(),
         hack_order_types_were_sized = a.boxed(List(Type), list(a)),
+        library_path = opts.library_path,
     );
+    self.vtable.library_path = opts.library_path;
     self.comptime_codegen.m.codemap = (Some = self.codemap);
     self.add_function(zeroed Func);  // just for good luck. life is better when FuncId=0 is invalid. 
     self.other_module&.push(self.comptime_codegen.m, self.get_alloc());

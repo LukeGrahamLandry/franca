@@ -75,10 +75,9 @@ make_top_level :: fn(self: *SelfHosted, body: []FatStmt) Res(void) #once = {
     @debug_assert_eq(self.get_function(fid)[].use_scope, TOP_LEVEL_SCOPE);
     
     self.library_scope = self.scopes.new_scope(TOP_LEVEL_SCOPE, self.get_alloc(), zeroed Span /*TODO*/);
-    if STDLIB_PATH { root |
-        self.scopes[self.library_scope].optional_path = self.pool.insert_owned(root.items());
+        root := self.library_path;
+        self.scopes[self.library_scope].optional_path = self.pool.insert_owned(root);
         @try(self.fill_directory_scope(self.library_scope)) return;
-    };
     
     self.poll_in_place(void, => self.compile_body(fid))
 };
@@ -89,7 +88,7 @@ fn fill_directory_scope(self: *SelfHosted, s: ScopeId) Res(void) = {
         return(.Ok);
     };
     root := self.pool.get(scope.optional_path);
-    prefix := root.rest(STDLIB_PATH[].unwrap().len());
+    prefix := root.rest(self.library_path.len);
     
     // want stable intern order regardless of what order the os gives back
     files := collect_directory_ordered(root, temp(), self.get_alloc()) || {
@@ -1064,8 +1063,8 @@ fn slow_body(self: *ResolveScope, body: *List(FatStmt)) PRes #once = {
                     if !self.compiler.scopes.already_loaded&.insert(name) {
                         name_s := self.compiler.pool.get(name);
                         :: ?WaitingParse;
-                        file := self.compiler.get_include_std(name_s).or() {
-                            return(@err("unknown path for #include_std %", name_s))
+                        file := self.compiler.get_library_parse(name_s).or() {
+                            return(@err("unknown library path %", name_s))
                         };
                         dirty = true;
                         stmts := @try(self.compiler.parser.finish_pending_stmts(file)) return;
@@ -1108,7 +1107,7 @@ fn import_as_scope(self: *SelfHosted, name: Symbol, _loc: Span, force_scope: ?Sc
             @err_assert(name_s.len > 2 && name_s[1] == "/".ascii(), "expected import descriptor to start with '@/'") return;
             @err_assert(!name_s[name_s.len - 1].is_ascii_whitespace(), "illegal trailing whitespace in import descriptor'") return;
             name_s := name_s.rest(2);
-            @unwrap(self.get_include_std(name_s), "unknown path for #include_std %", name_s) return
+            @unwrap(self.get_library_parse(name_s), "unknown library path %", name_s) return
         };
         @case("{".ascii()) => {
             @if(!name_s.ends_with("};")) return(@err("imported code block must end with };\n%", name_s));
@@ -1167,12 +1166,30 @@ fn add_to_scope(c: *SelfHosted, s: ScopeId, name: Symbol, type: LazyType, expr: 
     var
 }
 
-fn get_include_std(c: *SelfHosted, name: Str) ?WaitingParse = {
-    zone := zone_begin(.LoadFile); // TODO: defer
+fn get_library_file_text(c: *SelfHosted, name: Str) ?Str = {
     src := if name == "compiler" {
         c.export_ffi.src
     } else {
-        get_include_std(c.get_alloc(), name) || return(.None)
+        yield :: local_return;
+        a := c.get_alloc();
+        out := u8.list(a);
+        check := @tfmt("%/%", c.library_path, name);
+        if read_and_push(out&, check) {
+            yield(out.items());
+        };
+        if read_and_push(out&, name) {
+            yield(out.items());
+        };
+        return(.None)
+    };
+    (Some = src)
+}
+
+fn get_library_parse(c: *SelfHosted, name: Str) ?WaitingParse = {
+    zone := zone_begin(.LoadFile); // TODO: defer
+    src := c.get_library_file_text(name) || {
+        zone_end(zone);
+        return(.None)
     };
     name := @if(name == "compiler", name, (@tfmt("@/%", name)).shallow_copy(c.get_alloc()));
     file := c.codemap.add_file(name, src);
@@ -1181,26 +1198,14 @@ fn get_include_std(c: *SelfHosted, name: Str) ?WaitingParse = {
     (Some = id)
 }
 
-// TODO: store this in SelfHosted instead of in a global -- Jul 5
-STDLIB_PATH :: @static_mut @as(?RawList(u8)) (.None);
-
-fn get_include_std(a: Alloc, name: Str) ?Str = {
-    ::if(?Str);
-    out := u8.list(a);
-    if STDLIB_PATH[] { lib |
-        check := @tfmt("%/%", lib.items(), name);
-        if read_and_push(out&, check) {
-            return(Some = out.items());
-        }
-    };
-    if read_and_push(out&, name) {
-        return(Some = out.items())
-    };
-    .None
-}
+fn get_library_file_text(_a: Alloc, name: Str) ?Str = {
+    self := current_comptime();
+    // TODO: wrong if try to free
+    self.get_library_file_text(name)
+};
 
 // I like that users can put the lib somewhere and edit it for thier program. I dont want the compiler to just force its blessed version.
-fn find_std_lib(a: Alloc) ?RawList(u8) = {
+fn guess_library_path(a: Alloc) ?RawList(u8) = {
     // :io_driver
     check :: fn(p: *List(u8)) bool = {
         p.push_path_segment("lib");
@@ -1247,18 +1252,4 @@ fn find_std_lib(a: Alloc) ?RawList(u8) = {
         };
     };
     .None
-}
-
-fn update_global_stdlib_path() void = {
-    :: ?Str; 
-    if STDLIB_PATH.is_none() {
-        // :io_driver
-        a := find_std_lib(general_allocator());
-        if a& { lst |
-            lst.len -= int(lst.items().ends_with("/"));
-            STDLIB_PATH[] = (Some = lst[]);
-        } else {
-            panic("Could not find franca standard library."); // TODO: return error
-        };
-    };
 }
