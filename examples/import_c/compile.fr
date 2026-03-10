@@ -3326,10 +3326,6 @@ funcall :: fn(c, rest, tok, f) #infix(.@"(", .PostFix) = {
                 arg = c.new_cast(arg, c.ty_int);
             }
             
-            if @is(arg.ty.kind, .TY_STRUCT, .TY_UNION) {
-                @warn_tok(c, tok, "TODO: non-scalar variadic argument");
-            };
-            
             if @is(arg.ty.kind, .TY_FUNC) {
                 arg.ty = c.pointer_to(arg.ty);
             };
@@ -3339,6 +3335,7 @@ funcall :: fn(c, rest, tok, f) #infix(.@"(", .PostFix) = {
             //       TODO: maybe use TransformCall for this instead? i think i just need argc->arg. 
             // TODO: but doesn't this mean i get the wrong abi for single field scalar structs?
             if @is(arg.ty.kind, .TY_STRUCT, .TY_UNION) {
+                @warn_tok(c, tok, "TODO: non-scalar variadic argument");
                 arg = c.new_addr(arg, arg.tok);
             };
         };
@@ -4292,7 +4289,7 @@ fn gen_par(c: *Ctx, ty: *CType) void = {
         @debug_assert(!loc.is_const);
         loc.par_r = f.newtmp(loc.name, k);
         i := c.ir_index(loc.ty);
-        o: Qbe.O = @if(i == QbeNull, .par, .parc);
+        o := c.choose_arg_op(loc.ty).rebase(.par, .arg);
         emit(c, o, k, loc.par_r, i, QbeNull); 
     };
     // all the allocs have to be after all the pars
@@ -4581,9 +4578,8 @@ fn gen_call(c: *Ctx, callee: *Node, function_ty: *CType, arg: []*Node, tok: *Tok
         };
         variadic_marker_index -= 1;
         
-        // TODO: b/h arg/par
         r := c.gen_expr(arg);
-        arguments&.push(arg_ins(r, arg.ty.cls(), c.ir_index(arg.ty)));
+        arguments&.push(c.arg_ins(r, arg.ty));
     };
     
     @if(c.speculate) return c.ir_node(function_ty.return_ty, QbeNull, QbeNull, tok);
@@ -4613,14 +4609,25 @@ fn gen_call(c: *Ctx, callee: *Node, function_ty: *CType, arg: []*Node, tok: *Tok
     c.ir_node(function_ty.return_ty, r, lvalue, tok)
 }
 
-// TODO: move these to util and use them elsewhere
-fn arg_ins(r: Qbe.Ref, k: Qbe.Cls, type_index: Qbe.Ref) Qbe.Ins = {
+fn arg_ins(c: *Ctx, r: Qbe.Ref, ty: *CType) Qbe.Ins = {
+    k, type_index := (ty.cls(), c.ir_index(ty));
     ::if(Qbe.Ins);
     if type_index == QbeNull {
-        make_ins(.arg, k, QbeNull, r, QbeNull)
+        o := c.choose_arg_op(ty);
+        make_ins(o, k, QbeNull, r, QbeNull)
     } else {
         make_ins(.argc, .Kl, QbeNull, type_index, r)
     }
+}
+
+choose_arg_op :: fn(c: *Ctx, ty: *CType) Qbe.O #inline = {
+    @if(c.ir_index(ty) != Qbe.Null) return(.argc);
+    // tim apple wants to waste my time :(
+    @if(ty.kind == .TY_CHAR, 
+        @if(ty.is_unsigned, .argub, .argsb),
+    @if(ty.kind == .TY_SHORT, 
+        @if(ty.is_unsigned, .arguh, .argsh),
+    .arg))
 }
 
 fn gen_store(c: *Ctx, addr: Qbe.Ref, value: Qbe.Ref, ty: *CType) void = {

@@ -17,6 +17,9 @@ TODO: document the mistake of `f :: fn() = (); a := @static f; a[]();`
 TODO: shouldn't need to delay eveal import_c/compile/rules to avoid InProgressMacro
 
 ---
+- compiler/emit_ir.fr should use b/h arg/par but it only matters for apple-arm and only 
+  if you're calling an extern-c thing and run out of 8 registers and are still passing u8/u16's. 
+  (the backend does it right). would love to find a real program where this matters. 
 - i broke `main :: fn() void = @run Easy'start(State);` doing that in mandelbrot_ui.fr worked in 0c19956e79196884de5260e4ec1693f682091e4b
 - get rid of the unused code in examples/chess/uci.fr
 - :SLOW? did i seriously posix_getdents each import()? thats not acceptable for a feature i can't even use in the compiler because the bootstrap compiler doesn't have it. 
@@ -680,7 +683,6 @@ convert.fr:
 ## backend 
 
 - better error messages for abusing FPad. also for lying about Typ size in frc file (giving too many fields).
-- tests/todo/apple_arm_subword_abi.ssa
 - macho/emit.fr/emplace_fixup() allow negative offset for DataAbsolute of dynamic import in .Exe
 - rm64/emit.fr/fixup_arm64(): offset from dynamic import
 - isel5.ssa -w: fails with inlining disabled
