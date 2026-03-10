@@ -21,7 +21,7 @@ abstraction layer.
 - app_events: tries to use all features of app.fr and debugtext.fr
 - geo: decompresses LAZ files, draws 3d point clouds, and lets you fly around
 - farm_game: a 2d game drawn with coloured rectangles
-- edit: opens a text file and lets you scroll around
+- grep for "@/graphics/" in the examples folder
 
 ## other places to find words
 
@@ -59,7 +59,7 @@ for the native api. shaders.fr is the beginning of translating franca into
 those shader languages, but if you have your own convenient way to author 
 shaders, you can keep doing that instead. 
 - Supporting a new platform means adding an implementation for app.fr, gfx.fr, 
-and shaders.fr. For now i only support Metal. 
+and shaders.fr. For now i only support Metal and WebGPU.
 
 ## sending data to the gpu
 

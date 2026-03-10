@@ -17,6 +17,7 @@ TODO: document the mistake of `f :: fn() = (); a := @static f; a[]();`
 TODO: shouldn't need to delay eveal import_c/compile/rules to avoid InProgressMacro
 
 ---
+- i broke `main :: fn() void = @run Easy'start(State);` doing that in mandelbrot_ui.fr worked in 0c19956e79196884de5260e4ec1693f682091e4b
 - get rid of the unused code in examples/chess/uci.fr
 - :SLOW? did i seriously posix_getdents each import()? thats not acceptable for a feature i can't even use in the compiler because the bootstrap compiler doesn't have it. 
 - is my baking robust against dlsym returning the same non-null pointer for multiple symbols?

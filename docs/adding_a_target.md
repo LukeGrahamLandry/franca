@@ -18,11 +18,11 @@
   - elf: dynamic loader path and e_machine magic number
   - set regalloc masks in ir.fr/Target 
   - arch_name for llvm_mc_dis
-  - test/asm-arch.ssa
+- tests/(ssa/asm.ssa, c/asm.c)
 - AsmFunction 
   - plumbing for the frontend
   - lib
-    - entry point: fix_stack
+    - context.fr: call_in_stack
     - jump.fr: setjmp, longjmp
     - process.fr: current_arch
     - atomics.fr: fence

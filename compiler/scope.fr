@@ -424,7 +424,7 @@ fn add_use(self: *ResolveScope, a: *Annotation, reexport: bool) PRes = {
     each arg.items() { arg | 
         self.compiler.last_loc = arg.loc;
         @match(arg.expr&) {
-            // currently this only works as a function tag because the identifier gets looked up in the outer scope
+            // this is most sane as a function tag because the identifier gets looked up in the outer scope
             // but the #use only affects the function body so there's no confusion about needing to resolve all #use's 
             // before being able to evaluate the argument of a #use. 
             fn GetVar(it) => add_use_pending(self.compiler, scope_with_use, it[], reexport);
@@ -434,7 +434,14 @@ fn add_use(self: *ResolveScope, a: *Annotation, reexport: bool) PRes = {
                 scope := @try(self.compiler.import_as_scope(it[], arg.loc, .None)) return;
                 add_use(self.compiler, scope_with_use, scope, reexport);
             };
-            @default => return(@err("#use is temporarily limited to GetVar or String expressions"));
+            @default => {
+                // lift_to_const 
+                self := self.compiler;
+                v := self.unique_const(Flag.Anon.ident());
+                self.put_constant(v, arg[], .Infer);
+                arg.expr = (GetVar = v);
+                add_use_pending(self, scope_with_use, v, reexport);
+            };
         };
     };
     .Ok

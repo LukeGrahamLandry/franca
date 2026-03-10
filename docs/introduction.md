@@ -338,6 +338,8 @@ You can also say `#use(S)` to bring all the declarations in S into the current s
 (so you can access them like normal variables). `S` can be a `ScopeId` from `import`, 
 a struct with constant declarations, or a string (which is treated the same as when passed to `import`). 
 
+See ../imports.md for more ways to bring in new code (dynamic linking, assembly, etc.). 
+
 ## Comments
 
 - C style `//` comments go until the end of the line. 
