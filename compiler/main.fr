@@ -1,6 +1,6 @@
 #include_std("compiler/lib.fr"); 
 
-DISABLE_IMPORT_FRC :: IS_BOOTSTRAPPING || DUMB_EMIT_IR;
+DISABLE_IMPORT_FRC :: IS_BOOTSTRAPPING;
 DEBUG_SPAM_LOG :: false;
 
 want_backtrace :: @static_mut false;
@@ -11,8 +11,8 @@ main :: fn() void = {
         eprintln(">>> Compiler includes tracy instrumentation.");
     };
     if !ENABLE_CONST_FOLD || !ENABLE_INLINING || !ENABLE_ELIDE_SLOTS || !ENABLE_PROMOTE {
-        @eprintln(">>> (SLOW) Compiler optimisations: F=% I=% E=% M=% A=%", 
-            ENABLE_CONST_FOLD, ENABLE_INLINING, ENABLE_ELIDE_SLOTS, ENABLE_PROMOTE, !DUMB_EMIT_IR);
+        @eprintln(">>> (SLOW) Compiler optimisations: F=% I=% E=% M=%", 
+            ENABLE_CONST_FOLD, ENABLE_INLINING, ENABLE_ELIDE_SLOTS, ENABLE_PROMOTE);
     };
     if SLOW_USERSPACE_THREADS && show_backend_stats() {
         @eprintln(">>> SLOW_USERSPACE_THREADS :: true;");
@@ -36,7 +36,6 @@ main :: fn() void = {
 };
 
 main2 :: fn(filename: Str, no_cache: bool) void = {
-    vtable := init_driver_vtable(false);
     if !TODOWASM || query_current_arch() != .wasm32 {
     do_signals();
     Crash'push_aot_debug_resolver();
@@ -46,7 +45,7 @@ main2 :: fn(filename: Str, no_cache: bool) void = {
     };
    
     ::?Arch;
-    @match(run_franca_file(vtable, filename, no_cache)) {
+    @match(run_franca_file(filename, no_cache)) {
         (fn Ok(_) => ());
         (fn Err(e) => {
             // TODO: better error message logging but its a pain becuase you don't have the compiler instance here. -- Sep 19
@@ -65,8 +64,6 @@ fn do_signals() void = {
     handle_signal :: fn(s: i64, info: *Posix.SysSigInfo, ctx: *Posix.SysUContext) void = {
         signal_handler_body(info, ctx) { info, ctx |
           if !is_wrongly_illegal_instruction(info, ctx) {
-            self := current_comptime();
-            @if(@run(void != @type self.vm)) @if(!self.is_null()) self.vm.log_backtrace();
             if want_backtrace[] {
                 Crash'show_trace_and_exit(s, info, ctx);
             } else {

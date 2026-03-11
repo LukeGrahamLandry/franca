@@ -11,15 +11,6 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
     zone := self.zone_begin_dyncall(f_ptr.rawptr_from_int());
     self.stats.dyn_call += 1;
     
-    @if(abi_shift_native_to_easy) {
-        self.vm.eval(f_ptr, ret_buf, args_value);
-        zone_end(zone);
-        return self.from_bytes(ret_buf);
-    };
-    @if(abi_shift_easy_to_native) {
-        @assert(f_ptr > 0, "%", f_ptr);
-    };
-    
     callee := self.dyncalls&.get_or_insert(f_ty) {
         // 
         // This is super stupid. we should reuse the shim when the types have the same repr. 
@@ -84,7 +75,6 @@ fn comptime_jit_symbol_id(self: *SelfHosted, fid: FuncId) Qbe.Sym = {
 // It starts compiling on self.comptime_codegen and you have to get the result out of self.dyncalls when it's ready. 
 // TODO: reuse functions when they have different nominal types but the same repr. 
 fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) DynCallShim = {
-    @if(abi_shift_easy_to_native) return(Vm'easy_to_native_dyncall_shim(self, f_ty));
     shared := self.comptime_codegen;
     ins: RawList(Qbe.Ins) = empty();
     id := Qbe.no_symbol_S; 
@@ -190,10 +180,6 @@ emit_dyncall_shim_epilogue :: fn(self: *SelfHosted, shared: *FrontendCodegen, f:
 //       - it loads from the got twice on the fast path because i don't deduplicate RCon across blocks.
 //       - redundant copies of aggregates. 
 fn emit_jit_shim(c: *SelfHosted, fid: FuncId) void = {
-    @if(DUMB_EMIT_IR) c.have_jit_shim&.push(fid, c.get_alloc());
-    @if(abi_shift_native_to_easy) return(Vm'easy_abi_emit_shim(c, fid));
-    @if(abi_shift_easy_to_native) return(Vm'native_abi_emit_shim(c, fid));
-    
     self := c;
     shared := c.comptime_codegen;
     handler_callee_address: rawptr = report_called_uncompiled_or_just_fix_the_problem;

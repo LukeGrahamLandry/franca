@@ -1,10 +1,10 @@
 // the api exposed by the compiler to comptime code. 
 
 #noinline/* TODO: HACK: break cycle for examples/emit_c.fr */
-fn init_driver_vtable($for_driver: bool) *ImportVTable = {
+fn init_driver_vtable() *ImportVTable = {
     @static_mut {
         storage := ImportVTable.zeroed();
-        fill_driver_vtable(storage&, for_driver);
+        fill_driver_vtable(storage&);
         storage
     }
 }
@@ -21,29 +21,19 @@ next_abi_version :: fn() i64 = {
     }
 };
 
-fn fill_driver_vtable(vtable: *ImportVTable, for_driver: bool) void = {
+fn fill_driver_vtable(vtable: *ImportVTable) void = {
     vtable.driver_abi_version = next_abi_version();
     vtable.self_hash = Incr.self_hash;
     if enable_incremental() && !DISABLE_IMPORT_FRC {
         vtable.frc_module_magic_v = Incremental.MAGIC;
     };
-    if !DUMB_EMIT_IR {
         ::ptr_utils(QbeModule);
         fill_backend_vtable(vtable);
-    };
     
     driver_vtable_exports := Type.scope_of(driver_vtable_exports);
     fields := get_fields(ImportVTable);
     fr := current_compiler_context();
 
-    if DUMB_EMIT_IR {
-        vtable.generation = fr.vtable.generation;
-        vtable.generation += 1;
-        if vtable.generation > 2 {
-            vtable.generation = 0;
-        };
-    };
-    
     for get_constants(driver_vtable_exports) { name |
         fid := FuncId.get_constant(driver_vtable_exports, name)
             || @panic("failed to get %", name.str());
@@ -52,37 +42,10 @@ fn fill_driver_vtable(vtable: *ImportVTable, for_driver: bool) void = {
         off := f.byte_offset;
         p := bit_cast_unchecked(*ImportVTable, *rawptr, vtable).offset_bytes(off);
         
-        if DUMB_EMIT_IR && for_driver {
-            @if(@run(__driver_abi_version < 1512)) unreachable();
-            if name == (@symbol get_alloc) {
-                wrapped_get_alloc :: (fn(c: Compiler) Alloc = {
-                    self := c.cast()[][];
-                    a := self._get_alloc();
-                    @if(abi_shift_easy_to_native) Vm'wrap_alloc_with_native(self, a&);
-                    @if(abi_shift_native_to_easy) {
-                        a.vptr = bit_cast_unchecked(rawptr, @type a.vptr, translate_arena_allocator_fn);
-                    };
-                    a
-                });
-                fid = wrapped_get_alloc;
-            };
-            if abi_shift_native_to_easy {
-                fid = wrap_with_easy_abi(fid);
-            };  // abi_shift_easy_to_native: done in current_compiler_context
-        };
-        
         // TODO: type check against the func's annotations
         p[] = fr.get_jitted(fid);
     };
-    
-    if DUMB_EMIT_IR {
-        vtable.emit_qbe_included = (fn(_0, _1, _2, _3) = panic("can't emit_qbe_included because module has vtables"));
-        vtable.emit_qbe_included_old = (fn() = panic("can't emit_qbe_included because module has vtables"));
-    };
 }
-
-abi_shift_native_to_easy :: DUMB_EMIT_IR && { fr := current_compiler_context(); fr.vtable.generation == 0 };
-abi_shift_easy_to_native :: DUMB_EMIT_IR && { fr := current_compiler_context(); fr.vtable.generation == 1 };
 
 // TODO: this is garbage! the way my scoping works you can't access 
 //       the old overload set once you shadow it with a constant. 
@@ -211,9 +174,6 @@ driver_vtable_exports :: @struct {
         BakedValue.raw_from_ptr(c.cast()[].baked.values&.nested_index(@as(i64) id.id.zext()));
     
     fmt_error :: fn(c: Compiler, err: *CompileError, out: *List(u8)) void = {
-        if DUMB_EMIT_IR {
-            out.gpa = temp();  // HACK
-        };
         c.cast()[][]._fmt_error(err, out, true /*TODO*/);
     };
     
@@ -301,7 +261,6 @@ driver_vtable_exports :: @struct {
         };
         m.seal_debug_info(source, source.len != 0 || opts.retain_function_names, files);
         if m.goal.type == .JitOnly {
-            @assert(!abi_shift_easy_to_native);
             each self.comptime_libraries& { _, lib |
                 Qbe'fill_pending_dynamic_imports(m, lib[]);
             };
@@ -844,24 +803,12 @@ compiler_exports_s :: @struct {
     
     #export("ast_alloc")
     get_aa :: fn(self) Alloc = {
-        a := self.get_alloc();
-        @if(abi_shift_native_to_easy) {
-            a.vptr = bit_cast_unchecked(rawptr, @type a.vptr, translate_arena_allocator_fn);
-        };
-        @if(abi_shift_easy_to_native) Vm'wrap_alloc_with_native(self, a&);
-        a
+        self.get_alloc()
     };
     
     #export("current_compiler_context")
     get_cc :: fn(self) CompCtx = {
-        vtable := init_driver_vtable(true);
-        vtable.library_path = self.library_path;
-        @if(abi_shift_easy_to_native) {
-            hack :: @static_mut false;  // because init_driver_vtable returns @static
-            @if(!hack[]) Vm'wrap_vtable_with_native(self, vtable);
-            hack[] = true;
-        };
-        (data = self.legacy_indirection, vtable = vtable)
+        (data = self.legacy_indirection, vtable = self.vtable)
     };
     
     #export("resolve_overload #fold")
@@ -996,10 +943,6 @@ compiler_exports_s :: @struct {
     };
 };
 
-translate_arena_allocator_fn :: fn(r: *[]u8, a: *Ty(rawptr, Alloc.Action, rawptr, i64, i64)) void = {
-    r[] = Arena'arena_allocator_fn(@splat_tuple a);
-};
-
 // reflects on the signeture to create a string that can be parsed by the runtime compiler 
 // so the new compilation unit has a type safe way to call the functions. also injects an 
 // extra *SelfHosted parameter so the functions are tied to thier compctx and comptime code 
@@ -1042,48 +985,9 @@ generate_compctx_wrapper :: fn(fid: FuncId, src: *List(u8), i: i64) ?rawptr = {
     };
     @fmt(src, "__baked_compctx)\n}\n");
     
-    if abi_shift_native_to_easy {
-        fid = wrap_with_easy_abi(fid);
-    };
-    
     fr := current_compiler_context();
     (Some = fr.get_jitted(fid))
 };
-
-fn wrap_with_easy_abi(fid: FuncId) FuncId = {
-    @debug_assert(abi_shift_native_to_easy);
-    func := get_function_ast(fid, true, true, true, false);
-    arg := func.finished_arg.unwrap();
-    ret := func.finished_ret.unwrap();
-    fid := FuncId.const_eval(@{ 
-        R :: @[@literal ret];
-        A :: @[@literal arg];
-        callee :: @[@literal fid];
-        (fn(r: *R, a: *A) void = {
-            r[] = callee(@splat_tuple a);
-        })
-    });
-    wrapped := get_function_ast(fid, false, false, false, false);
-    wrapped.name = sym(@tfmt("easy_abi(%)", func.name.str()));
-    fid
-}
-
-fn splat_tuple(arg: FatExpr) FatExpr #macro = {
-    arg = compile_ast(arg);
-    info := get_type_info_ref(arg.ty);
-    @ct_assert(info.is(.Ptr), arg.loc, "@splat_tuple expected pointer");
-    T := info.Ptr;
-    info := get_type_info_ref(T);
-    if !(info.is(.Struct) && info.Struct.is_tuple) {
-        return @{ @[arg][] };
-    };
-    result := FatExpr.list(ast_alloc());
-    require_layout_ready(T);
-    each info.Struct.fields { f |
-        result&.push(@{ @[@literal T].get_field_ptr(@[arg], @[@literal f])[] })
-    };
-    (expr = (Tuple = result.as_raw()), ty = UnknownType, done = false, loc = arg.loc)
-}
 
 fn show_type(it: Type) Str = {
     fr := current_compiler_context();

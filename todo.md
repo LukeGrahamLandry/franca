@@ -75,10 +75,6 @@ export function w $main() {
   don't just have magic files that give an insane message if you try there. 
 - setting FRANCA_MORE_CACHE=1 also needs to invalidate the FrIncr'files_unchanged
 - when import_c/ffi makes a cache file it needs to include itself as a dep!
--     very concerning that boot with USE_VM doesn't work when -unsafe and 
-      opt passes somehow doesn't work specifically for replace_switches (had to skip it to get the measurement). 
-      doesn't matter because its going to be rewritten anyway
-      but it might be revealing an actual bug so should investigate further
 - make it more sane to jit a franca program from another directory
   - don't just always shit a "traget" dir in the current dir
   - be consistant about always checking the franca lib root dir then the current dir. 
@@ -397,7 +393,6 @@ cset	w0, eq
 - FRANCA_MORE_CACHE
 - anything about cache invalidation
 - that all the tests run in bubblewrap sandbox (rn i autotest is just hello world)
-- boot/src/driver.fr
 - things in lib/encoding are used by the autotest so won't silently break
   but don't have standalone tests so if it breaks it will cause a confusing failure elsewhere. 
 - round trip ir text/frc

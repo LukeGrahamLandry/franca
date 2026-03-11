@@ -3,6 +3,7 @@
 
 - don't like STDLIB_PATH, but then its dumb to re-guess_library_path if a driver inits a lot of compilers, 
   so pass it around in vtable/opts. 
+- the easy_abi/vm thing was a cool experiment but i think emit_c is a more sane path to having a bootstrap path that doesn't use my backend. 
 
 ## (Mar 9)
 
