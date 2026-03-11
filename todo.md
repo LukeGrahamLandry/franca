@@ -24,9 +24,6 @@ TODO: shouldn't need to delay eveal import_c/compile/rules to avoid InProgressMa
 - get rid of the unused code in examples/chess/uci.fr
 - :SLOW? did i seriously posix_getdents each import()? thats not acceptable for a feature i can't even use in the compiler because the bootstrap compiler doesn't have it. 
 - is my baking robust against dlsym returning the same non-null pointer for multiple symbols?
-- finish examples/os spawn on host/web. 
-  TODO: toy/hello2.fr works but toy/hello.fr the comptime part works but then CompileError: WebAssembly.Module(): Compiling function #1 failed: extra bits in varint @+45
-- deal with `franca examples/web/build.fr && node target/web/test.js` needs to get rootfs_hash somehow
 - each thread expose an allocator that allocates from the other end of the stack for things that last forever?
 - should give my ring buffer thing a more sane api for doing multiple entries at once 
   and nonblocking instead of always poking at the (confusingly named) fields.

@@ -1,10 +1,11 @@
-// franca examples/web/build.fr && node target/web/test.js
+// franca examples/web/build.fr && node target/web/test.js -rootfs=local
+// you can also use this to bootstrap a native compiler by fetching the latest wasm one (used for the web demo):
+// node tests/test.js -rootfs=fetch -file compiler/main.fr -lang franca -target [arm64, amd64, rv64]-[macos, linux]
 // TODO: less :paste from examples/web/main.js
 import { Worker } from "worker_threads";
-import { readFileSync, writeFileSync } from "fs";
+import { readFileSync, writeFileSync, realpathSync, chmodSync, mkdirSync } from "fs";
 import { spawn } from "child_process";
 function assert(cond, msg) { if (!cond) { console.trace(msg); process.exit(1); } } 
-process.chdir("target/web");
 
 // waste of time: node's threads api doesn't match the browser's threads api?
 const prelude = `
@@ -27,12 +28,31 @@ class XMLHttpRequest {
     }
 }
 `;
+const franca_path = "target/franca.out";
+const cli_args = process.argv;
+let rootfs_hash = cli_args[2];
+// const url = "https://localhost:8000"; // NODE_TLS_REJECT_UNAUTHORIZED=0 is the incantation for usefuckinghttpssoicandrawonthefuckingscreen.py
+const url = "https://franca.lukegrahamlandry.ca";
+if (cli_args.includes("-rootfs=fetch")) {
+    rootfs_hash = await (await fetch(`${url}/target/rootfs_hash.txt`)).text();
+    assert(rootfs_hash.length == 64, `this doesn't look like a hash: ${rootfs_hash}`);
+    const [rootfs, wasm] = await Promise.all([
+        fetch(`${url}/mirror/${rootfs_hash}`),
+        fetch(`${url}/target/demo.wasm`),
+    ].map((it) => it.then(async (it) => await it.arrayBuffer())));
+    mkdirSync("target/franca/fetch", { recursive: true });
+    mkdirSync("target/web/target", { recursive: true });
+    writeFileSync(`target/franca/fetch/${rootfs_hash}.out`, Buffer.from(rootfs));
+    writeFileSync(`target/web/target/demo.wasm`, Buffer.from(wasm));
+    writeFileSync(`target/web/target/rootfs_hash.txt`, rootfs_hash);
+} else if (cli_args.includes("-rootfs=local")) {
+    rootfs_hash = readFileSync("target/web/target/rootfs_hash.txt").toString();
+}
+assert(rootfs_hash.length == 64, `expected argv[2] = rootfs_hash (or -rootfs=fetch to download from ${url}`);
+process.chdir("target/web");
 const worker_path = "./node_worker.js";
 const worker_src = readFileSync("./worker.js");
 writeFileSync(worker_path, prelude + worker_src);
-const franca_path = "target/franca.out";
-const rootfs_hash = process.argv[2];
-assert(rootfs_hash.length == 64, "expected argv[2] = rootfs_hash");
 
 // TODO: test more and stop duplicating this list everywhere. 
 const tests = [
@@ -54,7 +74,7 @@ let running_threads = [];
 let worker = null;
 const wasm_module = await WebAssembly.compile(readFileSync("target/demo.wasm"));
 
-const handle = (resolve) => (msg) => {
+const handle = (resolve) => async (msg) => {
     msg = msg.data;
     switch (msg.tag) {
         case "show": { out_innerText += msg.text; break;  }
@@ -62,6 +82,13 @@ const handle = (resolve) => (msg) => {
         case "err": { err_innerText += msg.text; break; }
         case "done": { resolve(); break; }
         case "ready": break;
+        case "download": {
+            const path = "a.out";
+            writeFileSync(path, Buffer.from(await msg.content.arrayBuffer()));
+            console.log(realpathSync(path));
+            chmodSync(path, 0o777);
+            break;
+        }
         case "spawn": {
             const w = get_worker(); 
             w.onmessage = (msg) => {
@@ -146,9 +173,9 @@ function reset_worker() {
     for (const w of thread_pool) { w.postMessage({ tag: "reset" }); }
 }
 
-if (process.argv.includes("-file")) {
+if (cli_args.includes("-file")) {
     // cwd doesn't matter because demo.wasm doesn't use the real file system
-    await new Promise((resolve) => start_worker(process.argv.slice(2), resolve));
+    await new Promise((resolve) => start_worker(cli_args.slice(2), resolve));
     process.stdout.write(out_innerText);
     process.stderr.write(err_innerText);
     if (err_innerText.length !== 0) process.exit(1);

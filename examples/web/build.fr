@@ -54,11 +54,22 @@ driver :: fn(vtable: *ImportVTable) void = {
     make_dirs_or_crash(cache_path);
     root_fs := flatten_fs(temp());
     hash := Sha256'hex(root_fs);
-    write_entire_file_or_crash(@tfmt("%/%", mirror_path, hash), root_fs);
-    // TODO: don't leak the old one on the file system when developing. 
+    hash_path := "target/web/target/rootfs_hash.txt";
+    need_write := true;
+    if read_entire_file(temp(), hash_path) { old_hash |
+        need_write = hash != old_hash;
+        if need_write {
+            _ := Syscall'remove(@fmt_cstr("%/%", mirror_path, old_hash));
+            _ := Syscall'remove(@fmt_cstr("%/%.out", cache_path, old_hash));
+        };
+    };
     commit = hash;
     @eprint("rootfs_hash=%\n", hash);  // parsed by the test runner
-    copy(@tfmt("%/%.out", cache_path, hash), @tfmt("%/%", mirror_path, hash));
+    if need_write {
+        write_entire_file_or_crash(hash_path, hash);
+        write_entire_file_or_crash(@tfmt("%/%", mirror_path, hash), root_fs);
+        copy(@tfmt("%/%.out", cache_path, hash), @tfmt("%/%", mirror_path, hash));
+    };
     
     // TODO: this is slowly approching crazy town...
         default := "\"----------------------------------------------------------------\"";

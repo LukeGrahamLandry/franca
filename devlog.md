@@ -15,6 +15,9 @@
       so it wouldn't be marked BodyIsSpecial yet and by then the lib would be added so compiling would get a comptime address. 
       moving them out of the @run (or into their own seperate one) makes it work because statements are compiled linearly.
       however, it's bad karma to break old tests so im going to make the shims fix it for now. 
+- web/build: save the rootfs hash so the file can be cleanup next build. 
+  test.js: allow bootstrap by downloading the latest wasm. 
+  avoids the annoying chain of driver_abi_version but always does latest so wont be helpful for git bisect so can't replace the normal way, plus it's a crazy big dependency. 
 
 ## (Mar 10)
 
