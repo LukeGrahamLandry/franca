@@ -1,4 +1,21 @@
 
+## (Mar 11)
+
+- `stmt.done = true; // TODO: you probably want to check if inner expressions are done but this seems fine so far.`
+  a fantastic point made by "LukeGrahamLandry, 2 years ago". fixes todo/fold_string_escapes. 
+  - but that causes "Unknown type for runtime var" for some shape of nested emit_capturing_call?
+    - renumber doesn't copy types, which makes sense i guess but means it has to mark things not done, 
+      because rely on put_var_type being called for the arg bindings inserted for the capturing call. 
+    - it also broke tests/exe/dylibs, but the new way is kinda more sane. 
+      there's one @run containing both the add_comptime_library and the call that uses it, 
+      so now it correctly compiles the call before running the add_library, 
+      so the imported function's body has comptime=0 because it was compiled before the library existed 
+      so the shim says "tried to call uncompiled". before when it was marking done too soon, 
+      it wouldn't try to compile the import at all until calling the shim, 
+      so it wouldn't be marked BodyIsSpecial yet and by then the lib would be added so compiling would get a comptime address. 
+      moving them out of the @run (or into their own seperate one) makes it work because statements are compiled linearly.
+      however, it's bad karma to break old tests so im going to make the shims fix it for now. 
+
 ## (Mar 10)
 
 - don't like STDLIB_PATH, but then its dumb to re-guess_library_path if a driver inits a lot of compilers, 
