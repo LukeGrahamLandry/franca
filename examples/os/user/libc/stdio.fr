@@ -1,5 +1,16 @@
 // TODO: va is supposed to be by value. matters on wasm/rv. 
 vsnprintf :: fn(dest: *u8, n: i64, fmt: CStr, va: *CVariadicArgumentList) i32 = {
+    if @is(query_current_arch(), .wasm32, .rv64) {
+        // HACK: va_list passed by value on these arches is already a pointer so passed as scalar. 
+        //       matters because franca's CVariadicArgumentList isn't ifdef-ed to the right size. 
+        v := zeroed CVariadicArgumentList;
+        v._&[0] = CVariadicArgumentList.int_from_ptr(va);
+        va = @ref v;
+    };
+
+    vsnprintf_impl(dest, n, fmt, va)
+}
+vsnprintf_impl :: fn(dest: *u8, n: i64, fmt: CStr, va: *CVariadicArgumentList) i32 = {
     dest := dest.slice(n);
     fmt := fmt.str();  // :SLOW
     i := 0;
@@ -146,7 +157,7 @@ fopen :: fn(path: CStr, mode: CStr) *FILE = {
     a.boxed(FILE, (fd = fd))
 } 
 
-fseek :: fn(self: *FILE, pos: i64, whence: Whence) i64 = {
+fseek :: fn(self: *FILE, pos: i64, whence: Whence) i32 = {
     Syscall'lseek(self.fd, pos, whence) || return(-1);
     0
 }
@@ -168,19 +179,33 @@ fwrite :: fn() void =
 fflush :: fn() void = 
     @panic("TODO: fflush");
 
-fclose :: fn(self: *FILE) void = {
+fclose :: fn(self: *FILE) i32 = {
     Syscall'close(self.fd);
+    0
 }
 
 // todo; I_ERROR faults, probably before fprintf(stderr, _) because stderr is unfilled fixup?
-fprintf :: fn() void = 
-    @panic("TODO: fprintf");
+fprintf :: fn(f: *FILE, fmt: CStr, va: CVariadic) i32 = {
+    if true {
+        @panic("TODO: fprintf %", fmt);
+    };
+    -1
+}
 
-vfprintf :: fn() void = 
-    @panic("TODO: vfprintf");
-    
-printf :: fn(fmt: CStr, va: CVariadic) i32 /*#inline*/ = 
-    vprintf(fmt, va&.start());
+vfprintf :: fn(f: *FILE, fmt: CStr, va: *CVariadicArgumentList) i32 = {
+    if true {
+        @panic("TODO: vfprintf %", fmt);
+    };
+    -1
+}
+
+printf :: fn(fmt: CStr, va: CVariadic) i32 /*#inline*/ = {
+    out := temp().alloc_uninit(u8, fmt.str().len() + 100);
+    n := vsnprintf_impl(out.ptr, out.len, fmt, va&.start());
+    out := out.slice(0, n.intcast());
+    print(out);
+    n
+}
 
 vprintf :: fn(fmt: CStr, va: *CVariadicArgumentList) i32 = {
     out := temp().alloc_uninit(u8, fmt.str().len() + 100);
@@ -195,10 +220,10 @@ vsprintf :: fn(dest: *u8, fmt: CStr, va: *CVariadicArgumentList) i32 =
     vsnprintf(dest, MAX_i32, fmt, va);
 
 snprintf :: fn(dest: *u8, n: i64, fmt: CStr, va: CVariadic) i32 /*#inline*/ = 
-    vsnprintf(dest, n, fmt, va&.start());
+    vsnprintf_impl(dest, n, fmt, va&.start());
 
 sprintf :: fn(dest: *u8, fmt: CStr, va: CVariadic) i32 = {
-    vsnprintf(dest, MAX_i64, fmt, va&.start())
+    vsnprintf_impl(dest, MAX_i64, fmt, va&.start())
 };
 
 sscanf :: fn() void = 

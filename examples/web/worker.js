@@ -105,7 +105,8 @@ export const imports = {
         floor: (a) => Math.floor(a),
         ceil: (a) => Math.ceil(a),
 
-        js_worker_stop: (status) => {
+        js_worker_stop: (status, known_wasm_jit_event_) => {
+            known_wasm_jit_event = known_wasm_jit_event_;
             if (current_exit_futex !== undefined) set_zero_and_wake(current_exit_futex);
             throw "called exit 0";
         },
@@ -136,8 +137,12 @@ export const imports = {
             const instance = new WebAssembly.Instance(module, { main: Franca });
 
             let i = Number(first_export);
-            for (let func in instance.exports) {
-                Franca.__indirect_table.set(i, instance.exports[func]);
+            const [dest, src] = [Franca.__indirect_table, Object.values(instance.exports)];
+            if (dest.length < i + src.length) {
+                throw new Error(`jit_instantiate_module desync. didn't grow enough to hold all exports. ${i}+${src.length}>${dest.length}`);
+            }
+            for (const func of src) {
+                dest.set(i, func);
                 i += 1;
             }
         },

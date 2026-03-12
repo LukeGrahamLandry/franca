@@ -18,6 +18,14 @@
 - web/build: save the rootfs hash so the file can be cleanup next build. 
   test.js: allow bootstrap by downloading the latest wasm. 
   avoids the annoying chain of driver_abi_version but always does latest so wont be helpful for git bisect so can't replace the normal way, plus it's a crazy big dependency. 
+- don't need the complicated unresolve_scopes for AsmFunctionArmOnly
+
+web: trying to run doom. 
+- js_worker_stop needs to pass the known_wasm_jit_event because it exits without returning 
+  from init and lets the size of the table get desynced because the same worker will run them multiple times. 
+  (problem is when that worker is used for a different thread group so calls exit()). 
+- key_multi_msgplayer0. %i not working. va_list by value pointerness.
+- lots of signeture woes between examples/os/user/libc and examples/import_c/include.fr
 
 ## (Mar 10)
 

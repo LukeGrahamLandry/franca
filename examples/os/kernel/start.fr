@@ -302,7 +302,7 @@ fn futex_wake(addr: i64, val: i64) i64 = {
     n
 }
 
-init_interrupt_vector :: fn() void #use(Arm) = {
+init_interrupt_vector :: fn() void = {
     InterruptVector :: Array(Array(u32, 32), 16);
     interrupt_handlers := aligned_static(InterruptVector, 2048);
     // TODO: have a way to ask for the global to have the right alignment
@@ -374,10 +374,9 @@ reset_countdown :: fn() void #noinline = {
     i64.sys_set(.CNTV_TVAL_EL0, ticks);
 }
 
-Arm :: import("@/backend/arm64/bits.fr");
+#use("@/backend/arm64/bits.fr");
 interrupt_trampoline :: AsmFunctionArmOnly(fn() void = (), interrupt_trampoline_code);
 interrupt_trampoline_code :: {
-    #use(Arm);
     out := u32.list(64, ast_alloc());
     emit :: fn(inst) => out&.push(inst);
     
@@ -450,7 +449,6 @@ return_to_user :: fn(new_task: *Task) Never = {
 
 // read SavedRegisters
 return_to_user_impl :: AsmFunctionArmOnly(fn(task_x0: *Task) Never = (), {
-    #use(Arm);
     out := u32.list(64, ast_alloc());
     emit :: fn(inst) => out&.push(inst);
     
@@ -546,12 +544,12 @@ aligned_static :: fn($T: Type, $need_align: i64) *T #generic #inline = {
 }
 
 // all the barriers for good luck
-barrier :: @AsmFunctionArmOnly(fn() void = ()) => (
+barrier :: AsmFunctionArmOnly(fn() void = (), @const_slice(
     @bits(0b11010101000000110011, 0b1111, 0b101, 0b11111),  // DMB SY
     @bits(0b11010101000000110011, 0b1111, 0b100, 0b11111),  // DSB SY
     @bits(0b11010101000000110011, 0b1111, 0b110, 0b11111),  // ISB SY
     ret(),
-);
+));
 
 user_exec :: fn(elf_bytes: []u8, devicetree: *u8) void = {
     c := get_current_thread()[].first_environment&;
@@ -817,14 +815,14 @@ launder_to_user_pointer :: fn(a: rawptr) i64 #noinline = {
     u8.int_from_ptr(kernel.user_image.ptr) + i
 }
 
-user_unwind_signal :: @AsmFunctionArmOnly(fn(intid_x0: i64, ctx_x1: *MContext) Never = ()) => (
+user_unwind_signal :: AsmFunctionArmOnly(fn(intid_x0: i64, ctx_x1: *MContext) Never = (), @const_slice(
     add_im(.X64, x2, sp, 0, 0),
     movz(.X64, x16, 0xFFFF, Hw.Left16),
     movk(.X64, x16, 0x0004, Hw.Left0),
     mov(.X64, x8, x16),
     svc,  // sig_return
     // :end_user_unwind_signal
-);
+));
 
 user_virtq_poll :: fn(it: *UQueue, _: i64) void = {
     args: Array(i64, 6) = (UQueue.int_from_ptr(it), 0, 0, 0, 0, 0);
@@ -834,20 +832,20 @@ user_virtq_poll :: fn(it: *UQueue, _: i64) void = {
 Crash :: import("@/lib/crash_report.fr");
 
 PSCI :: @struct {
+    hvc_code :: @const_slice(hvc, ret());
+    
     system_off :: fn() Never = {
         // not listed in the devicetree's psci section which is strange (cpu_off is there but doesn't do what i want). 
         // Arm Power State Coordination Interface. Version 1.3 issue F.b
         SYSTEM_OFF :: 0x84000008;
         f(SYSTEM_OFF);
-        f :: @AsmFunctionArmOnly(fn(n: i64) Never = ())
-            => (hvc, ret());
+        f :: AsmFunctionArmOnly(fn(n: i64) Never = (), hvc_code);
     }
     
     cpu_on :: fn(cpu: i64, callee: @FnPtr(ctx: *u8) void, ctx: *u8) void = {
         CPU_ON :: 0xC4000003;  // TODO: get this from device tree? it has a specific value in the pdf tho. 
         f(CPU_ON, cpu, callee, ctx);
-        f :: @AsmFunctionArmOnly(fn(n: i64, cpu: i64, callee: @FnPtr(ctx: *u8) void, ctx: *u8) void = ()) 
-            => (hvc, ret());
+        f :: AsmFunctionArmOnly(fn(n: i64, cpu: i64, callee: @FnPtr(ctx: *u8) void, ctx: *u8) void = (), hvc_code); 
     }
 };
 
@@ -879,13 +877,13 @@ wake_secondary_cores :: fn(dt: DT.Iter) void = {
 }
 
 // can't pass cpu_on_main to cpu_on directly because need to set sp first. 
-cpu_on_trampoline :: @AsmFunctionArmOnly(fn(new_sp: *u8) void = ()) => (
+cpu_on_trampoline :: AsmFunctionArmOnly(fn(new_sp: *u8) void = (), @const_slice(
     0xd50041bf, // msr SPSel, #0x1; probably already the case but just make sure. 
     add_im(.X64, sp, x0, 0, 0),
     ldr_uo(.X64, x0, x0, 0),
     br(x0, 0),
     b(0, 0),
-);
+));
 
 cpu_on_main :: fn() void = {
     i := current_core_index();
@@ -933,7 +931,7 @@ kprint_label :: fn(msg: Str, value: i64) void = {
     kprint("\n");
 }
 
-spin :: (@AsmFunctionArmOnly(fn() Never = ()) => (
+spin :: AsmFunctionArmOnly(fn() Never = (), @const_slice(
     wfi,
     b(-1, 0),
 ));
@@ -990,64 +988,6 @@ fn kscary_log(i: i64) void = {
     buf := buf&.items();
     len := write_int_to_buffer(buf, i);
     kprint(buf.slice(0, len));
-}
-
-// TODO: this is a neat demo but it would be more simple to just make the syntax such that it doesn't resolve
-//       eagarly which might just mean using `fn() = {}` instead of `fn() => ()` but then its annoying to get 
-//       the tuple out of the block... idk this whole operation is kinda dumb anyway. 
-// this is convoluted to trick it into resolving the expression in the context of #use(arm/bits)
-fn AsmFunctionArmOnly(signeture: FatExpr, code: FatExpr) FatExpr #macro = {
-    signeture := FuncId.const_eval(signeture);
-    code_fid := FuncId.const_eval(code);
-    code := get_function_ast(code_fid, false, false, false, false);
-    @debug_assert(code.body&.is(.Normal));
-
-    code.body.Normal = @{ @const_slice(@[code.body.Normal]) };
-    unresolve_scopes(code.body.Normal&);
-    
-    code.resolve_scope = FuncId.scope_of(fn() = {
-        // the body of `code` will be able to see any constants declared here.
-        #use(Arm);
-    });
-    // TODO: makes sense that you need this,
-    //       but you shouldn't panic without it, should be an error instead of 
-    //       `panic! Unreachable unless you set the load factor to 100%`
-    code.unset_flag(.ResolvedBody);
-    
-    code := Slice(u32).const_eval(@{ @[@literal code_fid]() });
-    @literal AsmFunctionArmOnly(signeture, code)
-}
-
-// time to do some sketchy shit do da do da
-fn unresolve_scopes(expr: *FatExpr) void = {
-    #use("@/compiler/walk_ast.fr");
-    #use("@/compiler/ast_external.fr");
-    UnResolve :: @WalkAst(void) @struct();
-    
-    // TODO: `@ref(@as(UnResolve) ())` ambigous overload for FatExpr -> FatExpr. :compilerbug?
-    unresolve: UnResolve = ();  
-    walk_expr(unresolve&, expr);
-
-    fn handle_expr(self: *UnResolve, expr: *FatExpr) Result(DoMore, void) = {
-        @match(expr.expr&) {
-            fn GetVar(it) => {
-                expr.expr = (GetNamed = it.name);
-            }
-            fn UndeclaredVar(it) => {
-                expr.expr = (GetNamed = it.name);
-            }
-            fn Block(it) => {
-                it.flags = it.flags.bit_and(bit_not(1.shift_left(@as(i64) BlockFlags.Resolved)));
-                it.scope = NOSCOPE;
-            }
-            @default => ();
-        };
-        (Ok = .Continue)
-    }
-    fn handle_stmt(self: *UnResolve, stmt: *FatStmt) Result(DoMore, void) = (Ok = .Continue);
-    fn handle_type(self: *UnResolve, type: *LazyType) Result(DoMore, void) = (Ok = .Continue);
-    fn handle_func(self: *UnResolve, func: *Func) Result(DoMore, void) = (Ok = .Continue);
-    fn handle_pattern(self: *UnResolve, pattern: *Pattern) Result(DoMore, void) = (Ok = .Continue);
 }
 
 #use("@/examples/os/libkernel.fr");
