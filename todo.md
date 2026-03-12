@@ -16,6 +16,7 @@ TODO: document the mistake of `f :: fn() = (); a := @static f; a[]();`
 TODO: shouldn't need to delay eveal import_c/compile/rules to avoid InProgressMacro
 
 ---
+- prospero: maybe (with the low resolution i run in tests) on the edges both threads have floats that get different values but map to the same int pixel so its a race
 - make run_franca_file less insane
 - compiler/emit_ir.fr should use b/h arg/par but it only matters for apple-arm and only 
   if you're calling an extern-c thing and run out of 8 registers and are still passing u8/u16's. 

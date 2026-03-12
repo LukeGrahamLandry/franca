@@ -1,4 +1,10 @@
 
+## (Mar 12)
+
+- split the framebuffer part out of DeviceFile so now it's just used as a convoluted way to pass a buffer around. 
+- blit that framebuffer onto a graphics texture so it can go on the web demo's canvas
+- graphics: fix the imports so it works when not #use-ed at global scope
+
 ## (Mar 11)
 
 - `stmt.done = true; // TODO: you probably want to check if inner expressions are done but this seems fine so far.`

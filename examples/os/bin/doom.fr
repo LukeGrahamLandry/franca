@@ -1,21 +1,22 @@
 // this program uses my c compiler to compile doom and then runs it, rendering to the framebuffer on my os
 
 // input doesn't work yet
-// relies on shared target directory from host because i don't have my own writable file system 
 // need to pre-fetch the code+iwad because i don't have networking so run build.fr with -fetch-doom
-
-// TODO: change the resolution so it doesn't have the green boarder around the gameplay? 
 
 main :: fn() void = {
     println("doom.fr running");
+    Syscall'chdir("target");
+import("@/lib/sys/threads.fr")'start_thread_nodata {
+    Futex'wait_while(READY, fn(tmp) => tmp == 0);
     argv := list(CStr, temp());
     argv&.push("doom.fr".as_cstr());
     argv&.push("-iwad".as_cstr());
     argv&.push(IWAD[].rest("target/".len()).as_cstr());
     argv&.push(zeroed CStr);
-    Syscall'chdir("target");
-    
     doom'run(argv.len.intcast() - 1, bit_cast_unchecked(*CStr, **i8, argv.maybe_uninit.ptr));
+};
+    graphics_thread();
+    unreachable();
 }
 
 fetch :: fn() Ty(Str, Str) = {
@@ -122,3 +123,123 @@ int strcasecmp(const char *s1, const char *s2);
 char *strdup(char *s);
 int strncasecmp(const char *s1, const char *s2, long n);
 """;
+
+// TODO: this should move to its own program so i don't have to paste it every time.
+//       then have the system auto spawn it if you open /dev/fb0
+
+web :: query_current_arch() == .wasm32;  // i always jit so don't care about cross compiling
+graphics_thread :: @if(web, main_w, main_k);
+#use("@/lib/sys/process.fr");
+
+main_k :: fn() void = {
+    Screen :: import("@/examples/os/bin/test_screen.fr");
+    fd := Posix'open("/dev/fb0", 0).unwrap();
+    fb := Screen'bind() || {
+        @eprintln("DeviceFile: failed to bind framebuffer");
+        return();
+    };
+    set_screen_info(fd, fb.r.width, fb.r.height, fb.buf.interpret_as_bytes());
+    Screen'run_loop(fb) { fb, r |
+        // spin
+    };
+}
+
+// lets me use the linux-framebuffer-doom rather than porting it to my thing explicitly. 
+set_screen_info :: fn(fd: Fd, w: u32, h: u32, buf: []u8) void = {
+    Fb :: import("@/examples/os/user/libc/impl/fb.fr");
+    FR_ioctl :: fn(f: Fd, op: i64, data: rawptr) i32 #weak #libc;
+    info: Fb.fb_var_screeninfo = (
+        red = (offset = 16),
+        green = (offset = 8),
+        blue = (offset = 0),
+        transp = (offset = 24),
+        
+        xres = w,
+        yres = h,
+        xres_virtual = w,
+        yres_virtual = h,
+    );
+    FR_ioctl(fd, Fb.FBIOPUT_VSCREENINFO, Fb.fb_var_screeninfo.raw_from_ptr(info&));
+    FR_ioctl(fd, Fb.FBIOPUT_BUFFER, Slice(u8).raw_from_ptr(buf&));
+    READY[] = 1;
+    Futex'wake(READY, 1);
+}
+
+main_w :: fn() void = {
+    #use("@/graphics/lib.fr");
+    Easy'start(State);
+    State :: @struct {
+        HIGH_DPI :: false;
+        pipe: Sgl.Pipeline;
+        draw: Sgl.Self;
+        text: Sdtx.Self;
+        sg: *Sg.Self;
+        sapp: *Sapp.Self;
+        frame: Sg.Image;
+        buf: []u8;
+    };
+    
+    fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+        state.sg = sg; state.sapp = sapp;
+        state.draw&.setup(
+            allocator = general_allocator(),
+            sg = sg,
+        );
+        init_pipeline(state.draw&, state.pipe&, sg, ());
+        
+        state.buf = general_allocator().alloc_zeroed(u8, sapp.width() * sapp.height() * 4);
+        state.frame = state.sg.make(
+            width = sapp.width().intcast(), 
+            height = sapp.height().intcast(),
+            pixel_format = .BGRA8,
+            data = zeroed(Sg.ImageData),
+            usage = .DYNAMIC,
+        );
+        
+        fd := Posix'open("/dev/fb0", 0).unwrap();
+        set_screen_info(fd, sapp.width().trunc(), sapp.height().trunc(), state.buf);
+        _ := fd;  // :leak
+    }
+    
+    fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+        d := zeroed(Sg.ImageData);
+        d.subimage&[0]&[0] = state.buf;
+        sg.update_image(state.frame, d&);
+    
+        sgl := state.draw&;
+        sgl.defaults();
+        sgl.viewport(0.intcast(), 0.intcast(), sapp.width().intcast(), sapp.height().intcast(), true);
+        sgl.load_pipeline(state.pipe);
+        
+        sgl.texturing_enabled = true;
+        sgl.texture(state.frame, (id = Sg.INVALID_ID));
+        
+        sgl.begin(.QUADS);
+        sgl.cur_matrix_mode = .TEXTURE;
+        sgl.rotate(PI, 0.0, 1.0, 0.0);
+        sgl.rotate(PI, 0.0, 0.0, 1.0);
+        sgl.cur_matrix_mode = .MODELVIEW;
+        sgl.translate(-1, -1, 0.0);
+        sgl.scale(2, 2, 2);
+    
+        (x1: f32, x2: f32, y1: f32, y2: f32) := (0, 1, 0, 1);
+        sgl.v2f_t2f(x1, y1, 0, 0);
+        sgl.v2f_t2f(x2, y1, 1, 0);
+        sgl.v2f_t2f(x2, y2, 1, 1);
+        sgl.v2f_t2f(x1, y2, 0, 1);
+        sgl.end();
+        
+        // no transparancy!
+        Easy'glue_begin_pass(sapp, sg, zeroed(Sg.PassAction));
+        sgl.draw_layer(sg, 0);
+        sg.end_pass();
+        sg.commit();
+    };
+    
+    fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+        // TODO
+    }
+}
+
+READY :: @static_mut @as(u32) 0;
+Futex :: import("@/lib/sys/sync/futex.fr");

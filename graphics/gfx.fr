@@ -1349,15 +1349,14 @@ fn _sg_validate_append_buffer(sg: *Self, buf: *Buffer.T, data: []u8) bool = @val
     @V(buf.cmn.update_frame_index != sg.frame_index, VALIDATE_APPENDBUF_UPDATE);
 }
 
-fn validate(sg: *Self, img: *Image.T, data: *sg_image_data) bool = @validate(sg) {
-    @debug_assert(img && data);
-    @V(img.cmn.usage != SG_USAGE_IMMUTABLE, VALIDATE_UPDIMG_USAGE);
+fn validate(sg: *Self, img: *Image.T, data: *ImageData) bool = @validate(sg) {
+    @V(img.cmn.usage != .IMMUTABLE, VALIDATE_UPDIMG_USAGE);
     @V(img.cmn.upd_frame_index != sg.frame_index, VALIDATE_UPDIMG_ONCE);
-    _sg_validate_image_data(data,
+    validate(data,
         img.cmn.pixel_format,
         img.cmn.width,
         img.cmn.height,
-        @if(img.cmn.type == SG_IMAGETYPE_CUBE, 6, 1),
+        @if(img.cmn.type == .CUBE, 6, 1),
         img.cmn.num_mipmaps,
         img.cmn.num_slices);
 }
@@ -1386,8 +1385,8 @@ fn desc_defaults(sg: *Self, desc: *Image.Desc) Image.Desc = {
     return def;
 }
 
-fn _SG_ERROR(s: Str) void = @debug_log("%", s);
-fn _SG_LOGMSG(s: Str, c: Str) void = @debug_log("%: %", s, c);
+fn _SG_ERROR(s: Str) void = @eprintln("%", s);
+fn _SG_LOGMSG(s: Str, c: Str) void = @eprintln("%: %", s, c);
 
 fn desc_defaults(_: *Self, desc: *Sampler.Desc) Sampler.Desc = {
     desc[]
@@ -2105,26 +2104,13 @@ fn append_buffer(sg: *Self, buf_id: Buffer, data: []u8) i64 #trace = {
     start_pos
 }
 
-// TODO
-fn update_image(sg: *Self, img_id: Image, data: *sg_image_data) void #trace = {
-    @debug_assert(sg.valid);
-    _sg_stats_add(num_update_image, 1);
-    range(0, SG_CUBEFACE_NUM) { face_index |
-        range(0, SG_MAX_MIPMAPS) { mip_index |
-            if (data.subimage[face_index][mip_index].size == 0) {
-                break();
-            }
-            _sg_stats_add(size_update_image, (uint32_t)data.subimage[face_index][mip_index].size);
-        }
-    }
-    img := _sg_lookup_image(&sg.pools, img_id.id) || return();
-    if img.slot.state == .VALID {
-        if (validate(img, data)) {
-            @debug_assert(img.cmn.upd_frame_index != sg.frame_index);
-            sg.impl().update_image(img, data);
-            img.cmn.upd_frame_index = sg.frame_index;
-        }
-    }
+fn update_image(sg: *Self, img_id: Image, data: *ImageData) void #trace = {
+    sg.stat(.num_update_image, 1);  // TODO: .size_update_image
+    img := sg.lookup(img_id) || return();
+    @if(img.slot.state != .VALID) return();
+    @if(!sg.validate(img, data)) return();
+    sg.impl().update_image(img, data);
+    img.cmn.upd_frame_index = sg.frame_index;
 }
 
 fn push_debug_group(sg: *Self, name: Str) void #trace = {
@@ -2851,3 +2837,4 @@ Desc :: @struct(
     environment: Environment,
 );
 
+Sg :: import("@/graphics/gfx.fr");

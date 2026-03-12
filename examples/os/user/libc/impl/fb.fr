@@ -17,88 +17,49 @@ fb_var_screeninfo :: @struct {
 
 FBIOGET_VSCREENINFO :: 1234;
 FBIOPUT_VSCREENINFO :: 5678;
+FBIOPUT_BUFFER :: 9012;
 
 // /dev/fb0
 DeviceFile :: @struct {
-    Screen :: import("@/examples/os/bin/test_screen.fr");
-    handle: ?Screen.Handle = .None;
+    buf: ?[]u8 = .None;
     info: ?fb_var_screeninfo = .None;
-    worker: ?*Thread = .None;
-    stop := false;
     
-    debug :: fn(self, out) = @fmt(out, "DeviceFile(%)", self.handle.is_some());
+    debug :: fn(self, out) = @fmt(out, "DeviceFile(%)", self.info.is_some());
     
     #use("@/lib/sys/threads.fr");
     init :: fn(self: *DeviceFile) bool = {
-        fb := Screen'bind() || {
-            @trace("DeviceFile: failed to bind framebuffer");
-            return(false);
-        };
-        self.handle = (Some = fb);
-        self.info = (Some = (
-            red = (offset = 16),
-            green = (offset = 8),
-            blue = (offset = 0),
-            transp = (offset = 24),
-            
-            xres = fb.r.width,
-            yres = fb.r.height,
-            xres_virtual = fb.r.width,
-            yres_virtual = fb.r.height,
-        ));
-        t := start_thread_data(DeviceFile, self, fn(self: *DeviceFile) void = {
-            fb := self.handle.unwrap();
-            Screen'run_loop(fb) { fb, r |
-                if self.stop {
-                    return();
-                };
-            };
-        });
-        self.worker = (Some = t);
-        true
+        self.info.is_some()
     }
 
     get_vscreeninfo :: fn(self, out: *fb_var_screeninfo) #ioctl(FBIOGET_VSCREENINFO) = {
+        ::ptr_utils(@type out[]);
+        @if(out.is_null()) eprintln("fucked: out=null");
         if self.info.is_none() {
             self.init() || return(-1);
         };
         out[] = self.info || return(-1);
         0
     };
-    
     put_vscreeninfo :: fn(self, in: *fb_var_screeninfo) #ioctl(FBIOPUT_VSCREENINFO) = {
         self.info = (Some = in[]);
+        0
+    };
+    put_buffer :: fn(self, in: *[]u8) #ioctl(FBIOPUT_BUFFER) = {
+        self.buf = (Some = in[]);
         0
     };
     
     lseek :: fn(self, offset, whence, position) = 
         lseek_impl(offset, whence, position, 
-            => @if(self.handle.is_some(), self.handle.Some.buf.len * 4, -1)); 
+            => @if(self.buf.is_some(), self.buf.Some.len, -1)); 
     
     write :: fn(self, buf, position) = {
-        if self.handle.is_none() {
+        if self.buf.is_none() {
             self.init() || return(-1);
         };
-        handle := self.handle || return(-1);
-        dest := handle.buf.interpret_as_bytes();
+        dest := self.buf || return(-1);
         buf.len = buf.len.min(dest.len - position).max(0);
         dest.subslice(position, buf.len).copy_from(buf);
         buf.len
-    }
-    
-    close :: fn(self) = {
-        if self.worker { t |
-            self.stop = true;
-            t.join();
-        };
-        if self.handle { handle |
-            a := Vfs'get_vfs()[].allocator;
-            general_allocator().dealloc(u32, handle.buf);
-            // TODO: don't leak the queue
-        };
-        self.worker = .None;
-        self.handle = .None;
-        self.info = .None;
-        // TODO: be consistant about whose job it is to free the FileHandle.data memory
     }
 };
