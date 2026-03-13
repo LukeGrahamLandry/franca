@@ -5,6 +5,12 @@
 - blit that framebuffer onto a graphics texture so it can go on the web demo's canvas
 - graphics: fix the imports so it works when not #use-ed at global scope
 
+tests/todo
+- type check for decl_var_pattern. mostly from emit_capturing_call which already did the check so didn't come up. 
+- wasm_bad_sig: emit_ret isn't setting ret_cls if the body halts, but the signeture still needs to match the declared one.
+  - missed wasm got simplification: don't need pledge_function anymore. 
+- trivial oob span in eat_white_space_hit_end
+
 ## (Mar 11)
 
 - `stmt.done = true; // TODO: you probably want to check if inner expressions are done but this seems fine so far.`
