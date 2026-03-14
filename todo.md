@@ -1,4 +1,9 @@
 
+soon:
+TODO: use constdata for @static and string literals. 
+TODO: mprotect after applying relocations on linux. 
+TODO: do auxvec for page size
+
 ---
 
 things i found when looking at all uses of @static
@@ -16,6 +21,7 @@ TODO: document the mistake of `f :: fn() = (); a := @static f; a[]();`
 TODO: shouldn't need to delay eveal import_c/compile/rules to avoid InProgressMacro
 
 ---
+- https://en.wikipedia.org/wiki/ICO_(file_format)#File_structure
 - prospero: maybe (with the low resolution i run in tests) on the edges both threads have floats that get different values but map to the same int pixel so its a race
 - make run_franca_file less insane
 - compiler/emit_ir.fr should use b/h arg/par but it only matters for apple-arm and only 
@@ -874,7 +880,6 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 
 ## linux 
 
-- :TodoLinux CLOCK_REALTIME
 - :TodoMacosSyscall
 - how are you supposed to ask for page size? blink wants 64k instead of 4k. 
 - elf_loader.fr doesn't work on linker output: `panic! not divisible by page size`
@@ -896,7 +901,6 @@ q.out`impl2__7041:
 
 - be less strict about amd64 address folding when there's a large constant pointer (which is valid when jitting)
   - idk, i might have done this already? 
-- CLOCK_REALTIME
 - integer division by zero traps. so cross compiling isn't totally transparent. 
 
 ---

@@ -1050,13 +1050,15 @@ CodegenShared :: @rec @struct(
     no_more_functions: bool,
     no_more_codegen: u32,
     m: *QbeModule,
-    codegen_time: i64,
     // TODO: allow multiple backend threads. 
     thread: *Thread,
     threaded: bool,
     alloc: Alloc,
     enqueue: @FnPtr(*CodegenShared, *CodegenEntry) void,
     join: @FnPtr(*CodegenShared) void,
+    // has to happen on the codegen thread (because apple doesn't have pthread_getcpuclockid), 
+    // after all work done, but join also frees this struct so caller has to have memory for this if they want it. 
+    codegen_time_out: ?*i64,
 );
 
 CodegenTask :: @tagged(
@@ -1108,6 +1110,7 @@ fn init_codegen_worker(m: *QbeModule, arena: Alloc, worker: CodegenWorker, threa
     s.pipe = init(arena, n);
     s.enqueue = enqueue;
     s.join = join;
+    s.codegen_time_out = .None;
     each s.entries { it |
         if s.threaded {
             it.arena_storage = init(general_allocator(), 1.shift_left(16));  // these are freed in join_codegen_thread
@@ -1219,9 +1222,9 @@ codegen_thread_main :: fn(shared: *CodegenShared) void = {
         } else {
             @assert(shared.no_more_functions, "expected no_more_functions");
             emit_suspended_inlinables(shared.m); // needs to happen on codegen thread for apple's jit shit.
-        
-            // pthread_getcpuclockid doesn't exist? so we have to do this here
-            shared.codegen_time = clock_ms(MacosLibc.CLOCK_THREAD_CPUTIME_ID);  // // :TodoLinux
+            if shared.codegen_time_out { codegen_time |
+                codegen_time[] = thread_timestamp();
+            };
             shared.no_more_codegen = 1;
             Futex'wake(shared.no_more_codegen&, 1);
             return();
