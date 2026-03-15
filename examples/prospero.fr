@@ -96,17 +96,24 @@ render :: fn(p: *Program, width: i64, v: *ImportVTable) Ty(Qbe.BSet, i64, i64) =
     w: Work = (
         p = p, width = width, v = v, i = i, 
         pixels = init_bitset(width * width),
-        depth = max(log(width, 2) - 3, 1) - 1,
+        depth = max(log(width, 2) - 3, 1) - int(FEAT_THREADS),
         yes = @ref 0, no = @ref 0, 
     );
     if FEAT_THREADS {
         threads := list(*Thread, 4, temp());
+        regions := Qbe.BSet.list(temp());
         for_quads(i) { i |
             w := temp().boxed(Work, w);
             w.i = i;
+            w.pixels = init_bitset(width * width);
+            regions&.push(w.pixels);
             threads&.push(start_thread_data(Work, w, render2));
         };
         for(threads, join);
+        each regions.items().rest(1) { it |
+            bsunion(regions[0]&, it);
+        };
+        w.pixels = regions[0];
     } else {
         render2(w&);
     };
@@ -195,7 +202,7 @@ fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
             }
         };
         if (known.max < 0.0 || known.min > 0.0) {
-            s.yes[] += 1;
+            i64.atomic_inc(s.yes);
             return();
         };
     }
@@ -213,7 +220,7 @@ fn quad_rec(s: *RecState, int: Interval2, depth: i64) void = {
     }
     
     if depth == 0 {
-        s.no[] += 1;
+        i64.atomic_inc(s.no);
         if !s.enable_jit {
             iter_intervals(s.width, int.x, int.y) { x, y, i |
                 hit := interpret(f, s.vals, x, y) > 0.0;
