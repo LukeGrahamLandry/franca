@@ -1,4 +1,26 @@
 
+## (Mar 14)
+
+- macos screenshot default names have a U+202F so dragndrop loses it because NSString.length is in utf16
+- wasm/emit doesn't care about pointer stability so don't limit to commands_size_guess. 
+- remove the special case for `m.got: SegmentCursor`, they can just be randomly in ConstantData
+  instead of reserving a chunk at the start. probably slightly worse once i start putting more 
+  stuff in constdata (that doesn't have fixups) because the loader might have to look at more pages, 
+  but i'd rather the code simplicity (and no arbitrary limit) than unmeasurable startup time. 
+  - somehow that broke only the hare tests.
+    - dies in rt.start_linux `<+24>: str x2, [x1]; argc = iv[0]`. 
+      only when have_assembler, it's fine if i disable that and use a linker.
+    - it doesn't like that im not emitting the ConstantData segment if its length is 0 
+      (before it wasn't 0 because it had the wasted max_got_size). 
+      oops, wasn't incrementing virtual_offset if skip so only worked if last thing (MutableData) is the empty one
+      also only happened if -nostart because otherwise i import libc_start_main, 
+      and franca does static binaries by just making all the imports weak so would never be zero there either. 
+
+## (Mar 13)
+
+- magic numbers for clock_gettime on linux. 
+  - rare memory safety L: stop trying to read worker.codegen_time after deallocating it
+
 ## (Mar 12)
 
 - split the framebuffer part out of DeviceFile so now it's just used as a convoluted way to pass a buffer around. 

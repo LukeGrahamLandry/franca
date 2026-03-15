@@ -76,8 +76,7 @@ FixupType :: @tagged(
     //         It's a local symbol but since we want its absolute address in memory, we need the loader to add our base address.  
     // import: bind.
     //         We want the absolute address of an import to be in memory. ie. __got uses this. 
-    DataAbsolute: @struct(increment: i64),
-    
+    DataAbsolute: @struct(increment: i64, got: bool /* :track_got_reloc :NotForCorrectness */),
     // amd64
     RipDisp32: @struct(
         increment: i64,
@@ -339,7 +338,7 @@ fn emit_data(self: *QbeModule, dat: Dat2) void = {
                 ptr[] = 0;
             };
             // Since we need the absolute address in memory, even local symbols need a relocation. 
-            push_fixup(self, symbol, (patch_at = (i64 = ptr), type = (DataAbsolute = (increment = r.addend))));
+            push_fixup(self, symbol, (patch_at = (i64 = ptr), type = (DataAbsolute = (increment = r.addend, got = false))));
             @if(symbol.kind == .Local)
             if self.goal.arch != .wasm32 && self.goal.type == .Relocatable && !symbol.local_but_marked_for_relocation {
                 self.local_needs_reloc&.push(r.id);
@@ -535,8 +534,8 @@ fn finish_function(m: *QbeModule, dest: []u8, name_id: Qbe.Sym) void #inline = {
 }
 
 // not a repro problem because the memory is already zeroed by page allocator
-fn align_to(s: *SegmentCursor, align: i64) void = {
-    extra := s.len().mod(align);
+fn align_to(s: *SegmentCursor, align: i64) void #inline = {
+    extra := s.len().umod(align);
     if extra != 0 {
         s.next = s.next.offset(align - extra); 
     };
@@ -648,12 +647,14 @@ fn ensure_got_slot(self: *QbeModule, symbol: *SymbolInfo, jit_address: rawptr) ?
     new_got_reloc: ?Fixup = .None;
     if symbol.got_lookup_offset == -1 {
         // need to reserve a new __got entry.  :GotAtConstantDataBase 
-        symbol.got_lookup_offset = self.got&.len();
-        got := self.got&.reserve(rawptr);  // :TodoErrorMessage
+        segment := self.segments&[.ConstantData]&;
+        segment.align_to(8);
+        symbol.got_lookup_offset = segment.len();
+        got := segment.reserve(rawptr);
         when_debug(self, .Patch) { out |
             @fmt(out, "# reserve __got[%] = %\n", symbol.got_lookup_offset / 8, symbol.name);
         };
-        new_got_reloc = (Some = (patch_at = (raw = got), type = (DataAbsolute = (increment = 0))));
+        new_got_reloc = (Some = (patch_at = (raw = got), type = (DataAbsolute = (increment = 0, got = true))));
         if !(self.goal.got_indirection_instead_of_patches && jit_address.is_null()) { // TODO: remove this condition
             got[] = jit_address; // because we don't loop again to handle `new_got_reloc`
         }

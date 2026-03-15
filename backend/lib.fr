@@ -89,8 +89,6 @@ QbeModule :: @rec @struct(
     goal: QbeTargetEnv,
     start_of_writable_code: *u8,
     // these are special sections that live inside the main segments. 
-    got: SegmentCursor,
-    commands: SegmentCursor,
     wasm_types: SegmentCursor,
     
     exports: List(Qbe.Sym),
@@ -106,13 +104,10 @@ QbeModule :: @rec @struct(
     symbol_memmove: Qbe.Sym,
     types_mutex: Mutex,
     last_function_end: *u8,
-    __: Ty(i64, i64),  // :UpdateBoot
     
     wasm_function_type_count: i32,
     wasm_symbol_stackbase: Qbe.Sym,
-    _0: u32,
     wasm_has_any_indirect_calls: bool,
-    _1: bool,
     
     need_static_memmove: bool,
     have_static_memmove: bool,
@@ -200,7 +195,7 @@ QbeTargetEnv :: @struct(
     have_entry_point := false,  // ==Exe    
     
     segment_size        := 1.shift_left(25),
-    max_got_size        := 1.shift_left(15),
+    _2      := 1.shift_left(15),
     _       := 1.shift_left(11),  // :UpdateBoot
     commands_size_guess := 16384,
     chained_size_guess  := 2000000,
@@ -280,7 +275,7 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
     
     @if(TODOWASM)
     if m.goal.arch == .wasm32 {
-        m.goal.commands_size_guess *= 8;
+        m.goal.commands_size_guess = 0;
         if goal.type == .JitOnly {
             goal.jit_via_dlopen = true;
             Jit :: import("@/backend/wasm/jit.fr");
@@ -392,23 +387,7 @@ if need_segments {
     // :leak
     m.wasm_types_cache      = init(gpa);
     if need_segments {
-        // :GotAtConstantDataBase
-        // TODO: this is kinda ass
-        next := m.segments&[.ConstantData].next&;
-        m.got = (mmapped = (ptr = next[], len = goal.max_got_size), next = next[]);
-        next[] = next[].offset(goal.max_got_size); 
-        
-        if goal.type == .JitOnly {
-            range(0, goal.max_got_size / 8) { i |
-                tried_to_call_uncompiled :: fn() void = {
-                    panic("ICE: jitted code tried to call an uncompiled function through __GOT");
-                };
-                ptr_cast_unchecked(u8, @FnPtr() void, m.got.mmapped.ptr.offset(i * 8))[] = tried_to_call_uncompiled;
-            };
-        };
-        
         next := m.segments&[.Code].next&;
-        m.commands = (mmapped = (ptr = next[], len = m.goal.commands_size_guess), next = next[]);
         next[] = next[].offset(m.goal.commands_size_guess); 
         m.start_of_writable_code = next[];
         m.last_perfmap_end = m.start_of_writable_code;

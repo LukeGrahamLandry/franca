@@ -126,7 +126,7 @@ fn output_macho(m: *QbeModule) [][]u8 = {
             size = chunks[1].len - e.m.goal.commands_size_guess,
         );
         segments[1].sections = @slice(xx);
-        xx: WipSection = (name = "__got", size = chunks[2].len, flag = 0, offset_in_segment = 0);
+        xx: WipSection = (name = "__data_const", size = chunks[2].len, flag = 0, offset_in_segment = 0);
         segments[2].sections = @slice(xx);
         xx: WipSection = (name = "__data", size = chunks[3].len, flag = 0, offset_in_segment = 0);
         segments[3].sections = @slice(xx);
@@ -411,7 +411,6 @@ fn emit_exe_fixups(e: *EmitMacho, chained: *List(u8)) void #inline = {
     
     fixups, symbols := collect_aot_fixups(m);
     symbols := symbols.items();
-    @debug_assert_ge(fixups.len, e.m.got&.len() / 8, "at least each __got entry needs a fixup");
     if e.m.goal.jit_via_dlopen {| fixups.len = 0; };
     Sort'default(FixP, fixups, fn(a, b) => ptr_diff(a.fix.patch_at.addr, b.fix.patch_at.addr) >= 0);
     // at this point, `fixups` is in the order of the patch targets in virtual memory which is the order we need to emit the fixup chains. 
@@ -736,7 +735,7 @@ fn append_relocations(symbol_table_index: i64, id: Qbe.Sym, m: *QbeModule, reloc
     each s.fixups { fix | 
         continue :: local_return;
         patch_segment, patch_segment_offset := compiler_address_to_segment_offset(m, fix.patch_at.addr);
-        if patch_segment == .ConstantData && patch_segment_offset < m.got&.len() {
+        if fix.type&.tag() == .DataAbsolute && fix.type.DataAbsolute.got {
             // :track_got_reloc
             // We bound this symbol for jitting and reserved a __got slot for it.
             // However, we want to let static linker move stuff around and pack its own __got.
@@ -746,7 +745,6 @@ fn append_relocations(symbol_table_index: i64, id: Qbe.Sym, m: *QbeModule, reloc
             // we need to conservitively emit more got references if we address a var before knowing that 
             // it's a function and we might guess wrong. i think this is just wasteful, not a correctness issue -- Feb 14, 2025
             // TODO: but we still incorrectly export those below
-            @debug_assert(fix.type&.tag() == .DataAbsolute, "__got reloc must be data. %");
             continue();
         };
         sec: i64 = which_section(patch_segment).zext();

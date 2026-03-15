@@ -492,7 +492,6 @@ fn push_global_index(e: *EmitWasmFn, id: Qbe.Sym) void = @if_else {
 //   real wasm index in the module for direct calls. 
 //   first import is 0, local functions are after all imports. 
 //   JIT: no imports so it can be assigned early  
-//        
 //
 // The order of segments matters. 
 fn output_wasm_module(m: *QbeModule) [][]u8 = {
@@ -545,7 +544,9 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     memory_reserved += data_size;
     
     // TODO: allow these, they're just the same. zeroinit can go at the end so you don't need to include the bytes to init it. 
-    @assert_eq(m.segments&[.ConstantData]&.len(), m.goal.max_got_size, "wasm constdata len");
+    // (rn ensure_got_slot is only needed when jitting so this is fine. 
+    //  unlike native, wasm imports still get a fixed value at compile time)
+    @assert_eq(m.segments&[.ConstantData]&.len(), 0, "wasm constdata len");
     @assert_eq(m.segments&[.ZeroInitData]&.len(), 0, "wasm bss len");
     
     // TODO: remove
@@ -580,16 +581,11 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
         }
     };
     
-    // TODO: better error when you run out of commands_size_guess or better just dynamically allocate this 
-    //       becaause offsets don't matter (make sure im not relying on pointer stability here but i don't think so).
-    //       needed because you run out fast if you want to export every function so you get symbol names. 
-    code_segment := m.segments&[.Code]&;
     chunks := list([]u8, temp());
-    cursor: List(u8) = fixed_list(ptr = code_segment.mmapped.ptr, len = m.goal.commands_size_guess);  // :UnacceptablePanic
     push_buf :: fn($body: @Fn(buf: *List(u8)) void) void = {
-        start := cursor.len;
+        cursor := u8.list(temp());
         @must_return body(cursor&);
-        chunks&.push(cursor.items().rest(start)); 
+        chunks&.push(cursor.items()); 
     };
     
     push_buf { buf |
@@ -608,6 +604,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     }; 
     
     push_buf { buf |
+        buf.reserve(m.imports.len * 30);
         buf.push(@as(u8) Wasm.Section.Import);
         uleb_patch_delta buf {
             leb128_unsigned(buf, m.imports.len + 1);
@@ -633,7 +630,6 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
         write_function_section(m, buf);
     };
     
-    // TODO: reserve index 0 as null for sanity purposes
     // :OnlyOneTable for indirect function calls
     @if(m.wasm_has_any_indirect_calls)
     push_buf { buf |
@@ -675,6 +671,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     };
     
     push_buf { buf |
+        buf.reserve(50 + m.exports.len*20);
         buf.push(@as(u8) Wasm.Section.Export);
         uleb_patch_delta buf {
             leb128_unsigned(buf, m.exports.len + 2 + int(m.wasm_has_any_indirect_calls));
@@ -724,6 +721,8 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     //       and would only need to put functions that are actually referenced indirectly in the table. 
     @if(m.wasm_has_any_indirect_calls)
     push_buf { buf |
+        n := f_count+m.imports.len;
+        buf.reserve(10 + n*4);
         buf.push(@as(u8) Wasm.Section.Element);
         uleb_patch_delta buf {
             leb128_unsigned(buf, 1);  // length
@@ -734,7 +733,6 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
             leb128_signed(buf, 0);
             push(buf, @as(u8) Wasm.Inst.End);
             
-            n := f_count+m.imports.len;
             leb128_unsigned(buf, n);  // length
             range(0, n) { i |
                 leb128_unsigned(buf, i);
@@ -766,17 +764,16 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
         };
     };
     {
-        padding := m.goal.commands_size_guess;
-        total_code_bytes := code_segment.len() - padding;
+        @debug_assert_eq(m.text_padding(), 0);
         push_buf { buf |
             buf.push(@as(u8) Wasm.Section.Code);
             f_count := m.local_needs_reloc.len;
-            total_section_bytes := total_code_bytes + uleb_size(f_count);
+            total_section_bytes := m.segments&[.Code]&.len() + uleb_size(f_count);
             leb128_unsigned(buf, total_section_bytes);
             leb128_unsigned(buf, f_count);
         };
         
-        chunks&.push(code_segment.mmapped.slice(padding, code_segment.len()));
+        chunks&.push(m.live_segment_part(.Code));
     };
     
     if data_size > 0 {
@@ -820,6 +817,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
 }
 
 fn write_function_section(m: *Qbe.Module, buf: *List(u8)) void = {
+    buf.reserve(m.local_needs_reloc.len * 4);
     buf.push(@as(u8) Wasm.Section.Function);
     uleb_patch_delta buf {
         leb128_unsigned(buf, m.local_needs_reloc.len);
@@ -837,6 +835,7 @@ fn write_function_section(m: *Qbe.Module, buf: *List(u8)) void = {
 // "only after the data section"
 fn write_name_section(m: *Qbe.Module, buf: *List(u8)) void = {
     @if(!m.goal.exe_debug_symbol_table && m.goal.type != .JitOnly) return();
+    buf.reserve(m.local_needs_reloc.len * 30);
     buf.push(@as(u8) Wasm.Section.Custom);
     uleb_patch_delta buf {
         leb128_unsigned(buf, 4); 
@@ -895,10 +894,10 @@ fn wasm_name(m: *Qbe.Module, s: *SymbolInfo) Ty(Str, Str) = {
 
 // TODO: refactor this to remove duplication with the normal output_wasm_module
 fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
-    @assert_eq(m.segments&[.ConstantData]&.len(), m.goal.max_got_size, "wasm constdata len");
     @assert_eq(m.segments&[.ZeroInitData]&.len(), 0, "wasm bss len");
     // note: MutableData is fine even though i don't output a data for this module. 
     //       since it imports the whole memory, it can just use the literal pointers. 
+    //       ditto ConstantData, tho that doesn't mean anything. 
     
     enumerate m.local_needs_reloc& { i, id |
         use_symbol(m, id[]) { s |
@@ -919,16 +918,11 @@ fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
     };
     @debug_assert_eq(m.imports.len, 0, "imports list should be empty when jitting on wasm");
     
-    // TODO: better error when you run out of commands_size_guess or better just dynamically allocate this 
-    //       becaause offsets don't matter (make sure im not relying on pointer stability here but i don't think so).
-    //       needed because you run out fast if you want to export every function so you get symbol names. 
-    code_segment := m.segments&[.Code]&;
     chunks := list([]u8, temp());
-    cursor: List(u8) = fixed_list(ptr = code_segment.mmapped.ptr, len = m.goal.commands_size_guess);  // :UnacceptablePanic
     push_buf :: fn($body: @Fn(buf: *List(u8)) void) void = {
-        start := cursor.len;
+        cursor := u8.list(temp());
         @must_return body(cursor&);
-        chunks&.push(cursor.items().rest(start)); 
+        chunks&.push(cursor.items()); 
     };
     
     push_buf { buf |
@@ -991,17 +985,15 @@ fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
     // START goes here
     
     {
-        padding := m.goal.commands_size_guess;
-        total_code_bytes := code_segment.len() - padding;
         push_buf { buf |
             buf.push(@as(u8) Wasm.Section.Code);
             f_count := m.local_needs_reloc.len;
-            total_section_bytes := total_code_bytes + uleb_size(f_count);
+            total_section_bytes := m.segments&[.Code]&.len() + uleb_size(f_count);
             leb128_unsigned(buf, total_section_bytes);
             leb128_unsigned(buf, f_count);
         };
         
-        chunks&.push(code_segment.mmapped.slice(padding, code_segment.len()));
+        chunks&.push(m.live_segment_part(.Code));
     };
     
     
