@@ -23,7 +23,6 @@ TODO: shouldn't need to delay eveal import_c/compile/rules to avoid InProgressMa
 ---
 - make the hare tests work in my examples/elf_loader.fr
 - https://en.wikipedia.org/wiki/ICO_(file_format)#File_structure
-- prospero: maybe (with the low resolution i run in tests) on the edges both threads have floats that get different values but map to the same int pixel so its a race
 - make run_franca_file less insane
 - compiler/emit_ir.fr should use b/h arg/par but it only matters for apple-arm and only 
   if you're calling an extern-c thing and run out of 8 registers and are still passing u8/u16's. 
@@ -484,7 +483,6 @@ bodies on different targets which i don't deal with well.
 - :BrokenCGeneric i think erroring on conflicting `_Generic` cases is correct but you're supposed to treat `long` and `long long`
 as different types even when they're the same size.
 - generate c headers from .frc files
-- option to use system headers instead of my builtin ones
 - make it good enough to compile impressive things
   - blink
   - musl
