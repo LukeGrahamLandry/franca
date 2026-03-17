@@ -21,25 +21,27 @@ World :: @struct(
     farm: List(Planted),
     shelves: List(Shelf),
     shops: List(Shop),
+    sprinklers: List(Pos),
     requests: List(CropType),
     player: Player,
-    money: i64 = 20,
-    timer: i64 = 60,
+    money: i64,
+    timer: i64,
     farm_area: Rect,
     msg: List(u8),
-    msg_timer: i64 = 0,
+    msg_timer: i64,
     truck_area: Rect,
     round_timer: i64,
     next_round_timer: i64,
     round_number: i64,
     rng: Random.Rng,
+    paused: bool,
 );
 
-Player :: @struct(pos: Pos, inventory: ?Object = .None, dx: f64 = 0.0, dy: f64 = 0.0);
+Player :: @struct(pos: Pos, inventory := Object.None, dx: f64 = 0.0, dy: f64 = 0.0);
 Growth :: @enum(Seed, Ready);
-CropType :: @enum(Tomato, Potato, Acorn, Tree);
+CropType :: @enum(Tomato, Potato, Pizza, Acorn);
 Crop :: @struct(type: CropType, age: Growth);
-Planted :: @struct(pos: Pos, remaining: i64 = 100, drought: f64 = 0.0, crop: Crop);
+Planted :: @struct(pos: Pos, timer: i64, drought: ?i64 = .None, crop: Crop);
 Object :: @tagged(
     Crop: Crop,
     WateringCan,
@@ -48,46 +50,90 @@ Object :: @tagged(
     Fertalizer,
     CrowBaton,
     Shelf,
-    Wall,
+    None,
 );
 Shelf :: @struct(
     pos: Pos, 
-    holding: ?Object = .None,
-    crow_hp: i64 = 0,
-    scarecrow: bool = false,
+    item := Object.None,
+    crow_timer := 0,
+    crow_hp := 0,
+    scarecrow := false,
 );
 Shop :: @struct(
     pos: Pos,
-    price: i64 = 0,
-    item: ?Object = .None,
+    price := 0,
+    item := Object.None,
 );
+
+CropConfig :: @struct(time: i64, seed: i64, sale: i64, colour: Colour);
+ItemConfig :: @struct(type: Object, price: i64, colour: u32);
+HazardConfig :: @struct(chance: f64, scaling: f64, time: i64);
+config :: @struct {
+    tick_rate :: 60;  // TODO: don't just run simulation once per frame
+    min_round_timer :: 20 * tick_rate;
+    crow: HazardConfig : (chance = 0.05, scaling = 0.001, time = 5*tick_rate);
+    drought: HazardConfig : (chance = 0.03, scaling = 0.003, time = 5*tick_rate);
+    max_crow_hp :: 3;
+    player_speed :: 10.0;
+    start_money :: 15;
+    sprinkler_range :: base_size * 2;
+    first_round_timer :: 60 * tick_rate;
+    crops :: @const_slice(@as(CropConfig)
+        (time = 5*tick_rate, seed = 1, sale = 2, colour = red),
+        (time = 15*tick_rate, seed = 3, sale = 5, colour = white),
+        (time = 25*tick_rate, seed = 15, sale = 20, colour = yellow),
+        (time = 60*tick_rate, seed = 30, sale = 60, colour = green),
+    );
+    items :: @const_slice(@as(ItemConfig)
+        (type = .Fertalizer, price = 10, colour = pack_rgba(0.7, 0, 0.7, 1)),
+        (type = .WateringCan, price = 50, colour = pack_rgba(0.2, 0, 1, 1)),
+        (type = .CrowBaton, price = 50, colour = pack_rgba(0.4, 0.4, 0.4, 1)),
+        (type = .Sprinkler, price = 100, colour = pack_rgba(0.6, 0.6, 1, 1)),
+        (type = .Scarecrow, price = 100, colour = pack_rgba(0.6, 0.6, 0.6, 1)),
+        (type = .Shelf, price = 50, colour = pack_rgba(130, 60, 20, 255)),
+    );
+};
 
 fn load_default_world(self: *World) void = {
     allocator := general_allocator();
-    self[] = zeroed World;
-    self.player = (pos = (x = 150.0, y = 150.0));
-    self.shelves = list(allocator);
-    self.money = 15;
+    self[] = (
+        player = (pos = (x = 150.0, y = 150.0)),
+        shelves = list(allocator),
+        shops = list(allocator),
+        sprinklers = list(allocator),
+        money = config.start_money,
+        farm_area = (pos = (x = 350.0, y = 300.0), w = 500.0, h = 500.0),
+        truck_area = (pos = (x = 350.0 + 500.0 + 40, y = 300.0), w = 200.0, h = 200.0),
+        farm = list(allocator),
+        msg = list(allocator),
+        requests = list(allocator),
+        next_round_timer = config.first_round_timer,
+        rng = Random.xoshiro256SS.new_seeded(),
+        timer = 0, msg_timer = 0, round_timer = 0, round_number = 0,
+        paused = false,
+    );
     range(0, 5) {i|
         self.shelves&.push((pos = (x = i.float().mul(75.0).add(350.0), y = 200.0)));
     };
-    self.shelves[0].holding = (Some = .WateringCan);
+    self.shelves[0].item = .WateringCan;
+    self.shelves[1].item = .CrowBaton;
     
-    self.shops = list(allocator);
-    range(0, 2) {x|
-        range(0, 5) {y|
-            self.shops&.push((pos = (x = x.float().mul(75.0).add(175.0), y = y.float().mul(75.0).add(300.0))));
+    store_rows := max(enum_count(CropType), config.items.len());
+    range_rev(0, 2) {x|
+        range(0, store_rows) {y|
+            self.shops&.push((pos = (x = x.float().mul(100.0).add(150.0), y = y.float().mul(75.0).add(300.0))));
         };
     };
-    self.shops[0].price = 5;
-    self.shops[0].item = (Some = (Crop = (type = .Tomato, age = .Seed)));
-    self.farm_area = (pos = (x = 350.0, y = 300.0), w = 500.0, h = 500.0);
-    self.truck_area = (pos = (x = 350.0 + 500.0 + 40, y = 300.0), w = 200.0, h = 200.0);
-    self.farm = list(allocator); // :fucked you aren't forced to set this before
-    self.msg = list(allocator);
-    self.requests = list(allocator);
-    self.next_round_timer = 60*10;
-    self.rng = Random.xoshiro256SS.new_seeded();
+    for_enum CropType { r |
+        i := r.raw();
+        self.shops[i].price = config.crops[i].seed;
+        self.shops[i].item = (Crop = (type = r, age = .Seed));
+    };
+    enumerate config.items { i, it |
+        jt := self.shops[i + store_rows]&;
+        jt.price = it.price;
+        jt.item = it.type;
+    };
 }
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -132,26 +178,41 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 fn next_round(world: *World) void = {
     extra_time := world.round_timer;
     world.round_timer = world.next_round_timer;
-    world.next_round_timer -= 5;
+    world.next_round_timer -= 5 * config.tick_rate;
+    world.next_round_timer = max(world.next_round_timer, config.min_round_timer);
     world.round_number += 1;
     
     world.msg&.clear();
     world.msg_timer = 100;
     if world.requests.len == 0 {
-        bonus := extra_time / 15;
+        bonus := extra_time / config.tick_rate / 5;
         world.money += bonus;
         @if(extra_time != 0)
         @fmt(world.msg&, "Order fulfilled early! you earned % bonus rubles", bonus);
-        count := 2 + world.rng&.next().bitcast().abs().mod(world.round_number);
-        range(0, count) { _ |
-            world.requests&.push(.Tomato);
+
+        lo, hi := (4, 7);
+        n := world.rng&.next().mod(bitcast(hi - lo)).bitcast() + lo;
+        range(0, n) { _ |
+            hi := @if(world.round_number >= 5, 3, 2);
+            i := world.rng&.next().mod(bitcast(hi)).bitcast();
+            world.requests&.push(@as(CropType) i);
+        };
+        if world.round_number >= 10 && world.rng&.next().mod(2) == 0 {
+            world.requests&.push(.Acorn);
         };
     } else {
         prev_round := world.round_number;
+        world.requests&.drop();
+        world.farm&.drop();
+        world.sprinklers&.drop();
+        world.shops&.drop();
+        world.shelves&.drop();
+        world.msg&.drop();
+        
         world.load_default_world();
         world.next_round();
-        @fmt(world.msg&, "Time's up. You lose!");
-        world.round_timer += prev_round * 25; // a bit more since the transition is jarring
+        @fmt(world.msg&, "Time's up. You lost on round %!", prev_round);
+        world.paused = true;
     };
 }
 
@@ -164,43 +225,110 @@ yellow: Colour : (r = 250, g = 250, b = 0);
 brown: Colour : (r = 150, g = 70, b = 20);
 light_brown: Colour : (r = 180, g = 110, b = 70);
 black_transparent: Colour : (r = 0, g = 0, b = 0, a = 100);
+black: Colour : (r = 0, g = 0, b = 0);
+white: Colour : (r = 255, g = 255, b = 255);
 
 Rect :: @struct(pos: Pos, w: f64, h: f64);
 base_size :: 50.0;
 
 do_update :: fn(state: *State) void = {
+    // Clicker
     state.x += state.dx;
     state.y += state.dy;
-    player_speed :: 10.0;
-    state.world.player.pos.x += player_speed * state.world.player.dx;
-    state.world.player.pos.y += player_speed * state.world.player.dy;
-    unordered_retain state.world.farm& { planted | 
-        planted.remaining -= 1;
-        if planted.remaining <= 0 {
-            planted.crop.age = .Ready;
-        };
-        
-        planted.remaining > -300 // rot!
+    w := state.w.float().div(16.0);
+    if state.x > w - 14.0 || state.x < 0.0 {
+        state.dx *= -1;
     };
-    state.world.msg_timer -= 1;
-    state.world.round_timer -= 1; // TODO: dt
+    h := state.h.float().div(16.0);
+    if state.y > h - 1.0 || state.y < 0.0 {
+        state.dy *= 1.0.neg();
+    };
     
-    if state.world.round_timer <= 0 {
-        state.world&.next_round();
-    };
-};
-  
-fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    // Player Movement
     state.world.player.dy = float(int(state.pressed&[2]) - int(state.pressed&[0]));
     state.world.player.dx = float(int(state.pressed&[3]) - int(state.pressed&[1]));
     // no normalize. i want you to go faster when you're going diagonal. it's more fun than sprint. 
     // TODO: maybe that should be an upgrade you buy. that would be fun. 
-    do_update(state);
+    state.world.player.pos.x += config.player_speed * state.world.player.dx;
+    state.world.player.pos.y += config.player_speed * state.world.player.dy;
+    
+    // The Farm
+    drought := state.world&.check_hazard(config.drought);
+    unordered_retain state.world.farm& { planted | 
+        planted.timer -= 1;
+        if planted.timer <= 0 {
+            planted.crop.age = .Ready;
+        };
+        
+        @match(planted.drought&) {
+            fn Some(t) => {
+                t[] -= 1;
+                if t[] == 0 {
+                    planted.timer = MIN_i64;
+                }
+            }
+            fn None() => if drought && !state.world&.in_sprinkler(planted.pos) {
+                planted.drought = (Some = { xx := config.drought; xx.time });
+            }
+        };
+        
+        rot_time := -2 * config.crops[planted.crop.type.raw()].time;
+        planted.timer > rot_time
+    };
+    
+    // The Crows
+    each state.world.shelves& { it | 
+        @if(!it.item&.is(.None))
+        @if(!it.scarecrow)
+        @if(it.crow_hp == 0)
+        if state.world&.check_hazard(config.crow) {
+            it.crow_hp = config.max_crow_hp;
+            it.crow_timer = { xx := config.crow; xx.time };
+        };
+        if it.crow_hp != 0 {
+            it.crow_timer -= 1;
+            if it.crow_timer <= 0 {
+                it.item = .None;
+                it.crow_hp = 0;
+            };
+        };
+    };
+
+    // Rounds
+    state.world.msg_timer -= 1;
+    state.world.round_timer -= 1; // TODO: dt
+    if state.world.round_timer <= 0 {
+        state.world&.next_round();
+    };
+};
+
+fn check_hazard(world: *World, hazard: HazardConfig) bool = {
+    chance := hazard.chance + (hazard.scaling * world.round_number.float());
+    chance /= config.tick_rate;
+    N :: 100000;
+    p := world.rng&.next().mod(N.bitcast());
+    p := p.bitcast().float().div(N.float());
+    p <= chance
+}
+
+fn in_sprinkler(world: *World, plant: Pos) bool = {
+    for world.sprinklers& { it |
+        if center_overlaps(plant, base_size, it, config.sprinkler_range) {
+            return true;
+        }
+    }
+    false
+}
+
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    state.w = sapp.width();
+    state.h = sapp.height();
+    if !state.world.paused {
+        do_update(state);
+    };
     
     sgl := state.draw&;
     sdtx := state.text.default_context&;
-    state.w = sapp.width();
-    state.h = sapp.height();
     
     sgl.defaults();
     sgl.viewport(0.intcast(), 0.intcast(), sapp.width().intcast(), sapp.height().intcast(), true);
@@ -218,37 +346,51 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sdtx.pos.x = 0.0;
     sdtx.pos.y = 0.0;
     sdtx.put(@tfmt("You have % rubles.    Round %\n", state.world.money, state.world.round_number));
-    sdtx.put(@tfmt("Shipment due in % frames.\n", state.world.round_timer));
+    sdtx.put(@tfmt("Shipment due in % ticks.\n", state.world.round_timer));
     sdtx.put(@tfmt("Requests: "));
+    old_colour := sdtx.color;
     for state.world.requests& { r |
-        sdtx.put(@tfmt("%, ", r));
+        data := config.crops.index(r.raw());
+        sdtx.color = data.colour.pack();  
+        sdtx.put(r.name_str());
+        sdtx.color = old_colour;
+        sdtx.put(", ");
     };
     sdtx.put(@tfmt("\n"));
-    
-    each state.world.farm { planted |
-        sdtx := state.text.default_context&;
-        sdtx.pos.x = planted.pos.x.cast() / 32;
-        sdtx.pos.y = planted.pos.y.cast() / 32;
-        if planted.remaining < 0 {
-            sdtx.color = pack_rgba(0.0, 0.5, 1.0, 1.0);
-            sdtx.put(@tfmt("%", 300 + planted.remaining));
-        } else {
-            sdtx.color = pack_rgba(1.0, 0.0, 0.0, 1.0);
-            sdtx.put(@tfmt("%", planted.remaining));
-        }
-    };
-    
     if state.world.msg_timer > 0 {
         sdtx.color = pack_rgba(1.0, 0.5, 0.2, 1.0);
         sdtx.pos.x = 0.0;
         sdtx.pos.y = 3.0;
         sdtx.put(state.world.msg.items());
     };
+    if state.world.paused {
+        sdtx.pos.x = 0.0;
+        sdtx.pos.y = 4.0;
+        sdtx.put("paused. press ESCAPE to continue.");
+    };
+    
+    sdtx.canvas(sapp.width().float().div(1.0).cast(), sapp.height().float().div(1.0).cast());
+    each state.world.farm { planted |
+        if planted.timer < 0 {
+            rot_time := 2 * config.crops[planted.crop.type.raw()].time;
+            world_write(state, planted.pos, pack_rgba(0.0, 0.6, 0.2, 1.0), @tfmt("%", rot_time + planted.timer));
+        } else {
+            world_write(state, planted.pos, pack_rgba(0.0, 1.0, 0.0, 1.0), @tfmt("%", planted.timer));
+        };
+        if planted.drought { timer |
+            p := planted.pos;
+            p.y += base_size / 3;
+            world_write(state, p, pack_rgba(0.0, 0.0, 1.0, 1.0), @tfmt("%", timer));
+        };
+    };
+    
     sgl.begin(.QUADS);
    
-    fn draw(s: *State, area: Rect, colour: Colour) void = {
+    fn draw(s: *State, area: Rect, colour: Colour) void = 
+        draw(s, area, colour.pack());
+    fn draw(s: *State, area: Rect, colour: u32) void = {
         sgl := s.draw&;
-        sgl.color = pack_rgba(colour.r, colour.g, colour.b, colour.a);
+        sgl.color = colour;
         w, h := (s.w.float(), s.h.float());
         
         x1 := area.pos.x.sub(0.0).div(w).sub(1.0).cast();
@@ -262,57 +404,80 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sgl.v2f(x1, y2);
     }
     
-    fn draw_square(s: *State, x: f64, y: f64, size: f64, colour: Colour) void = 
+    fn draw_square(s: *State, x: f64, y: f64, size: f64, colour: u32) void = 
         s.draw(@as(Rect) (pos = (x = x, y = y), w = size, h = size), colour);
+    fn draw_square(s: *State, x: f64, y: f64, size: f64, colour: Colour) void = 
+        s.draw_square(x, y, size, colour.pack());
     
     fn draw_object(s: *State, ty: Object, pos: Pos) void = {
         @match(ty) {
+            fn None() => ();
             fn Crop(crop) => {
                 fraction := @match(crop.age) {
                     fn Seed() => 3.0;
                     fn Ready() => 1.5;
                 };
                 c := find_center(pos, fraction);
-                s.draw_square(c.x, c.y, base_size / fraction, green);
-                
+                data := config.crops.index(crop.type.raw());
+                s.draw_square(c.x, c.y, base_size / fraction, data.colour);
             }
-            @default => s.draw_square(pos.x, pos.y, base_size / 3, green);
+            @default => {
+                d, fraction := (base_size / 8, 3.0);
+                pos := find_center(pos, fraction);
+                size := base_size / fraction;
+                it := config.items.find(fn(it) => it.type&.tag() == ty&.tag()) || return();  // :SLOW
+                c := it.colour;
+                s.draw_square(pos.x, pos.y, size, c);
+                s.draw_square(pos.x + d, pos.y + d, size, c);
+                s.draw_square(pos.x - d, pos.y - d, size, c);
+            };
         }
     }
     
     s := state;
     sgl.load_identity();
-    s.draw_square(100.0, 100.0, 20.0, yellow);
-    s.draw_square(200.0, 200.0, 20.0, green);
-    s.draw_square(0.0, 0.0, 20.0, blue);
     
     s.draw(state.world.farm_area, light_brown);
     s.draw(state.world.truck_area, brown);
     each state.world.farm { planted | 
         s.draw_object((Crop = planted.crop), planted.pos);
     };
+    for state.world.sprinklers& { it |
+        s.draw_object(.Sprinkler, it);
+        s.draw_square(it.x, it.y, config.sprinkler_range, pack_rgba(0.0, 0.0, 1.0, 0.1));
+    };
     
     each state.world.shelves {obj|
         s.draw_square(obj.pos.x, obj.pos.y, base_size, brown);
-        if obj.holding { item |
-            s.draw_object(item, obj.pos);
+        if obj.scarecrow {
+            s.draw_square(obj.pos.x, obj.pos.y, base_size/4, pack_rgba(0.6, 0.6, 0.6, 1));
+        };
+        s.draw_object(obj.item, obj.pos);
+        if obj.crow_hp > 0 {
+            world_write(state, obj.pos, pack_rgba(0.0, 0.0, 0.0, 1), @tfmt("%", obj.crow_timer));
+            world_write(state, (x=obj.pos.x, y=obj.pos.y+base_size/4), pack_rgba(0.0, 0.0, 0.0, 1), @tfmt("%", obj.crow_hp));
         };
     };
+
+    world_write :: fn(state: *State, pos: Pos, colour: u32, s: Str) void = {
+        sdtx := state.text.default_context&;
+        sdtx.pos.x = pos.x.cast() / 16;
+        sdtx.pos.y = pos.y.cast() / 16;
+        sdtx.color = colour;
+        sdtx.put(s);
+    }
     each state.world.shops {obj|
+        @if(obj.price == 0) local_return();
         s.draw_square(obj.pos.x, obj.pos.y, base_size, light_brown);
-        if obj.item { item | 
-            s.draw_object(item, obj.pos);
-        };
+        s.draw_object(obj.item, obj.pos);
+        world_write(state, obj.pos, white.pack(), @tfmt("%", obj.price));
     };
     
     fn draw(player: *Player) void => {
         s.draw_square(player.pos.x, player.pos.y, base_size, black_transparent);
-        if player.inventory { item | 
-            s.draw_object(item, player.pos);
-        };
-        // TODO: do the math
+        s.draw_object(player.inventory, player.pos);
         c := find_center(player.pos, 5);
-        s.draw_square(c.x, c.y, base_size / 5, red);
+        s.draw_square(c.x, c.y, base_size / 5, black);
     }
     
     fn find_center(pos: Pos, frac: f64) Pos = {
@@ -323,15 +488,6 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     sgl.end();
     
-    w := sapp.width().float().div(16.0);
-    if state.x > w - 14.0 || state.x < 0.0 {
-        state.dx *= 1.0.neg();
-    };
-    h := sapp.height().float().div(16.0);
-    if state.y > h - 1.0 || state.y < 0.0 {
-        state.dy *= 1.0.neg();
-    };
-    
     Easy'glue_begin_pass(sapp, sg, state.pass_action);
     
     sgl.draw_layer(sg, 0);
@@ -341,10 +497,16 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sg.commit();
 };
 
+fn pack(it: Colour) u32 = 
+    pack_rgba(it.r, it.g, it.b, it.a);
+
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     if event.type == .KEY_DOWN && !event.key_repeat {
-        if event.key_code == .ESCAPE {
+        if event.key_code == .W && event.modifiers.get(.super) != 0 {
             sapp.requests.quit = true;
+        };
+        if event.key_code == .ESCAPE {
+            state.world.paused = !state.world.paused;
         };
         
         if event.key_code == .W {
@@ -359,7 +521,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         if event.key_code == .D {
             state.pressed&[3] = true;
         };
-        if event.key_code == .SPACE {
+        if event.key_code == .SPACE && !state.world.paused {
             state.do_interact();
         };
     };
@@ -379,10 +541,11 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         };
     };
     
+    @if(!state.world.paused)
     if event.type == .MOUSE_DOWN && event.mouse_button == .LEFT {
         mouse := vec2(event.mouse_x, event.mouse_y);
         goal := vec2(state.x.cast(), state.y.cast());
-        mouse *= 0.0625;  // TODO: goal *= 1.0 / 16.0; :compilerbug ?
+        mouse *= cast(1.0 / 16.0);
         size := vec2(15.0, 1.0);
         end := goal + size;
         hit := mouse.x < end.x && mouse.x > goal.x && mouse.y < end.y && mouse.y > goal.y;
@@ -409,15 +572,33 @@ fn do_interact(state: *State) void = {
     
     each state.world.shelves { shelf | 
         if center_overlaps(player.pos, base_size, shelf.pos, base_size) {
+            if player.inventory&.is(.Scarecrow) {
+                shelf.scarecrow = true;
+                shelf.crow_hp = 0;
+                player.inventory = .None;
+                @say("placed scarecrow");
+            };
+            if shelf.crow_hp > 0 {
+                if player.inventory&.is(.CrowBaton) {
+                    shelf.crow_hp = 0;
+                } else {
+                    shelf.crow_hp -= 1;
+                };
+                @say("hit crow");
+            };
+        
             temp := player.inventory;
-            player.inventory = shelf.holding;
-            shelf.holding = temp;
+            player.inventory = shelf.item;
+            shelf.item = temp;
             return();
         }; 
     };
-    if player.inventory.is_none() {
         each state.world.shops { shop | 
             if center_overlaps(player.pos, base_size, shop.pos, base_size) {
+                if !player.inventory&.is(.None) {
+                    // scanning shops first means this also prevents placing a shelf on a shop
+                    @say("can't buy while holding an item");
+                };
                 if shop.price <= state.world.money {
                     state.world.money -= shop.price; 
                     player.inventory = shop.item;
@@ -427,58 +608,93 @@ fn do_interact(state: *State) void = {
                 };
             };    
         };
-    };
     
     on_farm := center_overlaps(state.world.player.pos, base_size, state.world.farm_area.pos, state.world.farm_area.w);
     on_truck := center_overlaps(state.world.player.pos, base_size, state.world.truck_area.pos, state.world.truck_area.w);
     
     if on_farm {
         @match(player.inventory) {
-            fn Some(item) => {
+            fn Crop(crop) => {
                 // Try to plant a seed
-                @match(item) {
-                    fn Crop(crop) => {
-                        crop.age == Growth.Seed || @say("Your % is fully grown. you can't plant it again.", crop.type);
-                        player.inventory = .None;
-                        state.world.farm&.push(pos = player.pos, crop = crop);
-                        return();
-                    }
-                    @default => @say("You can only plant seeds but you are holding %.", item&.tag());
-                }
+                crop.age == Growth.Seed 
+                    || @say("The % is fully grown. It can't be planted it again.", crop.type);
+                player.inventory = .None;
+                state.world.farm&.push(
+                    pos = player.pos, 
+                    crop = crop, 
+                    timer = config.crops[crop.type.raw()].time,
+                );
+                return();
             }
             fn None() => {
                 // Try to pick up a grown plant
                 enumerate state.world.farm { i, planted | 
                     if planted.crop.age == .Ready {
                         if center_overlaps(player.pos, base_size, planted.pos, base_size) {
-                            player.inventory = (Some = (Crop = planted.crop));
+                            player.inventory = (Crop = planted.crop);
                             state.world.farm&.unordered_remove(i); // do this last or life gets confusing!
                             return();
                         };
                     };
                 };
             }
+            fn WateringCan() => {
+                enumerate state.world.farm { i, planted | 
+                    if planted.drought { _ |
+                        planted.drought = .None;
+                        @say("watered %", planted.crop.type);
+                    };
+                };
+            }
+            fn Sprinkler() => {
+                each state.world.farm& { it |
+                    if it.drought.is_some() && state.world&.in_sprinkler(it.pos) /*SLOW: could just check new ones*/ {
+                        it.drought = .None;
+                    };
+                };
+                
+                player.inventory = .None;
+                state.world.sprinklers&.push(player.pos);
+                @say("placed sprinkler");
+            }
+            fn Fertalizer() => {
+                enumerate state.world.farm { i, planted | 
+                    if planted.crop.age == .Seed {
+                        planted.crop.age = .Ready;
+                        player.inventory = .None;
+                        @say("grew %", planted.crop.type);
+                    }
+                };
+            }
+            @default => @say("You can only plant seeds but you are holding %.", player.inventory&.tag());
         }
     };
     
+    item := player.inventory;
     @if(on_truck)
-    if player.inventory { item |
+    if !item&.is(.None) {
         @if_let(item) fn Crop(crop) => {
-            crop.age == .Ready || @say("Trying to sell % seed. try growing letting it grow first!", crop.type);
+            crop.age == .Ready || @say("Trying to sell % seed. try planting it first!", crop.type);
             r := state.world.requests&;
             i := r.index_of(fn(it) => it[] == crop.type) 
                 || @say("Trying to sell % but that is not a requested item", crop.type);
             r.ordered_remove(i);
             player.inventory = .None;
-            state.world.money += (i + 1) * (1 + @as(i64) crop.type) * 2;
+            price := config.crops[crop.type.raw()].sale;
+            state.world.money += price;
             if r.len == 0 {
                 state.world&.next_round();
             };
-            
-            return();
+            @say("sold %", crop.type);
         }
-        @say("You can only sell crops (you are holding %)", item&.tag());
+        @say("You can only sell crops (you are item %)", item&.tag());
     }
+    
+    if player.inventory&.is(.Shelf) {
+        state.world.shelves&.push(pos = player.pos);
+        player.inventory = .None;
+        @say("placed shelf")
+    };
     
     @say("There is nothing to interact with here");
 }
@@ -495,3 +711,7 @@ main :: fn() void =
 driver :: fn(vtable: *ImportVTable) void = 
     Easy'build_for_graphics(vtable, @source_file_name()); 
 
+// (private; for my own archaeology)
+// https://github.com/LukeGrahamLandry/Old-Code/blob/main/src/Python/Games/Farm.py
+// https://github.com/LukeGrahamLandry/Old-Code/tree/main/src/Godot/Farm
+// https://github.com/LukeGrahamLandry/minigames/blob/main/farm/src
