@@ -675,3 +675,26 @@ fn AsFnPtr(fid: FuncId) Type = {
     arg, ret := (func.finished_arg.unwrap(), func.finished_ret.unwrap());
     FnPtr(arg, ret)
 }
+
+// TODO: this should go in sys/sync somewhere?
+// `body` will run only once even if this is called concurently on different threads. 
+// if when=Clear it will run twice if called at comptime and runtime, 
+// if when=DoNotClear it will only run at comptime if called at both^
+fn init_once($When: @Fn(t: Type) Type, $body: @Fn() void) void = {
+    W :: @as(FuncId) When;
+    A :: @as(FuncId) @as(@Fn(t: Type) Type) ClearOnAotBake;
+    B :: @as(FuncId) @as(@Fn(t: Type) Type) DoNotClearOnAotBake;
+    loc :: get_function_ast(body, false, false, false, false)[].loc;
+    @run @ct_assert(W.as_index() == A.as_index() || W.as_index() == B.as_index(), loc, "expected [DoNot]ClearOnAotBake");
+    Futex :: import("@/lib/sys/sync/futex.fr");
+    
+    lock := @static_mut zeroed(W(u32));
+    @if(lock.it == 2) return();
+    if u32.cas(lock.it&, 0, 1) == 0 {
+        body();  // we are the first thread
+        lock.it = 2;
+        Futex'wake(lock.it&, MAX_i32);
+    } else {
+        Futex'wait_while(lock.it&, fn(tmp) => tmp != 2);
+    };
+}

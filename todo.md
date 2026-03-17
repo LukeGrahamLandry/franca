@@ -8,7 +8,6 @@ TODO: do auxvec for page size
 
 things i found when looking at all uses of @static
 TODO: opts :: @static { xxx: Search.StratOpts = (); xxx };  try @static @as(Search.StratOpt) ()
-TODO: use ClearOnAotBake in examples/chess/precalc.fr
 TODO: dump_wasm.dump isn't thread safe because of `errors` global
 TODO: examples/lambda.fr.on_render.stack isn't thread safe if i want to have multiple from the same dylib in multiplexer
       but same problem for any graphcis program with @static(State).
@@ -21,6 +20,9 @@ TODO: document the mistake of `f :: fn() = (); a := @static f; a[]();`
 TODO: shouldn't need to delay eveal import_c/compile/rules to avoid InProgressMacro
 
 ---
+- broke self compile with emit_c. 
+`franca examples/emit_c.fr -o target/a.c -i compiler/main.fr -unsafe && cc -o q.out ./target/a.c -Wl,-undefined,dynamic_lookup -O2 && ./q.out examples/default_driver.fr build compiler/main.fr -unsafe`
+panic! Tried to allocate 4378 bytes with panicking_allocator
 - make the hare tests work in my examples/elf_loader.fr
 - https://en.wikipedia.org/wiki/ICO_(file_format)#File_structure
 - make run_franca_file less insane

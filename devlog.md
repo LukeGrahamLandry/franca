@@ -2,6 +2,7 @@
 ## (Mar 16)
 
 - uninspired so added more gameplay to farm_game example. droughts and crows from past versions. 
+- chess: use ClearOnAotBake in initTables so can be used at comptime+runtime without the giant tables going in the binary. 
 
 ## (Mar 15)
 

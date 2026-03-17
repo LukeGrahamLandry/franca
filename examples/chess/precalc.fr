@@ -1,29 +1,45 @@
 //! Calculate good numbers to use in movegen lookup table hash functions.
 
-// TODO: put it in ClearOnAotBake so you can use the chess stuff at comptime and runtime without bloating your binary
-// This is immutable so multiple threads can share one.
-tables :: @static zeroed(Tables);
+// the ClearOnAotBake means you can use the chess stuff at comptime and runtime without bloating your binary
+tables :: @static_mut @zeroed ClearOnAotBake(Tables);
+magic :: Magic.include_bytes("examples/chess/data/bitboards");
 
 // currently you can't forget to call this because you'll segfault on trying to index the AttackTable which is a bit rude but works out
-fn initTables(a: Alloc) void = {
-    rng: Random.Rng = (next = Random.xoshiro256SS, s = ZOIDBERG_SEED);
-    each ZOIDBERG { it |
+fn initTables() void = init_once ClearOnAotBake {
+    rng: Random.Rng = (next = Random.xoshiro256SS, s = Tables.ZOIDBERG_SEED);
+    each tables.it.zoidberg& { it |
         it[] = rng&.next().bitcast();
     };
+    size :: size_of_table_bytes(magic.rook&) + size_of_table_bytes(magic.bishop&);
+    a := Arena'bss_alloc(size, @source_location());
     
-    tables[] = (
-        rooks = makeSliderAttackTable(a, possibleRookTargets, magic.rook&),
-        bishops = makeSliderAttackTable(a, possibleBishopTargets, magic.bishop&),
-    );
+    makeSliderAttackTable(a, possibleRookTargets, magic.rook&, tables.it.rooks&);
+    makeSliderAttackTable(a, possibleBishopTargets, magic.bishop&, tables.it.bishops&);
+};
+
+fn size_of_table_bytes(magic: *Magic.BitBoardSeed) i64 = {
+    n := 0;
+    for magic.size& { it | n += 1.shift_left(it.zext()) * size_of(i64); };
+    n
 }
 
 Tables :: @struct {
+    // These are done at runtime because it's ~2MB of tables from ~1KB of magic 
     // Index is starting square. Key is bitboard of blocking pieces, (on both sides), (AttackTable.indexOf masks out irrelevant squares)
     // Value is bitboard of move targets, including on to pieces of either side (but not through them).
     // So key = allPieces & mask; targets = value & ~myPieces;
     rooks: AttackTable;
     bishops: AttackTable;
-
+    
+    // TODO: how did i pick these numbers? can i just make it 4 or whatever...?
+    // TODO: are there better numbers? experimentally run a bunch of games until I find the ones with least collissions?
+    // TODO: ugly... compiler shouldn't complain about u64 literal with high bit set :compilerbug
+    //
+    // magic numbers for https://en.wikipedia.org/wiki/Zobrist_hashing
+    // arbitrary numbers are filled in at runtime based on the seed
+    zoidberg: Array(i64, 781 + 128);  
+    ZOIDBERG_SEED :Array(u64, 4): (@as(u64) 11196532868861123662.bitcast(), @as(u64) 6132230720027805519.bitcast(), @as(u64) 14166148882366595784.bitcast(), @as(u64) 2320488099995370816.bitcast());
+    
     // These are done at comptime because the data is smaller than the code to generate it. 
     //     TODO: measure that again in to make sure
     // Index is starting square. Value is bitboard of move targets.
@@ -36,17 +52,15 @@ TargetSquares :: @Fn(i: i64, blockerFlag: i64, skipEdgeSquares: bool) i64;
 // Use the hardcoded primes to build an attack table.
 // Doesn't need to try increasing table sizes because the correct size for no collisions given that hasher is precalculated.
 // Maps the arangement of blocking pieces to the squares you can move to. 64 of them, one for each starting square.
-fn makeSliderAttackTable(alloc: Alloc, $possibleTargets: TargetSquares, magic: *Magic.BitBoardSeed) AttackTable = {
-    result := @uninitialized AttackTable;
+fn makeSliderAttackTable(alloc: Alloc, $possibleTargets: TargetSquares, magic: *Magic.BitBoardSeed, result: *AttackTable) void = {
     totalSize := 0;
     range(0, 64) { i |
         table := fillSliderTable(i, magic.magic&[i], magic.size&[i], alloc, possibleTargets)
             || @panic("Table % had collisions. Precalculated size % was wrong. (invalid bitboards data file)", i, magic.size&[i]);
-        result&[i] = table;
-        totalSize += result&[i].buffer_len() * size_of(i64) / 1024;
+        result[i] = table;
+        totalSize += result[i].buffer_len() * size_of(i64) / 1024;
     }
     // @print("Slider attack table size: % KB.\n", totalSize);
-    result
 }
 
 main :: fn() void = {
@@ -54,9 +68,9 @@ main :: fn() void = {
     _ := Tables.kings;
     _ := Tables.knights;
 
-    initTables(general_allocator());
-    a := findBetterSliderAttackTable(magic.rook&, "ROOK", tables.rooks&);
-    b := findBetterSliderAttackTable(magic.bishop&, "BISHOP", tables.bishops&);
+    initTables();
+    a := findBetterSliderAttackTable(magic.rook&, "ROOK", tables.it.rooks&);
+    b := findBetterSliderAttackTable(magic.bishop&, "BISHOP", tables.it.bishops&);
     
     if a || b {
         print("\n---\n\n");
@@ -147,6 +161,7 @@ fn fillSliderTable(sqI: i64, magic: i64, bits: u8, alloc: Alloc, $possibleTarget
     (Some = result)
 }
 
+// when searching for better magic, can use the old table to generate target lists faster. 
 fn fillSliderTableFast(sqI: i64, magic: i64, bits: u8, alloc: Alloc, old: *AttackTable) ?OneTable = {
     @debug_assert_lt(bits, 20, "too many bits in fillSliderTable");
     baseTargets := old[sqI].mask;
@@ -286,7 +301,7 @@ possibleKnightTargets :: fn(i: i64) i64 = {
 AttackTable :: Array(OneTable, 64);
 
 OneTable :: @struct {
-    buffer: *i64;
+    buffer: *i64;  // unpacked slice without bake_relocatable_value but that's fine because want it cleared anyway because it's big
     bitsInv: u8;
     magic: i64;  // brute forced by findBetterSliderAttackTable
     mask: i64;  // bitboard of relevant blockers. same as move targets, assuming no blocking pieces, and skipEdgeSquares=true.
@@ -350,15 +365,3 @@ Magic :: @struct {
         size: Array(u8, 64);
     };
 }
-
-magic :: Magic.include_bytes("examples/chess/data/bitboards");
-
-// TODO: are there better numbers? experimentally run a bunch of games until I find the ones with least collissions?
-/// Magic numbers for Zobrist hashing. I think I'm so funny.
-/// https://en.wikipedia.org/wiki/Zobrist_hashing
-// TODO: make sure i use bss for this!
-// TODO: put it in ClearOnAotBake so you can use the chess stuff at comptime and runtime without bloating your binary
-ZOIDBERG :: @static zeroed(Array(i64, 781 + 128));  // arbitrary numbers filled in at runtime
-// TODO: how did i pick these numbers? can i just make it 4 or whatever...?
-// TODO: ugly... compiler shouldn't complain about u64 literal with high bit set :compilerbug
-ZOIDBERG_SEED :Array(u64, 4): (@as(u64) 11196532868861123662.bitcast(), @as(u64) 6132230720027805519.bitcast(), @as(u64) 14166148882366595784.bitcast(), @as(u64) 2320488099995370816.bitcast());
