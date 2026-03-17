@@ -1,4 +1,12 @@
 
+## (Mar 16)
+
+- uninspired so added more gameplay to farm_game example. droughts and crows from past versions. 
+
+## (Mar 15)
+
+- c: more predefined macros so it's closer to drop in working with system headers
+
 ## (Mar 14)
 
 - macos screenshot default names have a U+202F so dragndrop loses it because NSString.length is in utf16
@@ -15,6 +23,7 @@
       oops, wasn't incrementing virtual_offset if skip so only worked if last thing (MutableData) is the empty one
       also only happened if -nostart because otherwise i import libc_start_main, 
       and franca does static binaries by just making all the imports weak so would never be zero there either. 
+- prospero threads fix
 
 ## (Mar 13)
 

@@ -26,7 +26,7 @@ available to every program (you can access them with `import()` or `#use`).
   - subprocess: launch other programs
   - fs: interact with files
   - process: get information about your execution environment 
-- dynamic_lib
+- dynamic_lib: bindings for libc's dlopen
 - jump: dynamic nonlocal returns (setjmp/longjmp)
 - variadic: call/define variadic functions that follow the system extern-c abi (equivalent to stdarg.h)
 - sort
@@ -35,6 +35,7 @@ available to every program (you can access them with `import()` or `#use`).
   - sha256
   - random: `xoshiro256**`
 - encoding
+  - deflate: uncompress gzip/pkzip archives
   - leb128: variable length integer encoding (used by wasm and dwarf). 
   - base64
   - json: parse a json string. (mostly) non-allocating iterator style. 

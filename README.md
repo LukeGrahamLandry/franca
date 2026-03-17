@@ -36,10 +36,6 @@ The compiler does not depend on libc (on linux, when built with -syscalls).
 The webassembly target is still a work in progress (doesn't follow c abi, poor codegen, etc), 
 but the compiler can (slowly) compile itself. 
 
-## Documentation
-
-Some does exist, see the `docs/README.md`.
-
 ## Nontrivial Example Programs
 
 [![](https://builds.sr.ht/~lukegrahamlandry/franca.svg)](https://builds.sr.ht/~lukegrahamlandry/franca)
@@ -53,16 +49,37 @@ Some does exist, see the `docs/README.md`.
   - can run at comptime so franca programs can import c libraries directly without depending on another compiler
   - compiles real programs: see tests/external/(lua, hare, bubblewrap, raylib, ...).fr
 - Windowing/3d graphics library [@/graphics](./graphics) (based on Sokol)
-  - very unfinished! macos-arm64-metal only currently
+  - very unfinished! macos-arm64-metal/webgpu only currently
 - You can try the [WebAssembly demo](https://franca.lukegrahamlandry.ca) in your browser without installing anything. 
   It can even cross compile a native version of the compiler that you can download as a way to bootstrap your first franca installation. 
+- The beginnings of an operating system for aarch64 [@/examples/os](./examples/os)
+
+## Documentation
+
+I suspect the best way to learn at this point is to just look at the examples folder, 
+but some things are subtle enough that it would feel rude if I didn't write them down, 
+and some things are dumb enough that I should defend myself. 
+These are not polished yet but hopefully better than nothing. 
+
+- [introduction](./docs/introduction.md): just enough syntax to be dangerous 
+- [aggregates](./docs/aggregates.md): more complicated types like structs, enums, slices, etc. 
+- [generics](./docs/generics.md): how to write functions that work for arbitrary types
+- [compilation](./docs/compilation.md): high level overview of the franca compilation model
+- [aot_bake](./docs/aot_bake.md): how to make ahead-of-time executables and control what data is included 
+- [imports](./docs/imports.md): how to load new code
+- [annotations](./docs/annotations.md): how to attach metadata to franca programs and query it from comptime code
+- [comptime](./docs/comptime.md): example usecases for full compile time execution
+- [higher_level](./docs/higher_level.md): a nonexhaustive list of features i don't have
+- [debugging](./docs/debugging.md)
+- [caching](./docs/caching.md): details about `.frc` files
+- [lib_summary](./docs/lib_summary.md): list of useful code provided with the franca distribution 
 
 ## Getting Started
 
-There's no "install" process, you just need the compiler binary and the code in this repository.  
+There's no global "install" process, you just need the compiler binary and the code in this repository.  
 
 ```
-git clone https://github.com/LukeGrahamLandry/franca.git && cd franca && make
+git clone https://git.sr.ht/~lukegrahamlandry/franca && cd franca && make
 ```
 
 That will download the source and an old version of the compiler, use it to compile 
