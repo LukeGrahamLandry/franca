@@ -11,6 +11,9 @@ c programs to test import_c:
 - tcc: c compiler written in c (that i can bootstrap with my c compiler)
 - qbe's minic/miniyacc: c compiler that generates a couple of the committed .ssa tests
 - bubblewrap: linux sandbox
+- clox: bytecode vm
+- raylib: "simple and easy-to-use library to enjoy videogames programming"
+- curl: "command line tool and library for transferring data with URLs"
 
 compilers that output qbe ir as text for qbe_frontend.fr:
 - hare

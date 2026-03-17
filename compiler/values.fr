@@ -93,9 +93,14 @@ fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type, loc: Span,
         @fmt(o, "B % at %", log(c, value&, type), fmt_loc(c, loc));
     };
     
-    out := BakedReloc.list(c.get_alloc());
+    out: BakeResult = (
+        rel = BakedReloc.list(c.get_alloc()),
+        off = 0,
+        bytes = value.shallow_copy(c.get_alloc()),
+    );
     start_id := c.baked.values&.len();
-    @try(c.bake_relocatable_body(value, type, out&, 0, false)) return;
+    @try(c.bake_relocatable_body(value, type, out&, false)) return;
+    @debug_assert_eq(out.off, c.get_info(type)[].stride_bytes.zext());
     
     // It's really irritating to force the user code to pass the span around, 
     // so instead, just assume anything made inside that call can be attributed to this constant. 
@@ -110,15 +115,18 @@ fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type, loc: Span,
     };
     
     // if it had a custom bake handler (ie. ClearOnAotBake) it might be able to go in bss after running it. 
-    if value.is_all_zeroes() {
-        finish(template = (Zeroes = value.len()), loc = loc, relocations = out&.items());
-    };
-    
-    finish(template = (Bytes = value), loc = loc, relocations = out&.items())
+    template: BakedValue.Template = @if(value.is_all_zeroes(), (Zeroes = out.bytes.len()), (Bytes = out.bytes));
+    finish(template = template, loc = loc, relocations = out.rel&.items());
 }
 
+BakeResult :: @struct {
+    rel: List(BakedReloc);
+    off: i64;
+    bytes: []u8;  // a copy so the comptime one isn't mutated
+};
+
 // TODO: make sure baked.lookup actually ever helps. might need to add checks in more places.
-fn bake_relocatable_body(c: *SelfHosted, value: []u8, type: Type, out: *List(BakedReloc), reloc_off: u32, force_default_handling: bool) Result(void, *CompileError) = {
+fn bake_relocatable_body(c: *SelfHosted, value: []u8, type: Type, out: *BakeResult, force_default_handling: bool) Result(void, *CompileError) = {
     info          := c.get_info(type);
     first_word    := if(value.len < 8, => 0 /*don't read OOB*/, => ptr_cast_unchecked(u8, i64, value.ptr)[]);
     only_one_word := value.len == 8;
@@ -130,14 +138,18 @@ fn bake_relocatable_body(c: *SelfHosted, value: []u8, type: Type, out: *List(Bak
         // Eventually i want ?*T to use zero as .None but for now allow null pointers. 
         || (only_one_word && first_word == 0)
     ;
-    if(treat_as_raw_bytes, => return(.Ok));
+    if treat_as_raw_bytes {
+        out.off += value.len;
+        return(.Ok);
+    };
     
     // :ScaryIfAliasWrongType
     // If we've already seen this pointer, don't emit it again, just alias the old one. 
     if only_one_word {
         if c.baked.vmem&.get(rawptr_from_int first_word) { it, addend, size |
             @debug_assert(addend == 0 || !it&.is(.FuncId), "func with addend doesn't make sense");
-            out.push(off = reloc_off, target = it, addend = addend);
+            out.rel&.push(off = out.off.trunc(), target = it, addend = addend);
+            out.off += 8;
             return(.Ok);
         };
     };
@@ -152,8 +164,10 @@ fn bake_relocatable_body(c: *SelfHosted, value: []u8, type: Type, out: *List(Bak
         if xx { f |
             // :call_dynamic_values
             values := f(u8.raw_from_ptr(value.ptr));
-            bytes_out := fixed_list(value);
-            bake_translate_legacy(values, bytes_out&, out, reloc_off);
+            bytes_out := fixed_list(out.bytes.subslice(out.off, value.len));
+            bake_translate_legacy(values, bytes_out&, out.rel&, out.off.trunc());
+            @debug_assert_eq(bytes_out.len, value.len);
+            out.off += value.len;
             return(.Ok);
         };
     };
@@ -178,20 +192,23 @@ fn bake_relocatable_body(c: *SelfHosted, value: []u8, type: Type, out: *List(Bak
             _, id := c.reserve_baked(Some = data);  // avoid cycles
             id2, addend := @try(c.bake_relocatable_constant(data, inner[], Span.zeroed(), (Some = id))) return;
             @debug_assert(id.id == id2.id && addend == 0, "thought this was a fresh pointer but it wasn't!");
-            out.push(off = reloc_off, target = (BakedVarId = id), addend = 0);
+            out.rel&.push(off = out.off.trunc(), target = (BakedVarId = id), addend = 0);
+            out.off += 8;
         }
         fn Struct(f) => {
             @err_assert(!f.is_union, "TODO: union in a constant. but its hard cause what if theres pointers in there but we don't know which is active") return;
             
             // Just do all the fields.
-            off := 0;
+            base := out.off;
             each f.fields { f |
                 info := c.get_info(f.ty);
-                @err_assert(off <= f.byte_offset, "struct fields must be in order (%)", c.log_type(type)) return;
-                off = f.byte_offset + info.stride_bytes.zext();
-                v  := value.slice(f.byte_offset, off);
-                @try(c.bake_relocatable_body(v, f.ty, out, reloc_off + f.byte_offset.trunc(), false)) return;
+                @err_assert(out.off - base <= f.byte_offset, "struct fields must be in order (%)", c.log_type(type)) return;
+                out.off = base + f.byte_offset;
+                v  := value.subslice(f.byte_offset, info.stride_bytes.zext());
+                @try(c.bake_relocatable_body(v, f.ty, out, false)) return;
+                @debug_assert_eq(out.off - base, f.byte_offset + info.stride_bytes.zext());
             };
+            out.off = base + value.len;
         }
         fn Tagged(f) => {
             tag := first_word; // For now tag is always 8 bytes. this is stupid but requires more thought to change. -- Mar 9, 2025. 
@@ -202,14 +219,16 @@ fn bake_relocatable_body(c: *SelfHosted, value: []u8, type: Type, out: *List(Bak
             b := value;
             tag_size :: 8;
             payload  := value.slice(tag_size, tag_size + payload_size);
-            @try(c.bake_relocatable_body(payload, inner, out, reloc_off + tag_size, false)) return;
+            out.off += tag_size;
+            @try(c.bake_relocatable_body(payload, inner, out, false)) return;
             
             padding := value.rest(tag_size + payload_size);
             @debug_assert(is_all_zeroes(padding), "ICE: zero_padding() didn't work on a @tagged constant. This is required for reproducibility.\n%\n%", 
                 c.log_type(type), fmt_loc(c, c.last_loc));
+            out.off += padding.len;
         }
-        fn Enum(f)  => return(c.bake_relocatable_body(value, f.raw, out, reloc_off, false));
-        fn Named(f) => return(c.bake_relocatable_body(value, f._0, out, reloc_off, force_default_handling));
+        fn Enum(f)  => return(c.bake_relocatable_body(value, f.raw, out, false));
+        fn Named(f) => return(c.bake_relocatable_body(value, f._0, out, force_default_handling));
         // TODO: explain that it's fine if it's reachable by an alias that knows the type
         // TODO: record it and see if we find an alias that knows the type later? 
         //       that sounds slow but wouldn't happen very often. 
@@ -266,13 +285,23 @@ fn put_baked(c: *SelfHosted, v: BakedValue, jit_ptr: ?[]u8) BakedVarId #inline =
     id
 }
 
+// fragile: when i call this from dyn_bake_relocatable_value, im often passing it stack pointers, 
+// so relying on this not calling bake_relocatable_body (which consults vmap for the shallow value).
+// TODO: document that in aot_bake.md saying "you can't bake stuff on the stack" is a bit misleading, theres a difference between manually triggered bake like this and letting a value escape to runtime code.  
+// 
 // TODO: change the api we expose so you don't need this anymore
 fn emit_relocatable_constant_body(c: *SelfHosted, bytes: Slice(u8), ty: Type, force_default_handling: bool) Res(Slice(BakedEntry)) = {
-    out := BakedReloc.list(temp());  // doesn't escape!
+    out := BakedReloc.list(temp());  
+    out: BakeResult = (  // doesn't escape!
+        rel = BakedReloc.list(temp()),
+        off = 0,
+        bytes = bytes.shallow_copy(temp()),
+    );
     // TODO: zero here? 
-    @try(c.bake_relocatable_body(bytes, ty, out&, 0, force_default_handling)) return;
+    @try(c.bake_relocatable_body(bytes, ty, out&, force_default_handling)) return;
+    @debug_assert_eq(out.off, c.get_info(ty)[].stride_bytes.zext());
     
-    value: BakedValue = (template = (Bytes = bytes), relocations = out.items(), loc = Span.zeroed());
+    value: BakedValue = (template = (Bytes = out.bytes), relocations = out.rel.items(), loc = Span.zeroed());
     (Ok = bake_collect_legacy(value&, c.get_alloc()))
 }
 

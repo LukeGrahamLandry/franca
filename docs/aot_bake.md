@@ -75,7 +75,7 @@ ditto cyclic data structures are allowed and will remain cycles when baked.
   contains constants of their own type, they never get baked anyway. 
   ie. this is fine even though it looks like it would be a cyclic dependency. 
   ``` 
-  fn bake_relocatable_value(self: Foo) []BakedEntry = {
+  fn bake_relocatable_value(self: *Foo) []BakedEntry = {
     another := :: zeroed Foo; // this is a constant of type Foo but will never be baked.  
     // <snip>
   }
@@ -84,8 +84,31 @@ ditto cyclic data structures are allowed and will remain cycles when baked.
 - talk about how jit-shims are used to avoid compiling for comptime but still give you something that bakes to the same thing. 
 - memory that is baked must remain live for the entire compliation. 
   it is an error to bake memory on the stack or in the temp() allocator. 
+- the order that bake handlers are called is arbitrary 
+  (depends on the order functions happen to be compiled). 
+  running other comptime code is interwoven with compiling/baking for aot, 
+  so if you do global side effects from your bake handler you might regret it. 
+- the parameter is the literal pointer used in the comptime address space, 
+  so if you modify that memory comptime code that runs later can see it (so maybe don't do that). 
+  Since the return value doesn't reference the input, the result in the executable 
+  won't see any changes made by other comptime code after the bake runs. 
+- tldr: comptime mutation of static variables is order dependent. 
+  try to use explicit dependencies to prevent memory from escaping to runtime code until you're done mutating it. 
+```
+X :: @static 123; @run { X[] = 4; }; println(X[]);  // bad
+X :: @static { x := 123; x = 4; x }; println(X[]);  // good
+```
+
+There are no constructors. 
+The output of a bake can only be raw bytes and pointer relocations for the dynamic loader. 
+More complex initialization must be done manually at the beginning of your program.
+- `init_once` marks a block of code that only runs on the first thread to reach it. 
+  It's useful for running (potentially expensive) init code in a thread safe way 
+  even when you don't control the entry point (ie. a library like examples/chess's initTables). 
 
 ## Jitted Code
+
+> May cause dizziness. Use with care until you become familier with its effects. 
 
 An exception to bake_relocatable_value just magically working is if you mmap executable memory 
 at comptime and then expect it to be available at runtime. 

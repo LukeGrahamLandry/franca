@@ -33,10 +33,10 @@ at comptime as well, and cross compile them, and introspect on thier types.
 > No thread_local, no complex numbers, no inline assembly. 
 > Not all stdlib standard headers are usable yet because i want to make cross compiling easy and not depend on system files. 
 
-but some examples of libraries that do work:
+but some examples of things that do work:
 - wuffs
 - stbimage, stbtruetype
-- lua (PUC Rio -- not jit)
+- lua (both PUC Rio and jit)
 - doom (see examples/os/bin/doom.fr)
 
 frontends for simpler languages: examples/import_wasm, examples/bf/bf2ir.fr

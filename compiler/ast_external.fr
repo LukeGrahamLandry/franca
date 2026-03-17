@@ -557,7 +557,8 @@ is_declared :: fn(target: FatExpr) FatExpr #macro =
 // See compiler/values.fr
 
 BakedValue :: @struct {
-    template: @tagged(Bytes: []u8, Zeroes: i64);
+    Template :: @tagged(Bytes: []u8, Zeroes: i64);
+    template: Template;
     relocations: []BakedReloc = empty();  // These must be in order (by .off)
     // TODO: expose these to the frontend in a sane way. 
     align: u32 = 1;
@@ -579,16 +580,15 @@ BakedReloc :: @struct {
 fn get_baked(c: CompCtx, id: BakedVarId) *BakedValue = 
     BakedValue.ptr_from_raw((c.vtable.get_baked)(c.data, id));
 
+// note: `bytes` is a copy for baking, not the original in comptime address space
 fn bake_translate_legacy(legacy: []BakedEntry, bytes: *List(u8), relocs: *List(BakedReloc), base: u32) void = {
     off: u32 = 0;
     for legacy { it |
         continue :: local_return;
         off += 8;
         
-        // TODO: This (not just setting the value to 0 when it's a pointer)
-        //       is a hack because it aliases the comptime bytes and sometimes
-        //       we need to use it at comptime even after we emit for AOT. 
         dest := bytes.reserve_type(i64);
+        dest[] = 0;
         @if_let(it) fn Num(int) => {
             dest[] = int.value;
         };
@@ -634,6 +634,7 @@ fn bake_iter_legacy(value: *BakedValue, $body: @Fn(legacy: BakedEntry) void) voi
         off += 8;
         body(legacy);
     };
+    @debug_assert_eq(off, size);
     @debug_assert_eq(next, value.relocations.len, "some relocs not in range");
 }
 
