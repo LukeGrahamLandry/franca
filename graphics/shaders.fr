@@ -756,21 +756,23 @@ fn swizzle_bits(s: Symbol) u32 = {
 }
 
 
-fn emit_bits(m: *ShaderModule, inst: *Ast, out: *List(u8)) void = {
+fn emit_bits(m: *ShaderModule, inst: *Ast, out: *List(u8), bitcast_name: Str) void = {
     @debug_assert_eq(inst.op, .Constant);
     info := m.types[inst.type.zext()]&;
     @debug_assert(info.is(.Scalar), "%", info.tag());
-    emit_bits(out, inst.a, info.Scalar);
+    emit_bits(out, inst.a, info.Scalar, bitcast_name);
 }
 
 // same syntax on msl/wgsl
-fn emit_bits(out: *List(u8), v: u32, type: Scalar) void = @match(type) {
+// TODO: webgpu doesn't allow nan/inf literals??
+fn emit_bits(out: *List(u8), v: u32, type: Scalar, bitcast_name: Str) void = @match(type) {
     fn F32() => {
         v: f32 = v.bitcast();
+        // my float printing is dumb as rocks so if there's a fraction, tell it exactly what bits to use
         if v.cast().int().float().cast() == v {
             @fmt(out, "%.0", v);
         } else {
-            @fmt(out, "(%.0/10000.0)", v*10000);  // TODO: correct fractional part
+            @fmt(out, "%(%)", bitcast_name, fmt_hex(v));
         }
     }
     // wgsl requires '-' if high bit is set (msl just warns)
@@ -953,7 +955,7 @@ fn display(self: *Function, out: *List(u8)) void = {
             fn Join() => @fmt(out, "join;\n");
             fn SetVar() => @fmt(out, "v% = v%;\n", it.a, it.b);
             fn Constant() => {
-                emit_bits(self.m, it, out);
+                emit_bits(self.m, it, out, "f32");
                 @fmt(out, ";\n");
             }
             fn GetVarField() => @fmt(out, "v%.%;\n", it.a, it.b);
