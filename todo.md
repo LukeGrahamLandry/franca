@@ -3,6 +3,8 @@ soon:
 TODO: use constdata for @static and string literals. 
 TODO: mprotect after applying relocations on linux. 
 TODO: do auxvec for page size
+- so far i've just expanded examples/toy/args.fr to show them. 
+  need to decide if that's the rules for tls(.environment_variables) or if it should get a new field. 
 
 ---
 
@@ -20,9 +22,38 @@ TODO: document the mistake of `f :: fn() = (); a := @static f; a[]();`
 TODO: shouldn't need to delay eveal import_c/compile/rules to avoid InProgressMacro
 
 ---
-- broke self compile with emit_c. 
-`franca examples/emit_c.fr -o target/a.c -i compiler/main.fr -unsafe && cc -o q.out ./target/a.c -Wl,-undefined,dynamic_lookup -O2 && ./q.out examples/default_driver.fr build compiler/main.fr -unsafe`
-panic! Tried to allocate 4378 bytes with panicking_allocator
+
+woes found when working on emit_c
+- slots/opt: "i'm just over-fitting to the shape of code for the one broken test"
+  that one's pretty urgent. 
+- might be rapidly approaching a limit in the current strategy. 
+  should try to find a fuzzer? 
+  maybe do something with automatically running the code in between different passes to make sure semantics didn't change. 
+  but i already have a combinatorics problem with all the platforms, that would just make it worse. 
+  how do serious people deal with this? 
+  at what point do i throw in the towel and write everything in lean or whatever? 
+- emit_c+clang self compile doesn't work on all targets
+- move the repro tests to the beginning of run_tests.fr so its less time you have to spend not editing the source while it runs
+- log_ast/log_ir should do something in emit_c?
+- emit_c jit hello world doesn't work with clang on rv if pass -target so i think it was cheating before because the multiarch thing is confusing
+- emit_c decide what to do about the non-overlap between the two ways of collecting pending functions. 
+  maybe want to move emitting constants into the first loop so ordering matches,
+  and that would make the graph sort thing do even less. 
+  might not even be worth the amount of forward declarations it avoids, 
+  especially since im just adding them back for types anyway. 
+- if expand_blit did it in the other order it would get better isel for arm. 
+  `m[0] = 64; b[8] = 32;` > `m[0] = 32; m[4] = 64` because can use aligned immediate.
+- import_c doing extra zeroing is wasteful and doesn't get removed well.
+  but also it revealed bugs in opt/slots so if i make it more efficient, it just makes those harder to find. 
+- i was super right about using reproducible builds as a bug detector. 
+  should extend the amount of those are checked in autotests. 
+  - put hashes of anything that's supposed to be arch independent in a file in the release. 
+    (ex. emit_c output, import_frc(CachedEarly) input, anything already cross compiled for a fixed arch: (web,os,gfx,wasm))
+  - does srht have a way of doing uploading artifacts? it almost always finishes first 
+    so could easily be added to the repro job on github. 
+
+---
+
 - make the hare tests work in my examples/elf_loader.fr
 - https://en.wikipedia.org/wiki/ICO_(file_format)#File_structure
 - make run_franca_file less insane

@@ -69,7 +69,7 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
             @case("strap") => {
                 if IS_BOOTSTRAPPING {
                     run_boot(vtable);
-                    franca_path = "./target/franca.out";
+                    franca_path = "./target/franca2.out";
                 };
                 sh(@slice(franca_path, "tests/run_tests.fr", "boot2"));  // note: re-exec not recurse until :updateboot
                 // TODO: don't put this in target/release so the bytes there always cross repro.
@@ -99,7 +99,7 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
             @case("core") => {
                 if IS_BOOTSTRAPPING {
                     run_boot(vtable);
-                    franca_path = "./target/franca.out";
+                    franca_path = "./target/franca2.out";
                 };
                 sh(@slice(franca_path, "tests/run_tests.fr", "boot2"));
                 println("=== re-exec ===");
@@ -137,19 +137,33 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
                 do_it(vtable, "release");
             };
             @case("emit-c") => {
+                run(@slice("examples/default_driver.fr", "build", "compiler/main.fr", "-unsafe", "-o", "target/iI.out")); // extra step only matters if running this case directly not as part of all the tests that already bootstrapped
+                sh(@slice("target/iI.out", "examples/default_driver.fr", "build", "compiler/main.fr", "-unsafe", "-o", "target/iII.out", "-keep-names"));
+            
                 run(@slice("examples/emit_c.fr", "-i", "compiler/main.fr", "-o", "target/a.c", "-unsafe"));
                 run(@slice("examples/import_c/cc.fr", "target/a.c", "-o", "target/a.out"));
-                check();
+                check(false);
                 Syscall'remove("target/a.out").unwrap();
+                
+                @if(query_current_arch() == .rv64) return(println("SKIP: emit_c clang on rv"));  // TODO
+                
+                clang_triple := import("@/examples/default_driver.fr")'target_triple(query_current_arch(), query_current_os());
                 hack := @if(query_current_os() == .macos, Foreign.EXE.cc, Foreign.EXE.clang);
-                sh(@slice(hack, "target/a.c", "-O0", "-o", "target/a.out", "-Wl,-undefined,dynamic_lookup", "-lm"));
-                check();
-                check :: fn() => {
+                sh(@slice(hack, "target/a.c", "-O0", "-o", "target/a.out", "-Wl,-undefined,dynamic_lookup", "-lm", "-target", clang_triple));
+                check(true);
+                check :: fn(HACK_clang: bool) => {
                     // TODO: should FRANCA_NO_CACHE=1 
                     ok, o, e := exec_and_catch("target/a.out", @slice("examples/toy/hello2.fr"), temp());
                     @assert_eq(o.items(), "Hello World!\n", "%", e.items());
                     @assert(ok);
                     print(o.items());
+                    
+                    if !HACK_clang || query_current_os() == .macos || query_current_arch() == .aarch64 {  // TODO: why? i assume its not really a platform thing, just the versions of clang i happen to have?
+                    // now can that compiler self-compile and get the same bytes as if it didn't go through c
+                    sh(@slice("target/a.out", "examples/default_driver.fr", "build", "compiler/main.fr", "-unsafe", "-o", "target/iCI.out", "-keep-names"));
+                    diff("target/iII.out", "target/iCI.out");
+                    println("i()->I()->I() == i()->C()->I()");
+                    };
                 };
             };
             @case("build_graphics") => build_graphics(franca_path);
@@ -419,7 +433,7 @@ fn run_boot(vtable: *ImportVTable) void = {
     println(n);
     
     rename(@as(CStr) "a.out", @as(CStr) "target/franca/b.out");
-    sh(@slice("./target/franca/b.out", "examples/default_driver.fr", "build", "compiler/main.fr", "-o", "target/franca.out"));
+    sh(@slice("./target/franca/b.out", "examples/default_driver.fr", "build", "compiler/main.fr", "-o", "target/franca2.out"));
     println("ok!");
 }
 

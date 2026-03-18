@@ -1,5 +1,4 @@
 
-:: add_compiler_hashers;
 #use("@/compiler/codemap.fr");
 #include_std("compiler/lex.fr");
 #use("@/compiler/pool.fr"); 
@@ -105,10 +104,24 @@ WipJitShim :: @struct {
 OverloadKey :: @struct(arg: Type, req: Type);
 WhereKey :: @struct(template: FuncId, arg: Values);
 
+add_compiler_hashers2 :: {
+:: add_compiler_hashers;
+driver_vtable_exports;
+// TODO: can't have these added to the eq overload set to early or it gets stuck
+:: {
+    fn eq(a: *Field, b: *Field) bool = {
+        (a.name& == b.name&) && (a.ty& == b.ty&) && (a.default& == b.default&)
+    }
+    TypeInfoStruct :: get_variant_type(TypeInfo, TypeInfo.Tag().Struct);
+    fn eq(a: *TypeInfoStruct, b: *TypeInfoStruct) bool = {
+        (a.is_tuple& == b.is_tuple&) && (a.fields& == b.fields&)
+    }
+};
 :: AutoHash(OverloadKey, TrivialHasher);
 :: AutoEq(OverloadKey);
 :: AutoEq(WhereKey);
 :: AutoHash(WhereKey, TrivialHasher);
+};
 
 PRes :: Result(void, *CompileError);
 
@@ -127,6 +140,7 @@ fn load_file_in_compiler(self: *SelfHosted, path: Str) void = {
 Dyn :: import("@/lib/dynamic_lib.fr");
 
 fn run_franca_file(path: Str, no_cache: bool) CRes(void) = {
+    add_compiler_hashers2;
     mark := mark_temporary_storage();
     @if(TODOWASM) if query_current_arch() == .wasm32 {| no_cache = true; }; // TODO
     
@@ -140,7 +154,6 @@ fn run_franca_file(path: Str, no_cache: bool) CRes(void) = {
     F :: @FnPtr(*ImportVTable) void;
     callee: ?F = .None;
     cachepath := choose_cache_filename(path);
-    ::driver_vtable_exports;
     
     a := general_allocator();
     to_free: ?Ty(*QbeModule, *Crash'LocationResolverNode) = .None;
@@ -510,7 +523,7 @@ MainThreadPump :: @struct {
     enable_tracy: bool = @if(ENABLE_ENABLE_TRACY, ENABLE_TRACY, false);
 };
 fn main_thread_pump(comp: *SelfHosted, shared: *FrontendCodegen, fns: []FuncId, wrap_main: bool) DynamicBitSet = {
-    ::driver_vtable_exports;
+    add_compiler_hashers2;
     main_thread_pump(comp, shared, fns, wrap_main, EmitIr)
 }
 
@@ -537,50 +550,20 @@ fn main_thread_pump(comp: *SelfHosted, shared: *FrontendCodegen, fns: []FuncId, 
         };
     };
     
-    self: MainThreadPump = (funcs_done = empty(a), funcs_seen = empty(a), work_stack = list(a), pending = list(a), comp = comp);
+    self := init_pump(comp);
     if wrap_main {
         rt_init := env.runtime_init.expect("declaration of franca_runtime_init (forgot to include lib/core.fr?)");
         self.work_stack&.push(rt_init);
     };
     self.work_stack&.push_all(fns);
     
-    while => self.work_stack.len != 0 {
-        continue :: local_return;
-        fid := self.work_stack[self.work_stack.len - 1];
-        fid_i: i64 = fid.to_index().zext();
-        if self.funcs_done&.get(fid_i) {
-            // might have been added multiple times
-            self.work_stack&.pop();
-            continue();
-        };
-        
-        first_time := !self.funcs_seen&.get_set(fid_i);
-        comp.report_progress(fid, true, .AotPump);
-        func := comp.get_function(fid);
-        // Note: compile before checking callees!
-        xx := comp.poll_in_place(void, => comp.compile_body(fid));
-        or xx { err | 
-            @eprintln("failed compile %", comp.get_string(func.name));
-            comp.report_error(err)
-        };  // TODO: return error instead
-        if self&.push_callees(func.callees&.items(), first_time) {
-            // no pop
-            continue();
-        };
-        
+    while => self&.next() { fid |
         emit_ir :: EmitIr.emit;
         xx := emit_ir(comp, shared, fid, when, self.pending&, false);
         or xx { err | 
             comp.report_error(err);
         };
-        
-        comp.report_progress(fid, false, .AotPump);
-        current := self.work_stack&.pop().unwrap();
-        @debug_assert_eq(current, fid, "order messed up");
-        self&.add_work(self.pending&.items());  // HACK
-        self.pending&.clear();
-        self.funcs_done&.set(fid_i);
-        self&.add_work(func.mutual_callees&.items());
+        self&.finish(fid);
     };
     
     @if(wrap_main) wrap_with_runtime_init(comp, shared.worker, fns[0]);
@@ -596,6 +579,52 @@ fn main_thread_pump(comp: *SelfHosted, shared: *FrontendCodegen, fns: []FuncId, 
     shared.join_codegen_thread();
     self.funcs_done
 };
+
+fn next(self: *MainThreadPump) ?FuncId = {
+    comp := self.comp;
+    while => self.work_stack.len != 0 {
+        continue :: local_return;
+        fid := self.work_stack[self.work_stack.len - 1];
+        fid_i := fid.as_index();
+        if self.funcs_done&.get(fid_i) {
+            // might have been added multiple times
+            self.work_stack&.pop();
+            continue();
+        };
+        
+        first_time := !self.funcs_seen&.get_set(fid_i);
+        comp.report_progress(fid, true, .AotPump);
+        func := comp.get_function(fid);
+        // Note: compile before checking callees!
+        xx := comp.poll_in_place(void, => comp.compile_body(fid));
+        or xx { err | 
+            @eprintln("failed compile %", comp.get_string(func.name));
+            comp.report_error(err)
+        };  // TODO: return error instead
+        if self.push_callees(func.callees&.items(), first_time) {
+            // no pop
+            continue();
+        };
+        return(Some = fid);
+    };
+    .None
+}
+
+fn finish(self: *MainThreadPump, fid: FuncId) void = {
+    self.comp.report_progress(fid, false, .AotPump);
+    current := self.work_stack&.pop().unwrap();
+    @debug_assert_eq(current, fid, "order messed up");
+    self.add_work(self.pending&.items());  // HACK
+    self.pending&.clear();
+    self.funcs_done&.set( fid.as_index());
+    func := self.comp.get_function(fid);
+    self.add_work(func.mutual_callees&.items());
+}
+
+fn init_pump(comp: *SelfHosted) MainThreadPump = {
+    a := comp.get_alloc();
+    (funcs_done = empty(a), funcs_seen = empty(a), work_stack = list(a), pending = list(a), comp = comp)
+}
 
 fn join_codegen_thread(it: *FrontendCodegen) void = 
     it.worker.join_codegen_thread();

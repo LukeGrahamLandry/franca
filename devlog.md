@@ -1,4 +1,28 @@
 
+## (Mar 18)
+
+emit_c
+- ms to jit (NO_CACHE) kaleidoscope.fr with compiler built by (emit_ir: 569, import_c: 690, clangO2: 374). 
+  mystery: what information am i losing by going through c that it gets slower when using my backend. 
+- it would be better for sanity if i compiled in the same order as emit_ir does,
+  that might be good enough that i don't need to do the whole graph sort situation. 
+  - it does work but callees and emit disagreeing on what's reachable means it's nontrivial to get rid of the old stuff. 
+  - the thing i thought was an urgant ordering problem was just that it doesn't call run_franca_file 
+    so wasn't reaching add_compiler_hashers2 in time. but the point remains it's probably better this way. 
+- can't self compile in import_c: FnPtr.ty.unary is wrong?  
+  yet another opt/slots escape problem created by coalesce adding weird aliasing.
+  - also shows that the c frontend being lazy about inserting extra copies/zeroing isn't removed well, so that's probably why it's slower.  
+- self-compile only repros between c and normal on arm. 
+  - same on rv and amd??: last 4 bytes of all the codemap hashes are 0. 
+    would you believe it's another opt/slots. 
+    for now a terrible hack to get to a point that i can add it to the tests but it's still progress,
+    more programs work and i have more proof of a class of program that doesn't work, doesn't feel great tho. 
+
+## (Mar 17)
+
+- i can produce a test where init_once(ClearOnAotBake) doesn't work. 
+  to make baking more order resistant it needs to mutate a copy of the bytes. 
+
 ## (Mar 16)
 
 - uninspired so added more gameplay to farm_game example. droughts and crows from past versions. 

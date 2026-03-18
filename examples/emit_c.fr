@@ -74,6 +74,10 @@ fn emit_body(self: *Emit, f: FuncId) void #once = {
         fn Normal(body) => body;
         fn NewIntrinsic(op) => {
             @fmt(self.out, "{\n");
+            if not_stand_alone(@as(Qbe.O) op.ir_op) {
+                @fmt(self.out, "while(1) {};\n}\n");
+                return();
+            };
             indented self {
                 self.statement();
                 result := self.emit_intrinsic(.NewMemory, op, ret, args, arg_ty, .None);
@@ -891,6 +895,8 @@ fn string_literal(self: *Emit, it: []u8) void = {
         @if_else {
             @if(printable(c)) => self.out.push(c);
             @if(c == "\n".ascii()) => @fmt(self.out, "\\n");
+            @if(c == "\\".ascii()) => @fmt(self.out, "\\\\");
+            @if(c == "\"".ascii()) => @fmt(self.out, "\\\"");
             @else => @fmt(self.out, "\\%%%", c / 64, (c / 8).mod(8), c.mod(8));
         };
     };
@@ -900,9 +906,10 @@ fn string_literal(self: *Emit, it: []u8) void = {
 fn define_baked_var(self: *Emit, id: BakedVarId) void = {
     name := @tfmt("C%", id.id);
     baked := self.program.get_baked(id);
+    alignment := @if(baked.type == UnknownType, 8, self.program.get_info(baked.type)[].align_bytes.zext());
+    @debug_assert(alignment == 1 || alignment == 2 || alignment == 4 || alignment == 8);
+    @debug_assert_eq(baked.len().umod(alignment), 0);
     if baked.relocations.len == 0 {
-        alignment := @if(baked.type == UnknownType, 8, self.program.get_info(baked.type)[].align_bytes.zext());
-        @debug_assert(alignment == 1 || alignment == 2 || alignment == 4 || alignment == 8);
         @fmt(self.out, "static u% %[%] = { ", alignment * 8, name, baked.len() / alignment);
         @match(baked.template) {
             fn Bytes(it) => @switch(alignment) {
@@ -911,11 +918,12 @@ fn define_baked_var(self: *Emit, id: BakedVarId) void = {
                 @case(4) => self.bytes_literal(it, u32);
                 @case(8) => self.bytes_literal(it, u64);
                 @default => @panic("TODO: big alignment");
-            }
+            };
             fn Zeroes() => @fmt(self.out, "0");
         };
     } else {
-        @fmt(self.out, "static void *%[%] = { ", name, baked.len().ualign_to(8).udiv(8));
+        @debug_assert(alignment >= 8);
+        @fmt(self.out, "static void *%[%] = { ", name, baked.len().udiv(8));
         bake_iter_legacy baked { part |
             self.emit_baked_part(part);
             @fmt(self.out, ", ");
@@ -1347,15 +1355,38 @@ pump :: fn(comp: *SelfHosted, fns: []FuncId) Str = {
     pending&.push(FuncId = rt_init);
     all_items&.insert((FuncId = rt_init), zeroed(ItemData));
     roots := pending.items().shallow_copy(a).assume_owned(a);
+
+    self := init_pump(comp);
+    self.work_stack&.push(rt_init);
+    self.work_stack&.push_all(fns);
     
-    // doing it this way is worse than main_thread_pump at making sure intrinsics are first. 
-    // but i need an extra level of sorting to output them in order and it feels dumb to keep track of it twice. 
-    // Func.callees isn't enough (doesn't have types/data) and also misses some (mutual, shims, etc.). 
+    all_fns := ItemKey.list(a);
+    // TODO: there are things in callees that collecting for `use` doesn't see. 
+    while => self&.next() { fid |
+        emit: Emit = init(comp, use&, out&, need_math_h&);
+        check_for_new_aot_bake_overloads(comp).unwrap();
+        emit&.emit_body(fid);
+        each use.raw& { it, _ |
+            @if_let(it) fn FuncId(it) => self.pending&.push(it);
+        };
+        self&.finish(fid);
+        all_items&.insert((FuncId = fid), zeroed(ItemData));
+        push_graph(out&, use&, pending&, all_items&, (FuncId = fid), a);
+        all_fns&.push(FuncId = fid);
+    };
+    
     while => pending&.pop() { key |
+        continue :: local_return;
         emit: Emit = init(comp, use&, out&, need_math_h&);
         check_for_new_aot_bake_overloads(comp).unwrap();
         @match(key) {
             fn FuncId(fid) => {
+                if self.funcs_done&.get(fid.as_index()) {
+                    continue();
+                };
+                // difference is that im not interweaving the bakes so functions only 
+                // referenced by vtables won't be seen in the above loop. 
+                //@println("? %", fmt_func(comp, fid));
                 func := comp.get_function(fid);
                 xx := comp.poll_in_place(void, => comp.compile_body(fid));
                 or xx { err | 
@@ -1363,24 +1394,23 @@ pump :: fn(comp: *SelfHosted, fns: []FuncId) Str = {
                     comp.report_error(err)
                 };
                 emit&.emit_body(fid);
-                
-                // HACK: makes complation order more similar to the other one because my overloading is garbage
-                for func.callees& { fid |
-                    comp.poll_in_place(void, => comp.compile_body(fid));
-                };
+                self.funcs_done&.set(fid.as_index());
             }
             fn Type(it) => emit&.define_type(it);
             fn BakedVarId(it) => emit&.define_baked_var(it);
         };
-        
+        push_graph(out&, use&, pending&, all_items&, key, a);
+    };
+    
+    push_graph :: fn(out: *List(u8), use: *HashSet(ItemKey), pending: *List(ItemKey), all_items: *HashMap(ItemKey, ItemData), key: ItemKey, a: Alloc) void = {
         used := @ref ItemKey.list(use.raw.len_including_tombstones, a);
         each use.raw.arr& { slot |
             // TODO: ugh, this removes info about when a type refers to itself indirectly
             //       so then need lots of extra typedefs but don't want to count the one for getting its own name. 
             if slot.hash != 0 && slot.key& != key& {
                 @debug_assert(slot.hash != 1);
-                _ := all_items&.get_or_insert(slot.key) {
-                    pending&.push(slot.key);
+                _ := all_items.get_or_insert(slot.key) {
+                    pending.push(slot.key);
                     zeroed(ItemData)
                 };
                 
@@ -1389,10 +1419,10 @@ pump :: fn(comp: *SelfHosted, fns: []FuncId) Str = {
             slot.hash = 0;  // remove without tombstone valid because removing all. 
         };
         use.raw.len_including_tombstones = 0;
-        it := all_items&.get_ptr(key).unwrap();
+        it := all_items.get_ptr(key).unwrap();
         @debug_assert(it.use.len == 0 && it.src.len == 0, "double emit");
         it[] = (use = used.items(), src = out.items().shallow_copy(a), id = -1, key = key);
-        out&.clear();
+        out.clear();
     };
     
     @fmt(out&, """
@@ -1441,7 +1471,11 @@ pump :: fn(comp: *SelfHosted, fns: []FuncId) Str = {
     """, comp.fmt_fn_name(rt_init), comp.fmt_fn_name(fns[0]));
     root := zeroed(FuncId);  // fake root node so whole graph is reachable
     all_items&.insert((FuncId = root), (
-        use = roots.items(),
+        // HACK: MainThreadPump addings things based on callees which can be junk but everything needs to be found in the graph ordering
+        //       but also should fix that there instead because it means i wastefully send those to the backend an extra time. 
+        //       TODO: what things are they tho? 
+        use = all_fns.items(), 
+        //use = roots.items(),
         key = (FuncId = root),
         src = wrapped_main,
         id = -1,
@@ -1513,10 +1547,11 @@ pump :: fn(comp: *SelfHosted, fns: []FuncId) Str = {
 
 main :: fn() void = {
     Incr'set_self_hash();
-    driver_vtable_exports;
+    add_compiler_hashers2;
+    import("@/lib/crash_report.fr")'hook_backtrace();
     
     #use("@/lib/args.fr");
-    args := parse_args(@struct(i := "", o := "", unsafe := false));
+    args := parse_args(@struct(i := "", o := "", unsafe := false, D := ""));
     @assert(args.i != "" && args.o != "", "USAGE: [emit_c.fr] -i filename.fr -o a.c [-unsafe]");
     
     vtable := init_driver_vtable();
@@ -1528,6 +1563,7 @@ main :: fn() void = {
         it.insert(.InvalidTag, false);
     };
     opts.retain_function_names = true;
+    opts.frontend_logging = args.D;
     src := @tfmt("""#include_std("lib/core.fr"); #include_std("%"); """, args.i);
     c := new_with_src(vtable, src, "entry_file", opts);
     c := vtable.with(c);
