@@ -72,10 +72,7 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
                     franca_path = "./target/franca2.out";
                 };
                 sh(@slice(franca_path, "tests/run_tests.fr", "boot2"));  // note: re-exec not recurse until :updateboot
-                // TODO: don't put this in target/release so the bytes there always cross repro.
-                //       but then need to update rustc_codegen_ferb's ci script. 
-                //       rn repro test works because it doesn't run ./boot/strap.sh with -no-test
-                sh(@slice("./target/f.out", driver_path, "build", "compiler/main.fr", "-o", "target/release/f.out", 
+                sh(@slice("./target/f.out", driver_path, "build", "compiler/main.fr", "-o", "target/franca.out", 
                     "-unsafe", "-keep-names", "-debug-info"));
             };
             @case("-hush") => {
@@ -111,10 +108,14 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
                     "-unsafe", "-keep-names", "-debug-info"));
             };
             @case("run") => {
+                start_repro_file();
                 do_it(vtable, "run-no-deps");
                 // the rules are everything before this must not download dependencies or exec system binaries. 
                 println("=== end of dependency free tests ===");
                 do_it(vtable, "run-yes-deps");
+                finish_repro_file();
+                println(choose_repro_path());
+                maybe_deploy_srht_site();
             };
             @case("run-no-deps") => {
                 for bins { code, dest |
@@ -125,7 +126,6 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
                     run(cmd);
                 };
                 
-                ::import("@/examples/testing.fr");
                 build_aoc(franca_path);
                 test_static_repro(franca_path);
                 
@@ -144,6 +144,8 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
                 run(@slice("examples/import_c/cc.fr", "target/a.c", "-o", "target/a.out"));
                 check(false);
                 Syscall'remove("target/a.out").unwrap();
+                @if(false)  // :TodoSketchyRepro
+                cross_repro("target/a.c", "compiler/main.fr", "emit_c");
                 
                 @if(query_current_arch() == .rv64) return(println("SKIP: emit_c clang on rv"));  // TODO
                 
@@ -170,6 +172,8 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
             @case("run-yes-deps") => {
                 prospero(franca_path);
                 for(with_deps, fn(it) => run(it));
+                @if(false)  // :TodoSketchyRepro
+                cross_repro("target/web/target/demo.wasm", "examples/web/build.fr", "wasm32");
                 build_graphics(franca_path);
                 for deps_compile_only { file |
                     run(@slice("examples/default_driver.fr", "build", file, "-o", "target/a.out"));
@@ -218,6 +222,9 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
                     // TODO: need to error if it errors (host/vzf.fr doesn't know if you crashed) 
                     run(@slice("examples/os/build.fr", "-vzf", "-smp", "2", "-append", "nocache on; kaleidoscope; quit;"));
                 };
+                run(@slice("examples/os/build.fr"));
+                @if(false)  // :TodoSketchyRepro
+                cross_repro("target/kernel.out", "examples/os/build.fr", "kernel-aarch64");
                 
                 if ci {
                     rootfs_hash := build_web_and_get_hash(franca_path);
@@ -271,6 +278,7 @@ build_release :: fn(vtable: *ImportVTable) void = {
     fid := c.get_unique_named("main").expect("'main' when building the compiler");
     chunks := {c.vtable.emit_qbe_included}(QbeModule.raw_from_ptr(m), c&, @slice(fid), .WrapMain);
     bytes := concat(chunks&, temp());
+    cross_repro_bytes(bytes, "compiler/main.fr", "release-CachedEarly");
     c'vtable'drop_qbe_module(QbeModule.raw_from_ptr(m));
     
     ;{
@@ -304,6 +312,7 @@ build_release :: fn(vtable: *ImportVTable) void = {
         chunks := {vtable.finish_qbe_module}(QbeModule.raw_from_ptr(m));
         
         bytes := concat(chunks&, temp());
+        cross_repro_bytes(bytes, "compiler/main.fr", @tfmt("release-%-%", os, arch));
         arch := @match(arch) {
             fn x86_64() => "amd64";
             fn aarch64() => "arm64";
@@ -353,9 +362,15 @@ build_graphics :: fn(franca: Str) void = {
     files&.push_all(graphics_demos);
     
     run_tests_main_threaded(Str, Str, franca, files.items(), fn(_, a) = a[], fn(franca, it) = {
-        ok, out, err := exec_and_catch(franca, @slice(it[], "-arch", "aarch64", "-os", "macos", "-o", "target/gfx.out"), temp());
+        path := @tfmt("target/gfx.out%", tls(.thread_index)[]);
+        ok, out, err := exec_and_catch(franca, @slice(it[], "-arch", "aarch64", "-os", "macos", "-o", path), temp());
+        broken := it[].ends_with("stackie.fr") || it[].ends_with("multiplexer.fr");
+        @if(!broken)  // :TodoSketchyRepro
+        cross_repro(path, it[], "macos-aarch64");
         if it[] != "examples/gpu/terminal.fr" && it[] != "examples/gpu/viewer.fr" {  // TODO
-            ok, out, err := exec_and_catch(franca, @slice(it[], "-arch", "wasm32", "-wgpu", "-o", "target/gfx.out"), temp());
+            ok, out, err := exec_and_catch(franca, @slice(it[], "-arch", "wasm32", "-wgpu", "-o", path), temp());
+            @if(!broken)  // :TodoSketchyRepro
+            cross_repro(path, it[], "web");
             if !ok {
                 return(ok, out, err, "");
             };
@@ -498,4 +513,46 @@ diff :: fn(path0: Str, path1: Str) void = {
     @assert(a == b, "diff % %", path0, path1);
 };
 
+maybe_deploy_srht_site :: fn() void = {
+    it := get_environment_variable("BUILD_SUBMITTER") || return();
+    @if(it.str() != "git.sr.ht") return(@println("SKIP: submitter is %", it));
+    token := get_environment_variable("OAUTH2_TOKEN") || return(println("missing oauth"));
+    
+    out := u8.list(temp());
+    @fmt(out&, "<a href='https://franca.lukegrahamlandry.ca'>https://franca.lukegrahamlandry.ca</a><hr>\n");
+    files := collect_directory_ordered("target/release", temp(), temp()).unwrap();
+    each files { it |
+        @fmt(out&, "<a href='./%'> % </a><br>\n", it.name, it.name);
+    };
+    write_entire_file_or_crash("target/release/index.html", out.items());
+    
+    commit := git_rev_parse();
+    copy :: fn(dest, src) => write_entire_file_or_crash(dest, read_entire_file_or_crash(temp(), src));
+    dir := @tfmt("target/release/%", commit);
+    make_dirs_or_crash(dir);
+    copy(@tfmt("%/repro.txt", dir), "target/release/repro.txt");
+    
+    Syscall'chdir("target/release");
+    sh(@slice("tar", "-cvzf", "../site.tar.gz", "."));
+    Syscall'chdir("../..");
+
+    // not using sh() avoids printing the token
+    ok, _out, _err := exec_and_catch(Foreign.EXE.curl, @slice(
+        "--oauth2-bearer", token.str(), "-Fcontent=@target/site.tar.gz", "https://pages.sr.ht/publish/fr.lukegrahamlandry.ca",
+    ), temp());
+    @assert(ok, "failed publish to srht.site");
+};
+
+git_rev_parse :: fn() Str = {
+    git := Foreign.EXE.git;
+    ok, o, e := exec_and_catch(git, @slice("rev-parse", "HEAD"), temp());
+    @assert(ok, "failed git rev-parse");
+    while => o[o.len - 1].is_ascii_whitespace() {
+        o.len -= 1;
+    };
+    @assert_eq(o.len, 40, "failed git rev-parse");
+    o.items()
+};
+
 #use("@/lib/sys/subprocess.fr");
+#use("@/examples/testing.fr");

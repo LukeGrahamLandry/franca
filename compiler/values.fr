@@ -236,17 +236,24 @@ fn bake_relocatable_body(c: *SelfHosted, value: []u8, type: Type, out: *BakeResu
     .Ok
 }
 
-fn from_legacy(self: *SelfHosted, legacy: BakedVar) BakedValue = {
-    @match(legacy) {
+fn from_legacy(self: *SelfHosted, legacy: BakedVar, type: Type) BakedValue = {
+    relocs := BakedReloc.list(self.get_alloc());
+    bytes := @match(legacy) {
         fn VoidPtrArray(legacy) => {
             bytes := u8.list(self.get_alloc());
-            relocs := BakedReloc.list(self.get_alloc());
             bake_translate_legacy(legacy.items(), bytes&, relocs&, 0);
-            (template = (Bytes = bytes.items()), relocations = relocs.items(), loc = Span.zeroed())
+            bytes.items()
         };
-        fn Bytes(bytes) => (template = (Bytes = bytes.items()), loc = Span.zeroed());
-        fn Zeros(len) => (template = (Zeroes = len), loc = Span.zeroed());
-    }
+        // TODO: here the zero_padding will mutate the comptime memory which is bad karma 
+        //       but you'll only get here if there's no bake handler so it won't affect 
+        //       init_once(ClearOnAotBake) which is the clear example where stomping is a problem. 
+        //       so maybe it's fine. 
+        fn Bytes(bytes) => bytes.items();
+        fn Zeros(len) => return(template = (Zeroes = len), loc = Span.zeroed());
+    };
+    to_zero: ReadBytes = (bytes = bytes, i = 0);
+    current_comptime().zero_padding(type, to_zero&);
+    (template = (Bytes = bytes), relocations = relocs.items(), loc = Span.zeroed())
 }
 
 fn reserve_baked(c: *SelfHosted, jit_ptr: ?[]u8) Ty(*BakedValue, BakedVarId) #inline = {

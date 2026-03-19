@@ -45,15 +45,29 @@ woes found when working on emit_c
   `m[0] = 64; b[8] = 32;` > `m[0] = 32; m[4] = 64` because can use aligned immediate.
 - import_c doing extra zeroing is wasteful and doesn't get removed well.
   but also it revealed bugs in opt/slots so if i make it more efficient, it just makes those harder to find. 
-- i was super right about using reproducible builds as a bug detector. 
-  should extend the amount of those are checked in autotests. 
-  - put hashes of anything that's supposed to be arch independent in a file in the release. 
-    (ex. emit_c output, import_frc(CachedEarly) input, anything already cross compiled for a fixed arch: (web,os,gfx,wasm))
-  - does srht have a way of doing uploading artifacts? it almost always finishes first 
-    so could easily be added to the repro job on github. 
 
 ---
 
+reproducibility
+
+- more cross_repro  
+  - import_frc(CachedEarly) input
+  - wasm (c/ssa tests)
+- direct aot and via frc don't get the same bytes so what you get from demo.wasm 
+  cross compiling one native compiler isn't the same as the multitarget build in run_tests/release()
+- unsolved
+  - in the general case the whole cross repro thing can't work if something arch specific 
+    is used at comptime behind a jit_shim because it will change compilation order. 
+- :TodoSketchyRepro
+    - os/build/user.elf: FuncId order changed (and those are used for mangling in the elf symbol table)
+    - target/web/target/demo.wasm across different arches. 
+    - the Symbol order ones (stackie, emit_c) are still fragile, 
+      but think now it's not target based but just random, 
+      can't reliably create the problem when compiling alone with the release compiler. 
+
+---
+
+- os/vfs O_APPEND
 - make the hare tests work in my examples/elf_loader.fr
 - https://en.wikipedia.org/wiki/ICO_(file_format)#File_structure
 - make run_franca_file less insane

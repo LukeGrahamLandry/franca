@@ -127,9 +127,11 @@ it decides to mix the bytes around.
 
 The claim is that reproducibility works for all the example programs in 
 the franca repository. However, the testing for this is not robust yet so it only 
-mostly kinda probably works and it doesn't work at all with `-debug-info`. 
-You can easily check a program by compiling with the environment variable 
-`FRANCA_LOG_STATS=true` (twice) and checking that the `repro: <hash>` line matches. 
+mostly kinda probably works. 
+This is slowly improving. Hashes for a semi-arbitrary-subset of programs compiled for fixed targets 
+are included in the ci release by (macos,linux)-(arm,amd) hosts 
+and diff-ed between those targets on each commit. 
+Notably the compiler itself is among the programs that repro successfully. 
 
 When the compiler gets more multi-threaded and more out of order, this might need to 
 be relegated to a special option you can enable at the cost of reduced compile speed. 

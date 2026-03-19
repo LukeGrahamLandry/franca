@@ -9,18 +9,19 @@ jobs:
         system: [macos-14, macos-15-intel, ubuntu-latest, ubuntu-24.04-arm]
     name: run_tests ${{ matrix.system }}
     runs-on: ${{ matrix.system }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/cache@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb
         with:
           path: target/franca/fetch
           key: cache-deps-${{ hashFiles('tests/deps.fr') }}
       - run: ./boot/strap.sh
-      - uses: actions/upload-artifact@v4
+      - run: cp target/release/repro.txt target/repro-${{ matrix.system }}.txt
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         with:
-          name: built_on_${{ matrix.system }}
-          path: target/release
+          path: target/repro-${{ matrix.system }}.txt
+          archive: false
   repro:
     name: repro and deploy
     runs-on: ubuntu-latest
@@ -33,22 +34,25 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/cache@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb
         with:
           path: target/franca/fetch
           key: cache-deps-${{ hashFiles('tests/deps.fr') }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3
         with: 
           path: .
-      - run: diff built_on_macos-14 built_on_macos-15-intel
-      - run: diff built_on_macos-14 built_on_ubuntu-latest
-      - run: diff built_on_macos-14 built_on_ubuntu-24.04-arm
+      - run: diff repro-macos-14.txt/repro-macos-14.txt repro-macos-15-intel.txt/repro-macos-15-intel.txt
+      - run: diff repro-macos-14.txt/repro-macos-14.txt repro-ubuntu-latest.txt/repro-ubuntu-latest.txt
+      - run: diff repro-macos-14.txt/repro-macos-14.txt repro-ubuntu-24.04-arm.txt/repro-ubuntu-24.04-arm.txt
       - run: ./boot/strap.sh -no-test
-      - run: ./target/f.out examples/web/build.fr
-      - uses: actions/upload-pages-artifact@v3
+      - run: ./target/franca.out examples/web/build.fr
+      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b
         with:
           path: target/web
+      # TODO: this is a race with the srht build but it always wins so it's fine for now
+      - run: curl https://fr.lukegrahamlandry.ca/${{ github.sha }}/repro.txt -o repro-srht.txt -L
+      - run: diff repro-macos-14.txt/repro-macos-14.txt repro-srht.txt
       - name: wnebsnite
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e

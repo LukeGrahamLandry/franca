@@ -184,4 +184,43 @@ hush :: fn(a: []Str) Str = {
     out.items()
 };
 
+choose_repro_path :: fn() Str = {
+    repro_path :: @static_mut "";
+    init_once DoNotClearOnAotBake {
+        repro_path[] = @tfmt("target/repro-%-%.txt", query_current_os(), query_current_arch());
+    };
+    repro_path[]
+};
+cross_repro :: fn(filename: Str, input: Str, flags: Str) void = 
+    cross_repro_bytes(read_entire_file_or_crash(temp(), filename), input, flags);
+cross_repro_bytes :: fn(a: Str, input: Str, flags: Str) void = 
+    cross_repro_hash(Sha256'hex(a), input, flags);
+cross_repro_hash :: fn(hash: Str, input: Str, flags: Str) void = {
+    s := @tfmt("% % %\n", f_pad(input, 40, .After), f_pad(flags, 25, .After), hash);
+    if !append_to_file(choose_repro_path(), s) {
+        @panic("failed to record cross_repro");
+    };
+};
+// only the top level run_tests calls start+finish. 
+start_repro_file :: fn() void = {
+    Syscall'remove(choose_repro_path().as_cstr());
+};
+finish_repro_file :: fn() void = {
+    src := choose_repro_path();
+    a := read_entire_file_or_crash(temp(), src);
+    a.len -= int(a.ends_with("\n"));
+    lines := a.split("\n", temp());
+    // sort so run_tests_main_threaded doesn't break it
+    Sort'default(Str, lines.items(), fn(a, b) => Sort'order_strings(a, b));
+    a := u8.list(lines.len * (lines[0].len + 1), temp());
+    for lines { it |
+        a&.push_all(it);
+        a&.push_all("\n");
+    };
+    a := a.items();
+    dest := "target/release/repro.txt";
+    write_entire_file_or_crash(dest, a);  // for ci to release to be diff-ed later. 
+    write_entire_file_or_crash(src, a);   // for running locally in different emulators.
+};
+
 #reexport("@/examples/fetch.fr");

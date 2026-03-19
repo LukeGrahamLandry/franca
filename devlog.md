@@ -1,4 +1,20 @@
 
+## (Mar 19)
+
+- run_tests start recording hashes of outputs that should repro across targets
+- found repro problems. not exciting correctness ones yet tho. 
+  - emit_c(compiler): interning `libc***` at the beginning shifts all the Symbol numbers on linux (which changes ident() mangling). 
+  - farm_game: $g1046 trailing padding at the end of ItemConfig in config.items. 
+    bake_relocatable_slice_erased(!contains_pointers)->emplace_bake->from_legacy->Bytes needs to call zero_padding. 
+  - stackie: also mangle() based on Symbol numbers. 
+    this time the problem is easy.fr add_comptime_library for the macos frameworks. 
+  - confusing. those seem to fix it when i run them alone but also they don't repro consistantly even on the same target if i run all the tests together.
+    once again, it's still progress to produce proof of bugs, fixing them is a separate issue. 
+- why bother with uploading binaries, just put their hashes in the repro file. 
+  cross compiling the demo website shouldn't be any harder than finding the actions tab even if someone else wanted it for some reason. 
+  looks like microslop finally has `archive: false` so i can fix the embarrassing zip files with different hashes dispite the same contents. 
+  hopefully srht.site just works and i can check that it repros too.
+
 ## (Mar 18)
 
 emit_c
