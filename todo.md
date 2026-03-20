@@ -45,6 +45,13 @@ woes found when working on emit_c
   `m[0] = 64; b[8] = 32;` > `m[0] = 32; m[4] = 64` because can use aligned immediate.
 - import_c doing extra zeroing is wasteful and doesn't get removed well.
   but also it revealed bugs in opt/slots so if i make it more efficient, it just makes those harder to find. 
+- make tests/fr pass via c (then add that to autotest)
+  - TODO: va
+  - TODO: field_align #align
+  - TODO: internal_bake
+  - TODO: redirect_to_import *u8->CStr maybe shouldn't allow
+  - TODO: weird_switch_values can't switch() on non-int
+  - TODO: clang doesn't like exceptional (longjmp)
 
 ---
 
@@ -64,6 +71,7 @@ reproducibility
     - the Symbol order ones (stackie, emit_c) are still fragile, 
       but think now it's not target based but just random, 
       can't reliably create the problem when compiling alone with the release compiler. 
+- all this hashing makes the tests like 10s slower?
 
 ---
 

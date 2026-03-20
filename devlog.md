@@ -1,4 +1,14 @@
 
+## (Mar 20)
+
+- emit_c on tests/fr
+  - type_name(Fn), const_cycle: forward declare data, basic_overload: check ty.unary,
+    raw_idents: mangle fmt_fn_name, empty_struct_is_still_unique: skip non-void-zst param. 
+  - import_c problems
+    - allow `(UnionType) {}` for constructing a zst case.
+    - woah!! no_fallthrough fails. i guess real programs tend to not have unreachable code. 
+      take the opportunity to simplify all the places i check if the block is already terminated. 
+
 ## (Mar 19)
 
 - run_tests start recording hashes of outputs that should repro across targets
@@ -10,10 +20,11 @@
     this time the problem is easy.fr add_comptime_library for the macos frameworks. 
   - confusing. those seem to fix it when i run them alone but also they don't repro consistantly even on the same target if i run all the tests together.
     once again, it's still progress to produce proof of bugs, fixing them is a separate issue. 
-- why bother with uploading binaries, just put their hashes in the repro file. 
-  cross compiling the demo website shouldn't be any harder than finding the actions tab even if someone else wanted it for some reason. 
+- why bother with uploading binaries from all the hosts, just put their hashes in the repro file. 
   looks like microslop finally has `archive: false` so i can fix the embarrassing zip files with different hashes dispite the same contents. 
   hopefully srht.site just works and i can check that it repros too.
+- srht.site can't use cloudflare proxy, but works if just a normal dns thing, 
+  which is fine but it means i can't host the demo there because i can't set the magic headers to enable SharedArrayBuffer. 
 
 ## (Mar 18)
 

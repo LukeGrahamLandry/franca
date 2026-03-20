@@ -52,7 +52,7 @@ int main() {
   ASSERT(1116355952, ({ float a = 12.34; a += (float ) 56.78; *(unsigned*)&a; }));
 
   printf("OK\n");
-  return 0;
+  switch ((short) 0xFFFF) { case -1: return 0; default: return 1; }
 }
 
 // :ParamTypeList

@@ -28,8 +28,11 @@ void voidexpr() { return voidexpr2(); }
 typedef void V; 
 void voidtypedef(V) {}
 
+static void trivial_early_return() { return; exit(1); }
+
 int main() {
     make_empty_struct2(); make_empty_struct();
+    trivial_early_return();
     
     // :ThisShouldBeValidUndef
     ASSERT(1, ({

@@ -176,17 +176,18 @@ fn write_sig_names(self: *Emit, f: FuncId, name: Str) []Str = {
     if f_ty.arg != void {
         enumerate func.arg.bindings { i, b |
             ty := b.ty&.unwrap();
+            is_void := self.program.get_info(ty)[].stride_bytes == 0;
             // TODO: allowing it to be None here is kinda dumb. only happens for import_frc
             name := @match(b.var()) {
                 fn Some(v) => {
-                    if ty == void {
+                    if is_void {
                         self.var_lookup&.insert(v.id, "");
                     };
                     self.var_name(v)
                 }
                 fn None() => @tfmt("_%", i);
             };
-            if ty != void {
+            if !is_void {
                 @fmt(self.out, "% %, ", self.type_name(ty), name);
                 args.push(name);
             }
@@ -492,7 +493,9 @@ fn emit_call(self: *Emit, f: *FatExpr, arg: *FatExpr, p: Placement) Str #once = 
         @default => unreachable();
     };
     
-    fields := self.pre_eval_tuple(arg.items());
+    fields := @if(f_ty.unary,  // careful not to flatten for `fn who_is(value: Ty(i64, i64));`
+        @slice(self.compile_expr(arg, .NewMemory)),
+        self.pre_eval_tuple(arg.items()));
     self.declare_now(p&, f_ty.ret) {
         self.write_call(callee, fields);
     }
@@ -1079,8 +1082,10 @@ fn as_const(self: *FatExpr, $T: Type) T #generic = {
     T.assume_cast(self.expr.Value.bytes&)[]
 }
 
-fn fmt_fn_name(self: *Emit, f: FuncId) []u8 = 
-    self.program.fmt_fn_name(f);
+fn fmt_fn_name(self: *Emit, f: FuncId) []u8 = {
+    s := self.program.fmt_fn_name(f);
+    mangle_ident(s, => self.program.intern_string(s))
+}
 
 fn pre_eval_tuple(self: *Emit, values: []FatExpr) []Str = {
     fields := @ref Str.list(values.len, temp());
@@ -1097,6 +1102,11 @@ fn is_empty(e: *FatExpr) bool = {
 fn type_name(self: *Emit, t: Type) Str = {
     if self.simple_type(t) { s |
         return s;
+    };
+    t := @match(self.program.get_type(t)) {
+        fn Fn() => FuncId;
+        fn Label() => LabelId;
+        @default => t;
     };
     self.use.insert(Type = t);
     @tfmt("T%", t)
@@ -1127,13 +1137,16 @@ fn simple_type(self: *Emit, t: Type) ?Str = {
 // franca has @"raw identifiers", fewer keywords, and comptime code can create arbitrary asts. 
 // so some will need to be mangled. TODO: this is not conflict proof. 
 fn ident(self: *Emit, sym: Symbol) Str = {
-    s := self.program.get_string(sym);
+    mangle_ident(self.program.get_string(sym), => sym)
+}
+
+mangle_ident :: fn(s: Str, $get_sym: @Fn() Symbol #duplicated) Str = {
     for s { c |  
         if !(c.is_ascii_alpha() || c.is_ascii_digit() || c == "_".ascii()) {
-            return @tfmt("S__%", sym);
+            return @tfmt("S__%", get_sym());
         };
     };
-    @if(s.len == 0 || s[0].is_ascii_digit()) return(@tfmt("S__%", sym));
+    @if(s.len == 0 || s[0].is_ascii_digit()) return(@tfmt("S__%", get_sym()));
     kw := import("@/examples/import_c/tokenize.fr").keyword_tokens;
     if kw.contains(s) {  // :SLOW
         s = @tfmt("%_", s);
@@ -1312,7 +1325,7 @@ fn define_type(self: *Emit, it: Type) void = {
             return();  // name goes in the middle
         }
         fn Placeholder() => @fmt(self.out, "void");  // TODO ???
-        @default => @panic("TODO: /* % */", self.program.log(it)); 
+        @default => @panic("TODO: /* % % */", info.tag(), self.program.log(it)); 
     };
     };
     @fmt(self.out, " %;\n", name);
@@ -1511,19 +1524,23 @@ pump :: fn(comp: *SelfHosted, fns: []FuncId) Str = {
         };
     };
     
-    defined: HashSet(FuncId) = init(temp());
+    defined: HashSet(ItemKey) = init(temp());
     emit: Emit = init(comp, use&, out&, @ref false);
     for_rev ordered { it |
-        @if_let(it.key) fn FuncId(it) => {
-            defined&.insert(it);
-        };
+        defined&.insert(it.key);
         for it.use { it |
-            @if_let(it) fn FuncId(it) => {
-                if !defined&.insert(it) {
-                    // call graph had a cycle.
-                    emit&.write_sig_names(it, emit&.fmt_fn_name(it));
-                    @fmt(out&, ";\n");
-                };
+            if !defined&.insert(it) {
+                @match(it) {
+                    fn FuncId(it) => {
+                        // call graph had a cycle.
+                        emit&.write_sig_names(it, emit&.fmt_fn_name(it));
+                        @fmt(out&, ";\n");
+                    }
+                    fn BakedVarId(it) => {
+                        @fmt(out&, "static void* C%[];\n", it.id);
+                    }
+                    fn Type() => ();
+                }
             };
         };
     

@@ -171,6 +171,13 @@ Ctx :: @rec @struct {
     yielded_builtin_clear_cache: bool;
     have_seen_c_code: bool;  // TODO: remove once top level asm with relocationscan go through CodegenShared
     static_initializer_depth: i32;
+
+    // this isn't part of the function, just something to point at after terminating a block 
+    // (ie. return, goto, etc.) so if there's unreachable code / jumps, 
+    // they can be emitted without stomping anything important. 
+    // not a @static_mut so it doesn't try to get baked if was already used at comptime. 
+    // TODO: need to forget .ins when i want to reset temp
+    discard_block: *Qbe.Blk;  
     
     // I'm probably going to regret this. 
     error_buf: List(u8);
@@ -1441,6 +1448,11 @@ fn union_initializer(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) vo
     init.mem = init.ty.members;
 
     if consume(tok&, tok, "{") {
+        if consume(rest, tok, "}") {
+            init.all_zeros = true;
+            return();
+        };
+    
         c.initializer2(tok&, tok, init[0]);
         _ := consume(tok&, tok, ",");
         rest[] = c.skip(tok, "}");
@@ -2390,7 +2402,6 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
     c.push_scope("__FUNCTION__")[].var = name_var;
     
     _ := c.compound_stmt(tok&, tok);
-    if c.b.jmp.type == .Jxxx {
         c.b.jmp = @if_else {
             // for main() falling off the end is legal and means returning 0
             @if(f.name == "main") => {
@@ -2404,7 +2415,6 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *T
             // TODO: does the spec say i have to just give you garbage or is it ub that lets me crash?
             @else                 => (type = .hlt, arg = QbeNull);
         };
-    };
     
     if c.inline_assembly.len == 0 {
         c.f.set_link_from_rpo();
@@ -2869,11 +2879,8 @@ parse_logical :: fn(c, rest, tok, cond) = {
     join_block := c.new_block();
     
     prev_block := c.b;
-    need_jump := prev_block.jmp.type == .Jxxx && !c.speculate;
-    if need_jump {
         r := c.gen_expr(cond);
         prev_block.jmp = (type = .jnz, arg = r);
-    };
     
     c.b = else_block; 
     c.lookahead(tok, 1);
@@ -2887,11 +2894,8 @@ parse_logical :: fn(c, rest, tok, cond) = {
     };
     
     c.jmp_if_unterminated(join_block);
-    if need_jump {
         prev_block.s1 = s1;
         prev_block.s2 = s2;
-    };
-    
     c.b = join_block;
 
     r := if rtype(cond.r) == .RCon && rtype(rhs.r) == .RCon {
@@ -3411,9 +3415,8 @@ return :: fn(c, rest, tok) #prefix(.return, .ND_STMT) = {
     } else {
         (QbeNull, Qbe.J.ret0)
     };
-    if c.b.jmp.type == .Jxxx && !c.speculate {
         c.b.jmp = (type = j, arg = r);
-    };
+    c.b = c.discard_block;
     c.new_node(.ND_STMT, tok)
 };
 if_ :: fn(c, rest, tok) #prefix(.if, .ND_STMT) = {
@@ -3453,16 +3456,10 @@ switch_ :: fn(c, rest, tok) #prefix(.switch, .ND_STMT) = {
     tok = c.skip(tok, "(");
     cond := c.parse_expr(tok&, tok, .None);
     tok = c.skip(tok, ")");
-    //cond := c.new_cast(cond, ty_long);
-    payload.inspect = c.assert_gen_expr(cond);
-    // TODO :WrongSwitchCast
-    // there should be no conversion here and the constant case values should be cast to cond.ty
-    // but the backend needs 64 bits
-    if cond.ty.cls() != .Kl && !c.speculate {
-        r := c.f.newtmp("c", .Kl);
-        c.emit(.extsw, .Kl, r, payload.inspect, QbeNull);
-        payload.inspect = r;
-    };
+    // [n1570#6.8.4.2p1] The controlling expression of a switch statement shall have integer type 
+    cond := c.new_cast(cond, c.ty_int);
+    r := c.assert_gen_expr(cond);
+    payload.inspect = c.emit(.extsw, .Kl, r, QbeNull);
     payload.src = c.b;
     payload.cases = new(0);
 
@@ -3483,11 +3480,9 @@ switch_ :: fn(c, rest, tok) #prefix(.switch, .ND_STMT) = {
         payload.default = brk_label;
     };
     
-    if payload.src.jmp.type == .Jxxx && !c.speculate {
         n := c.f.new_switch(payload.case_count, payload.src, payload.inspect, payload.default);
         c.f.switches[n].cases = payload.cases;
         c.f.switches[n].case_count = payload.case_count;
-    };
     c.leave_scope();
     c.new_node(.ND_STMT, tok)
 };
@@ -3497,7 +3492,6 @@ case :: fn(c, rest, tok) #prefix(.case, .ND_STMT) = {
     c.b = unique_label;
     current_switch := c.current_switch || @error_tok(c, tok, "stray case");
     
-    // TODO :WrongSwitchCast
     c.eat(tok&, "case");
     begin := c.const_expr(tok&, tok);
     begin: u32 = begin.trunc();
@@ -3689,7 +3683,7 @@ asm :: fn(c, rest, tok) #prefix(.asm, .ND_STMT) = {
             fn Err(msg) => @error_tok(c, tok, "unsupported inline assembly\n%", msg);
         };        
         c.b.jmp.type = .hlt;
-        c.b = c.new_block();
+        c.b = c.discard_block;
         return(c.new_node(.ND_STMT, tok));
     };
     
@@ -3697,7 +3691,7 @@ asm :: fn(c, rest, tok) #prefix(.asm, .ND_STMT) = {
         @warn_tok(c, tok, "asm stmt is not supported");
         if !c.f.is_null() {
             c.b.jmp.type = .hlt;
-            c.b = c.new_block();
+            c.b = c.discard_block;
         };
     }
     // TODO: else when its just used as a memory barrier, should insert a no_inline=true call to keep that semantic
@@ -3715,7 +3709,7 @@ goto :: fn(c, rest, tok) #prefix(.goto, .ND_STMT) = {
     c.jmp_if_unterminated(unique_label);
     c.eat(tok&, "TK_IDENT");
     rest[] = c.skip(tok, ";");
-    c.b = c.new_block();
+    c.b = c.discard_block;
     c.new_node(.ND_STMT, tok)
 };
 break :: fn(c, rest, tok) #prefix(.break, .ND_STMT) = {
@@ -3724,7 +3718,7 @@ break :: fn(c, rest, tok) #prefix(.break, .ND_STMT) = {
     c.eat(tok&, "break");
     rest[] = c.skip(tok, ";");
     c.jmp_if_unterminated(brk_label);
-    c.b = c.new_block();
+    c.b = c.discard_block;
     c.new_node(.ND_STMT, tok)
 };
 continue :: fn(c, rest, tok) #prefix(.continue, .ND_STMT) = {
@@ -3733,7 +3727,7 @@ continue :: fn(c, rest, tok) #prefix(.continue, .ND_STMT) = {
     c.eat(tok&, "continue");
     rest[] = c.skip(tok, ";");
     c.jmp_if_unterminated(cont_label);
-    c.b = c.new_block();
+    c.b = c.discard_block;
     c.new_node(.ND_STMT, tok)
 };
 block :: fn(c, rest, tok) #prefix(.@"{", .ND_STMT) = {
@@ -4084,7 +4078,7 @@ fn speculate(c: *Ctx, rest: **Token, tok: *Token, prec: Prec, is_stmt: bool) *No
     old_block := c.b;
     prev := c.speculate;
     c.speculate = true;
-    c.b = c.new_block();
+    c.b = c.discard_block;
     node := if is_stmt {
         c.stmt(rest, tok)
     } else {
@@ -4243,7 +4237,7 @@ fn ir_node(c: *Ctx, ty: *CType, r: Qbe.Ref, lvalue: Qbe.Ref, tok: *Token) *Node 
 ********************/
 
 fn new_block(c: *Ctx) *Qbe.Blk = {
-    @if(c.speculate) return(@static_mut zeroed(Qbe.Blk));
+    @if(c.speculate) return(c.discard_block);
     
     f := c.f;
     b := newblk();
@@ -4256,19 +4250,16 @@ fn get_block(c: *Ctx, name: Str) *Qbe.Blk = {
     c.labels&.get_or_insert(name, => c.new_block())[]
 }
 
+// "if_underminated" is a dumb name now that i always switch to discard_block so doesn't matter
 fn jmp_if_unterminated(c: *Ctx, dest: *Qbe.Blk) void = {
-    if c.b.jmp.type == .Jxxx && !c.speculate {
         c.b.s1 = dest;
         c.b.jmp.type = .jmp;
-    };
 }
 
 fn jnz_if_unterminated(c: *Ctx, cond: Qbe.Ref, then: *Qbe.Blk, else: *Qbe.Blk) void = {
-    if c.b.jmp.type == .Jxxx && !c.speculate {
         c.b.jmp = (type = .jnz, arg = cond);
         c.b.s1 = then;
         c.b.s2 = else;
-    };
 }
 
 fn emit(c: *Ctx, op: Qbe.O, k: Qbe.Cls, to: Qbe.Ref, arg0: Qbe.Ref, arg1: Qbe.Ref) void = {
@@ -4315,12 +4306,12 @@ fn gen_par(c: *Ctx, ty: *CType) void = {
     // but since all vars get stack slots, we need to store any scalar arguments. 
     body := c.new_block();
     c.jmp_if_unterminated(body);
+    c.b = body; 
     for obj_params { loc |
         if c.ir_index(loc.ty) == QbeNull {
             c.gen_store(loc.stack_slot, loc.par_r, loc.ty);
         };
     };
-    c.b = body;
 }
 
 fn assert_gen_expr(c: *Ctx, node: *Node) Qbe.Ref = {
@@ -4383,7 +4374,7 @@ fn gen_assign(c: *Ctx, addr_node: *Node, value: Qbe.Ref, ty: *CType) *Node = {
 }
 
 fn gen_zero_var(c: *Ctx, var: *Obj, tok: *Token) void = {
-    if(c.speculate || c.b.jmp.type != .Jxxx, => return());
+    if(c.speculate, => return());
     dest := var.stack_slot;
     if dest == QbeNull {
         @error_tok(c, tok, "ICE: gen_zero_var missing slot for %", var.name);
