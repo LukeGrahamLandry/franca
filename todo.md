@@ -10,12 +10,10 @@ TODO: do auxvec for page size
 
 things i found when looking at all uses of @static
 TODO: opts :: @static { xxx: Search.StratOpts = (); xxx };  try @static @as(Search.StratOpt) ()
-TODO: dump_wasm.dump isn't thread safe because of `errors` global
 TODO: examples/lambda.fr.on_render.stack isn't thread safe if i want to have multiple from the same dylib in multiplexer
       but same problem for any graphcis program with @static(State).
 TODO: not passing around macho_loader.OUTPUT is lazy
 TODO: const destructure. `a, b :: foo()` for doom.IWAD
-TODO: either use import_objc_value.CLASS or get rid of it 
 TODO: i want `(?T).None` instead of `@as(?T) (.None)`
 TODO: document the mistake of `f :: fn() = (); a := @static f; a[]();` 
       (you need to explicitly @as(AsFnPtr(f)) or you get a funcid that can't be called at runtime)

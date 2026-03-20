@@ -3,21 +3,27 @@
 
 #use("@/examples/import_wasm/parse.fr");
 
-main :: fn() void = dump(read_file_from_last_arg());
-
-errors :: @static_mut 0;
-
-dump :: fn(input: []u8) void = {
-    errors[] = 0;
-    w: WasmModule = empty(temp()); w := w&;
+main :: fn() void = {
+    out := @ref u8.list(temp());
+    input := read_file_from_last_arg();
     @println("--- read % bytes ---", input.len);
+    ok := dump(out, input);
+    print(out.items());
+    @assert(ok, "invalid wasm file");
+}
+
+Ctx :: @struct(w: *WasmModule #use, out: *List(u8), errors: i64);
+
+dump :: fn(out: *List(u8), input: []u8) bool = {
+    out.reserve(input.len * 10);
+    w: WasmModule = empty(temp()); w := w&;
+    o := @ref @as(Ctx) (w = w, out = out, errors = 0);
+    errors := o.errors&;
     p: ParseWasm = (w = w, src = input);
     or parse_wasm(p&) { e |
-        @panic("% (at byte index %)", e, p.cursor);
+        @fmt(out, "% (at byte index %)", e, p.cursor);
+        return false;
     };
-    println("--- initial parse successful ---");
-    
-    out := u8.list(temp()); out := out&;
     
     import_types := temp().alloc_uninit(Wasm.TypeIdx, w.import_count&[.Func]);
     f_count := min(w.functions.len, w.code.len);
@@ -50,7 +56,7 @@ dump :: fn(input: []u8) void = {
             @fmt(out, " - '%' from '%' is a %", it.name.items(), it.module.items(), it.desc&.tag());
             @if_let(it.desc) fn Function(type) => {
                 @fmt(out, "\n     - ");
-                show_type(out, w, type);  
+                show_type(o, type);  
                 function_names[n] = @tfmt("%$%", it.name.items(), it.module.items());
                 import_types[n] = type; n += 1;
             };
@@ -66,17 +72,14 @@ dump :: fn(input: []u8) void = {
             @fmt(out, " - '%' % %\n", it.name.items(), it.type, it.id);
             @if_let(it.type) fn Func() => {
                 if function_names.len.ule(it.id.zext()) {
-                    errors[] += 1;
+                    o.errors += 1;
                     @fmt(out, "(ERROR: % is larger than number of functions)\n", it.id);
                 } else {
                     function_names[it.id.zext()] = it.name.items();
                 }
             };
-            
-            print(out.items()); out.clear();
         };
         @fmt(out, " === END EXPORT SECTION ===\n\n");
-        print(out.items()); out.clear();
     };
     
     if w.data.len > 0 {
@@ -88,7 +91,7 @@ dump :: fn(input: []u8) void = {
                 @fmt(out, "(passive)\n");
             } else {
                 @fmt(out, "active at offset ");
-                dump_wasm_expr(w, input, it.active_offset_expr.items(), out, import_types);
+                dump_wasm_expr(o, input, it.active_offset_expr.items(), import_types);
             };
         };
         @fmt(out, " === END DATA SECTION ===\n\n");
@@ -110,7 +113,7 @@ dump :: fn(input: []u8) void = {
                 @fmt(out, "(passive)\n");
             } else {
                 @fmt(out, "active at offset ");
-                dump_wasm_expr(w, input, it.active_offset_expr.items(), out, import_types);
+                dump_wasm_expr(o, input, it.active_offset_expr.items(), import_types);
             };
             start, in_order := (out.len, true);
             @fmt(out, "  Functions: [");
@@ -140,7 +143,7 @@ dump :: fn(input: []u8) void = {
         @fmt(out, "=== BEGIN GLOBAL SECTION ===\n");
         each w.globals { it |
             @fmt(out, " - % %\n  init ", if(it.mutable, => "mutable", => "constant"), it.type);
-            dump_wasm_expr(w, input, it.init_expr.items(), out, import_types);
+            dump_wasm_expr(o, input, it.init_expr.items(), import_types);
         };
         @fmt(out, " === END GLOBAL SECTION ===\n\n");
     };
@@ -148,17 +151,15 @@ dump :: fn(input: []u8) void = {
     @fmt(out, "=== BEGIN TYPE SECTION ===\n");
     range(0, w.types.len) { i |
         @fmt(out, " - ");
-        show_type(out, w, (id = i.trunc()));  
+        show_type(o, (id = i.trunc()));  
         @fmt(out, "\n");
     };
     @fmt(out, " === END TYPE SECTION ===\n\n");
-    print(out.items()); out.clear();
     
     @fmt(out, "=== BEGIN FUNCTION/CODE SECTION ===\n");
     if w.functions.len != w.code.len {
         errors[] += 1;
         @fmt(out, "(ERROR: % function types and % function bodies)\n", w.functions.len, w.code.len);
-        print(out.items()); out.clear();
     };
     
     locals := Wasm.ValType.list(temp());
@@ -169,15 +170,13 @@ dump :: fn(input: []u8) void = {
         @fmt(out, " [F%]: %\n  - signeture ", abs_index, name);
         if i < w.functions.len {
             ty := w.functions[i];
-            if !show_type(out, w, ty) {
-                print(out.items()); out.clear();
+            if !show_type(o, ty) {
                 continue();
             };
             locals&.push_all(w.types[ty.id.zext()].arg.items());
         } else {
             errors[] += 1;
             @fmt(out, "(ERROR: missing. only % entries signeture section)", w.functions.len);
-            print(out.items()); out.clear();
         };
         @fmt(out, "\n");
         if code.locals.len == 0 {
@@ -192,7 +191,7 @@ dump :: fn(input: []u8) void = {
         };
         
         @fmt(out, "  - code ");
-        dump_wasm_expr(w, input, code.insts.items(), out, import_types, locals.items(), function_names);
+        dump_wasm_expr(o, input, code.insts.items(), import_types, locals.items(), function_names);
         locals&.clear();
     };
     @fmt(out, " === END FUNCTION/CODE SECTION ===\n");
@@ -200,22 +199,21 @@ dump :: fn(input: []u8) void = {
     if errors[] != 0 {
         @fmt(out, "!!! found % errors !!!\n", errors[]);
     }
-    print(out.items());
+    errors[] == 0
 }
 
 // TODO: this sucks. should allow default parameter values. :Compiler
-fn dump_wasm_expr(w: *WasmModule, i: []u8, is: []u8, o: *List(u8), it: []Wasm.TypeIdx) void = 
-    dump_wasm_expr(w, i, is, o, it, empty(), empty());
+fn dump_wasm_expr(o: *Ctx, i: []u8, is: []u8,it: []Wasm.TypeIdx) void = 
+    dump_wasm_expr(o, i, is, it, empty(), empty());
 
-fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8), import_types: []Wasm.TypeIdx, local_types: []Wasm.ValType, function_names: []Str) void = {
+fn dump_wasm_expr(o: *Ctx, full_input: []u8, insts: []u8, import_types: []Wasm.TypeIdx, local_types: []Wasm.ValType, function_names: []Str) void = {
     Qbe :: import("@/backend/lib.fr").Qbe;    
-    
+    w, out, errors := (o.w, o.out, o.errors&);
     start := ptr_diff(full_input.ptr, insts.ptr);
     @fmt(out, "{  // [%..<%]", start, start + insts.len);
     if start < 0 || insts.len < 0 { 
         errors[] += 1;
         @fmt(out, "\n // (ERROR: negative sizes??)\n");
-        print(out.items()); out.clear();
     };
     c := 0;
     indent := 1;
@@ -301,7 +299,7 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8),
             first_type_byte := insts[c];
             type_index := read_leb(true);
             if type_index >= 0 {
-                show_type(out, w, (id = type_index.trunc()));  
+                show_type(o, (id = type_index.trunc()));  
             } else {
                 type := @as(Wasm.ValType) first_type_byte;
                 if type != .EmptyBlock {
@@ -402,10 +400,10 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8),
             v := push_leb(false);
             @fmt(out, "); // %; ", @if(v < function_names.len, function_names[v], ""));
             if v < w.import_count&[.Func] {
-                show_type(out, w, import_types[v]);
+                show_type(o, import_types[v]);
             } else {
                 id := v - w.import_count&[.Func];
-                show_type(out, w, w.functions[id]);
+                show_type(o, w.functions[id]);
             };
             continue()
         };
@@ -415,7 +413,7 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8),
             @fmt(out, ", table = ");
             table_index := push_leb(false);
             @fmt(out, "); // ");
-            show_type(out, w, (id = type_index.trunc()));
+            show_type(o, (id = type_index.trunc()));
         };
         
         // TODO: VectorPrefix some have lane and memarg immediates. 
@@ -428,7 +426,8 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8),
     @fmt(out, "\n");
 }
 
-fn show_type(out: *List(u8), w: *WasmModule, i: Wasm.TypeIdx) bool = {
+fn show_type(o: *Ctx, i: Wasm.TypeIdx) bool = {
+    w, out, errors := (o.w, o.out, o.errors&);
     i: i64 = i.id.zext();
     @fmt(out, "[T%]: (", i);
     if i >= w.types.len {

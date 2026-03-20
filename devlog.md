@@ -8,6 +8,7 @@
     - allow `(UnionType) {}` for constructing a zst case.
     - woah!! no_fallthrough fails. i guess real programs tend to not have unreachable code. 
       take the opportunity to simplify all the places i check if the block is already terminated. 
+- cleanup: give up on elide_blits for now. dump_wasm remove static. 
 
 ## (Mar 19)
 
