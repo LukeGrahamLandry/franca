@@ -203,29 +203,6 @@ const toggle_worker = (resolve) => {
         document.getElementById("btn").innerText = start_message;
     }
 };
-
-// this is a super slow way to do this, 
-// eventually i'll have the worker be persistant and everything just live in one canvas 
-async function get_file(path) {
-    return new Promise((resolve) => {
-        const args = ["demo.wasm", "-yield", path, "-rootfs_hash", manifest_version];
-        let w = get_worker(); 
-        w.onmessage = async (msg) => {
-            if (msg.data.tag != "download") {
-                console.log(msg.data);
-                if (msg.data.tag === "err" || msg.data.tag === "show") handle(() => {})(msg); 
-                flush();
-            } else {
-                w.postMessage({ tag: "reset" });
-                thread_pool.push(w);
-                document.getElementById("time").innerText = ".";
-                resolve(await msg.data.content.text());
-            }
-        };
-        w.postMessage({ tag: "start",args: args, memory: new_memory() }, []);
-    });
-}
-
 function new_memory() {
     return new WebAssembly.Memory({
         initial: 300,  // write_args grows it if needed
@@ -236,22 +213,36 @@ function new_memory() {
 }
 
 // _: my hope is that i can ask it to prefetch everything i want and then it will be faster on the workers via magic.   
-let [wasm_module, manifest, _rootfs, _worker_script] = await Promise.all([
+let [wasm_module, manifest, rootfs, _worker_script] = await Promise.all([
     load_wasm(),
     fetch("target/manifest.json?v=" + manifest_version).then(async (it) => await it.json()),
-    fetch(`mirror/${manifest_version}`),
+    fetch(`mirror/${manifest_version}`).then(async (it) => await it.arrayBuffer()),
     fetch(`worker.js?v=${manifest_version}`),
 ]);
 
 console.log(manifest);
 document.getElementById("version").innerText = manifest.commit;
 
+// (length, off(indices), [blob; indices=[off(name), length(name), off(data), length(data)]])
+const get_file = (path) => {
+    const d = new DataView(rootfs);
+    const get = (off) => d.getUint32(off, true);
+    const end = get(0);
+    let off = get(4)+8;
+    while (off < end) {
+        const name = new TextDecoder().decode(new DataView(rootfs, get(off+0)+8, get(off+4)));
+        if (name === path) return new TextDecoder().decode(new DataView(rootfs, get(off+8)+8, get(off+12)));
+        off += 16;
+    }
+    throw new Error(`file not found: ${path}`);
+};
+
 const load_example = async (path) => {
     document.getElementById("err").innerText = "SLOW\n";
     try {
-        document.getElementById("in").value = await get_file(path);
+        document.getElementById("in").value = get_file(path);
     } catch (s) {
-        document.getElementById("out").value += `${s.toString()}\n\n${s.stack}`;
+        document.getElementById("in").value = `/*\n${s.toString()}\n\n${s.stack}*/`;
     }
     document.getElementById("err").innerText = "";
     document.getElementById("stale").hidden = false;
