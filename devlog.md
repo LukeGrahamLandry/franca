@@ -1,4 +1,9 @@
 
+## (Mar 21)
+
+- os: shitty O_APPEND (run_tests needs it now). libc_start_main for tests/c.fr
+- cleanup: @if(TODOWASM) is official now. run_tests skips for os. 
+
 ## (Mar 20)
 
 - emit_c on tests/fr

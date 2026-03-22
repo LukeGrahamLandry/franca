@@ -73,7 +73,6 @@ reproducibility
 
 ---
 
-- os/vfs O_APPEND
 - make the hare tests work in my examples/elf_loader.fr
 - https://en.wikipedia.org/wiki/ICO_(file_format)#File_structure
 - make run_franca_file less insane
@@ -414,6 +413,7 @@ cset	w0, eq
   so you can run the tests twice on the same file system at the same time. 
 - stop using environment variables so much. they annoy me. 
 - run_qbe_passes_common takes 170ms on wuffs_jpeg__decoder__load_mcu_blocks_for_single_component_smooth
+- examples/os: small tests for O_APPEND and O_CLOEXEC
 
 ## things i don't autotest
 
@@ -573,24 +573,9 @@ All is fine! (passed 35 tests)
 - import_c can't do SLOW_USERSPACE_THREADS when run directly on a compiler that was build with real threads because of "using host backend"
 - can't run tests/c.fr at comptime (@run main() hangs)
 - tests/exe/sys.fr might not work with SLOW_LEAK_ARENAS=true?
-- i've seen this a couple times on actions:
-```
->>> unpacking [target/franca/deps/fonts.zip]...
-Assertion Failed: failed to read file 'target/franca/deps/fonts/ttf/JetBrainsMonoNL-Bold.ttf'
-```
-i think it's just a race where it gets confused if two programs try to cache the same dependency at the same time. 
 - `./target/f.out tests/exe/wasm.fr` doesn't work with SLOW_MEMORY_DEBUGGING=true
 - `franca examples/os/build.fr -vzf -smp 2 -append "nocache on;spawn kaleidoscope;kaleidoscope;"`
   it doesn't like two at once? (with -smp 1 it works but is SUPER slow which should also be fixed)
-- TODO: i broke compiler/test.fr running examples/repl.fr (Cached) on riscv
-- spurious failures
-  - (repro) diff target/release/franca-linux-arm64-sta a.out 
-  - TODO: i broke repro. only of linux-rv64-sta and the only difference is two instructions swapped:
-```
-00154490  93 02 05 00 13 83 05 00  b3 84 62 40 93 03 00 00
-00154490  13 83 05 00 93 02 05 00  b3 84 62 40 93 03 00 00
-```
-it seems to work most of the time? so thread ordering problem?
 
 
 ## import_symbol / weak
@@ -632,11 +617,6 @@ TODO: end of loop. still too many options for 'index'
 - there's still a compilation order problem with inlining intrinsics. look at copy_bytes(). 
 - :ThisIsNotOkBecauseMemoryWillBeReused
 
-## random failures
-
-- failed to read file 'target/franca/deps/fonts/ttf/JetBrainsMonoNL-Bold.ttf'
-  unpacking race probably
-
 ## 
 
 - put more stuff in read only data. 
@@ -658,9 +638,40 @@ different subsets of the same resources.
 - make #log_asm work for the #asm replacement 
 - experiment with outputting even more info in .frc and an lsp that reads it back. 
 
+## tests i skip
+
+examples/os (tls(.deny_syscalls)[])
+- tests/backend.fr: "vararg2.ssa", "vararg1.ssa", "mem1.ssa", "abi8.ssa", "abi6.ssa", "ops.ssa", "abi5.ssa"
+- tests/c.fr: "literal.c", "function.c", "usualconv.c", "atomic.c"
+- tests/exe: sys, cli_args, dylibs
+- tests/fr: catch_signal, call_fork, hello_va
+- on wasm still can't use run_tests.fr at all because i can't exec an aot binary yet. 
+  so tests/exe/wasm has its own skips. 
+- on kernel/user i don't bundle dependencies so can't run-yes-deps at all. 
+  which has collateral damage of not running tests/exe/wasm.fr or examples/emit_c.fr
+
+:TodoRiscv
+- tests/fr/(inline_asm_jit, intrins).fr (haven't bothered to write the AsmFunction)
+- emit_c clang (weirdness with multiarch?)
+- tests/external/(bubblewrap, curl) (weirdness with multiarch?)
+- wuffs std/json (float bug!!)
+- tcc: bootstrap+abitest
+
+wasm
+- tests/fr/(inline_asm_jit, intrins).fr (haven't bothered to write the AsmFunction)
+- tests/fr/(exceptional)
+
+macos
+- curl
+
+linux
+- raylib
+
+amd
+- tcc: bootstrap+abitest
+
 ## wasm
 
-- remove all the TODOWASM (ifdefs/comments)
 - let frontends directly provide signeture for imports since they probably know instead of only trying to infer from callsites. 
   (currently emit_ir just always outputs a shim with a direct call which works but is hacky and not something i'd be proud to explain). 
 - generate better code (see comments in wasm/isel.fr)
@@ -884,13 +895,10 @@ need to be careful about the refs which have tags in the high bits so won't leb 
   - also cas.ssa but there it has an expcilit error message for not supporting that extension instead of just giving the wrong answer like the others
 - call local symbol directly without producing it in a register first
 - trampolines for imported symbols
-- tests/
-  - intrins, inline_asm_jit (AsmFunction)
 - clang's binary does something with `__global_pointer` in start. do i have to do that?
 - ssa test that uses the constant 9223372036854775807
 - `thread backtrace` doesn't work in lldb. is my stack layout wrong? 
 - riscv_flush_icache syscall vs FENCE.I instruction for clear_instruction_cache
-- :TodoRiscv tests/fr/(inline_asm_jit, intrins).fr
 
 ## don't rely on libc
 

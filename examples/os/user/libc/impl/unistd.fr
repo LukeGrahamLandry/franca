@@ -24,6 +24,13 @@ read :: fn(f: Fd, buf: *u8, len: i64) i64 = {
 write :: fn(f: Fd, buf: *u8, size: i64) i64 = {
     @if(size == 0) return(0);
     fd := get_file(f) || return(-1);
+    
+    append := fd.flags.bit_and(LinuxLibc.O_arm.APPEND) != 0;
+    if append {
+        // TODO: this needs to be atomic
+        _ := fd'vtable'lseek(fd.data, 0, .End, fd.position&);
+    };
+    
     result := fd'vtable'write(fd.data, buf.slice(size), fd.position);
     @trace("write(%, %, %) = %", f.fd, u8.int_from_ptr(buf), size, result);
     if result >= 0 {
@@ -96,9 +103,6 @@ FR_openat :: fn(f: Fd, path: CStr, flags: i64, mode: i64) i64 = {
     d := flags;  // :HostUserNightmare
     if query_current_arch() == .x86_64 && d.bit_and(LinuxLibc.O_amd.DIRECTORY) != 0 { 
         d = d.bit_and(bit_not(LinuxLibc.O_amd.DIRECTORY)).bit_or(LinuxLibc.O_arm.DIRECTORY);
-    };
-    if d.bit_and(LinuxLibc.O_arm.APPEND) != 0 {
-        @panic("TODO: O_APPEND");
     };
     
     result := fd'vtable'openat(fd.data, path, d, mode);

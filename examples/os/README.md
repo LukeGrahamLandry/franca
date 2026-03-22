@@ -48,6 +48,7 @@ The later is used (as an emscripten alternative) by the
 
 ## incomplete
 
+- proper locks in vfs.fr (rn it's by thread group which isn't enough)
 - posix_spawnattr_t (i only do file_actions)
 - MemDir ref counts / shallow copying children is very sketchy
 - mprotect (rn i only have unmapped or RWX)
@@ -72,18 +73,9 @@ The later is used (as an emscripten alternative) by the
 - check for needs_reset flag when waiting for virt queue
 - make volatile pointers less painful in my language
 - vzf: sometimes you don't get the `>>>` prompt until you hit a key
-- why does mmap die sometimes??
 - be able to spawn a thread that's disallowed from using specific libc functions. 
   ie. my compiler's codegen thread needs mmap+futex+exit and nothing else
-- rest of the libc functions needed for all my tests:
-```
-   "unlinkat", 
-   "mkstemp",
-   "readlinkat",
-   "sigaction",
-   "localtime_r", 
-   fmodf, fmod, sinf, cosf
-```
+- trig functions
 - compile with import_c and mount it in the vfs:
   https://github.com/libfuse/libfuse/blob/master/example/hello_ll.c 
 - generate things from examples/os/user/libc
