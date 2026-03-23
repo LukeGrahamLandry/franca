@@ -76,7 +76,7 @@ on_init :: fn(userdata: rawptr) void = {
         prelude := "#include_std(\"lib/core.fr\");#include_std(\"examples/gpu/terminal.fr\");\n";
         prelude := @tfmt("%\nSOKOL_BACKEND :: RenderBackend.%;\n", prelude, SOKOL_BACKEND);
         state.repl = ReplFns'init(allocator, prelude);
-        src := @tfmt("real_state := State.ptr_from_int(%); state[] = real_state; state := state[];", raw_from_ptr(State, state[]));
+        src := @tfmt("#use(BuiltinCommands); real_state := State.ptr_from_int(%); state[] = real_state; state := state[];", raw_from_ptr(State, state[]));
         res := ReplFns'run(state.repl&, src);
         if res&.is_err() {
             out: List(u8) = list(temp());
@@ -208,6 +208,7 @@ draw_frame :: fn() void = {
                     buffer.append_string(@tfmt(" (in % ms)", ms));
                 };
                 buffer.append_string("\n");
+                buffer.append_bar();
             } else {
                 // still running
             };
@@ -316,22 +317,6 @@ fn put_cursor_at_end(buffer: *TextBuffer) void = {
     last := buffer.lines[buffer.lines.len - 1]&;
     buffer.cursor.y = buffer.lines.len.float() - 1;
     buffer.cursor.x = last.len().float();
-}
-
-fn echo(s: Str) void = {
-    if selected_buffer() { buffer |
-        buffer.append_string(s);
-        buffer.put_cursor_at_end();
-    }
-}
-
-fn cd(s: Str) void = {
-    Syscall'chdir(@fmt_cstr("%", s)) 
-        || echo(@tfmt("failed to set working directory to '%'\n", s));
-}
-
-fn exit() void = {
-    state[].app.requests.quit = true;
 }
 
 on_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
@@ -473,6 +458,7 @@ handle_event :: fn(event: *Sapp.Event) void = {
             }
         }
         
+        echo :: BuiltinCommands.echo;
         if event.key_code == .R && event.modifiers.get(.control) != 0 && event.modifiers.get(.shift) != 0 {
             if state.recording { it |
                 out := u8.list(temp());
@@ -541,13 +527,19 @@ handle_event :: fn(event: *Sapp.Event) void = {
             };
         }
         
-        if event.key_code == .UP {
-            move_in_history(buffer, true);
-        }
-        
-        if event.key_code == .DOWN {
-            move_in_history(buffer, false);
-        }
+        if @is(event.key_code, .UP, .DOWN) {
+            up := event.key_code == .UP;
+            if event.modifiers.get(.super) != 0 {
+                move_to_next_command(buffer, up);
+                return();
+            }
+            if event.modifiers.get(.shift) != 0 {
+                delta: f64 = @if(up, -1, 1);
+                buffer.set_cursor(x = buffer.cursor.x, y = buffer.cursor.y + delta);  
+                return();
+            };
+            move_in_history(buffer, up);
+        };
         
         if event.key_code == .A && event.modifiers.get(.control) != 0 {
             buffer.move_to(buffer.cursor.y.int(), 0);
@@ -557,7 +549,7 @@ handle_event :: fn(event: *Sapp.Event) void = {
         };
         
         if event.key_code == .LEFT {
-            buffer.cursor.x = max(buffer.cursor.x - 1, 0);
+            buffer.set_cursor(x = buffer.cursor.x - 1, y = buffer.cursor.y);
             // TODO: off the end to prev line?
         };
         
@@ -663,14 +655,23 @@ move_in_history :: fn(b: *TextBuffer, up: bool) void = {
     if b.lines.len > 0 {
         b.lines&[b.lines.len - 1]&.set_len(0);
     }
-    state.history_index = if up {
-        max(state.history_index - 1, 0)
-    } else {
-        min(state.history_index + 1, state.history.len - 1)
-    };
+    delta := @if(up, -1, 1);
+    state.history_index = mod(state.history_index + delta + state.history.len, state.history.len);
     cmd := state.history[state.history_index];
     b.append_string(cmd);
     b.put_cursor_at_end();
+}
+
+move_to_next_command :: fn(b: *TextBuffer, up: bool) void = {
+    i, line := (0, b.cursor.y.int());
+    m := b.storage.command_markers&;
+    @if(m.len == 0) return();
+    while => i < m.len && m[i] < line {  // :SLOW
+        i += 1;
+    };
+    i := (@if(up, i-1, i+1)).max(0);
+    dest := @if(i >= m.len, b.lines.len - 1, m[i]);
+    b.move_to(dest, 0);
 }
 
 update_hover :: fn(event: *Sapp.Event) void = {
@@ -761,7 +762,7 @@ open_link :: fn(full_link: Str) void = {
     contents := read_entire_file(temp(), link) || {
         if dir_exists(link) {
             // TODO: un-chdir when you pop tho
-            Syscall'chdir(link.as_cstr());
+            BuiltinCommands'cd(link);
             dest: *TextBuffer = empty(general_allocator());
             old := push_as_current_buffer(dest);
             cmd := @tfmt("ls ../%", link);
@@ -953,11 +954,13 @@ main :: fn() void = {
 driver :: fn(vtable: *ImportVTable) void = 
     Easy'build_for_graphics(vtable, @source_file_name());
 
+// seperate from TextBuffer so you can open the same one at multiple col/line positions
 TextStorage :: @struct(
     lines: RawList(Line),
     gpa: Alloc,
     line_lock: Mutex,
     ref_count: i64,
+    command_markers: RawList(i64),  // TODO: these will drift if you edit text not at the end of the buffer
 );
     
 TextBuffer :: @struct(
@@ -1129,6 +1132,7 @@ empty_line: Line : (repr = (ptr = zeroed(*u8), cap = 0, len = 0x80.shift_left(64
 fn raw_bytes(self: *Line) []u8 = self.slice(1).interpret_as_bytes();
 
 fn str(self: *Line) Str #inline = if self.repr.len < 0 {
+    @run @assert(size_of(Line) == 24 && offset_of(RawList(u8), .len) == 16, "rawlist repr changed");
     b := self.raw_bytes();
     b.subslice(0, b[23].zext().bit_and(0x7F))
 } else {
@@ -1228,6 +1232,7 @@ fn drop(self: *TextBuffer) void = {
         it.drop(self.gpa);
     };
     self.lines&.drop(self.gpa);
+    self.command_markers&.drop(self.gpa);
     self.gpa.dealloc_one(TextStorage, self);
 }
 
@@ -1322,6 +1327,7 @@ split_program_args :: fn(raw_command: Str) ?[]CStr = {
         cmd&.push(@fmt_cstr("%", raw_command.rest(start)));
     };
     
+    echo :: BuiltinCommands.echo;
     if in_quote {
         echo "\n";
         range(0, start-1, fn(_) => echo(" "));
@@ -1336,6 +1342,7 @@ split_program_args :: fn(raw_command: Str) ?[]CStr = {
     if cmd[0].str() == "cd" {
         echo "\nassuming you meant to call the shell builtin 'cd'\n";
         if cmd.len > 1 {
+            cd :: BuiltinCommands.cd;
             cd(cmd[1].str());
         };
         return(.None);
@@ -1357,10 +1364,20 @@ exec_program :: fn(buffer: *TextBuffer, raw_command: Str) void = {
             }
             fn Err(msg) => buffer.append_string(msg);
         };
-        buffer.append_string("======================\n");
+        buffer.command_markers&.push(buffer.lines.len, buffer.gpa);
+        buffer.append_bar();
     } else {
         buffer.append_string("something is already running.\npress control + c to interrupt it (+ shift to kill it)\n");
     };
+}
+
+fn append_bar(b: *TextBuffer) void = {
+    chars := int(b.at.w / state.scale);
+    chars := min(chars, 22);  // use the small repr of Line
+    range(0, chars) { _ |
+        b.append_string("=");
+    };
+    b.append_string("\n");
 }
 
 search_for_selected :: fn(b: *TextBuffer) void = {
@@ -1478,6 +1495,41 @@ fn run(self: *SearchTask) void = {
     }
 };
 
+BuiltinCommands :: @struct {
+    echo :: fn(s: Str) void = {
+        b := selected_buffer() || return();
+        b.append_string(s);
+        b.put_cursor_at_end();
+    }
+    
+    cd :: fn(s: Str) void = {
+        Syscall'chdir(@fmt_cstr("%", s)) 
+            || echo(@tfmt("failed to set working directory to '%'\n", s));
+    }
+    
+    exit :: fn() void = {
+        state[].app.requests.quit = true;
+    }
+    
+    history :: fn() void = {
+        b: *TextBuffer = empty(general_allocator());
+        push_as_current_buffer(b);
+        // :SLOW but can't just keep the buffer and use it as the history for tab/arrow 
+        // completion because if you run a command in the history buffer it will dump its output there. 
+        b.append_string("history();\n===\n");
+        for state.history { it |
+            b.append_string(it);
+            b.append_string("\n");
+        };
+        b.put_cursor_at_end();
+    }
+    
+    help :: fn() void = {
+        b := selected_buffer() || return();
+        b.append_string(HELP);
+    }
+};
+
 StbTrueType :: {
     root := Foreign'stb();
     Ffi  :: import("@/examples/import_c/ffi.fr");
@@ -1513,6 +1565,7 @@ enter               (run current line as a command)
   <program> <args>  (exec a binary or .fr file)
   <franca_code>;    (run in repl. note the semicolon)
 up/down arrow       (move through command history)
+cmd+(up/down arrow) (jump cursor to next block)
 tab                 (autocomplete from history)
 ctrl+c              (SIGINT)
 ctrl+shift+c        (SIGKILL)
@@ -1526,4 +1579,5 @@ left+drag           (select text)
 cmd+c/v             (copy / paste)
 backspace           (delete text)
 ctrl+a/e            (go to start/end of line)
+history();          (open a buffer listing previous commands)
 """;

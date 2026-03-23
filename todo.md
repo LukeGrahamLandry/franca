@@ -1153,6 +1153,10 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 
 ### Terminal
 
+- change save file while running
+- list buffers. allow moving them out of the stack (that esc closes)?
+- show byte value on non ascii chars (except 0 because i use that to draw)
+- buffer track cwd so pop fixes it. ref count so can close when no more buffers have that one. cd builtin changes it too.
 - should seperate the text editing model part from the rendering. 
   i need to make it more structured anyway to allow undo. 
 - tab to autocomplete a file path 
@@ -1165,7 +1169,6 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 - && to run two commands
 - multiline franca commands
 - save cmd history to file as well (not just output) so up/down work across restarts (and maybe auto save)
-- jump around past commands like warp
 - ui for canceling search
 - environment variable syntax
 - tell child programs that im a terminal. ie. ls gives me one column instead of two.
@@ -1197,6 +1200,7 @@ actually that's a bit too agressive but certainly stop processing ANSI escape co
    until the process doesn't get a turn to run between reads tho its fine for my terminal because it has realloc=false)
 - let you get out of lock_to_bottom while a process is spamming output
 - scrollbar feels bad because i stop sending events when the mouse goes off the window
+- horizontal scrollbar
 
 ## Graphics
 

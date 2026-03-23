@@ -1,8 +1,16 @@
 
+## (Mar 22)
+
+terminal
+- history command
+- cmd+arrow to move jump between command output like warp
+
 ## (Mar 21)
 
 - os: shitty O_APPEND (run_tests needs it now). libc_start_main for tests/c.fr
 - cleanup: @if(TODOWASM) is official now. run_tests skips for os. 
+- started splitting wasm/isel legalization part from ssa->stack in the hopes it will be less confusing 
+  to be smarter about leaving values on the stack. stashed that for now. 
 
 ## (Mar 20)
 
