@@ -63,8 +63,6 @@ Shader :: @struct {
 
 Pipeline :: @struct {
     prim_type: M("MTLPrimitiveType");
-    index_type: M("MTLIndexType");
-    index_size: i64;
     cull_mode: M("MTLCullMode");
     winding: M("MTLWinding");
     stencil_ref: u32;
@@ -85,15 +83,11 @@ _SG_MTL_MAX_STAGE_BUFFER_BINDINGS :: _SG_MTL_MAX_STAGE_UB_SBUF_BINDINGS;
 _SG_MTL_MAX_STAGE_IMAGE_BINDINGS :: Sg.SG_MAX_IMAGE_BINDSLOTS;
 _SG_MTL_MAX_STAGE_SAMPLER_BINDINGS :: Sg.SG_MAX_SAMPLER_BINDSLOTS;
 
-
 StateCacheEntry :: fn($T, $N) => EnumMap(Sg.ShaderStage, Array(T, N));
 
 StateCache :: @struct {
     cur_pipeline: *Sg.Pipeline.T;
     cur_pipeline_id: Sg.Pipeline;
-    cur_indexbuffer: *Sg.Buffer.T;
-    cur_indexbuffer_id: Sg.Buffer;
-    cur_indexbuffer_offset: i64;
     buffer: StateCacheEntry(Sg.Buffer, _SG_MTL_MAX_STAGE_BUFFER_BINDINGS);
     image: StateCacheEntry(Sg.Image, _SG_MTL_MAX_STAGE_IMAGE_BINDINGS);
     sampler: StateCacheEntry(Sg.Sampler, _SG_MTL_MAX_STAGE_SAMPLER_BINDINGS);
@@ -197,12 +191,6 @@ fn to_mtl(it: Sg.CullMode) M("MTLCullMode") = @map_enum(it)
 
 fn to_mtl(it: Sg.FaceWinding) M("MTLWinding") = @map_enum(it) 
     (CW = 0, CCW = 1);
-
-fn to_mtl(it: Sg.IndexType) M("MTLIndexType") = @map_enum(it) 
-    (UINT16 = 0, UINT32 = 1);
-
-fn to_mtl_size(it: Sg.IndexType) i32 = @map_enum(it) 
-    (NONE = 0, UINT16 = 2, UINT32 = 4);
 
 fn to_mtl(it: Sg.ImageType) M("MTLTextureType") = @map_enum(it)
     (_2D = 2, CUBE = 5, _3D = 7, ARRAY = 3);
@@ -866,10 +854,6 @@ fn create(mtl: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipeline
     } else {
         prim_type := desc.primitive_type;
         pip.mtl.prim_type = to_mtl(prim_type);
-        pip.mtl.index_size = intcast to_mtl_size(pip.cmn.index_type);
-        if pip.cmn.index_type != .NONE {
-            pip.mtl.index_type = to_mtl(pip.cmn.index_type);
-        }
         pip.mtl.cull_mode = to_mtl(desc.cull_mode);
         pip.mtl.winding = to_mtl(desc.face_winding);
         pip.mtl.stencil_ref = zext desc.stencil.ref;
@@ -1365,22 +1349,6 @@ fn apply_pipeline(mtl: *Impl, pip: *Sg.Pipeline.T) void = {
 fn apply_bindings(mtl: *Impl, bnd: *Sg.ResolvedBindings) bool = {
     @debug_assert(bnd.pip.cmn.shader_t.slot.id == bnd.pip.cmn.shader.id);
     shd, sc := (bnd.pip.cmn.shader_t, mtl.state_cache&);
-
-    // don't set vertex- and index-buffers in compute passes
-    if (!mtl.sg.cur_pass.is_compute) {
-        @debug_assert(!mtl.render_cmd_encoder.is_nil());
-        // store index buffer binding, this will be needed later in sg_draw()
-        sc.cur_indexbuffer = bnd.ib;
-        sc.cur_indexbuffer_offset = bnd.ib_offset.intcast();
-        ::if(u32);
-        sc.cur_indexbuffer_id.id = if !bnd.ib.is_null() {
-            @debug_assert(bnd.pip.cmn.index_type != .NONE);
-            bnd.ib.slot.id
-        } else {
-            @debug_assert(bnd.pip.cmn.index_type == .NONE);
-            Sg.Sg.INVALID_ID
-        };
-    }
     
     F :: @Fn(e: ObjCId, s: i32) Sg.Stat;
     apply :: fn(stage, entry, res, mtl_slot, $v: F, $f: F, $c: F) => {
@@ -1511,28 +1479,11 @@ fn draw(mtl: *Impl, base_element: i64, num_elements: i64, num_instances: i64) vo
     @debug_assert(!mtl.render_cmd_encoder.is_nil());
     @debug_assert(sc.cur_pipeline.slot.id == sc.cur_pipeline_id.id);
     prim := sc.cur_pipeline.mtl.prim_type;
-    if sc.cur_pipeline.cmn.index_type != .NONE {
-        // indexed rendering
-        @debug_assert(sc.cur_indexbuffer.slot.id == sc.cur_indexbuffer_id.id);
-        ib := sc.cur_indexbuffer;
-        ib := ib.mtl.buf&[ib.cmn.active_slot];
-        @debug_assert(ib != 0);
-        index_buffer_offset := sc.cur_indexbuffer_offset + base_element * sc.cur_pipeline.mtl.index_size;
-        @objc mtl.render_cmd_encoder.drawIndexedPrimitives(prim, 
-            indexCount = num_elements,
-            indexType = sc.cur_pipeline.mtl.index_type,
-            indexBuffer = mtl.get_id(ib),
-            indexBufferOffset = index_buffer_offset,
-            instanceCount = num_instances,
-        );
-    } else {
-        // non-indexed rendering
         @objc mtl.render_cmd_encoder.drawPrimitives(prim,
             vertexStart   = base_element,
             vertexCount   = num_elements,
             instanceCount = num_instances,
         );
-    }
 }
 
 fn dispatch(mtl: *Impl, num_groups_x: i64, num_groups_y: i64, num_groups_z: i64) void = {

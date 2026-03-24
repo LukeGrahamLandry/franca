@@ -136,10 +136,6 @@ bindgroup_t :: @struct {
 };
 
 bindings_cache_t :: @struct {
-    ib: @struct {
-        buffer: Sg.Buffer;
-        offset: i64;
-    };
     bg: bindgroup_handle_t;
 };
 
@@ -147,7 +143,6 @@ bindings_cache_t :: @struct {
 Impl :: @struct {
     sg: *Sg.Self;
     valid: bool;
-    use_indexed_draw: bool;
     dev: WGPU.Device;
     limits: WGPU.Limits;
     queue: WGPU.Queue;
@@ -171,13 +166,13 @@ fn to_wgpu(b: bool) WGPU.OptionalBool =
 fn to_wgpu(b: bool) WGPU.Bool = 
     @if(b, .True, .False);
 
-fn to_wgpu(t: Sg.BufferType, u: Sg.Usage) WGPU.BufferUsage = {
+fn to_wgpu(u: Sg.Usage) WGPU.BufferUsage = {
     // FIXME: change to WGPU.BufferUsage once Emscripten and Dawn webgpu.h agree
     // TODO: ?^ sure seems like this is using WGPU.BufferUsage?
     
     // TODO: better things for flags and then put these numbers in the bindings instead so 
     //       you can sanely use wgpu from franca without the gfx abstraction layer. :LazyMagicNumbers
-    res: i64 = @map_enum(t) (STORAGEBUFFER = 0x80, INDEXBUFFER = 0x10);
+    res: i64 = 0x80;
     (_ = res.bit_or(@if(u == .IMMUTABLE, 0, 0x8))) // CopyDst
 }
 
@@ -209,17 +204,6 @@ fn to_wgpu(it: Sg.Filter) WGPU.FilterMode = @map_enum(it)
 
 fn to_wgpu(it: Sg.Filter) WGPU.MipmapFilterMode = @map_enum(it)
     (NEAREST = .Nearest, LINEAR = .Linear);
-
-// NOTE: there's no WGPU.IndexFormat_None
-fn to_wgpu(it: Sg.IndexType) WGPU.IndexFormat = {
-    @if(it == .UINT16, .Uint16, .Uint32)
-}
-
-fn to_wgpu(prim_type: Sg.PrimitiveType, idx_type: Sg.IndexType) WGPU.IndexFormat = {
-    if(idx_type == .NONE, => return(.Undefined));
-    if(@is(prim_type, .LINE_STRIP, .TRIANGLE_STRIP), => return(to_wgpu(idx_type)));
-    .Undefined
-}
 
 fn to_wgpu(it: Sg.PrimitiveType) WGPU.PrimitiveTopology = @map_enum(it)
     (POINTS = .PointList, LINES = .LineList, LINE_STRIP = .LineStrip, TRIANGLES = .TriangleList, TRIANGLE_STRIP = .TriangleStrip);
@@ -641,24 +625,6 @@ fn bindings_cache_clear(wgpu: *Impl) void = {
     wgpu.bindings_cache = zeroed @type wgpu.bindings_cache;
 }
 
-fn bindings_cache_ib_dirty(wgpu: *Impl, ib: *Sg.Buffer.T, offset: i64) bool = {
-    dest := wgpu.bindings_cache.ib&;
-    if !ib.is_null() {
-        dest.buffer.id != ib.slot.id || dest.offset != offset
-    } else {
-        dest.buffer.id != 0
-    }
-}
-
-fn bindings_cache_ib_update(wgpu: *Impl, ib: *Sg.Buffer.T, offset: i64) void = {
-    dest := wgpu.bindings_cache.ib&;
-    if !ib.is_null() {
-        dest[] = (buffer = (id = ib.slot.id), offset = offset);
-    } else {
-        dest[] = zeroed @type dest[];
-    }
-}
-
 fn bindings_cache_bg_dirty(wgpu: *Impl, bg: ?*bindgroup_t) bool = {
     wgpu.bindings_cache.bg.id != if(bg, fn(bg) => bg.slot.id, => 0)
 }
@@ -742,30 +708,6 @@ fn apply_bindgroup(wgpu: *Impl, bnd: *Sg.ResolvedBindings) bool = {
     true
 }
 
-fn apply_index_buffer(wgpu: *Impl, bnd: *Sg.ResolvedBindings) bool = {
-    rpass_enc := wgpu.rpass_enc.expect("in render pass");
-    ib := bnd.ib;
-    offset := intcast bnd.ib_offset;
-    if !wgpu.bindings_cache_ib_dirty(ib, offset) {
-        wgpu.sg.stat(.wgpu_bindings_num_skip_redundant_index_buffer, 1);
-        return true;
-    }
-    wgpu.bindings_cache_ib_update(ib, offset);
-    if !ib.is_null() {
-        format := to_wgpu(bnd.pip.cmn.index_type);
-        buf_size := intcast ib.cmn.size;
-        @debug_assert(buf_size > offset);
-        max_bytes := buf_size - offset;
-        setIndexBuffer(rpass_enc, ib.mtl.buf, format, offset, max_bytes);
-    /* FIXME: the else-pass should actually set a null index buffer, but that doesn't seem to work yet
-    } else {
-        setIndexBuffer(rpass_enc, 0, WGPU.IndexFormat_Undefined, 0, 0);
-    */
-    }
-    wgpu.sg.stat(.wgpu_bindings_num_set_index_buffer, 1);
-    true
-}
-
 fn setup_backend(wgpu: *Impl, desc: *Sg.Desc) void = {
     @debug_assert(!desc.environment.wgpu.device._.is_null());
     @debug_assert(desc.uniform_buffer_size > 0);
@@ -837,7 +779,7 @@ fn create(wgpu: *Impl, buf: *Sg.Buffer.T, desc: *Sg.Buffer.Desc) Sg.ResourceStat
             buf.cmn.usage = .DYNAMIC;  
         };
         buf.mtl.buf = createBuffer(wgpu.dev, @ref @as(WGPU.BufferDescriptor) (
-            usage = to_wgpu(buf.cmn.type, buf.cmn.usage),
+            usage = to_wgpu(buf.cmn.usage),
             size = wgpu_buf_size.zext(),
             mappedAtCreation = to_wgpu (map_at_creation && !GRAPHICS_TARGET_WEB /*:WebBufferInitHack*/),
             label = desc.label,
@@ -868,9 +810,7 @@ fn create(wgpu: *Impl, buf: *Sg.Buffer.T, desc: *Sg.Buffer.Desc) Sg.ResourceStat
 // TODO
 fn discard(wgpu: *Impl, buf: *Sg.Buffer.T) void = {
     @debug_assert(!buf.is_null());
-    if (buf.cmn.type == .STORAGEBUFFER) {
         bindgroups_cache_invalidate(BINDGROUPSCACHEITEMTYPE_STORAGEBUFFER, buf.slot.id);
-    }
     if (buf.wgpu.buf) {
         wgpuBufferRelease(buf.wgpu.buf);
     }
@@ -1301,7 +1241,6 @@ fn create(wgpu: *Impl, pip: *Sg.Pipeline.T, shd: *Sg.Shader.T, desc: *Sg.Pipelin
             ),
             primitive = (
                 topology = to_wgpu(desc.primitive_type),
-                stripIndexFormat = to_wgpu(desc.primitive_type, desc.index_type),
                 frontFace = to_wgpu(desc.face_winding),
                 cullMode = to_wgpu(desc.cull_mode),
             ),
@@ -1663,7 +1602,6 @@ fn apply_pipeline(wgpu: *Impl, pip: *Sg.Pipeline.T) void = {
     } else {
         @debug_assert(!pip.mtl.rpip._.is_null());
         rpass_enc := wgpu.rpass_enc.unwrap();
-        wgpu.use_indexed_draw = pip.cmn.index_type != .NONE;
         setPipeline(rpass_enc, pip.mtl.rpip);
         setBlendConstant(rpass_enc, pip.mtl.blend_color&);
         setStencilReference(rpass_enc, zext pip.cmn.stencil.ref);
@@ -1676,9 +1614,7 @@ fn apply_pipeline(wgpu: *Impl, pip: *Sg.Pipeline.T) void = {
 
 fn apply_bindings(wgpu: *Impl, bnd: *Sg.ResolvedBindings) bool = {
     @debug_assert(bnd.pip.cmn.shader.id == bnd.pip.cmn.shader_t.slot.id);
-    // compute passes don't have index buffers
-    ok := wgpu.sg.cur_pass.is_compute || wgpu.apply_index_buffer(bnd);
-    wgpu.apply_bindgroup(bnd) && ok
+    wgpu.apply_bindgroup(bnd)
 }
 
 fn apply_uniforms(wgpu: *Impl, ub_slot: i64, data: []u8) void #once = {
@@ -1707,11 +1643,7 @@ fn draw(wgpu: *Impl, base_element: i64, num_elements: i64, num_instances: i64) v
     rpass_enc := wgpu.rpass_enc.unwrap();
     pip := wgpu.cur_pipeline.unwrap();
     @debug_assert(pip.slot.id == wgpu.cur_pipeline_id.id);
-    if pip.cmn.index_type != .NONE {
-        drawIndexed(rpass_enc, trunc num_elements, trunc num_instances, trunc base_element, 0, 0);
-    } else {
         draw(rpass_enc, trunc num_elements, trunc num_instances, trunc base_element, 0);
-    }
 }
 
 fn dispatch(wgpu: *Impl, num_groups_x: i64, num_groups_y: i64, num_groups_z: i64) void = {

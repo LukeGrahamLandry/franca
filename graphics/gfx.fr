@@ -62,7 +62,6 @@ BufferCommon :: @struct {
     append_frame_index: u32;
     num_slots: i64;
     active_slot: i64;
-    type: BufferType;
     usage: Usage;
 };
 
@@ -74,7 +73,6 @@ fn common_init(cmn: *BufferCommon, desc: *BufferDesc) void = {
     cmn.append_frame_index = 0;
     cmn.num_slots = @if(desc.usage == .IMMUTABLE, 1, SG_NUM_INFLIGHT_FRAMES);
     cmn.active_slot = 0;
-    cmn.type = desc.type;
     cmn.usage = desc.usage;
 }
 
@@ -224,7 +222,7 @@ fn common_init(cmn: *Pipeline.Common, desc: *Pipeline.Desc) void = {
     rbau := cmn.required_bindings_and_uniforms&;
     cmn.use_instanced_draw = false;
     cmn.common = desc.common;
-    flag: u32 = int(cmn.index_type != .NONE).trunc().shift_left(SG_MAX_UNIFORMBLOCK_BINDSLOTS);
+    flag: u32 = 0;
     rbau[] = bit_or(rbau[], flag);
 }
 
@@ -259,8 +257,6 @@ _sg_commit_listeners_t :: RawList(CommitListener);
 
 ResolvedBindings :: @struct {
     pip: *Pipeline.T;
-    ib_offset: i32;
-    ib: *Buffer.T;
     imgs: Array(*Image.T, SG_MAX_IMAGE_BINDSLOTS);
     smps: Array(*Sampler.T, SG_MAX_SAMPLER_BINDSLOTS);
     sbufs: Array(*Buffer.T, SG_MAX_STORAGEBUFFER_BINDSLOTS);
@@ -323,7 +319,6 @@ Stat :: @enum(
     wgpu_uniforms_size_write_buffer, wgpu_uniforms_num_set_bindgroup,
     wgpu_bindings_num_skip_redundant_bindgroup, wgpu_bindings_num_set_bindgroup, 
     wgpu_bindings_num_discard_bindgroup, wgpu_bindings_num_create_bindgroup, 
-    wgpu_bindings_num_skip_redundant_index_buffer, wgpu_bindings_num_set_index_buffer,
 );
 
 fn stat(sg: *Self, stat: Stat, n: u32) void = {
@@ -631,10 +626,8 @@ fn validate(sg: *Self, desc: *Buffer.Desc) bool = @validate(sg) {
         @V(desc.data.ptr.is_null(), VALIDATE_BUFFERDESC_EXPECT_NO_DATA);
         @V(desc.data.len == 0, VALIDATE_BUFFERDESC_EXPECT_ZERO_DATA_SIZE);
     };
-    if desc.type == .STORAGEBUFFER {
         @V(sg.features.compute, VALIDATE_BUFFERDESC_STORAGEBUFFER_SUPPORTED);
         @V(umod(desc.size, 4) == 0, VALIDATE_BUFFERDESC_STORAGEBUFFER_SIZE_MULTIPLE_4);
-    }
 };
 
 fn validate(data: *ImageData, fmt: PixelFormat, width: i32, height: i32, num_faces: i32, num_mips: i32, num_slices: i32) void = {
@@ -1197,7 +1190,7 @@ fn validate_apply_bindings(sg: *Self, bindings: *Bindings) bool = @validate(sg) 
     @V(sg.cur_pass.in_pass, VALIDATE_ABND_PASS_EXPECTED);
 
     // bindings must not be empty
-    has_any_bindings := bindings.index_buffer.id != Sg.INVALID_ID
+    has_any_bindings := false
         || !bindings.images&.items().interpret_as_bytes().is_all_zeroes()
         || !bindings.samplers&.items().interpret_as_bytes().is_all_zeroes()
         || !bindings.storage_buffers&.items().interpret_as_bytes().is_all_zeroes()
@@ -1213,30 +1206,6 @@ fn validate_apply_bindings(sg: *Self, bindings: *Bindings) bool = @validate(sg) 
     @V(pip.slot.state == .VALID, VALIDATE_ABND_PIPELINE_VALID);
     shd := pip.cmn.shader_t;
     @debug_assert(pip.cmn.shader.id == shd.slot.id);
-
-    if (sg.cur_pass.is_compute) {
-        @V(bindings.index_buffer.id == Sg.INVALID_ID, VALIDATE_ABND_COMPUTE_EXPECTED_NO_IB);
-    } else {
-        // index buffer expected or not, and index buffer still exists
-        if (pip.cmn.index_type == .NONE) {
-            // pipeline defines non-indexed rendering, but index buffer provided
-            @V(bindings.index_buffer.id == Sg.INVALID_ID, VALIDATE_ABND_IB);
-        } else {
-            // pipeline defines indexed rendering, but no index buffer provided
-            @V(bindings.index_buffer.id != Sg.INVALID_ID, VALIDATE_ABND_NO_IB);
-        }
-        if bindings.index_buffer.id != Sg.INVALID_ID {
-            // buffer in index-buffer-slot must be of type SG_BUFFERTYPE_INDEXBUFFER
-            if sg.lookup(bindings.index_buffer) { buf |
-                if buf.slot.state == .VALID {
-                    @V(buf.cmn.type == .INDEXBUFFER, VALIDATE_ABND_IB_TYPE);
-                    @V(!buf.cmn.append_overflow, VALIDATE_ABND_IB_OVERFLOW);
-                }
-            } else {
-                @V(false, VALIDATE_ABND_IB_EXISTS);
-            }
-        }
-    }
 
     // has expected images
     rangec(0, SG_MAX_IMAGE_BINDSLOTS) { i, $continue |
@@ -1294,7 +1263,6 @@ fn validate_apply_bindings(sg: *Self, bindings: *Bindings) bool = @validate(sg) 
                 @V(false, VALIDATE_ABND_STORAGEBUFFER_EXISTS);
                 continue()
             };
-            @V(sbuf.cmn.type == .STORAGEBUFFER, VALIDATE_ABND_STORAGEBUFFER_BINDING_BUFFERTYPE);
             // read/write bindings are only allowed for immutable buffers
             if !shd.cmn.storage_buffers&[i].readonly {
                 @V(sbuf.cmn.usage == .IMMUTABLE, VALIDATE_ABND_STORAGEBUFFER_READWRITE_IMMUTABLE);
@@ -1401,19 +1369,6 @@ fn desc_defaults(_: *Self, desc: *Shader.Desc) Shader.Desc = {
     // TODO: d3d11_target
     def.mtl_threads_per_threadgroup.y = _sg_def(desc.mtl_threads_per_threadgroup.y, 1);
     def.mtl_threads_per_threadgroup.z = _sg_def(desc.mtl_threads_per_threadgroup.z, 1);
-    range(0, SG_MAX_UNIFORMBLOCK_BINDSLOTS) { ub_index |
-        ub_desc := def.uniform_blocks&[ub_index]&;
-        if ub_desc.stage != .NONE {
-            ub_desc.layout = _sg_def(ub_desc.layout, .NATIVE);
-            rangeb(0, SG_MAX_UNIFORMBLOCK_MEMBERS) { u_index, $break |
-                u_desc := ub_desc.glsl_uniforms&[u_index]&;
-                if (u_desc.type == .INVALID) {
-                    break();
-                }
-                u_desc.array_count = _sg_def(u_desc.array_count, 1);
-            }
-        }
-    }
     range(0, SG_MAX_IMAGE_BINDSLOTS) { img_index |
         img_desc := def.images&[img_index]&;
         if img_desc.stage != .NONE {
@@ -1437,7 +1392,6 @@ fn desc_defaults(sg: *Self, desc: *Pipeline.Desc) Pipeline.Desc = {
 
     // TODO: #use doesn't work with #where
     def.primitive_type = _sg_def(def.common.primitive_type, .TRIANGLES);
-    def.index_type = _sg_def(def.common.index_type, .NONE);
     def.cull_mode = _sg_def(def.common.cull_mode, .NONE);
     def.face_winding = _sg_def(def.common.face_winding, .CW);
     def.sample_count = _sg_def(def.common.sample_count, sg.desc.environment.defaults.sample_count);
@@ -1943,15 +1897,6 @@ fn apply_bindings(sg: *Self, bindings: *Bindings) void = {
     //       handle how you want. like you might want to do interactive demo thing and handle 
     //       mistakes gracefully, so maybe i need to change this back. 
     
-    if !sg.cur_pass.is_compute {
-        if bindings.index_buffer.id != 0 { 
-            ::?*Sg.Buffer.T;
-            bnd.ib = sg.lookup(bindings.index_buffer) || panic("invalid index bind");
-            bnd.ib_offset = bindings.index_buffer_offset;
-            check(bnd.ib.slot.state == .VALID);
-            check(!bnd.ib.cmn.append_overflow);
-        }
-    }
     range(0, SG_MAX_IMAGE_BINDSLOTS) { i |
         if shd.cmn.images&[i].stage != .NONE {
             ::?*Sg.Image.T;
@@ -2317,17 +2262,6 @@ Usage :: @enum(u32) (
     DYNAMIC,
     STREAM,
 );
-BufferType :: @enum(u32) (
-    DEFAULT,
-    INDEXBUFFER,
-    STORAGEBUFFER,
-);
-IndexType :: @enum(u32) (
-    DEFAULT,
-    NONE,
-    UINT16,
-    UINT32,
-);
 ImageType :: @enum(u32) (
     DEFAULT,
     _2D,
@@ -2388,11 +2322,6 @@ UniformType :: @enum(u32) (
     INT3,
     INT4,
     MAT4,
-);
-UniformLayout :: @enum(u32) (
-    DEFAULT,
-    NATIVE,
-    STD140,
 );
 CullMode :: @enum(u32) (
     DEFAULT,
@@ -2538,15 +2467,12 @@ Pass :: @struct(
     compute: bool,
 );
 Bindings :: @struct(
-    index_buffer: Buffer,
-    index_buffer_offset: i32,
-    images: Array(Image, 16),
-    samplers: Array(Sampler, 16),
-    storage_buffers: Array(Buffer, 8),
+    images: Array(Image, SG_MAX_IMAGE_BINDSLOTS),
+    samplers: Array(Sampler, SG_MAX_SAMPLER_BINDSLOTS),
+    storage_buffers: Array(Buffer, SG_MAX_STORAGEBUFFER_BINDSLOTS),
 );
 BufferDesc :: @struct(
     size := 0,  // will default to data.len if provided
-    type := BufferType.STORAGEBUFFER,
     usage := Usage.IMMUTABLE,
     data: []u8 = empty(),
     label: Str = "",
@@ -2619,19 +2545,12 @@ ShaderFunction :: @struct(
     entry := "",
     metal_disable_fast_math: bool,
 );
-GlslShaderUniform :: @struct(
-    type: UniformType,
-    array_count: u16,
-    glsl_name: CStr,
-);
 ShaderUniformBlock :: @struct(
     stage: ShaderStage,
     size: u32,
     hlsl_register_b_n: u8 = 0,
     msl_buffer_n: u8,
     wgsl_group0_binding_n: u8,
-    layout := UniformLayout.DEFAULT,
-    glsl_uniforms := zeroed Array(GlslShaderUniform, 16),
 );
 ShaderImage :: @struct(
     stage: ShaderStage,
@@ -2724,7 +2643,6 @@ PipelineShared :: @struct(
     color_count: i32 = 0,  // defaults to 1 if not depth only
     colors := zeroed Array(ColorTargetState, 4),
     primitive_type := PrimitiveType.TRIANGLES,
-    index_type := IndexType.NONE,
     cull_mode := CullMode.NONE,
     face_winding := FaceWinding.CW,
     sample_count: i32 = 0,  // set from environment.defaults
