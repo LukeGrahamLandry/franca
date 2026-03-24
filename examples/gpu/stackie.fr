@@ -11,6 +11,7 @@ default_palette :: "xy2*1-*C";
 // CONTROLS: 
 //     type to edit the program (backspace to delete a char. copy/paste affect the whole program). 
 //     it auto recompiles. press enter to reset t=0. hold control to show ir.
+//     space: generate random program. space+shift: keep prefix and fill rest of 50 chars randomly. 
 
 // each line is a program. 
 // you can find a bunch at https://c50.fingswotidun.com/api/?top=200
@@ -25,7 +26,6 @@ optional_examples_path :: "target/c50.txt";
 //         example: "ztzpetyl3^lzCop" metal is too smooth and webgpu is too noisy
 
 // TODO: cli mode where you pass program+t and it outputs a png
-// TODO: generate random programs
 // TODO: test this somehow
 // TODO: ui for changing resolution
 
@@ -517,6 +517,10 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             fn C() => if event.modifiers.get(.super) != 0 {
                 sapp.set_clipboard_string(state.src.items().shallow_copy(temp())); 
             };
+            fn SPACE() => {
+                prefix := @if(event.modifiers.get(.shift) != 0, state.src.items(), "");
+                state.set_src(gen_random_program(prefix));
+            }
             // need to still mark dirty if it's CTRL and program_contains_t=false
             // TODO: the thing where modifiers is still set on the event where you release the key
             @default => ();
@@ -535,6 +539,23 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         @default => return();
     };
     state.dirty = true;
+}
+
+gen_random_program :: fn(prefix: Str) Str = {
+    ::reach_overloads(); Random;  // garbage language :(
+    rng := Random.xoshiro256SS.new_seeded();
+    m := init_shader_module(temp());
+    src := u8.list(50, temp());
+    src&.push_all(prefix);
+    dowhile {
+        src.len = prefix.len;
+        range(prefix.len, 50) { _ |
+            src&.push(valid_commands.index(rng&.rand_int(valid_commands.len()))[]);
+        };
+        result := compile_c50(m&, src.items(), @run mangle_name(fn() = ()));
+        result&.is_err()
+    };
+    src.items()
 }
 
 fn next_example(state: *State, delta: i64) void = {

@@ -1,9 +1,17 @@
 
+## (Mar 23)
+
+- continuing the strategy of improving shader compiler by trying to write a program that won't work yet: 
+  porting my old raytracer from metal. got to the phong sphere. 
+- shaders: index without reading field, few more matrix ops
+
 ## (Mar 22)
 
 terminal
 - history command
 - cmd+arrow to move jump between command output like warp
+
+stackie: random programs. farm_game: hour glass + more messages. random: rand_(int, float)
 
 ## (Mar 21)
 

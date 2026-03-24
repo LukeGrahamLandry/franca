@@ -43,13 +43,14 @@ CropType :: @enum(Tomato, Potato, Pizza, Acorn);
 Crop :: @struct(type: CropType, age: Growth);
 Planted :: @struct(pos: Pos, timer: i64, drought: ?i64 = .None, crop: Crop);
 Object :: @tagged(
-    Crop: Crop,
-    WateringCan,
-    Scarecrow,
-    Sprinkler,
-    Fertalizer,
-    CrowBaton,
-    Shelf,
+    Crop: Crop,   // seed: place on farm. ready: place on truck
+    Fertalizer,   // instantly grow a crop
+    WateringCan,  // removes drought from a crop (reusable)
+    CrowBaton,    // kill a crow in 1 hit instead of 3 (reusable)
+    Sprinkler,    // place on farm to prevent drought in a zone
+    Scarecrow,    // add to a shelf to prevent crows
+    Shelf,        // place a new shelf in the world
+    HourGlass,    // place on truck to get bonus time
     None,
 );
 Shelf :: @struct(
@@ -91,6 +92,7 @@ config :: @struct {
         (type = .Sprinkler, price = 100, colour = pack_rgba(0.6, 0.6, 1, 1)),
         (type = .Scarecrow, price = 100, colour = pack_rgba(0.6, 0.6, 0.6, 1)),
         (type = .Shelf, price = 50, colour = pack_rgba(130, 60, 20, 255)),
+        (type = .HourGlass, price = 30, colour = pack_rgba(150, 150, 0, 255)),
     );
 };
 
@@ -191,10 +193,10 @@ fn next_round(world: *World) void = {
         @fmt(world.msg&, "Order fulfilled early! you earned % bonus rubles", bonus);
 
         lo, hi := (4, 7);
-        n := world.rng&.next().mod(bitcast(hi - lo)).bitcast() + lo;
+        n := world.rng&.rand_int(lo, hi);
         range(0, n) { _ |
             hi := @if(world.round_number >= 5, 3, 2);
-            i := world.rng&.next().mod(bitcast(hi)).bitcast();
+            i := world.rng&.rand_int(hi);
             world.requests&.push(@as(CropType) i);
         };
         if world.round_number >= 10 && world.rng&.next().mod(2) == 0 {
@@ -265,6 +267,8 @@ do_update :: fn(state: *State) void = {
                 t[] -= 1;
                 if t[] == 0 {
                     planted.timer = MIN_i64;
+                    @fmt(state.world.msg&, "a drought killed your %\n", planted.crop.type);  
+                    state.world.msg_timer = 100;
                 }
             }
             fn None() => if drought && !state.world&.in_sprinkler(planted.pos) {
@@ -273,7 +277,12 @@ do_update :: fn(state: *State) void = {
         };
         
         rot_time := -2 * config.crops[planted.crop.type.raw()].time;
-        planted.timer > rot_time
+        ok := planted.timer > rot_time;
+        if !ok { 
+            @fmt(state.world.msg&, "your % rotted\n", planted.crop.type);
+            state.world.msg_timer = 100; 
+        };
+        ok
     };
     
     // The Crows
@@ -288,6 +297,8 @@ do_update :: fn(state: *State) void = {
         if it.crow_hp != 0 {
             it.crow_timer -= 1;
             if it.crow_timer <= 0 {
+                @fmt(state.world.msg&, "a crow took your %\n", it.item&.tag()); 
+                state.world.msg_timer = 100;
                 it.item = .None;
                 it.crow_hp = 0;
             };
@@ -300,15 +311,15 @@ do_update :: fn(state: *State) void = {
     if state.world.round_timer <= 0 {
         state.world&.next_round();
     };
+    if state.world.msg_timer <= 0 {
+        state.world.msg.len = 0;
+    };
 };
 
 fn check_hazard(world: *World, hazard: HazardConfig) bool = {
     chance := hazard.chance + (hazard.scaling * world.round_number.float());
     chance /= config.tick_rate;
-    N :: 100000;
-    p := world.rng&.next().mod(N.bitcast());
-    p := p.bitcast().float().div(N.float());
-    p <= chance
+    world.rng&.rand_float() <= chance
 }
 
 fn in_sprinkler(world: *World, plant: Pos) bool = {
@@ -671,9 +682,8 @@ fn do_interact(state: *State) void = {
     };
     
     item := player.inventory;
-    @if(on_truck)
-    if !item&.is(.None) {
-        @if_let(item) fn Crop(crop) => {
+    @if(on_truck) @match(item) { 
+        fn Crop(crop) => {
             crop.age == .Ready || @say("Trying to sell % seed. try planting it first!", crop.type);
             r := state.world.requests&;
             i := r.index_of(fn(it) => it[] == crop.type) 
@@ -685,9 +695,17 @@ fn do_interact(state: *State) void = {
             if r.len == 0 {
                 state.world&.next_round();
             };
-            @say("sold %", crop.type);
-        }
-        @say("You can only sell crops (you are item %)", item&.tag());
+            @say("sold % for % rubles", crop.type, price);
+        };
+        fn HourGlass() => {
+            t := (10 + mod(state.world.round_number, 10)) * config.tick_rate;
+            state.world.timer += t;
+            state.world.next_round_timer += t;
+            player.inventory = .None;
+            @say("sold HourGlass for % ticks of bonus time", t)
+        };
+        fn None() => ();
+        @default => @say("cannot sell %", item&.tag());
     }
     
     if player.inventory&.is(.Shelf) {

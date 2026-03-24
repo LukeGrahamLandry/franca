@@ -29,7 +29,17 @@
 ShaderTexture2f :: @struct();
 ShaderSampler :: @struct();
 fn sample(t: ShaderTexture2f, s: ShaderSampler, uv: Vec2) Vec4 #metal_method = ();
-fn mul(m: Sgl.Matrix, v: Vec4) Vec4 #builtin(.mul);
+
+fn transpose(mat: Sgl.Matrix) Sgl.Matrix #builtin(.transpose) = ();
+fn mul(m: Sgl.Matrix, v: Vec4) Vec4 #builtin(.mul) = {
+    out := zeroed(Vec4);
+    range(0, 4) { r |
+        range(0, 4) { c |
+            out&[r] += m&[r, c] * v&[c];
+        };
+    };
+    out
+}
 
 fn Buf($T: Type) Type = {
     Self :: @struct(_: *T, ShaderBufferElement :: T);
@@ -111,7 +121,7 @@ init_shader_module :: fn(a: Alloc) ShaderModule = {
     );
     m.types&.push(.Void);  // 0=placeholder
     m.type_lookup&.insert(void, 0);
-    m.types&.push(Scalar = .F32);  // hack for playground TODO: keep the module from comptime?
+    m.types&.push(Scalar = .F32);  // hack for stackie TODO: keep the module from comptime?
     m.type_lookup&.insert(f32, 1);
     m.types&.push(Scalar = .Bool);
     m.type_lookup&.insert(bool, 2);
@@ -304,8 +314,16 @@ fn msl_expr2(self: *Function, e: *FatExpr) u32 = {
             // TODO
             self.msl_expr(it.ptr)
         }
-        fn Deref(_) => {
-            ptr, name := e.as_deref_field().expect("a&.b[]");
+        fn Deref(inner) => {
+            ptr, name := e.as_deref_field() || { 
+                if !inner.expr&.is(.Call) {  // index
+                    debug_log_ast(e[]); 
+                    compile_error("expected a&.b[]", e.loc); 
+                };
+                place := self.place_expr(inner[]);
+                self.body&.push(op = .load, a = place, type = e_type);
+                return trunc(self.body.len - 1);
+            };
             self.field_access(ptr, e.ty, name)
         }
         fn Block(it) => {
@@ -413,6 +431,10 @@ fn msl_expr2(self: *Function, e: *FatExpr) u32 = {
             0
         }
         fn Unreachable() => 0;  // TODO: something that will typecheck in the output code if this isn't for a statement
+        fn Uninitialized() => {
+            self.body&.push(op = .Join, type = e_type);
+            trunc(self.body.len - 1)
+        }
         @default => {
             debug_log_ast(e[]);
             compile_error("unhandled expression type in shader", e.loc)
@@ -561,6 +583,7 @@ fn msl_stmt(self: *Function, e: *FatStmt) void = {
         fn Set(it) => {
         // THIS IS ALL A GARBAGE WASTE OF TIME
             if it.place&.as_field_access() { ptr, name |
+                self.strings&.insert(name, name.str());
                 if ptr.as_var_place() { place |
                     place := self.msl_expr(place);
                     value := self.msl_expr(it.value&);
@@ -621,6 +644,7 @@ fn place_expr(self: *Function, e: *FatExpr) u32 = {
 // THIS IS ALL A GARBAGE WASTE OF TIME
     if e.as_field_access() { ptr, name |
         place := self.place_expr(ptr);
+        self.strings&.insert(name, name.str());
         self.body&.push(
             op = .AddrField, 
             a = place, 
@@ -728,6 +752,7 @@ fn type_name(self: *ShaderModule, type: Type) u16 = {
                     (Struct = (fields = out.items()))
                 };
                 @if(size_of(type) == 0) => return(0);
+                @if(info.is(.Enum)) => return(self.type_name(info.Enum.raw));
                 @else => @panic("TODO: handle % in shader translation", type.typename().str());
             }
         };
@@ -847,6 +872,7 @@ AstOp :: @enum(u16) (
     f32_to_i32, i32_to_f32,
     addr_of, load, trunc, 
     u2x16, u4x8,
+    transpose,
     
     vec2, 
     add, sub, mul, div, 
@@ -857,6 +883,7 @@ AstOp :: @enum(u16) (
     pow, atan2,
     shift_right_arithmetic, bit_xor, shift_left, shift_right_logical, fmod, 
     mod,
+    dot,
     
     vec3, 
     sample, mix, clamp, 
@@ -932,7 +959,11 @@ ShaderModule :: @struct {
 
 fn string(self: *Function, s: Symbol) Str = self.m.string(s);
 fn string(self: *ShaderModule, s: Symbol) Str = {
-    self.strings&.get(s).expect("Function.strings")
+    s := self.strings&.get(s).expect("Function.strings");
+    if s == "type" {
+        s = "XXXtype";   // HACK for webgpu.
+    }
+    s
 }
 
 fn display(self: *Function, out: *List(u8)) void = {

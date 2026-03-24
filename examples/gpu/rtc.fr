@@ -1,0 +1,329 @@
+// based on The Ray Tracer Challenge by Jamis Buck (http://raytracerchallenge.com)
+// predecessor of this code: https://github.com/LukeGrahamLandry/RustyRayTracer
+// thus far this one is only the sphere from chapter 6
+
+// TODO: i need to be able to pass around structs of buffers. 
+//       even if they all end up being global for webgpu, it's still nice as a visibility control thing. 
+// TODO: arrays, Stmt.Set with index expr on the left, Expr.Addr (pointers to stack slots). 
+//       without those can't really do mutable container for Intersections
+
+Uniforms :: @struct {
+    transform_inverse: Sgl.Matrix;
+    half_width: f32;
+    half_height: f32;
+    pixel_size: f32;
+    field_of_view: f32;
+    hsize: f32;
+    vsize: f32;
+    
+    shape_count: u32;
+    light_count: u32;
+};
+ShapeType :: @enum(u32) (Sphere, Plane, Cube);
+Shape :: @struct {
+    transform_inverse: Sgl.Matrix;
+    type: ShapeType;
+    obj: u32;
+    material_index: u32;
+    XXX: u32 = 0;  // :ShaderLimitation TODO: need to make my Matrix be align 16 for webgpu
+};
+Material :: @struct {
+    colour: Vec4;
+    pattern_index: u32;
+    ambient: f32;
+    diffuse: f32;
+    specular: f32;
+    shininess: f32;
+    reflective: f32;
+    transparency: f32;
+    refractive_index: f32;
+};
+Light :: @struct {
+    position: Vec4;
+    intensity: Vec4;
+};
+
+Shaders :: @struct {
+    OutV :: @struct(pos: Vec4 #position);
+    // TODO: stupid
+    vs   :: fn(i: u32 #vertex_id) OutV = {
+        xy := @if(i == 0, @vec(-1.0, 1.0),
+              @if(i == 1, @vec(-1.0, -1.0),
+              @if(i == 2, @vec(1.0, -1.0),
+              @if(i == 3, @vec(1.0, 1.0),
+              @if(i == 4, @vec(1.0, -1.0),
+              @if(i == 5, @vec(-1.0, 1.0),
+              @vec(0.0, 0.0)))))));
+        (pos = @vec(xy, 0.0, 1.0))
+    }
+    OutF :: @struct(colour: Vec4 #colour);
+    fs   :: fn(
+        in: OutV #input,
+        uni: Uniforms #uniform(0), 
+        shapes: Buf(Shape) #buffer(1),
+        materials: Buf(Material) #buffer(2),
+        lights: Buf(Light) #buffer(3),
+    ) Shaders.OutF = {
+        i: u32 = 0;
+        while => i < uni.shape_count {
+            ray := ray_for_pixel(uni, @swizzle in.pos.x, @swizzle in.pos.y);
+            ray := ray.transform(shapes[i].transform_inverse);
+            hit := intersect_sphere(ray, shapes[i].obj);
+            
+            if hit.x >= 0 {
+                t := max(hit.y, hit.z);
+                material := materials[shapes[i].material_index];
+                comps := prepare_comps(t, ray, shapes[i], material);
+                
+                c := vec4(0, 0, 0, 0);
+                j: u32 = 0;
+                while => j < uni.light_count {
+                    c += lighting(material, comps.colour, lights[j], comps.over_point, comps.eyev, comps.normalv, false);
+                    j += 1;
+                };
+                return(colour = c);
+            };
+            i += 1;
+        };
+        (colour = vec4(0.0, 0.0, 0.0, 1.0))
+    }
+};
+
+Comps :: @struct {
+    colour: Vec4;
+    point: Vec4;
+    eyev: Vec4;
+    normalv: Vec4;
+    over_point: Vec4;
+    reflectv: Vec4;
+    under_point: Vec4;
+    t: f32;
+    n1: f32;
+    n2: f32;
+};
+
+prepare_comps :: fn(t: f32, ray: Ray, object: Shape, material: Material) Comps = {
+    c := @uninitialized Comps;
+    c.t = t;
+    c.point = ray.position(t);
+    c.eyev = -ray.direction;
+    c.normalv = object.normal_at(c.point);
+    inside := dot(c.normalv, c.eyev) < 0;
+    if inside {
+        c.normalv = -c.normalv;
+    };
+
+    EPSILON: f32 = 0.00001;
+    c.over_point = c.point + (c.normalv * EPSILON);
+    c.under_point = c.point - (c.normalv * EPSILON);
+    
+    c.colour = material.colour;
+    c.reflectv = reflect(ray.direction, c.normalv);
+
+    c
+}
+
+lighting :: fn(self: Material, object_colour: Vec4, light: Light, position: Vec4, eye_vector: Vec4, normal_vector: Vec4, in_shadow: bool) Vec4 = {
+    base_colour := object_colour * light.intensity;
+    ambient_colour := object_colour * self.ambient;
+
+    @if(in_shadow) return(ambient_colour);
+
+    light_direction := normalize(light.position - position);
+    cos_light_to_normal := dot(light_direction, normal_vector);
+
+    diffuse_colour := vec4(0, 0, 0, 0);
+    specular_colour := vec4(0, 0, 0, 0);
+    if cos_light_to_normal >= 0 {
+        diffuse_colour = base_colour * self.diffuse * cos_light_to_normal;
+
+        reflection_direction := reflect(-light_direction, normal_vector);
+        cos_reflect_to_eye := dot(reflection_direction, eye_vector);
+
+        if cos_reflect_to_eye >= 0 {
+            factor := pow(cos_reflect_to_eye, self.shininess);
+            specular_colour = light.intensity * self.specular * factor;
+        }
+    };    
+
+    ambient_colour + diffuse_colour + specular_colour
+}
+
+fn reflect(v: Vec4, n: Vec4) Vec4 = 
+    v - (n * 2.0 * dot(v, n));
+
+fn intersect_sphere(ray: Ray, obj: u32) Vec4 = {
+    sphere_to_ray := ray.origin - vec4(0, 0, 0, 1.0);
+    a := dot(ray.direction, ray.direction);
+    b := dot(ray.direction, sphere_to_ray) * 2.0;
+    c := dot(sphere_to_ray, sphere_to_ray) - 1;
+    discriminant := (b * b) - (4 * a * c);
+
+     d := sqrt(discriminant);
+    t1 := (-b - d) / (2 * a);
+    t2 := (-b + d) / (2 * a);
+
+    vec4(discriminant, t1, t2, 0)
+}
+
+fn normal_at(self: Shape, world_pos: Vec4) Vec4 = {
+    object_space_point := self.transform_inverse * world_pos;
+    object_space_normal := object_space_point - vec4(0, 0, 0, 1.0);  // Sphere
+    
+    world_space_normal := transpose(self.transform_inverse) * object_space_normal;
+    world_space_normal.w = 0;
+    normalize(world_space_normal)
+}
+
+Ray :: @struct(origin: Vec4, direction: Vec4);
+
+fn ray_for_pixel(uni: Uniforms, x: f32, y: f32) Ray #inline = {
+    object_x := uni.half_width - ((x + 0.5) * uni.pixel_size);
+    object_y := uni.half_height - ((y + 0.5) * uni.pixel_size);
+
+    pixel_object_point := vec4(object_x, object_y, -1, 1.0);
+
+    pixel_world_point := uni.transform_inverse * pixel_object_point;
+    camera_world_point := uni.transform_inverse * vec4(0, 0, 0, 1.0);
+    ray_direction := normalize(pixel_world_point - camera_world_point);
+    (origin = camera_world_point, direction = ray_direction)
+};
+
+fn transform(self: Ray, mat: Sgl.Matrix) Ray = 
+    (origin = mat * self.origin, direction = mat * self.direction);
+
+fn position(self: Ray, t: f32) Vec4 = 
+    self.origin + self.direction * t;
+
+fn resize(self: *Uniforms, hsize: f32, vsize: f32) void = {
+    half_view := (self.field_of_view / 2.0).tan();
+    aspect_ratio := hsize / vsize;
+    ::if(f32);
+    self.half_width = if aspect_ratio >= 1.0 {
+        half_view
+    } else {
+        half_view * aspect_ratio
+    };
+    self.half_height = if aspect_ratio >= 1.0 {
+        half_view / aspect_ratio
+    } else {
+        half_view
+    };
+
+    self.pixel_size = (self.half_width * 2.0) / hsize;
+    self.hsize = hsize;
+    self.vsize = vsize;
+}
+
+State :: @struct {
+    HIGH_DPI :: true;
+    pipe: Sg.Pipeline;
+    dirty: bool;
+    shapes: []Shape;
+    materials: []Material;
+    lights: []Light;
+    buffers: Array(Sg.Buffer, 3);
+    uni: Uniforms;
+};
+
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    shd := Sg.ShaderDesc.zeroed();
+    choose_shader_impl(SOKOL_BACKEND, shd&, Shaders);
+    shd.uniform_blocks&[0] = (
+        stage = .FRAGMENT,
+        size = size_of(Uniforms),
+        msl_buffer_n = 0,
+        wgsl_group0_binding_n = 0,
+    );
+    shd.storage_buffers&[0] = (
+        stage = .FRAGMENT,
+        readonly = true,
+        msl_buffer_n = 1,
+        wgsl_group1_binding_n = 1,
+    );
+    shd.storage_buffers&[1] = (
+        stage = .FRAGMENT,
+        readonly = true,
+        msl_buffer_n = 2,
+        wgsl_group1_binding_n = 2,
+    );
+    shd.storage_buffers&[2] = (
+        stage = .FRAGMENT,
+        readonly = true,
+        msl_buffer_n = 3,
+        wgsl_group1_binding_n = 3,
+    );
+    state.pipe = sg.make(
+        shader = sg.make(shd),
+    );
+    
+    state.uni.field_of_view = PI / 3.0;
+    state.uni&.resize(sapp.width().float().cast(), sapp.height().float().cast());
+    state.load_world();
+    state.init_buffers(sg);
+    state.dirty = true;
+}
+
+fn load_world(state: *State) void = {
+    a := temp();  // for now only needed while init-ing
+    m := state.uni.transform_inverse&;
+    identity(m);
+    translate(m, vec3(0.0, 0.0, 5.0));  // get out of the sphere so we can see it 
+    state.shapes = a.alloc_zeroed(Shape, 1);
+    identity(state.shapes&[0].transform_inverse&);
+    state.materials = a.alloc_zeroed(Material, 1);
+    m := state.materials[0]&;
+    m.colour = vec4(1.0, 0.2, 1.0, 1.0);
+    m.ambient = 0.1;
+    m.diffuse = 0.9;
+    m.specular = 0.9;
+    m.shininess = 200;
+    state.lights = a.alloc_zeroed(Light, 1);
+    state.lights[0] = (position = vec4(-10.0, -10.0, 10.0, 1.0), intensity = vec4(1.0, 1.0, 1.0, 1.0));
+}
+
+fn init_buffers(state: *State, sg: *Sg.Self) void = {
+    state.buffers&[0] = sg.make(
+        type = .STORAGEBUFFER,
+        data = state.shapes.interpret_as_bytes(),
+    );
+    state.buffers&[1] = sg.make(
+        type = .STORAGEBUFFER,
+        data = state.materials.interpret_as_bytes(),
+    );
+    state.buffers&[2] = sg.make(
+        type = .STORAGEBUFFER,
+        data = state.lights.interpret_as_bytes(),
+    );
+    state.uni.shape_count = state.shapes.len.trunc();
+    state.uni.light_count = state.lights.len.trunc();
+}
+
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    @match(event.type) {
+        fn RESIZED() => state.uni&.resize(sapp.width().float().cast(), sapp.height().float().cast());
+        @default => return();
+    };
+    state.dirty = true;
+}
+
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
+    
+    bind := zeroed Sg.Bindings;
+    enumerate state.buffers& { i, it |
+        bind.storage_buffers&[i] = it[];
+    };
+    Easy'glue_begin_pass(sapp, sg, zeroed Sg.PassAction);
+    sg.apply_pipeline(state.pipe);
+    ::[]Uniforms;
+    sg.apply_uniforms(0, state.uni&.slice(1).interpret_as_bytes());
+    sg.apply_bindings(bind&);
+    draw(sg = sg, base = 0, elements = 6, instances = 1);
+    sg.end_pass();
+    sg.commit();
+};
+
+#use("@/graphics/lib.fr");
+main :: fn() void = Easy'start(State);
+driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());

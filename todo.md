@@ -1204,6 +1204,10 @@ actually that's a bit too agressive but certainly stop processing ANSI escape co
 
 ## Graphics
 
+- `shd.uniform_blocks&[0], shd.storage_buffers&[0]` junk is giving me whisker fatigue. generate it. 
+- considering index buffers harmful. 
+- shaders: unconditional early return fucks it up
+- webgpu: array type, transpose, load (for index), addrof
 - the cpu code generated for individual graphics/vec.fr functions is garbage
     because opt/slots.fr can't cope with the s->l casts for abi copies.
 - offsets on storage buffers (they added it in Resource View Update)
