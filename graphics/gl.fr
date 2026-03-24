@@ -180,7 +180,7 @@ Shaders :: @struct(
         psize = in[v].psize,
     ),
     OutF :: @struct(frag_color: Vec4 #colour),
-    BndF :: @struct(tex: ShaderTexture2f, smp: ShaderSampler),
+    BndF :: @struct(tex: ShaderTexture2f #tex(0), smp: ShaderSampler #smp(0)),
     fs   :: fn(in: Shaders.OutV #input, bnd: Shaders.BndF #bind) Shaders.OutF = (
         frag_color = sample(bnd.tex, bnd.smp, @swizzle in.uv.xy) * in.color,
     ),
@@ -269,7 +269,7 @@ fn init_context(ctx: *Self, desc: *Desc) bool = {
         label = "sgl-vertex-buffer",
     );
     @debug_assert(ctx.vbuf.id != Sg.INVALID_ID.trunc());
-    ctx.bind.storage_buffers&[0] = ctx.vbuf;
+    ctx.bind.storage_buffers&[1] = ctx.vbuf;
 
     def_pip_desc: PipeDesc = ();
     def_pip_desc.depth.write_enabled = true;
@@ -413,45 +413,8 @@ fn create_defaults(sg: *Sg.Self) Shared = {
         mag_filter = .NEAREST,
     );
 
-    // TODO: surely this is generated code. do a comptime thing instead
-    // one shader for all contexts
-    shd_desc := Sg.ShaderDesc.zeroed();
-    b := shd_desc.uniform_blocks&.index(0);
-    b.stage = .VERTEX;
-    b.size = size_of(Uniform);
-    b.hlsl_register_b_n = 0;
-    b.msl_buffer_n = 0;
-    b.wgsl_group0_binding_n = 0;
-    shd_desc.images&[0] = (
-        stage = .FRAGMENT, 
-        image_type = ._2D, 
-        sample_type = .FLOAT, 
-        hlsl_register_t_n = 0, 
-        msl_texture_n = 0, 
-        wgsl_group1_binding_n = 64,
-        multisampled = false,
-    );
-    shd_desc.samplers&[0] = (
-        stage = .FRAGMENT,
-        sampler_type = .FILTERING,
-        hlsl_register_s_n = 0,
-        msl_sampler_n = 0,
-        wgsl_group1_binding_n = 80,
-    );
-    shd_desc.image_sampler_pairs&[0] = (
-        stage = .FRAGMENT,
-        image_slot = 0,
-        sampler_slot = 0,
-        glsl_name = "tex_smp",
-    );
-    shd_desc.storage_buffers&[0] = (
-        wgsl_group1_binding_n = 1,
-        msl_buffer_n = 1,
-        stage = .VERTEX,
-        readonly = true,
-    );
+    shd_desc := choose_shader_impl(SOKOL_BACKEND, Shaders);
     shd_desc.label = "sgl-shader";
-    choose_shader_impl(SOKOL_BACKEND, shd_desc&, Shaders);
     shd := sg.make(shd_desc);
     sg.pop_debug_group();
     

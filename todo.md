@@ -73,6 +73,9 @@ reproducibility
 
 ---
 
+- collect_tests: tag the tests about which to skip in a more structured way?
+  - run everything in a @run since that's different than jit now
+- my hopes of vzf just reliably working were crushed by going back to sequoia and now it just instantly exits
 - make the hare tests work in my examples/elf_loader.fr
 - https://en.wikipedia.org/wiki/ICO_(file_format)#File_structure
 - make run_franca_file less insane
@@ -714,6 +717,16 @@ amd
   - ugly=false
 - examples/gpu/viewer.fr doesn't work in wasm 
   - FEAT_PNG "stbi__hdr_load panic! missing br target @64 -> @62"
+- make @source_file_name work in web demo 
+  - ex. rn examples/terminal's repl import is hardcoded to that path so it won't get your changes to BuiltinCommands. 
+  - need to write it to a file anyway when i want to 
+  - main.js can diff against the find_file src and decide to send path instead of the whole string for tiny efficiency improvment in the common case where you're not typing in to the ass text box
+- fix firefox like selecting the canvas so everything is tinted your highlight colour
+  - easy to see in mandelbrot, you get real black when you click away 
+  - hopefully related to why all the debugtext demos look like garbage highlighted
+  - related to giving the canvas a tabIndex so it can get events? 
+    - also that's not enough for firefox to send it paste events so maybe i need a fake textbox and make you select that
+- demo: show webgpu errors in output box (not just console)
 
 ## import_wasm 
 
@@ -1204,14 +1217,14 @@ actually that's a bit too agressive but certainly stop processing ANSI escape co
 
 ## Graphics
 
-- `shd.uniform_blocks&[0], shd.storage_buffers&[0]` junk is giving me whisker fatigue. generate it. 
+- get rid of image_sampler_pairs if i don't care about opengl
 - shaders: unconditional early return fucks it up
 - webgpu: array type, transpose, load (for index), addrof
 - the cpu code generated for individual graphics/vec.fr functions is garbage
     because opt/slots.fr can't cope with the s->l casts for abi copies.
 - offsets on storage buffers (they added it in Resource View Update)
 - https://github.com/floooh/sokol/commit/50bbbe4521af356c3b0879e1d46e30114feb4e6b
-- tests that reach discard(), compute shader dispatch(), and create(Attachments)
+- tests that reach discard() and create(Attachments)
   - finish gfx-webgpu
   - finish gfx-metal
 - example program that tries to use all features

@@ -67,27 +67,40 @@ reach_overloads :: fn() = {
 //
 
 DUMP_SHADERS :: false;
-fn choose_shader_impl($backend: RenderBackend, shd_desc: *Sg.ShaderDesc, $data: Type) void = {
-    vv, ff, cc := (shd_desc.vertex_func&, shd_desc.fragment_func&, shd_desc.compute_func&);
+fn choose_shader_impl($backend: RenderBackend, $data: Type) Sg.ShaderDesc = {
+    shd_desc := zeroed Sg.ShaderDesc;
 
     ::reach_overloads();
+    vv, ff, cc := (shd_desc.vertex_func&, shd_desc.fragment_func&, shd_desc.compute_func&);
+    @if(@run has_const_field(data, @symbol cs)) {
+        @assert(!has_const_field(data, @symbol vs), "TODO: allow vertex+compute and preserve generated desc");
+        shd_desc = @run {
+            shd := zeroed Sg.ShaderDesc;
+            shd.compute_func.source = compile_to_shader_source(data.cs, backend, .COMPUTE, (Some = shd&)).sym().str();
+            shd
+        };
+    }
+    @if(@run has_const_field(data, @symbol vs)) {
+        shd_desc = @run compile_vf(data.vs, data.fs, backend);
+    };
     @if(is_metal(backend)) {
         vv.entry = "main0";
         ff.entry = "main0";
         cc.entry = "main0";
-    };
-    @if(@run has_const_field(data, @symbol cs)) {
-        cc.source = :: compile_to_shader_source(data.cs, backend, .COMPUTE).sym().str();
-    };
-    @if(@run has_const_field(data, @symbol vs)) {
-        vv.source = :: compile_to_shader_source(data.vs, backend, .VERTEX).sym().str();
-        ff.source = :: compile_to_shader_source(data.fs, backend, .FRAGMENT).sym().str();
     };
     if DUMP_SHADERS {
         @println("%", vv.source);
         @println("%", ff.source);
         @println("%", cc.source);
     };
+    shd_desc
+}
+
+compile_vf :: fn(v: FuncId, f: FuncId, backend: RenderBackend) Sg.ShaderDesc = {
+    shd := zeroed Sg.ShaderDesc;
+    shd.vertex_func.source = compile_to_shader_source(v, backend, .VERTEX, (Some = shd&)).sym().str();
+    shd.fragment_func.source = compile_to_shader_source(f, backend, .FRAGMENT, (Some = shd&)).sym().str();
+    shd
 }
 
 // stage is NONE except for the one entry point function of each stage. 
@@ -128,16 +141,23 @@ init_shader_module :: fn(a: Alloc) ShaderModule = {
     m
 }
 
-compile_to_shader_source :: fn(fid: FuncId, backend: RenderBackend, stage: Sg.ShaderStage) Str = {
+compile_to_shader_source :: fn(fid: FuncId, backend: RenderBackend, stage: Sg.ShaderStage, bnd: ?*Sg.ShaderDesc) Str = {
+    // TODO: no need for all the ir to live forever. 
     m := init_shader_module(ast_alloc());
     translate_to_shader(m&, fid, backend, stage);
+    
+    if bnd { out |
+        func := m.code&.nested_index(m.code&.len() - 1);
+        fill_binding_info(m&, func.input.items(), out, stage);
+    };
+    
     while => m.work&.pop() { fid |
         translate_to_shader(m&, fid, backend, .NONE);
     };
     emit_all(m&, backend)
 }
 
-Counters :: @struct(user: u16, sampler: u16, texture: u16, junk_types := zeroed(List(u16)));
+Counters :: @struct(user: u16, junk_types := zeroed(List(u16)));
 ShaderTarget :: @struct {
     prelude: @FnPtr(self: *ShaderModule, out: *List(u8)) Counters;
     function: @FnPtr(self: *Function, out: *List(u8), n: *Counters) void;
@@ -191,7 +211,7 @@ fn translate_to_shader(m: *ShaderModule, fid: FuncId, backend: RenderBackend, st
         self.locals&.insert(a.name.Var.id, self.body.len.trunc());
         self.body&.push(op = .Par);
         
-        info: IoField = (name = a.name.Var.name, type = self.type_name(a.ty.Finished));
+        info: IoField = (name = a.name.Var.name, type = self.type_name(a.ty.Finished), size_of_uniforms = a.ty.Finished.size_of());
         if !a.nullable_tag.is_null() {
             set_annotations(info&, a.nullable_tag.items());
         } else {
@@ -215,6 +235,12 @@ fn set_annotations(info: *IoField, annotations: []Annotation) void = {
                 info.uniform = true;
             };
             @case(@symbol buffer) => {
+                info.buffer = const_eval(u8)(it.args);
+            };
+            @case(@symbol tex) => {
+                info.buffer = const_eval(u8)(it.args);
+            };
+            @case(@symbol smp) => {
                 info.buffer = const_eval(u8)(it.args);
             };
             @case(@symbol vertex_id) => {
@@ -458,7 +484,7 @@ fn ref_func(self: *ShaderModule, fr: CompCtx, fid: FuncId) void = {
         );
         each args { a |
             ty := a.unwrap_ty();
-            info: IoField = (name = zeroed(Symbol), type = self.type_name(ty));
+            info: IoField = (name = zeroed(Symbol), type = self.type_name(ty), size_of_uniforms = ty.size_of());
             if !a.nullable_tag.is_null() {
                 set_annotations(info&, a.nullable_tag.items());
             };
@@ -917,8 +943,9 @@ IoField :: @struct(
     name: Symbol,
     builtin := BuiltinProperty.none,
     type: u16,
-    buffer: u8 = 255,
+    buffer: u8 = 255,  // or shader/sampler index depending on type. 255 is none (like for vertex_id, etc.)
     uniform := false,
+    size_of_uniforms := 0,  // i don't keep the franca type around so need to save size_of
 );
 
 Scalar :: @enum(u8) (I32, U32, F32, Bool);
@@ -1004,6 +1031,49 @@ fn display(self: *Function, out: *List(u8)) void = {
         depth += int(@is(it.op, .Else, .If));
     };
     @if(depth != 0) @fmt(out, "// ERROR: bad nesting depth=%\n", depth);
+}
+
+fill_binding_info :: fn(m: *ShaderModule, in: []IoField, out: *Sg.ShaderDesc, stage: Sg.ShaderStage) void = {
+    each in { it |
+        ty := m.types[it.type.zext()]&;
+        if it.buffer != 255 {
+            if it.uniform {
+                t := out.uniform_blocks&[it.buffer.zext()]&;
+                t.stage = stage;
+                t.size = it.size_of_uniforms.trunc();
+                t.msl_buffer_n = it.buffer;
+                t.wgsl_group0_binding_n = it.buffer;
+            } else {
+                @match(ty) {
+                    fn Texture() => {
+                        t := out.images&[it.buffer.zext()]&;
+                        t.stage = stage;
+                        t.msl_texture_n = it.buffer;
+                        t.wgsl_group1_binding_n = 64 + it.buffer;
+                        t.image_type = ._2D;  // TODO
+                        t.sample_type = .FLOAT;  // TODO
+                        t.multisampled = false;  // TODO
+                    }
+                    fn Sampler() => {
+                        t := out.samplers&[it.buffer.zext()]&;
+                        t.stage = stage;
+                        t.msl_sampler_n = it.buffer;
+                        t.wgsl_group1_binding_n = 80 + it.buffer;
+                        t.sampler_type = .FILTERING;  // TODO
+                    }
+                    @default => {
+                        t := out.storage_buffers&[it.buffer.zext()]&;
+                        t.stage = stage;
+                        t.msl_buffer_n = Sg.SG_MAX_UNIFORMBLOCK_BINDSLOTS + it.buffer;
+                        t.wgsl_group1_binding_n = it.buffer;
+                        t.readonly = true;  // TODO
+                    };
+                };
+            };
+        } else {
+            @if_let(ty) fn Struct(in) => fill_binding_info(m, in.fields, out, stage);
+        };
+    };
 }
 
 #use("@/graphics/lib.fr");

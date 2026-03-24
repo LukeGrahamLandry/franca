@@ -418,12 +418,12 @@ recompile :: fn(state: *State, sg: *Sg.Self) void = {
     };
     @println("run: %", src);
 
-    vertex, fragment := base_shaders();
+    shd_desc := base_shaders();
     state.input_dirty = false;
     state.code&.clear();
     f := @slice(program_f, palette_f);
     out := @ref u8.list(temp());
-    out.push_all(fragment);
+    out.push_all(shd_desc.fragment_func.source);
     ::reach_overloads();
     for f { f |
         @fmt(state.code&, "%", f);
@@ -439,9 +439,17 @@ recompile :: fn(state: *State, sg: *Sg.Self) void = {
     // if it's not animated, don't bother redrawing the screen every frame. 
     state.program_contains_t = src.contains("t") || src.contains("r");
     
-    base_shaders :: fn() Ty(Str, Str) = @run {
+    base_shaders :: fn() Sg.ShaderDesc = @run {
         backend := SOKOL_BACKEND;
-        vertex := compile_to_shader_source(Shaders.vs, backend, .VERTEX);
+        shd := zeroed Sg.ShaderDesc;
+        
+        if is_metal(backend) {
+            shd.vertex_func.entry = "main0";
+            shd.fragment_func.entry = "main0";
+        };
+        
+        vertex := compile_to_shader_source(Shaders.vs, backend, .VERTEX, (Some = shd&));
+        shd.vertex_func.source = vertex;
         
         m := init_shader_module(general_allocator());
         
@@ -454,30 +462,18 @@ recompile :: fn(state: *State, sg: *Sg.Self) void = {
         };
         
         translate_to_shader(m&, Shaders.fs, backend, .FRAGMENT);
+        func := m.code&.nested_index(m.code&.len() - 1);
+        fill_binding_info(m&, func.input.items(), shd&, .FRAGMENT);
         while => m.work&.pop() { fid |
             translate_to_shader(m&, fid, backend, .NONE);
         };
         fragment := emit_all(m&, backend);
-        (vertex, fragment)
+        shd.fragment_func.source = fragment;
+        shd
     };
     
     // TODO: more direct way of it handling linking stuff together
-    // TODO: don't reallocate just to null terminate :SLOW
-    shd_desc := Sg.ShaderDesc.zeroed();
-    shd_desc.vertex_func.source = vertex;
     shd_desc.fragment_func.source = out.items();
-    @if(is_metal(SOKOL_BACKEND)) {
-        shd_desc.vertex_func.entry = "main0";
-        shd_desc.fragment_func.entry = "main0";
-    };
-    
-    shd_desc.uniform_blocks&[0] = (
-        stage = .FRAGMENT,
-        size = size_of(Shaders.UniF),
-        msl_buffer_n = 0,
-        wgsl_group0_binding_n = 0,
-    );
-
     if state.shd { shd |
         state.shd = .None;
         sg.destroy(shd);

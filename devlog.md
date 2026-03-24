@@ -1,4 +1,19 @@
 
+
+## (Mar 24)
+
+- gfx: like vertex, i don't understand why index buffers exist. 
+  if you want to shrink your vertex data by putting indices in a different buffer 
+  and using `vtx[idx[i]]` instead of `[vtx[i]]`, you can just do that with a storage buffer.
+  i think only sad thing is webgpu doesn't give you very many of them. i love deleting code so lets hope it's fine. 
+- web: fixed asking for aot of gfx program. trivial now that i can just exec. 
+  bit slower than jit but it only exists as a flex, not because it's actually useful. 
+  (apple is a bitch about letting you run downloaded programs anyway)
+- shd: generate the buffers junk for ShaderDesc. 
+  - you need to know the indices to apply_bindings, so force those to line up with the index you give to the gpu. 
+    - metal uniforms and buffers are in the same space so they need to be offset since my limits are each, not combined. 
+      (that's already what sokol does but i stole it wrong)
+
 ## (Mar 23)
 
 - continuing the strategy of improving shader compiler by trying to write a program that won't work yet: 
