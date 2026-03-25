@@ -1,4 +1,9 @@
 
+- backend: cancel redundant or+and (ie. to_obj(to_value(foo)) in lox)
+```
+   183a4:	b24e3414 	orr	x20, x0, #0xfffc000000000000
+   183a8:	9240c680 	and	x0, x20, #0x3ffffffffffff
+```
 - prospero writeup: add complicated numbers of running the emit_c and wasm on my import_wasm/import_c
 
 soon:

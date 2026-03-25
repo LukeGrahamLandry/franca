@@ -39,7 +39,8 @@ fn display(self: Value, out: *List(u8)) void = {
                 @fmt(out, "<fn %>", o.name);
             }
             fn Native() => {
-                @fmt(out, "<fn <native>>");
+                name := ObjNative.to_obj_subtype(self)[].name;
+                @fmt(out, "<fn <native: %>>", name);
             }
             fn Closure() => {
                 o := self.to_closure()[].function;
@@ -80,7 +81,7 @@ from_obj_subtype :: fn($T: Type, self: *T) Value #generic = {
 #inline fn is_obj(self: Value) bool = {
     self.bits.bit_and(null_object) == null_object
 }
-fn is_obj(self: Value, type: ObjType) bool = {
+fn is_obj(self: Value, type: ObjType) bool #inline = {
     self.is_obj() && self.obj_type() == type 
 }
 
@@ -125,12 +126,14 @@ ObjFunction :: @struct {
     name: Str;
     chunk: Chunk;
     upvalue_count: i64;
+    aot: rawptr; // @FnPtr(vm: *Vm) void;  // nullable. will only be filled if using aot.fr
 };
 
 ObjNative :: @struct {
     TAG :: ObjType.Native;
     obj: Obj;
     function: F;
+    name: Str;  // points to the interned value, can't be gc'd because they're created as a global and if even you redefine it, the key is still the same
     F :: @FnPtr(vm: *Vm, args: []Value) Value;
 };
 
@@ -255,7 +258,7 @@ fn free_objects(self: *Vm) void = {
         @fmt(self.debug&, "--- free_objects: found ---\n");
         self.globals&.clear();
         self.frames&.clear();
-        self.stack&.clear();
+        self.reset_stack();
         self.collect_garbage();
         @if(!self.objects.is_null()) @fmt(self.debug&, "--- free_objects: lost ---\n");
     };
@@ -328,8 +331,8 @@ fn collect_garbage(self: *Vm) void = {
 }
 
 fn mark_roots(self: *Vm) void = {
-    for self.stack& { value |
-        self.mark(value);
+    for(self.stack.ptr, self.stack_top) { value |
+        self.mark(value[]);
     };
     self.mark(self.globals&);
     it := self.open_upvalues;

@@ -1,0 +1,221 @@
+
+main :: fn() void = {
+    n := 0;
+    for cli_args() { it |
+        it := it.str();
+        if it.ends_with(".lox") {
+            #use("@/lib/sys/fs.fr");
+            src := read_entire_file_or_crash(temp(), it);
+            vm := zeroed Lox'Vm;
+            init(vm&);
+            script := vm&.compile(src) 
+                || panic(vm.errors.items());
+            out := @ref u8.list(temp());
+            ctx: Ctx = (
+                vm = vm&, 
+                out = out,
+                constants = init(temp()),
+            );
+            translate(ctx&);
+            @fmt(out, """
+                Lox :: import("@/examples/lox/lox_main.fr").Lox;
+                declare :: fn(vm: *Lox.Vm, name: Str, arity: i64, upvalue_count: i64, f: @FnPtr(vm: *Lox.Vm) void) *Lox.Obj = {
+                    it := vm.Lox'allocate_obj(Lox.ObjFunction);
+                    it.arity = arity; it.name = name; it.upvalue_count = upvalue_count;
+                    it.aot = bit_cast_unchecked(@type f, rawptr, f);
+                    it.obj&
+                };
+                
+                main :: fn() void = {
+                    vm := @ref zeroed(Lox'Vm);
+                    init(vm);
+                    o := vm.gc.alloc_zeroed(*Lox.Obj, %);
+                    init_lox_constants(vm, o);
+                    script := Lox'ObjFunction.Lox'to_obj_subtype(o[%].to_value());
+                    vm.interpret(script, false);
+                }
+            """, ctx.constants.raw.len_including_tombstones, ctx&.get_runtime_index(script.obj&));
+            if cli_args().index_of(fn(it) => it[] == "-o") { i |
+                dest := cli_args().index(i + 1)[].str();
+                write_entire_file_or_crash(dest, out.items());
+            } else {
+                print(out.items());
+            };
+            vm&.drop();
+            n += 1;
+        };
+    };
+    @assert(n > 0, "USAGE: pass .lox files as cli arguments (or -test for builtin tiny test)");
+}
+
+Ctx :: @struct {
+    vm: *Lox.Vm;
+    out: *List(u8);
+    constants: HashMap(i64 /*comptime value.bits*/, i64 /* index in runtime constants pool */);
+};
+
+fn translate(ctx: *Ctx) void = {
+    @fmt(ctx.out, "init_lox_constants :: fn(vm: *Lox.Vm, o: []*Lox.Obj) void = {\n");
+    @fmt(ctx.out, "\tS :: fn(s) => vm.copy_string(s)[].obj&;\n");
+    @fmt(ctx.out, "\tN :: fn(s) => vm.globals&.get(S(s).to_value().to_string()).unwrap().to_obj();::?Lox.Value;\n");
+    @fmt(ctx.out, "\tO :: @static_mut(zeroed([]*Lox.Obj)); O[] = o;  // TODO: not thread safe, etc.\n");
+    @fmt(ctx.out, "\tOP :: Lox'Opcodes;\n");
+    o := ctx.vm.objects;
+    while => !o.is_null() {
+        n := ctx.constants.raw.len_including_tombstones;
+        ctx.constants&.insert(Lox.Obj.int_from_ptr(o), n);
+        o = o.next;
+    };
+    o := ctx.vm.objects;
+    while => !o.is_null() {
+        n := ctx.get_runtime_index(o);
+        @match(o.type) {
+            fn Function() => {
+                it := o.to_value().to_function();
+                // TODO: safe print
+                @fmt(ctx.out, "\to[%] = vm.declare(\"%\", %, %, fn(vm) = {", 
+                    n, it.name, it.arity, it.upvalue_count);
+                ctx.translate_fn(it);
+                @fmt(ctx.out, "\n\t});\n");
+            }
+            fn String() => {
+                s := o.to_value().to_string();
+                // TODO: safe print
+                @fmt(ctx.out, "\to[%] = S(\"%\");\n", n, s.data);
+            }
+            fn Native() => {
+                // TODO: safe print
+                name := Lox'ObjNative.Lox'to_obj_subtype(o.to_value())[].name;
+                @fmt(ctx.out, "\to[%] = N(\"%\");\n", n, name);
+            }
+            @default => @panic("% is a runtime only type % %", o.type, n, o.to_value());
+        };
+        o = o.next;
+    };
+    @fmt(ctx.out, "}\n");
+}
+
+fn translate_fn(ctx: *Ctx, it: *Lox.ObjFunction) void = {
+    cfg := get_cfg(it.chunk&);
+    @fmt(ctx.out, "\n\t\tip := 0;\n\t\tloop {| @switch(ip) {\n\t\t@case(0) => {");
+    i := 0; 
+    self := it.chunk&;
+    while => i < self.code.len {
+        continue :: local_return;
+        
+        is_jump_dest := cfg.find(fn(it) => it._1 == i).is_some();  // :SLOW  
+        if is_jump_dest {
+            @fmt(ctx.out, "\n\t\t}; @case(%) => {", i);
+        };
+        
+        @fmt(ctx.out, "\n\t\t");
+        op := @as(Lox.OpCode) @as(u8) self.code[i];
+        if @is(op, .Constant, .SetGlobal, .GetGlobal, .DefineGlobal) {
+            val_i := self.code[i + 1];
+            val := self.constants.get(val_i.zext());
+            @fmt(ctx.out, "OP'%(vm, ", op);
+            if val.is_obj() {
+                n := ctx.get_runtime_index(val.to_obj());
+                @fmt(ctx.out, "O[%].to_value());", n);
+            } else {
+                @fmt(ctx.out, "(bits = %));", val.bits);
+            };
+            i += 2;
+            continue();
+        };
+        
+        if @is(op, .SetLocal, .GetLocal, .Call, .GetUpvalue, .SetUpvalue) {
+            @fmt(ctx.out, "OP'%(vm, %);", op, self.code[i + 1]);
+            i += 2;
+            continue();
+        };
+        
+        offset16 :: fn(direction: i64) i64 => {
+            a: i64 = self.code[i + 1].zext();
+            b: i64 = self.code[i + 2].zext();
+            distance := a.bit_or(b.shift_left(8));
+            dest := 3 + i + distance * direction;
+            
+            if op == .JumpIfFalse {
+                @fmt(ctx.out, "ip = @if(vm.peek().Lox'is_falsy(), %, %);", dest, i + 3);
+            } else {
+                @fmt(ctx.out, "ip = %;", dest);
+            };
+            i += 3;
+        }
+        @match(op) {
+            fn Closure() => {
+                val_i := self.code[i + 1];
+                i += 2;
+                val := self.constants.get(val_i.zext());
+                n := ctx.get_runtime_index(val.to_obj());
+                f := val.to_function();
+                @fmt(ctx.out, "f := vm.new_closure(O[%].to_value().to_function());\n\t\t", n);
+                @fmt(ctx.out, "vm.push(f.obj&.to_value());");
+                @if(f.upvalue_count == 0) continue();
+                @fmt(ctx.out, "\n\t\tup := f.upvalues;");
+                range(0, f.upvalue_count) { j |
+                    local := self.code[i] == 1;
+                    index := self.code[i + 1];
+                    @fmt(ctx.out, "\n\t\tvm.open_upvalue(up[%], %, %);", j, index, local);
+                    i += 2;
+                };
+            };
+            fn Jump()        => offset16(1);
+            fn JumpIfFalse() => offset16(1);
+            fn Loop()        => offset16(-1);
+            @default => {
+                @fmt(ctx.out, "OP'%(vm);", op);
+                if op == .Return {
+                    @fmt(ctx.out, "\n\t\treturn();");
+                }
+                i += 1;
+            };
+        };
+    };
+    
+    @fmt(ctx.out, "\n}; @default => unreachable(); };};\n");
+}
+
+fn get_cfg(self: *Lox.Chunk) []Ty(i64, i64) = {
+    i := 0; 
+    cfg := @ref Ty(i64, i64).list(temp());
+    while => i < self.code.len {
+        continue :: local_return;
+        op := @as(Lox.OpCode) @as(u8) self.code[i];
+        if @is(op, .Constant, .SetGlobal, .GetGlobal, .DefineGlobal, .SetLocal, .GetLocal, .Call, .GetUpvalue, .SetUpvalue) {
+            i += 2;
+            continue();
+        };
+        
+        if @is(op, .Jump, .JumpIfFalse, .Loop) {
+            a: i64 = self.code[i + 1].zext();
+            b: i64 = self.code[i + 2].zext();
+            distance := a.bit_or(b.shift_left(8));
+            direction := @if(op == .Loop, -1, 1);
+            push(cfg, (i, 3 + i + distance * direction));
+            if op == .JumpIfFalse {
+                push(cfg, (i, 3 + i));
+            };
+            i += 3;
+            continue();
+        };
+    
+        if op == .Closure {
+            val_i := self.code[i + 1];
+            val := self.constants.get(val_i.zext());
+            f := val.to_function();
+            i += 2 + 2 * f.upvalue_count;
+            continue();
+        };
+        i += 1;
+    };
+    cfg.items()
+}
+
+fn get_runtime_index(ctx: *Ctx, o: *Lox.Obj) i64 = {
+    ctx.constants&.get(Lox.Obj.int_from_ptr(o))
+        || @panic("new object created after initial aot scan: %", o.to_value())
+}
+
+Lox :: import("@/examples/lox/lox_main.fr").Lox;

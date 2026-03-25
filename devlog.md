@@ -5,6 +5,14 @@ lox
 - ch25: upvalues, ch26: gc
 - lex: allow identifiers with keyword as prefix. oops. i.e. `returnXXX`
 - take_string: stop doing an extra allocation on intern hit
+- write the opcode bodies as functions because it would be neat to do aot by just expanding out the chunk to code to see how much of the time is switch overhead
+- dumb_fib(35) all debug build; clox: 2.49 (compiled by import_c), closures before: 2.77, closures after: 2.97. 
+  switch->fns: 4.62, frames.last()->vm.frame: 3.22, #inline everything: 2.82.
+  missed a frames.last() in read_constant: 2.68,
+  unsafe: 2.1, don't track stack.len: 1.97. 
+- pull more of the literal unpacking out from the body so it can be done in the aot part. 
+- dumb loop(switch(ip)) for making basic blocks for now. 
+- aot works dumb_fib(35): safe: 1.5, unsafe: 1.25, clang-O2: 0.40
 
 ## (Mar 24)
 
