@@ -2,8 +2,9 @@
 ## (Mar 25)
 
 lox
-- upvalues for ch25
+- ch25: upvalues, ch26: gc
 - lex: allow identifiers with keyword as prefix. oops. i.e. `returnXXX`
+- take_string: stop doing an extra allocation on intern hit
 
 ## (Mar 24)
 

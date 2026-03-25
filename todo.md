@@ -1168,6 +1168,8 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 
 ### Terminal
 
+- cmd+f only search the cursor's current output block. cmd+shift+f to search the whole buffer
+- cmd+enter be same as cmd+click (open link the cursor's on)
 - change save file while running
 - list buffers. allow moving them out of the stack (that esc closes)?
 - show byte value on non ascii chars (except 0 because i use that to draw)

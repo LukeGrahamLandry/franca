@@ -1,12 +1,15 @@
-// note: ive been lazy about saving things on the stack to defend from gc, maybe fix that or maybe just check gc at the end of the opcode
 
 debug_trace_execution :: false;
 debug_print_code :: false;
+debug_stress_gc :: false;
+debug_log_gc :: false;
 stack_max :: 256;
+gc_heap_grow_factor :: 2;
+gc_heap_base_size :: 1024 * 1024;
 
 Vm :: @struct(
-    stack: List(Value), // TODO: inline fixed size array
     stack_top: *Value,
+    stack: List(Value),
     last_return: Value,
     gc: Alloc,
     objects: *Obj,
@@ -15,7 +18,13 @@ Vm :: @struct(
     errors: List(u8),
     frames: List(CallFrame),
     start_time: f64,
-    open_upvalues: *ObjUpvalue,
+    // location still points to the stack. 
+    // values captured by OpCode.Closure but not yet OpCode.CloseUpvalue. 
+    // sorted by position in the stack. 
+    open_upvalues: *ObjUpvalue,  
+    gc_storage: CountingAllocator,
+    // only used when one of the debug options is enabled
+    debug: List(u8),   
 );
 
 CallFrame :: @struct {
@@ -24,21 +33,25 @@ CallFrame :: @struct {
     first_local: i64;
 };
 
-Table :: RawHashMap(*ObjString, Value);
-
-fn init_vm() Vm = {
-    self := zeroed Vm;
-    self.gc = general_allocator();
-    self.stack = list(stack_max, general_allocator());  // EXTRA: grow stack
+fn init(self: *Vm) *Vm = {
+    self[] = zeroed Vm;
+    a := general_allocator();
+    self.gc_storage.parent = a;
+    self.gc_storage.bytes_next_gc = gc_heap_base_size;
+    self.gc = self.gc_storage&.borrow();
+    if debug_trace_execution || debug_print_code || debug_log_gc {
+        self.debug = list(a);
+    }
+    self.stack = list(stack_max, self.gc);  // EXTRA: grow stack
     // you're fucked if this resizes because of capture_upvalue
     self.stack.gpa = panicking_allocator;
     self.objects = Obj.ptr_from_int(0); // EVIL
     self.strings = init(); 
     self.globals = init(); 
-    self&.reset_stack();
+    self.reset_stack();
     self.errors = list(self.gc);
     self.frames = list(self.gc);
-    self&.define_native("clock", fn(vm, _) = {
+    self.define_native("clock", fn(vm, _) = {
         (timestamp_s() - vm.start_time).to_value()
     });
     self.start_time = timestamp_s();
@@ -53,12 +66,16 @@ fn define_native(self: *Vm, name: Str, callee: ObjNative.F) void = {
 }
 
 fn drop(self: *Vm) void = {
+    self.free_objects();
+    self.stack.gpa = self.gc;
     self.stack&.drop();
     self.globals&.drop(self.gc);
     self.strings&.drop(self.gc);
     self.errors&.drop();
     self.frames&.drop();
-    self.free_objects();
+    self.debug&.drop();
+    leaked := self.gc_storage.bytes_allocated;
+    @if(debug_log_gc && leaked != 0) @print("leaked bytes_allocated = %", leaked);
 }
 
 InterpretResult :: @enum(i64) (Ok, CompileError, RuntimeError, SuspendPrint);
@@ -109,32 +126,11 @@ is_falsy :: fn(v: Value) bool = v.is_bool().and(=> v.to_bool().not()).or(v.is_ni
                 
 fn run(self: *Vm) InterpretResult = {
     out := InterpretResult.RuntimeError;
-    debug: List(u8) = list(temp());  // :LEAK someone needs to reset temp in this program
     frame := self.frames&.last().unwrap();
     ip := frame.ip&;
     loop {
-        continue :: local_return;
         @debug_assert(ptr_diff(frame.function.chunk.code.maybe_uninit.ptr, ip[]) < frame.function.chunk.code.len, "fell off the end of function");
-        
-        if debug_trace_execution {
-            debug&.clear();
-            @fmt(debug&, "       stack:");
-            for(self.stack&.as_ptr(), self.stack_top) {slot|
-                @fmt(debug&, "[ % ]", slot);
-            };
-            @fmt(debug&, "\n      global:"); 
-            each self.globals& { k, v |
-                @fmt(debug&, "[ % = % ]", k.data, v);
-            };
-        
-            @fmt(debug&, "\n"); 
-            p := frame.function.chunk.code&.as_ptr();
-            i := p.ptr_diff(ip[]);
-            frame.function.chunk&.dis_inst(debug&, i);
-            
-            print(debug&.items());
-        };
-        
+        self.trace_inst();
         instruction := self.read_byte();
         
         // TODO: switch over incomplete enum like is is awkward because you can't use contextual field. 
@@ -152,6 +148,7 @@ fn run(self: *Vm) InterpretResult = {
                 ip = frame.ip&;
             };
             @case(OpCode.Return) => {
+                self.maybe_collect_garbage();
                 value := self.pop();
                 self.close_upvalues(self.stack.index_unchecked(frame.first_local));
                 self.frames&.pop().unwrap();
@@ -174,6 +171,7 @@ fn run(self: *Vm) InterpretResult = {
                 self.push(val.to_number().neg().to_value());
             };
             @case(OpCode.Add) => {
+                continue :: local_return;
                 rhs := self.pop();
                 lhs := self.pop();
                 if rhs.is_number() {
@@ -196,7 +194,7 @@ fn run(self: *Vm) InterpretResult = {
                     new := self.gc.alloc_uninit(u8, lhs.data.len + rhs.data.len);
                     new.slice(0, lhs.data.len).copy_from(lhs.data);
                     new.slice(lhs.data.len, new.len).copy_from(rhs.data);
-                    o := self.take_string(new);
+                    o := self.take_string(new, true);
                     self.push(o.to_value());
                     continue();
                 };
@@ -294,6 +292,7 @@ fn run(self: *Vm) InterpretResult = {
             @case(OpCode.Loop) => {
                 distance := -self.read_u16();
                 ip[] = ip[].offset(distance);
+                self.maybe_collect_garbage();
             };
             @default => {
                 @println("bad opcode %", @as(u8) instruction);
@@ -332,7 +331,7 @@ fn op_closure(self: *Vm, frame: *CallFrame) void = {
 
 fn capture_upvalue(self: *Vm, value: *Value) *ObjUpvalue = {
     ::ptr_utils(ObjUpvalue);
-    // dedup so they share a slot when closed. the list is sorted by position in the stack 
+    // dedup so they share a slot when closed even if referenced by multiple closures at the same nesting level. 
     link := self.open_upvalues&;
     while => !link[].is_null() && ptr_diff(link.location, value) > 0 {
         link = link.next&;
@@ -442,6 +441,33 @@ fn runtime_error(self: *Vm, msg: Str) void = {
         line := chunk.lines[i];
         @fmt(self.errors&, "\n[line %] in %", line, frame.function.name);
     };
+}
+
+fn flush_debug(self: *Vm) void = {
+    print(self.debug&.items());
+    self.debug&.clear();
+}
+
+fn trace_inst(self: *Vm) void = {
+    @if(!debug_trace_execution) return();
+    frame := self.frames&.last().unwrap();
+    ip := frame.ip&;
+    out := self.debug&;
+    @fmt(out, "       stack:");
+    for(self.stack&.as_ptr(), self.stack_top) {slot|
+        @fmt(out, "[ % ]", slot);
+    };
+    @fmt(out, "\n      global:"); 
+    each self.globals& { k, v |
+        @fmt(out, "[ % = % ]", k.data, v);
+    };
+
+    @fmt(out, "\n"); 
+    p := frame.function.chunk.code&.as_ptr();
+    i := p.ptr_diff(ip[]);
+    frame.function.chunk&.dis_inst(out, i);
+    
+    self.flush_debug();
 }
 
 #use("@/examples/lox/value.fr");

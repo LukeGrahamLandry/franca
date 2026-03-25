@@ -1,3 +1,5 @@
+// this file corresponds to value+object+memory+table in the clox codebase
+
 Value :: @struct(bits: i64);  // TODO: the world is probably a better place if this is u64 since I just care about the bits. 
 
 // TODO: better error message if you forget the format string in @fmt
@@ -106,6 +108,7 @@ ObjType :: @enum(i64) (String, Function, Native, Closure, Upvalue);
 Obj :: @rec @struct(
     type: ObjType,
     next: *Obj,
+    marked: bool,
 );
 
 ObjString :: @struct {
@@ -155,19 +158,22 @@ allocate_obj :: fn(self: *Vm, $T: Type) *T #generic = {
     mem := self.gc.alloc_zeroed(T, 1);
     mem.ptr.obj.type = T.TAG;
     mem.ptr.obj.next = self.objects;
+    // mem.ptr.obj.marked = false;
     self.objects = mem.ptr.obj&;
+    @if(debug_log_gc) @fmt(self.debug&, "% alloc %\n", fmt_hex(mem.ptr), mem.ptr.obj.type);
     mem.ptr
 };
 
 // TODO: EXTRA: store the data contiguously with the ObjString header
 // TODO: EXTRA: track which strings are constant-ish so don't free them
 fn copy_string(self: *Vm, s: Str) *ObjString = {
-    new := s.shallow_copy(self.gc);
-    self.take_string(new)
+    self.take_string(s, false)
 }
 
-fn take_string(self: *Vm, s: Str) *ObjString = {
-    o := self.allocate_obj(ObjString);
+Table :: RawHashMap(*ObjString, Value);
+
+fn take_string(self: *Vm, s: Str, owned: bool) *ObjString = {
+    o := zeroed ObjString; o := o&;
     o.data = s;
     o.update_hash();
     
@@ -178,24 +184,23 @@ fn take_string(self: *Vm, s: Str) *ObjString = {
     if(full, => self.strings&.resize(self.gc)); // does it sooner than necessary (if replacing a slot) but thats fine. 
     slot := self.strings&.slow_find_slot(o);
     
-    @switch(slot.hash) {
-        @case(0) => {
-            slot[] = (hash = o.hash, key = o, value = nil_value);
-            self.strings.len_including_tombstones += 1;
+    // TODO: should do the tombstone in-band (null key + nonnull value) like clox save 8 bytes each slot :SLOW
+    self.strings.len_including_tombstones += int(slot.hash == 0);
+    if slot.hash == 0 || slot.hash == 1 {
+        if !owned {
+            s = s.shallow_copy(self.gc);
         };
-        @case(1) => {
-            slot[] = (hash = o.hash, key = o, value = nil_value);
-        };
-        @default => {
-            // It was interned!
-            // TODO: don't allocate and then immediately free the objheader.
-            //       we should just be freeing the bytes here. 
-            @debug_assert(identical(self.objects, o.obj&));
-            self.objects = o.obj.next; // we know we just made this so its the most recent
-            self.free_obj(o.obj&);
-            return(slot.key);
-        };
+        o2 := self.allocate_obj(ObjString);
+        o2.data = s;
+        o2.hash = o.hash;
+        slot[] = (hash = o2.hash, key = o2, value = nil_value);
+    } else {
+        // already in the table, no need to promote `o` to the heap
+        if owned {
+            self.gc.dealloc(u8, s);
+        }
     };
+    return slot.key;
     
     fn slow_find_slot(self: *Table, key: *ObjString) *Table.E = {
         i := key.hash.mod(self.arr.len); // TODO: power of two trick
@@ -218,8 +223,6 @@ fn take_string(self: *Vm, s: Str) *ObjString = {
     
     fn slow_eq(lhs: *ObjString, rhs: *ObjString) bool = 
         lhs.data == rhs.data;
-
-    o
 }
 
 fn hash(h: *TrivialHasher, obj: **ObjString) void = {
@@ -248,14 +251,26 @@ fn new_closure(self: *Vm, function: *ObjFunction) *ObjClosure = {
 }
 
 fn free_objects(self: *Vm) void = {
+    if debug_log_gc {  // if we clear all the roots, everything should be garbage
+        @fmt(self.debug&, "--- free_objects: found ---\n");
+        self.globals&.clear();
+        self.frames&.clear();
+        self.stack&.clear();
+        self.collect_garbage();
+        @if(!self.objects.is_null()) @fmt(self.debug&, "--- free_objects: lost ---\n");
+    };
+    
     while => !self.objects.is_null() {
         obj := self.objects;
         self.objects = obj.next;
         self.free_obj(obj);
     };
+    self.flush_debug();
 }
 
 fn free_obj(self: *Vm, obj: *Obj) void = {
+    @if(debug_log_gc) @fmt(self.debug&, "% free %\n", fmt_hex(obj), obj.type);
+    
     @match(obj.type) {
         fn String() => {
             obj := obj.to_value().to_string();
@@ -282,6 +297,137 @@ fn free_obj(self: *Vm, obj: *Obj) void = {
         }
     };
 }
+
+// note: ive been lazy about saving things on the stack to defend from gc. 
+//       so for now i just run this on backward branches (Loop & Return) instead of inside the allocator. 
+//       maybe sad to miss out on the cool fiddliness of the extra stack manipulation. 
+fn maybe_collect_garbage(self: *Vm) void #inline = {
+    if self.gc_storage.collect || debug_stress_gc {
+        self.collect_garbage();
+    };
+}
+
+fn collect_garbage(self: *Vm) void = {
+    self.gc_storage.collect = false;
+    before := self.gc_storage.bytes_allocated;
+    @if(debug_log_gc) @fmt(self.debug&, "--- begin gc ---\n");
+    
+    self.mark_roots();
+    // interned strings are weak, get rid of pointers that will be freed
+    self.strings&.retain(fn(k, _) => k.obj.marked);  
+    self.sweep();
+    self.gc_storage.bytes_next_gc = self.gc_storage.bytes_allocated * gc_heap_grow_factor;
+    
+    if debug_log_gc {
+        @fmt(self.debug&, "collected % bytes (from % to %) next at %\n", 
+            before - self.gc_storage.bytes_allocated, before, 
+            self.gc_storage.bytes_allocated, self.gc_storage.bytes_next_gc);
+        @fmt(self.debug&, "--- end gc ---\n");
+        self.flush_debug();
+    };
+}
+
+fn mark_roots(self: *Vm) void = {
+    for self.stack& { value |
+        self.mark(value);
+    };
+    self.mark(self.globals&);
+    it := self.open_upvalues;
+    while => !it.is_null() {
+        self.mark(it.obj&);
+        it = it.next;
+    };
+    for self.frames& { it |
+        self.mark(it.closure.obj&);
+    };
+    // i don't call collect_garbage while in the compiler
+}
+
+fn mark(self: *Vm, value: Value) void = {
+    @if(value.is_obj()) self.mark(value.to_obj());
+}
+
+fn mark(self: *Vm, obj: *Obj) void = {
+    @if(obj.is_null()) return();
+    @if(obj.marked) return();
+    obj.marked = true;  
+    
+    if debug_log_gc {
+        @fmt(self.debug&, "% mark %\n", fmt_hex(obj), obj.to_value());
+    };
+    
+    // TODO: clox uses an explicit stack instead of recursing here. 
+    //       is it just so you don't die if the heap is deeper than the system stack has space for? 
+    @match(obj.type) {
+        fn String() => ();
+        fn Native() => ();
+        fn Function() => {
+            it := ObjFunction.to_obj_subtype(obj.to_value());
+            for it.chunk.constants& { it |
+                self.mark(it);
+            };
+            // it.name is a Str into the source code
+        }
+        fn Closure() => {
+            it := ObjClosure.to_obj_subtype(obj.to_value());
+            self.mark(it.function.obj&);
+            for it.upvalues { it |
+                self.mark(it.obj&);
+            };
+        }
+        fn Upvalue() => {
+            it := ObjUpvalue.to_obj_subtype(obj.to_value());
+            // location either points at it.closed or vm.stack
+            self.mark(it.closed);
+        }
+    };
+}
+
+fn mark(self: *Vm, table: *Table) void = {
+    each table { k, v |
+        self.mark(k.obj&);
+        self.mark(v[]);
+    };
+}
+
+fn sweep(self: *Vm) void = {
+    link := self.objects&;
+    while => !link[].is_null() {
+        if link.marked {
+            link.marked = false;
+            link = link.next&;
+        } else {
+            next := link.next;
+            self.free_obj(link[]);
+            link[] = next;
+        }
+    }
+}
+
+CountingAllocator :: @struct {
+    parent: Alloc;
+    bytes_allocated: i64;
+    bytes_next_gc: i64;
+    collect: bool;
+    
+    impl :: fn(self: rawptr, action: Alloc.Action, ptr: rawptr, count: i64, align: i64) []u8 = {
+        self := CountingAllocator.ptr_from_raw(self);
+        @match(action) {
+            fn Allocate() => { 
+                self.bytes_allocated += count; 
+                self.collect = self.bytes_allocated >= self.bytes_next_gc;
+            }
+            fn Deallocate() => { 
+                self.bytes_allocated -= count; 
+            }
+            @default => ();
+        };
+        self'parent'vptr(self.parent.data, action, ptr, count, align)
+    };
+    
+    fn borrow(self: *CountingAllocator) Alloc = 
+        (data = CountingAllocator.raw_from_ptr(self), vptr = impl);
+};
 
 #use("@/examples/lox/chunk.fr");
 #use("@/examples/lox/vm.fr");

@@ -1,4 +1,16 @@
 
+> The goal of these programs is largely to boost morale. 
+> Nontrivial programs are important proof that the compiler actually works. 
+> They're also useful if you want to learn my language dispite its sparse documentation. 
+>
+> Some of them are **heavily** inspired by (other people's programs, books, or my own past projects) 
+> because I'm interested the contrast between implementations of the same thing in different languages. 
+> Also converting programs is a nice brain vacation from doing original stuff. 
+> Often mine make tradeoffs that are worse than the originals in the general case 
+> but demonstrate an interesting point (even if that point is just "hehe look it's MY language now"). 
+> Ideas stolen in this way will have header comments somewhere crediting the source & license info. 
+> The originals have permissive licenses and you're free to use my versions under [The Franca License](../LICENSE.md), (along with preserving references to the originals).
+
 ## big programs
 
 - import_c: a C11 compiler using the franca backend
@@ -28,7 +40,7 @@
 - kaleidoscope: jit for a tiny expression langauge (based on an llvm tutorial but using my backend instead)
 - bf: include a brainfuck program in a franca program with various flavours of meta-programming. 
   - interpreter, franca source, c source, ir, wasm
-- lox: bytecode vm for the language from craftinginterpreters.com (only ch 14-22 so far)
+- lox: bytecode vm for the language from craftinginterpreters.com
 - minijinja: interpret a tiny subset of jinja templates
 - **unfinished**: import_wuffs
 
