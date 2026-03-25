@@ -31,19 +31,19 @@ fn display(self: Value, out: *List(u8)) void = {
     if self.is_obj() {
         @match(self.obj_type()) {
             fn String() => {
-                o := self.to_string();
+                o := self.to(.String);
                 o.data.display(out);
             }
             fn Function() => {
-                o := self.to_function();
+                o := self.to(.Function);
                 @fmt(out, "<fn %>", o.name);
             }
             fn Native() => {
-                name := ObjNative.to_obj_subtype(self)[].name;
+                name := self.to(.Native)[].name;
                 @fmt(out, "<fn <native: %>>", name);
             }
             fn Closure() => {
-                o := self.to_closure()[].function;
+                o := self.to(.Closure)[].function;
                 @fmt(out, "<fn %>", o.name);
             }
             fn Upvalue() => @fmt(out, "upvalue");
@@ -81,7 +81,7 @@ from_obj_subtype :: fn($T: Type, self: *T) Value #generic = {
 #inline fn is_obj(self: Value) bool = {
     self.bits.bit_and(null_object) == null_object
 }
-fn is_obj(self: Value, type: ObjType) bool #inline = {
+fn is(self: Value, type: ObjType) bool #inline = {
     self.is_obj() && self.obj_type() == type 
 }
 
@@ -95,10 +95,20 @@ to_obj_subtype :: fn($T: Type, self: Value) *T #generic = {
     obj
 };
 
-fn to_obj(self: Value) *Obj #inline  = Obj.to_obj_subtype(self);
-fn to_string(self: Value) *ObjString #inline = ObjString.to_obj_subtype(self);
-fn to_function(self: Value) *ObjFunction #inline = ObjFunction.to_obj_subtype(self);
-fn to_closure(self: Value) *ObjClosure = ObjClosure.to_obj_subtype(self);
+fn to_obj(self: Value) *Obj #inline = Obj.to_obj_subtype(self);
+
+fn to(self: Value, $type: ObjType) *GetObjType(type) #generic = 
+    GetObjType(type).to_obj_subtype(self);
+
+fn to(self: *Obj, $type: ObjType) *GetObjType(type) #generic = {
+    @debug_assert_eq(self.type, type);
+    bit_cast_unchecked(*Obj, *GetObjType(type), self)
+}
+
+GetObjType :: fn(type: ObjType) Type #fold = {
+    x := object_types;
+    x[type.raw().int()]
+}
 
 fn eq(lhs: Value, rhs: Value) bool = {
     // strings are interned so this is good enough for them too. 
@@ -106,10 +116,11 @@ fn eq(lhs: Value, rhs: Value) bool = {
 }
 
 ObjType :: @enum(i64) (String, Function, Native, Closure, Upvalue);
+object_types :: @const_slice(ObjString, ObjFunction, ObjNative, ObjClosure, ObjUpvalue);
 Obj :: @rec @struct(
     type: ObjType,
     next: *Obj,
-    marked: bool,
+    marked: bool,  // TODO: pack this better with the type field
 );
 
 ObjString :: @struct {
@@ -235,9 +246,8 @@ fn hash(h: *TrivialHasher, obj: **ObjString) void = {
 // this assumes the strings are already interned ,
 // so you can't use the normal hashmap insert functions to check if a string is unique when first creating it.
 fn eq(lhs: **ObjString, rhs: **ObjString) bool = {
-    lhs := ObjString.int_from_ptr(lhs[]);
-    rhs := ObjString.int_from_ptr(rhs[]);
-    lhs == rhs
+    ::ptr_utils(@type lhs[][]);
+    identical(lhs[], rhs[])
 }
 
 fn update_hash(obj: *ObjString) void = {
@@ -276,26 +286,26 @@ fn free_obj(self: *Vm, obj: *Obj) void = {
     
     @match(obj.type) {
         fn String() => {
-            obj := obj.to_value().to_string();
+            obj := obj.to(.String);
             self.gc.dealloc(u8, obj.data);
             self.gc.dealloc_one(ObjString, obj);
         }
         fn Function() => {
-            obj := obj.to_value().to_function();
+            obj := obj.to(.Function);
             obj.chunk&.drop();
             self.gc.dealloc_one(ObjFunction, obj);
         }
         fn Native() => {
-            obj := ObjNative.to_obj_subtype(obj.to_value());
+            obj := obj.to(.Native);
             self.gc.dealloc_one(ObjNative, obj);
         }
         fn Closure() => {  // we don't own .function
-            obj := ObjClosure.to_obj_subtype(obj.to_value());
+            obj := obj.to(.Closure);
             self.gc.dealloc(*ObjUpvalue, obj.upvalues);  // shallow
             self.gc.dealloc_one(ObjClosure, obj);
         }
         fn Upvalue() => {
-            obj := ObjUpvalue.to_obj_subtype(obj.to_value());
+            obj := obj.to(.Upvalue);
             self.gc.dealloc_one(ObjUpvalue, obj);
         }
     };
@@ -365,21 +375,21 @@ fn mark(self: *Vm, obj: *Obj) void = {
         fn String() => ();
         fn Native() => ();
         fn Function() => {
-            it := ObjFunction.to_obj_subtype(obj.to_value());
+            it := obj.to(.Function);
             for it.chunk.constants& { it |
                 self.mark(it);
             };
             // it.name is a Str into the source code
         }
         fn Closure() => {
-            it := ObjClosure.to_obj_subtype(obj.to_value());
+            it := obj.to(.Closure);
             self.mark(it.function.obj&);
             for it.upvalues { it |
                 self.mark(it.obj&);
             };
         }
         fn Upvalue() => {
-            it := ObjUpvalue.to_obj_subtype(obj.to_value());
+            it := obj.to(.Upvalue);
             // location either points at it.closed or vm.stack
             self.mark(it.closed);
         }

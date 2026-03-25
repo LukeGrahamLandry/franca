@@ -1,11 +1,10 @@
 
 main :: fn() void = {
-    n := 0;
-    for cli_args() { it |
-        it := it.str();
-        if it.ends_with(".lox") {
+    #use("@/lib/args.fr");
+    args := parse_args(@struct(i := "", o := ""));
+    @assert(args.i != "" && args.o != "", "USAGE: [lox/aot.fr] -i filename.lox -o a.fr");
             #use("@/lib/sys/fs.fr");
-            src := read_entire_file_or_crash(temp(), it);
+            src := read_entire_file_or_crash(temp(), args.i);
             vm := zeroed Lox'Vm;
             init(vm&);
             script := vm&.compile(src) 
@@ -31,21 +30,12 @@ main :: fn() void = {
                     init(vm);
                     o := vm.gc.alloc_zeroed(*Lox.Obj, %);
                     init_lox_constants(vm, o);
-                    script := Lox'ObjFunction.Lox'to_obj_subtype(o[%].to_value());
+                    script := o[%].to(.Function);
                     vm.interpret(script, false);
                 }
             """, ctx.constants.raw.len_including_tombstones, ctx&.get_runtime_index(script.obj&));
-            if cli_args().index_of(fn(it) => it[] == "-o") { i |
-                dest := cli_args().index(i + 1)[].str();
-                write_entire_file_or_crash(dest, out.items());
-            } else {
-                print(out.items());
-            };
+            write_entire_file_or_crash(args.o, out.items());
             vm&.drop();
-            n += 1;
-        };
-    };
-    @assert(n > 0, "USAGE: pass .lox files as cli arguments (or -test for builtin tiny test)");
 }
 
 Ctx :: @struct {
@@ -55,11 +45,13 @@ Ctx :: @struct {
 };
 
 fn translate(ctx: *Ctx) void = {
-    @fmt(ctx.out, "init_lox_constants :: fn(vm: *Lox.Vm, o: []*Lox.Obj) void = {\n");
-    @fmt(ctx.out, "\tS :: fn(s) => vm.copy_string(s)[].obj&;\n");
-    @fmt(ctx.out, "\tN :: fn(s) => vm.globals&.get(S(s).to_value().to_string()).unwrap().to_obj();::?Lox.Value;\n");
-    @fmt(ctx.out, "\tO :: @static_mut(zeroed([]*Lox.Obj)); O[] = o;  // TODO: not thread safe, etc.\n");
-    @fmt(ctx.out, "\tOP :: Lox'Opcodes;\n");
+    prelude :: """init_lox_constants :: fn(vm: *Lox.Vm, o: []*Lox.Obj) void = {
+    S :: fn(s) => vm.copy_string(s)[].obj&;
+    N :: fn(s) => vm.globals&.get(S(s).to(.String)).unwrap().to_obj();::?Lox.Value;
+    O :: @static_mut(zeroed([]*Lox.Obj)); O[] = o;  // TODO: not thread safe, etc.
+    OP :: Lox'Opcodes;
+    """;
+    @fmt(ctx.out, "%\n", prelude);
     o := ctx.vm.objects;
     while => !o.is_null() {
         n := ctx.constants.raw.len_including_tombstones;
@@ -71,21 +63,19 @@ fn translate(ctx: *Ctx) void = {
         n := ctx.get_runtime_index(o);
         @match(o.type) {
             fn Function() => {
-                it := o.to_value().to_function();
-                // TODO: safe print
+                it := o.to(.Function);
                 @fmt(ctx.out, "\to[%] = vm.declare(\"%\", %, %, fn(vm) = {", 
                     n, it.name, it.arity, it.upvalue_count);
                 ctx.translate_fn(it);
                 @fmt(ctx.out, "\n\t});\n");
             }
             fn String() => {
-                s := o.to_value().to_string();
-                // TODO: safe print
+                s := o.to(.String);
+                // lox strings don't have escape sequences so this isn't actually a problem
                 @fmt(ctx.out, "\to[%] = S(\"%\");\n", n, s.data);
             }
             fn Native() => {
-                // TODO: safe print
-                name := Lox'ObjNative.Lox'to_obj_subtype(o.to_value())[].name;
+                name := o.to(.Native)[].name;
                 @fmt(ctx.out, "\to[%] = N(\"%\");\n", n, name);
             }
             @default => @panic("% is a runtime only type % %", o.type, n, o.to_value());
@@ -96,23 +86,23 @@ fn translate(ctx: *Ctx) void = {
 }
 
 fn translate_fn(ctx: *Ctx, it: *Lox.ObjFunction) void = {
-    cfg := get_cfg(it.chunk&);
+    cfg := get_cfg_targets(it.chunk&);
     @fmt(ctx.out, "\n\t\tip := 0;\n\t\tloop {| @switch(ip) {\n\t\t@case(0) => {");
     i := 0; 
     self := it.chunk&;
     while => i < self.code.len {
         continue :: local_return;
         
-        is_jump_dest := cfg.find(fn(it) => it._1 == i).is_some();  // :SLOW  
+        e := self.decode_one(i);
+        is_jump_dest := cfg&.get(i).is_some();
         if is_jump_dest {
             @fmt(ctx.out, "\n\t\t}; @case(%) => {", i);
         };
         
         @fmt(ctx.out, "\n\t\t");
-        op := @as(Lox.OpCode) @as(u8) self.code[i];
+        op := e.op;
         if @is(op, .Constant, .SetGlobal, .GetGlobal, .DefineGlobal) {
-            val_i := self.code[i + 1];
-            val := self.constants.get(val_i.zext());
+            val := e.value;
             @fmt(ctx.out, "OP'%(vm, ", op);
             if val.is_obj() {
                 n := ctx.get_runtime_index(val.to_obj());
@@ -120,20 +110,18 @@ fn translate_fn(ctx: *Ctx, it: *Lox.ObjFunction) void = {
             } else {
                 @fmt(ctx.out, "(bits = %));", val.bits);
             };
-            i += 2;
+            i += e.size;
             continue();
         };
         
         if @is(op, .SetLocal, .GetLocal, .Call, .GetUpvalue, .SetUpvalue) {
-            @fmt(ctx.out, "OP'%(vm, %);", op, self.code[i + 1]);
-            i += 2;
+            @fmt(ctx.out, "OP'%(vm, %);", op, e.literal);
+            i += e.size;
             continue();
         };
         
         offset16 :: fn(direction: i64) i64 => {
-            a: i64 = self.code[i + 1].zext();
-            b: i64 = self.code[i + 2].zext();
-            distance := a.bit_or(b.shift_left(8));
+            distance := e.literal;
             dest := 3 + i + distance * direction;
             
             if op == .JumpIfFalse {
@@ -141,24 +129,19 @@ fn translate_fn(ctx: *Ctx, it: *Lox.ObjFunction) void = {
             } else {
                 @fmt(ctx.out, "ip = %;", dest);
             };
-            i += 3;
         }
         @match(op) {
             fn Closure() => {
-                val_i := self.code[i + 1];
-                i += 2;
-                val := self.constants.get(val_i.zext());
+                i += e.size;
+                val := e.value;
                 n := ctx.get_runtime_index(val.to_obj());
-                f := val.to_function();
-                @fmt(ctx.out, "f := vm.new_closure(O[%].to_value().to_function());\n\t\t", n);
+                f := val.to(.Function);
+                @fmt(ctx.out, "f := vm.new_closure(O[%].to(.Function));\n\t\t", n);
                 @fmt(ctx.out, "vm.push(f.obj&.to_value());");
                 @if(f.upvalue_count == 0) continue();
                 @fmt(ctx.out, "\n\t\tup := f.upvalues;");
-                range(0, f.upvalue_count) { j |
-                    local := self.code[i] == 1;
-                    index := self.code[i + 1];
-                    @fmt(ctx.out, "\n\t\tvm.open_upvalue(up[%], %, %);", j, index, local);
-                    i += 2;
+                enumerate e.upvalues { i, it |
+                    @fmt(ctx.out, "\n\t\tvm.open_upvalue(up[%], %, %);", i, it.index, it.local);
                 };
             };
             fn Jump()        => offset16(1);
@@ -169,48 +152,30 @@ fn translate_fn(ctx: *Ctx, it: *Lox.ObjFunction) void = {
                 if op == .Return {
                     @fmt(ctx.out, "\n\t\treturn();");
                 }
-                i += 1;
             };
         };
+        i += e.size;
     };
     
     @fmt(ctx.out, "\n}; @default => unreachable(); };};\n");
 }
 
-fn get_cfg(self: *Lox.Chunk) []Ty(i64, i64) = {
+fn get_cfg_targets(self: *Lox.Chunk) RawHashMap(i64, void) = {
     i := 0; 
-    cfg := @ref Ty(i64, i64).list(temp());
+    cfg: HashMap(i64, void) = init(temp());
     while => i < self.code.len {
-        continue :: local_return;
-        op := @as(Lox.OpCode) @as(u8) self.code[i];
-        if @is(op, .Constant, .SetGlobal, .GetGlobal, .DefineGlobal, .SetLocal, .GetLocal, .Call, .GetUpvalue, .SetUpvalue) {
-            i += 2;
-            continue();
-        };
-        
+        e := self.decode_one(i);
+        distance, op := (e.literal, e.op);
         if @is(op, .Jump, .JumpIfFalse, .Loop) {
-            a: i64 = self.code[i + 1].zext();
-            b: i64 = self.code[i + 2].zext();
-            distance := a.bit_or(b.shift_left(8));
             direction := @if(op == .Loop, -1, 1);
-            push(cfg, (i, 3 + i + distance * direction));
+            insert(cfg&, 3 + i + distance * direction, ());
             if op == .JumpIfFalse {
-                push(cfg, (i, 3 + i));
+                insert(cfg&, 3 + i, ());
             };
-            i += 3;
-            continue();
         };
-    
-        if op == .Closure {
-            val_i := self.code[i + 1];
-            val := self.constants.get(val_i.zext());
-            f := val.to_function();
-            i += 2 + 2 * f.upvalue_count;
-            continue();
-        };
-        i += 1;
+        i += e.size;
     };
-    cfg.items()
+    cfg.raw
 }
 
 fn get_runtime_index(ctx: *Ctx, o: *Lox.Obj) i64 = {

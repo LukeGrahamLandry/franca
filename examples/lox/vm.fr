@@ -211,12 +211,12 @@ Opcodes :: fix_opcodes(@struct {
                 };
                 outline(self, lhs, rhs);
                 outline :: fn(self: *Vm, lhs: Value, rhs: Value) void = {
-                if rhs.is_obj(ObjType.String) {
-                    if !lhs.is_obj(ObjType.String) {
+                if rhs.is(.String) {
+                    if !lhs.is(.String) {
                         self.runtime_error("Second operand must be a string.");
                     };
-                    lhs := lhs.to_string();
-                    rhs := rhs.to_string();
+                    lhs := lhs.to(.String);
+                    rhs := rhs.to(.String);
                     new := self.gc.alloc_uninit(u8, lhs.data.len + rhs.data.len);
                     new.slice(0, lhs.data.len).copy_from(lhs.data);
                     new.slice(lhs.data.len, new.len).copy_from(rhs.data);
@@ -252,21 +252,21 @@ Opcodes :: fix_opcodes(@struct {
             };
             DefineGlobal :: fn(self, name: Value) = {
                 value := self.pop();
-                @debug_assert(name.is_obj(.String), "LOX_ICE: DefineGlobal expected string name.");
-                self.globals&.insert(name.to_string(), value, self.gc);
+                @debug_assert(name.is(.String), "LOX_ICE: DefineGlobal expected string name.");
+                self.globals&.insert(name.to(.String), value, self.gc);
             };
             GetGlobal :: fn(self, name: Value) = {
-                @debug_assert(name.is_obj(.String), "LOX_ICE: GetGlobal expected string name.");
+                @debug_assert(name.is(.String), "LOX_ICE: GetGlobal expected string name.");
                 report_error :: fn(self: *Vm, name: Value) Never #noinline = 
-                    self.runtime_error2(@tfmt("Accessed undeclared global variable: %", name.to_string()[].data));
-                value := self.globals&.get(name.to_string()) 
+                    self.runtime_error2(@tfmt("Accessed undeclared global variable: %", name.to(.String)[].data));
+                value := self.globals&.get(name.to(.String)) 
                     || report_error(self, name);
                     
                 self.push(value);
             }
             SetGlobal :: fn(self, name: Value) = {
-                @debug_assert(name.is_obj(.String), "LOX_ICE: SetGlobal expected string name.");
-                slot := self.globals&.get_ptr(name.to_string())
+                @debug_assert(name.is(.String), "LOX_ICE: SetGlobal expected string name.");
+                slot := self.globals&.get_ptr(name.to(.String))
                     || self.runtime_error("Accessed undeclared global variable.");
                 slot[] = self.peek();
             };
@@ -325,7 +325,7 @@ binary_op :: fn(self: *Vm, $op: OverloadSet) void = {
 };
 
 op_closure :: fn(self: *Vm) void = {
-    it := self.new_closure(self.read_constant().to_function());
+    it := self.new_closure(self.read_constant().to(.Function));
     self.push(it.obj&.to_value());
     enumerate it.upvalues { i, slot |
         local := self.read_byte() == 1;
@@ -375,9 +375,9 @@ fn call_value(self: *Vm, callee: Value, arg_count: i64) void = {
         self.runtime_error("tried to call non-function");
     }
     f := @match(callee.to_obj()[].type) {
-        fn Closure() => callee.to_closure();
+        fn Closure() => callee.to(.Closure);
         fn Native() => {
-            callee := ObjNative.to_obj_subtype(callee);
+            callee := callee.to(.Native);
             args := self.stack_top.offset(-arg_count).slice(arg_count);
             result := callee'function(self, args);
             self.stack_top = self.stack_top.offset(-arg_count - 1);
@@ -420,10 +420,9 @@ fn call_value(self: *Vm, callee: Value, arg_count: i64) void = {
 
 #inline fn read_u16(self: *Vm) i64 = {
     ip := self.frames&[self.frames.len - 1].ip&;
-    a: i64 = ip[][].zext();
-    b: i64 = ip[].offset(1)[].zext();
+    a := bit_cast_unchecked(*u8, *u16, ip[])[];  // TODO: is alignment real?
     ip[] = ip[].offset(2);
-    a.bit_or(b.shift_left(8))
+    a.zext()
 }
 
 #inline fn read_constant(self: *Vm) Value = {
@@ -484,7 +483,7 @@ fn trace_inst(self: *Vm) void = {
     ip := frame.ip&;
     out := self.debug&;
     @fmt(out, "       stack:");
-    for(self.stack&.as_ptr(), self.stack_top) {slot|
+    for(self.stack.ptr, self.stack_top) {slot|
         @fmt(out, "[ % ]", slot);
     };
     @fmt(out, "\n      global:"); 
