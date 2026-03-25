@@ -1,4 +1,6 @@
 
+- prospero writeup: add complicated numbers of running the emit_c and wasm on my import_wasm/import_c
+
 soon:
 TODO: use constdata for @static and string literals. 
 TODO: mprotect after applying relocations on linux. 

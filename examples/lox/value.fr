@@ -13,7 +13,17 @@ fn display(self: Value, out: *List(u8)) void = {
         return();
     };
     if self.is_number() {
-        self.to_number().display(out);
+        // TODO: float printing that isn't dumb as rocks
+        f := self.to_number();  
+        if f.is_nan() {
+            @fmt(out, "NaN");
+        } else {
+            extra := (f - f.int().float());
+            @fmt(out, "%", int(f));
+            if extra != 0 {
+                @fmt(out, ".%", int(extra * 1000));
+            };
+        };
         return();
     };
     if self.is_obj() {
@@ -29,6 +39,11 @@ fn display(self: Value, out: *List(u8)) void = {
             fn Native() => {
                 @fmt(out, "<fn <native>>");
             }
+            fn Closure() => {
+                o := self.to_closure()[].function;
+                @fmt(out, "<fn %>", o.name);
+            }
+            fn Upvalue() => @fmt(out, "upvalue");
         };
         return();
     };
@@ -48,6 +63,7 @@ true_value  : Value : (bits = 3.bit_or(qnan));
 #inline fn to_value(self: *Obj) Value = Obj.from_obj_subtype(self);
 #inline fn to_value(self: *ObjString) Value = ObjString.from_obj_subtype(self);
 #inline fn to_value(self: *ObjFunction) Value = ObjFunction.from_obj_subtype(self);
+#inline fn to_value(self: *ObjClosure) Value = ObjClosure.from_obj_subtype(self);
 
 null_object :: sign_bit.bit_or(qnan);
 
@@ -63,8 +79,7 @@ from_obj_subtype :: fn($T: Type, self: *T) Value #generic = {
     self.bits.bit_and(null_object) == null_object
 }
 fn is_obj(self: Value, type: ObjType) bool = {
-    if(!self.is_obj(), => return(false));
-    self.obj_type() == type 
+    self.is_obj() && self.obj_type() == type 
 }
 
 #inline fn to_bool(self: Value) bool = self.eq(true_value);
@@ -80,13 +95,14 @@ to_obj_subtype :: fn($T: Type, self: Value) *T #generic = {
 fn to_obj(self: Value) *Obj #inline  = Obj.to_obj_subtype(self);
 fn to_string(self: Value) *ObjString #inline = ObjString.to_obj_subtype(self);
 fn to_function(self: Value) *ObjFunction #inline = ObjFunction.to_obj_subtype(self);
+fn to_closure(self: Value) *ObjClosure = ObjClosure.to_obj_subtype(self);
 
 fn eq(lhs: Value, rhs: Value) bool = {
     // strings are interned so this is good enough for them too. 
     lhs.bits == rhs.bits // TODO: IEEE NaN
 }
 
-ObjType :: @enum(i64) (String, Function, Native);
+ObjType :: @enum(i64) (String, Function, Native, Closure, Upvalue);
 Obj :: @rec @struct(
     type: ObjType,
     next: *Obj,
@@ -105,13 +121,29 @@ ObjFunction :: @struct {
     arity: i64;
     name: Str;
     chunk: Chunk;
+    upvalue_count: i64;
 };
 
 ObjNative :: @struct {
     TAG :: ObjType.Native;
     obj: Obj;
     function: F;
-    F :: @FnPtr(args: []Value) Value;
+    F :: @FnPtr(vm: *Vm, args: []Value) Value;
+};
+
+ObjClosure :: @struct {
+    TAG :: ObjType.Closure;
+    obj: Obj;
+    function: *ObjFunction #use;
+    upvalues: []*ObjUpvalue;
+};
+
+ObjUpvalue :: @rec @struct {
+    TAG :: ObjType.Upvalue;
+    obj: Obj;
+    location: *Value;  // open: points to a stack slot. closed: points to the `closed` field
+    next: *ObjUpvalue;
+    closed: Value;
 };
 
 fn obj_type(self: Value) ObjType #inline = {
@@ -208,6 +240,13 @@ fn update_hash(obj: *ObjString) void = {
     obj.hash = h&.end().bitcast().abs();
 }
 
+fn new_closure(self: *Vm, function: *ObjFunction) *ObjClosure = {
+    it := self.allocate_obj(ObjClosure);
+    it.function = function;
+    it.upvalues = self.gc.alloc_zeroed(*ObjUpvalue, it.upvalue_count);
+    it
+}
+
 fn free_objects(self: *Vm) void = {
     while => !self.objects.is_null() {
         obj := self.objects;
@@ -231,6 +270,15 @@ fn free_obj(self: *Vm, obj: *Obj) void = {
         fn Native() => {
             obj := ObjNative.to_obj_subtype(obj.to_value());
             self.gc.dealloc_one(ObjNative, obj);
+        }
+        fn Closure() => {  // we don't own .function
+            obj := ObjClosure.to_obj_subtype(obj.to_value());
+            self.gc.dealloc(*ObjUpvalue, obj.upvalues);  // shallow
+            self.gc.dealloc_one(ObjClosure, obj);
+        }
+        fn Upvalue() => {
+            obj := ObjUpvalue.to_obj_subtype(obj.to_value());
+            self.gc.dealloc_one(ObjUpvalue, obj);
         }
     };
 }

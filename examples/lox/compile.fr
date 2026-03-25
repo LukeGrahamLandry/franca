@@ -1,4 +1,4 @@
-Parser :: @struct(
+Parser :: @rec @struct(
     vm: *Vm, // because we want to own strings so need to allocate. 
     scanner: Scanner, 
     current: Token, 
@@ -10,11 +10,14 @@ Parser :: @struct(
     function: *ObjFunction,
     function_type := FunctionType.Script, 
     locals: List(Local),
+    upvalues: List(Upvalue),
+    enclosing: ?*Parser,
 );
 
 FunctionType :: @enum(Function, Script);
 
-Local :: @struct(name: Str, depth: i64);
+Local :: @struct(name: Str, depth: i64, captured := false);
+Upvalue :: @struct(index: i64, local: bool);
 
 Prec      :: @enum(None, Assignment, Or, And, Equality, Comparison, Term, Factor, Unary, Call, Primary);
 ParseFn   :: @FnPtr(self: *Parser, can_assign: bool) void;
@@ -68,6 +71,8 @@ fn compile(vm: *Vm, source: Str) ?*ObjFunction = {
         previous = Token.zeroed(), 
         function = vm.allocate_obj(ObjFunction),
         locals = list(temp()),
+        enclosing = .None,
+        upvalues = list(temp()),
     );
     self.function.chunk = init();
     self.function.name = "<script>";
@@ -80,6 +85,10 @@ fn compile(vm: *Vm, source: Str) ?*ObjFunction = {
         if(self.panic_mode, => self&.syncronize());
     };
     self&.consume(.Eof, "Expect end of expression.");
+    
+    // end the implicit top level function to halt the vm
+    self&.emit(OpCode.Nil);
+    self&.emit(OpCode.Return);
     
     if debug_print_code && !self.had_error {
         self.chunk.disassemble(self.function.name);
@@ -208,9 +217,16 @@ fn statement(self: *Parser, may_declare: bool) void = {
             name := self.previous;
             function := self.vm.allocate_obj(ObjFunction);
             function.name = name.lexeme;
-            self.emit(function.to_value());
+            upvalues := self.start_function_body(function, .Function);
+            
+            function.upvalue_count = upvalues.len;
+            self.emit(OpCode.Closure, self.make_constant(function.to_value()));
+            for upvalues { it |
+                self.emit(int(it.local));
+                self.emit(it.index);
+            };
             self.define_var_from_stack(name);
-            self.start_function_body(function, .Function);
+            
             return();
         }
         @default => {
@@ -232,7 +248,7 @@ fn parse_block(self: *Parser) void = {
     self.consume(.RightBrace, "Expected '}' to close block");
 }
 
-fn start_function_body(self: *Parser, function: *ObjFunction, t: FunctionType) void = {
+fn start_function_body(self: *Parser, function: *ObjFunction, t: FunctionType) []Upvalue = {
     inner: Parser = (
         vm = self.vm,
         scanner = self.scanner,
@@ -240,6 +256,8 @@ fn start_function_body(self: *Parser, function: *ObjFunction, t: FunctionType) v
         previous = self.previous,
         function = function,
         locals = list(temp()),
+        upvalues = list(temp()),
+        enclosing = (Some = self),
     );
     inner.function.chunk = init();
     inner.chunk = inner.function.chunk&;
@@ -254,6 +272,7 @@ fn start_function_body(self: *Parser, function: *ObjFunction, t: FunctionType) v
     self.previous = inner.previous;
     self.current = inner.current;
     self.scanner = inner.scanner;
+    inner.upvalues.items()
 }
 
 fn parse_function_body(self: *Parser) void = {
@@ -320,8 +339,12 @@ fn end_scope(self: *Parser) void = {
     locals := self.locals&;
     cond   :: => !locals.is_empty() && locals[locals.len - 1].depth > self.scope_depth;
     while cond {
+        if locals[locals.len - 1].captured {
+            self.emit(OpCode.CloseUpvalue);
+        } else {
+            self.emit(OpCode.Pop); // TODO: EXTRA: PopN
+        };
         locals.len -= 1;
-        self.emit(OpCode.Pop); // TODO: EXTRA: PopN
     };
 }
 
@@ -487,25 +510,23 @@ fn define_var_from_stack(self: *Parser, name: Token) void = {
 // = fast locals + late bound globals. 
 parse_ident :: fn(self: *Parser, can_assign: bool) void = {
     name := self.previous;
-    if can_assign && self.current.type == .Equal {
+    is_assign := can_assign && self.current.type == .Equal;
+    if is_assign {
         self.advance();
         self.expression();
-        @match(self.find_local_index(name.lexeme)) {
-            fn Some(var) => self.emit(OpCode.SetLocal, var);
-            fn None() => {
-                var := self.ident_const(name);
-                self.emit(OpCode.SetGlobal, var);
-            }
-        };
-    } else {
-        @match(self.find_local_index(name.lexeme)) {
-            fn Some(var) => self.emit(OpCode.GetLocal, var);
-            fn None() => {
-                var := self.ident_const(name);
-                self.emit(OpCode.GetGlobal, var);
-            }
-        };
     };
+   
+    if self.find_local_index(name.lexeme) { var |
+        return self.emit(@if(is_assign, OpCode.SetLocal, OpCode.GetLocal), var);
+    };
+    if self.resolve_upvalue(name.lexeme) { var |
+        if self.upvalues.len > 255 {
+            self.error_at(name, "Too many closure variables in function");
+        };
+        return self.emit(@if(is_assign, OpCode.SetUpvalue, OpCode.GetUpvalue), var);
+    };
+    var := self.ident_const(name);
+    self.emit(@if(is_assign, OpCode.SetGlobal, OpCode.GetGlobal), var);
 };
 
 fn find_local_index(self: *Parser, name: Str) ?i64 = {
@@ -515,6 +536,26 @@ fn find_local_index(self: *Parser, name: Str) ?i64 = {
         };
     };
     .None  // it must be a global
+}
+
+fn resolve_upvalue(child: *Parser, name: Str) ?i64 = {
+    parent := child.enclosing || return(.None);
+    var := parent.find_local_index(name) || {
+        var := parent.resolve_upvalue(name) || return(.None);
+        return(Some = child.add_upvalue(var, false))
+    };
+    parent.locals[var].captured = true;
+    (Some = child.add_upvalue(var, true))
+}
+
+fn add_upvalue(self: *Parser, var: i64, local: bool) i64 = {
+    enumerate self.upvalues& { i, it |
+        if it.index == var && it.local == local {
+            return i;
+        };
+    };
+    self.upvalues&.push(local = local, index = var);
+    self.upvalues.len - 1
 }
 
 fn ident_const(self: *Parser, token: Token) i64 = {

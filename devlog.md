@@ -1,4 +1,9 @@
 
+## (Mar 25)
+
+lox
+- upvalues for ch25
+- lex: allow identifiers with keyword as prefix. oops. i.e. `returnXXX`
 
 ## (Mar 24)
 

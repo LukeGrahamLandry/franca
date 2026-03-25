@@ -1,3 +1,5 @@
+// note: ive been lazy about saving things on the stack to defend from gc, maybe fix that or maybe just check gc at the end of the opcode
+
 debug_trace_execution :: false;
 debug_print_code :: false;
 stack_max :: 256;
@@ -12,10 +14,12 @@ Vm :: @struct(
     globals: Table,
     errors: List(u8),
     frames: List(CallFrame),
+    start_time: f64,
+    open_upvalues: *ObjUpvalue,
 );
 
 CallFrame :: @struct {
-    function: *ObjFunction;
+    closure: *ObjClosure #use;
     ip: *u8;
     first_local: i64;
 };
@@ -26,15 +30,18 @@ fn init_vm() Vm = {
     self := zeroed Vm;
     self.gc = general_allocator();
     self.stack = list(stack_max, general_allocator());  // EXTRA: grow stack
+    // you're fucked if this resizes because of capture_upvalue
+    self.stack.gpa = panicking_allocator;
     self.objects = Obj.ptr_from_int(0); // EVIL
     self.strings = init(); 
     self.globals = init(); 
     self&.reset_stack();
     self.errors = list(self.gc);
     self.frames = list(self.gc);
-    self&.define_native("clock", fn(_) = {
-        timestamp_s().to_value()
+    self&.define_native("clock", fn(vm, _) = {
+        (timestamp_s() - vm.start_time).to_value()
     });
+    self.start_time = timestamp_s();
     self
 }
 
@@ -79,12 +86,13 @@ fn interpret(self: *Vm, function: *ObjFunction, collect_errors: bool, $print: Fn
     self.stack_top = self.stack.maybe_uninit.ptr;
     self.stack&.clear();
     
+    closure := self.new_closure(function);
     self.frames&.push(
-        function = function, ip = 
+        closure = closure, ip = 
         function.chunk.code.index(0), 
         first_local = ptr_diff(self.stack.maybe_uninit.ptr, self.stack_top),
     );
-    self.push(function.to_value());
+    self.push(closure.to_value());
     
     loop {
         result := self.run();
@@ -145,6 +153,7 @@ fn run(self: *Vm) InterpretResult = {
             };
             @case(OpCode.Return) => {
                 value := self.pop();
+                self.close_upvalues(self.stack.index_unchecked(frame.first_local));
                 self.frames&.pop().unwrap();
                 if self.frames.len == 0 {
                     self.last_return = value;
@@ -218,9 +227,6 @@ fn run(self: *Vm) InterpretResult = {
                 self.last_return = value;
                 return(.SuspendPrint);
             };
-            @case(OpCode.Pop) => {
-                _ := self.pop();
-            };
             @case(OpCode.DefineGlobal) => {
                 value := self.pop();
                 name := self.read_constant();
@@ -259,6 +265,22 @@ fn run(self: *Vm) InterpretResult = {
                 idx: i64 = self.read_byte().zext();
                 self.push(self.stack[frame.first_local + idx]);
             };
+            @case(OpCode.SetUpvalue) => {
+                idx: i64 = self.read_byte().zext();
+                frame.upvalues[idx].location[] = self.peek();
+            };
+            @case(OpCode.GetUpvalue) => {
+                idx: i64 = self.read_byte().zext();
+                self.push(frame.upvalues[idx].location[]);
+            };
+            @case(OpCode.Closure) => op_closure(self, frame);
+            @case(OpCode.CloseUpvalue) => {
+                self.close_upvalues(self.stack_top.offset(-1));
+                _ := self.pop();
+            };
+            @case(OpCode.Pop) => {
+                _ := self.pop();
+            };
             @case(OpCode.JumpIfFalse) => {
                 distance := self.read_u16();
                 if self.peek().is_falsy() {
@@ -274,7 +296,7 @@ fn run(self: *Vm) InterpretResult = {
                 ip[] = ip[].offset(distance);
             };
             @default => {
-                println("bad opcode");
+                @println("bad opcode %", @as(u8) instruction);
                 return(.RuntimeError);
             };
         };
@@ -294,17 +316,57 @@ fn run(self: *Vm) InterpretResult = {
     out
 }
 
+fn op_closure(self: *Vm, frame: *CallFrame) void = {
+    it := self.new_closure(self.read_constant().to_function());
+    self.push(it.obj&.to_value());
+    enumerate it.upvalues { i, slot |
+        local := self.read_byte() == 1;
+        idx: i64 = self.read_byte().zext();
+        if local {
+            slot[] = self.capture_upvalue(self.stack.index(frame.first_local + idx));
+        } else {
+            slot[] = frame.closure.upvalues[idx];
+        };
+    };
+};
+
+fn capture_upvalue(self: *Vm, value: *Value) *ObjUpvalue = {
+    ::ptr_utils(ObjUpvalue);
+    // dedup so they share a slot when closed. the list is sorted by position in the stack 
+    link := self.open_upvalues&;
+    while => !link[].is_null() && ptr_diff(link.location, value) > 0 {
+        link = link.next&;
+    };
+    if !link[].is_null() && identical(link.location, value) {
+        return link[];
+    };
+
+    it := self.allocate_obj(ObjUpvalue);
+    it.location = value;
+    link[] = it;
+    it
+}
+
+fn close_upvalues(self: *Vm, last: *Value) void = {
+    open := self.open_upvalues&;
+    while => !open[].is_null() && ptr_diff(open.location, last) >= 0 {
+        open.closed = open.location[];
+        open.location = open.closed&;
+        open[] = open.next;
+    }
+}
+
 fn call_value(self: *Vm, callee: Value, arg_count: i64) bool = {
     if !callee.is_obj() {
         self.runtime_error("tried to call non-function");
         return false;
     }
     f := @match(callee.to_obj()[].type) {
-        fn Function() => callee.to_function();
+        fn Closure() => callee.to_closure();
         fn Native() => {
             callee := ObjNative.to_obj_subtype(callee);
             args := self.stack_top.offset(-arg_count).slice(arg_count);
-            result := callee'function(args);
+            result := callee'function(self, args);
             self.stack_top = self.stack_top.offset(-arg_count - 1);
             self.stack.len -= arg_count + 1;  // [...]
             self.push(result);
@@ -320,7 +382,7 @@ fn call_value(self: *Vm, callee: Value, arg_count: i64) bool = {
         return false;
     }
     s := ptr_diff(self.stack.maybe_uninit.ptr, self.stack_top);
-    self.frames&.push(function = f, ip = f.chunk.code.index(0), first_local = s - arg_count - 1);
+    self.frames&.push(closure = f, ip = f.chunk.code.index(0), first_local = s - arg_count - 1);
     true
 }
 
