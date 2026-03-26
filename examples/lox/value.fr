@@ -47,6 +47,8 @@ fn display(self: Value, out: *List(u8)) void = {
                 @fmt(out, "<fn %>", o.name);
             }
             fn Upvalue() => @fmt(out, "upvalue");
+            fn Class() => @fmt(out, "%", self.to(.Class)[].name.data);
+            fn Instance() => @fmt(out, "% instance", self.to(.Instance)[].class.name.data);
         };
         return();
     };
@@ -115,8 +117,8 @@ fn eq(lhs: Value, rhs: Value) bool = {
     lhs.bits == rhs.bits // TODO: IEEE NaN
 }
 
-ObjType :: @enum(i64) (String, Function, Native, Closure, Upvalue);
-object_types :: @const_slice(ObjString, ObjFunction, ObjNative, ObjClosure, ObjUpvalue);
+ObjType :: @enum(i64) (String, Function, Native, Closure, Upvalue, Class, Instance);
+object_types :: @const_slice(ObjString, ObjFunction, ObjNative, ObjClosure, ObjUpvalue, ObjClass, ObjInstance);
 Obj :: @rec @struct(
     type: ObjType,
     next: *Obj,
@@ -161,6 +163,19 @@ ObjUpvalue :: @rec @struct {
     location: *Value;  // open: points to a stack slot. closed: points to the `closed` field
     next: *ObjUpvalue;
     closed: Value;
+};
+
+ObjClass :: @struct {
+    TAG :: ObjType.Class;
+    obj: Obj;
+    name: *ObjString;
+};
+
+ObjInstance :: @struct {
+    TAG :: ObjType.Instance;
+    obj: Obj;
+    class: *ObjClass;
+    fields: Table;
 };
 
 fn obj_type(self: Value) ObjType #inline = {
@@ -285,28 +300,18 @@ fn free_obj(self: *Vm, obj: *Obj) void = {
     @if(debug_log_gc) @fmt(self.debug&, "% free %\n", fmt_hex(obj), obj.type);
     
     @match(obj.type) {
-        fn String() => {
-            obj := obj.to(.String);
-            self.gc.dealloc(u8, obj.data);
-            self.gc.dealloc_one(ObjString, obj);
-        }
-        fn Function() => {
-            obj := obj.to(.Function);
-            obj.chunk&.drop();
-            self.gc.dealloc_one(ObjFunction, obj);
-        }
-        fn Native() => {
-            obj := obj.to(.Native);
-            self.gc.dealloc_one(ObjNative, obj);
-        }
-        fn Closure() => {  // we don't own .function
-            obj := obj.to(.Closure);
-            self.gc.dealloc(*ObjUpvalue, obj.upvalues);  // shallow
-            self.gc.dealloc_one(ObjClosure, obj);
-        }
-        fn Upvalue() => {
-            obj := obj.to(.Upvalue);
-            self.gc.dealloc_one(ObjUpvalue, obj);
+        fn String() => self.gc.dealloc(u8, obj.to(.String)[].data);
+        fn Function() => obj.to(.Function)[].chunk&.drop();
+        fn Native() => ();
+        fn Closure() => self.gc.dealloc(*ObjUpvalue, obj.to(.Closure)[].upvalues);
+        fn Upvalue() => ();
+        fn Class() => ();
+        fn Instance() => drop(obj.to(.Instance)[].fields&, self.gc);
+    };
+    inline_for object_types { $T |
+        if obj.type == T[].TAG {
+            self.gc.dealloc_one(T[], obj.to(T[].TAG));
+            return();
         }
     };
 }
@@ -392,6 +397,15 @@ fn mark(self: *Vm, obj: *Obj) void = {
             it := obj.to(.Upvalue);
             // location either points at it.closed or vm.stack
             self.mark(it.closed);
+        }
+        fn Class() => {
+            obj := obj.to(.Class);
+            self.mark(obj.name.obj&);
+        }
+        fn Instance() => {
+            obj := obj.to(.Instance);
+            self.mark(obj.class.obj&);
+            self.mark(obj.fields&);
         }
     };
 }

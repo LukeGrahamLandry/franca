@@ -156,7 +156,7 @@ fn run(self: *Vm) void = {
             op :: OpCode.from_name(name[].str()).unwrap();
             i := @as(OpCode) instruction;
             if op == i {
-                const_literal :: @is(op, .Constant, .DefineGlobal, .GetGlobal, .SetGlobal);
+                const_literal :: @is(op, .Constant, .DefineGlobal, .GetGlobal, .SetGlobal, .Class, .GetProperty, .SetProperty);
                 byte_literal :: @is(op, .SetLocal, .GetLocal, .Call, .GetUpvalue, .SetUpvalue);
                 @if(const_literal, 
                     fid(self, self.read_constant()), 
@@ -312,6 +312,26 @@ Opcodes :: fix_opcodes(@struct {
                 ip[] = ip[].offset(distance);
                 self.maybe_collect_garbage();
             };
+            Class :: fn(self, name: Value) = {
+                obj := self.allocate_obj(ObjClass);
+                obj.name = name.to(.String);
+                self.push(obj.obj&.to_value());
+            };
+            GetProperty :: fn(self, name: Value) = {
+                it := self.pop();
+                name := name.to(.String);
+                @if(!it.is(.Instance)) self.runtime_error("only instances have properties");
+                value := it.to(.Instance)[].fields&.get(name)
+                    || self.runtime_error2(@tfmt("undefined property '%'", name.data));
+                self.push(value);
+            };
+            SetProperty :: fn(self, name: Value) = {
+                value := self.pop();
+                it := self.pop();
+                @if(!it.is(.Instance)) self.runtime_error("only instances have properties");
+                it.to(.Instance)[].fields&.insert(name.to(.String), value, self.gc);
+                self.push(value);
+            };
 });
 
 binary_op :: fn(self: *Vm, $op: OverloadSet) void = {
@@ -384,6 +404,14 @@ fn call_value(self: *Vm, callee: Value, arg_count: i64) void = {
             self.push(result);
             return()
         }
+        fn Class() => {
+            callee := callee.to(.Class);
+            obj := self.allocate_obj(ObjInstance);
+            obj.class = callee;
+            self.stack_top = self.stack_top.offset(-arg_count - 1);
+            self.push(obj.obj&.to_value());
+            return()
+        };
         @default => self.runtime_error("tried to call non-function");
     };
     if arg_count != f.arity {

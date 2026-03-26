@@ -57,6 +57,7 @@ rules :: {
     T(.Ident,         parse_ident,     null_rule,  .None);
     T(.And,           null_rule,       parse_and,  .And);
     T(.Or,            null_rule,       parse_or,   .Or);
+    T(.Dot,           null_rule,       parse_dot,  .Call);
     
     T :: fn(t: TokenType, prefix: ParseFn, infix: ParseFn, prec: Prec) => 
         table.set(@as(i64) t, (prefix = prefix, infix = infix, prec = prec));
@@ -213,6 +214,20 @@ fn statement(self: *Parser, may_declare: bool) void = {
             self.end_scope();
             return();
         }
+        fn Class() => {
+            self.advance();
+            self.consume(TokenType.Ident, "expected class name after 'class'");
+            name := self.previous;
+            self.emit(OpCode.Class, self.make_constant(self.vm.copy_string(name.lexeme).to_value()));
+            self.define_var_from_stack(name);
+            
+            self.consume(.LeftBrace, "before class body");
+            while => !self.maybe(.RightBrace) {
+                // TODO
+            };
+            
+            return();
+        }
         fn Fun() => {
             self.advance();
             self.consume(TokenType.Ident, "expected function name after 'fun'");
@@ -335,6 +350,17 @@ parse_or :: fn(self: *Parser, _can_assign: bool) void = {
     self.parse(.Or);
     self.patch_jump(skip_rhs);
 }
+
+parse_dot :: fn(self: *Parser, can_assign: bool) void = {
+    self.consume(TokenType.Ident, "expected property name after '.'");
+    name := self.ident_const(self.previous);
+    if can_assign && self.maybe(.Equal) {
+        self.expression();
+        self.emit(OpCode.SetProperty, name);
+    } else {
+        self.emit(OpCode.GetProperty, name);
+    };
+};
 
 fn end_scope(self: *Parser) void = {
     self.scope_depth -= 1;
