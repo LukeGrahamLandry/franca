@@ -8,13 +8,18 @@ Parser :: @rec @struct(
     chunk := zeroed(*Chunk),
     scope_depth: i64 = 0,
     function: *ObjFunction,
-    function_type := FunctionType.Script, 
+    function_type: FunctionType,
     locals: List(Local),
     upvalues: List(Upvalue),
     enclosing: ?*Parser,
+    class: ?*ClassCtx,
 );
 
-FunctionType :: @enum(Function, Script);
+ClassCtx :: @rec @struct {
+    enclosing: ?*ClassCtx;
+};
+
+FunctionType :: @enum(Function, Script, Method, Initializer);
 
 Local :: @struct(name: Str, depth: i64, captured := false);
 Upvalue :: @struct(index: i64, local: bool);
@@ -58,6 +63,7 @@ rules :: {
     T(.And,           null_rule,       parse_and,  .And);
     T(.Or,            null_rule,       parse_or,   .Or);
     T(.Dot,           null_rule,       parse_dot,  .Call);
+    T(.This,          parse_this,      null_rule,  .Call);
     
     T :: fn(t: TokenType, prefix: ParseFn, infix: ParseFn, prec: Prec) => 
         table.set(@as(i64) t, (prefix = prefix, infix = infix, prec = prec));
@@ -75,6 +81,8 @@ fn compile(vm: *Vm, source: Str) ?*ObjFunction = {
         locals = list(temp()),
         enclosing = .None,
         upvalues = list(temp()),
+        class = .None,
+        function_type = .Script, 
     );
     self.function.chunk = init();
     self.function.name = "<script>";
@@ -89,8 +97,7 @@ fn compile(vm: *Vm, source: Str) ?*ObjFunction = {
     self&.consume(.Eof, "Expect end of expression.");
     
     // end the implicit top level function to halt the vm
-    self&.emit(OpCode.Nil);
-    self&.emit(OpCode.Return);
+    self&.empty_return();
     
     if debug_print_code && !self.had_error {
         self.chunk.disassemble(self.vm, self.function.name);
@@ -104,18 +111,24 @@ fn compile(vm: *Vm, source: Str) ?*ObjFunction = {
 }
 
 fn statement(self: *Parser, may_declare: bool) void = {
-    keyword_expr :: fn(op: OpCode) void => {
-        self.advance();
-        if self.current.type == .Semicolon && op != .Print {
-            self.emit(OpCode.Nil);
-        } else {
-            self.expression();
-        }
-        self.emit(op);
-    };
     @match(self.current.type) {
-        fn Print()  => keyword_expr(.Print);
-        fn Return() => keyword_expr(.Return);
+        fn Print() => {
+            self.advance();
+            self.expression();
+            self.emit(OpCode.Print);
+        }
+        fn Return() => {
+            self.advance();
+            if self.current.type == .Semicolon {
+                self.empty_return();
+            } else {
+                if self.function_type == .Initializer {
+                    self.error_at(self.current, "init() cannot return a value.");
+                };
+                self.expression();
+            }
+            self.emit(OpCode.Return);
+        }
         fn Var() => {
             if !may_declare {
                 self.error_at(self.current, "declaration not allowed here.");
@@ -218,32 +231,28 @@ fn statement(self: *Parser, may_declare: bool) void = {
             self.advance();
             self.consume(TokenType.Ident, "expected class name after 'class'");
             name := self.previous;
-            self.emit(OpCode.Class, self.make_constant(self.vm.copy_string(name.lexeme).to_value()));
+            self.emit(OpCode.Class, self.ident_const(name));
             self.define_var_from_stack(name);
             
-            self.consume(.LeftBrace, "before class body");
-            while => !self.maybe(.RightBrace) {
-                // TODO
-            };
+            ctx: ClassCtx = (enclosing = self.class);
+            self.class = (Some = ctx&);
             
+            self.ref_variable(name, false);  // push the class for op.Method
+            self.consume(.LeftBrace, "before class body");
+            while => !self.maybe(.RightBrace) && self.current.type != .Eof {
+                self.method();
+            };
+            self.emit(OpCode.Pop);  // class
+            
+            self.class = ctx.enclosing;
             return();
         }
         fn Fun() => {
             self.advance();
             self.consume(TokenType.Ident, "expected function name after 'fun'");
             name := self.previous;
-            function := self.vm.allocate_obj(ObjFunction);
-            function.name = name.lexeme;
-            upvalues := self.start_function_body(function, .Function);
-            
-            function.upvalue_count = upvalues.len;
-            self.emit(OpCode.Closure, self.make_constant(function.to_value()));
-            for upvalues { it |
-                self.emit(int(it.local));
-                self.emit(it.index);
-            };
+            self.function(.Function);
             self.define_var_from_stack(name);
-            
             return();
         }
         @default => {
@@ -252,6 +261,28 @@ fn statement(self: *Parser, may_declare: bool) void = {
         };
     };
     self.consume(.Semicolon, "Expected ';' after statement");
+}
+
+fn function(self: *Parser, type: FunctionType) void = {
+    name := self.previous;
+    function := self.vm.allocate_obj(ObjFunction);
+    function.name = name.lexeme;
+    upvalues := self.start_function_body(function, type);
+    
+    function.upvalue_count = upvalues.len;
+    self.emit(OpCode.Closure, self.make_constant(function.to_value()));
+    for upvalues { it |
+        self.emit(int(it.local));
+        self.emit(it.index);
+    };
+}
+
+fn method(self: *Parser) void = {
+    self.consume(TokenType.Ident, "expected method name");
+    name := self.ident_const(self.previous);
+    is_init := self.previous.lexeme == "init";
+    self.function(@if(is_init, .Initializer, .Method));
+    self.emit(OpCode.Method, name);
 }
 
 fn parse_block(self: *Parser) void = {
@@ -275,10 +306,14 @@ fn start_function_body(self: *Parser, function: *ObjFunction, t: FunctionType) [
         locals = list(temp()),
         upvalues = list(temp()),
         enclosing = (Some = self),
+        class = self.class,
+        function_type = t,
     );
     inner.function.chunk = init();
     inner.chunk = inner.function.chunk&;
-    inner.locals&.push(name = "", depth = 0);
+    // :ThisSlotZero
+    this_name := @if(@is(t, .Method, .Initializer), "this", "");
+    inner.locals&.push(name = this_name, depth = 0);
     
     inner&.parse_function_body();
     
@@ -310,7 +345,15 @@ fn parse_function_body(self: *Parser) void = {
     self.consume(.RightParen, "after arguments");
     self.consume(.LeftBrace, "before body");
     self.parse_block();
-    self.emit(OpCode.Nil);
+    self.empty_return();
+}
+
+fn empty_return(self: *Parser) void = {
+    if self.function_type == .Initializer {
+        self.emit(OpCode.GetLocal, 0);   // :ThisSlotZero
+    } else {
+        self.emit(OpCode.Nil);
+    };
     self.emit(OpCode.Return);
 }
 
@@ -358,8 +401,22 @@ parse_dot :: fn(self: *Parser, can_assign: bool) void = {
         self.expression();
         self.emit(OpCode.SetProperty, name);
     } else {
-        self.emit(OpCode.GetProperty, name);
+        if self.maybe(.LeftParen) {
+            arg_count := self.arg_list();
+            self.consume(.RightParen, "Expect ')' after call arguments.");
+            self.emit(OpCode.Invoke, name);
+            self.emit(arg_count);
+        } else {
+            self.emit(OpCode.GetProperty, name);
+        }
     };
+};
+
+parse_this :: fn(self: *Parser, _can_assign: bool) void = {
+    if self.class.is_none() {
+        self.error_at(self.previous, "'this' outside class.");
+    };
+    self.parse_ident(false);
 };
 
 fn end_scope(self: *Parser) void = {
@@ -543,7 +600,10 @@ parse_ident :: fn(self: *Parser, can_assign: bool) void = {
         self.advance();
         self.expression();
     };
-   
+    self.ref_variable(name, is_assign);
+}
+
+fn ref_variable(self: *Parser, name: Token, is_assign: bool) void = {
     if self.find_local_index(name.lexeme) { var |
         return self.emit(@if(is_assign, OpCode.SetLocal, OpCode.GetLocal), var);
     };
@@ -654,16 +714,8 @@ fn syncronize(self: *Parser) void = {
     self.panic_mode = false;
     while => self.current.type != .Eof {
         if(self.previous.type == .Semicolon, => return());
-        @match(self.current.type) {
-            fn Fun()    => return();
-            fn Class()  => return();
-            fn Var()    => return();
-            fn Print()  => return();
-            fn While()  => return();
-            fn Return() => return();
-            fn For()    => return();
-            fn If()     => return();
-            @default    => ();
+        if @is(self.current.type, .Fun, .Class, .Var, .Print, .While, .Return, .For, .If) {
+            return();
         };
         self.advance();
     };

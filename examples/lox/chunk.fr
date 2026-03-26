@@ -40,6 +40,8 @@ OpCode :: @enum(u8) (
     Class,
     GetProperty,
     SetProperty,
+    Method,
+    Invoke,  // GetProperty+Call (avoids allocating an ObjBoundMethod)
 );
 
 fn init() Chunk = (code = list(general_allocator()), constants = list(general_allocator()), lines = list(general_allocator()));
@@ -73,6 +75,13 @@ fn disassemble(self: *Chunk, vm: *import("@/examples/lox/vm.fr")'Vm, name: Str) 
     vm.flush_debug();
 }
 
+fn has_value_literal(op: OpCode) bool #fold =  // followed by constant pool index
+    @is(op, .SetGlobal, .GetGlobal, .DefineGlobal, .Constant, .Class, .GetProperty, .SetProperty, .Method);
+
+fn has_index_literal(op: OpCode) bool #fold =
+    @is(op, .SetLocal, .GetLocal, .Call, .GetUpvalue, .SetUpvalue);
+    
+    
 fn dis_inst(self: *Chunk, out: *List(u8), i: i64) i64 = {
     line := self.lines[i]; // TODO: print line info and leave blank if it didn't change from the last time. 
     changed := i > 0 && self[].lines.get(i - 1) != line;
@@ -84,8 +93,9 @@ fn dis_inst(self: *Chunk, out: *List(u8), i: i64) i64 = {
     e := self.decode_one(i); op := e.op;
     @fmt(out, "  - %: % ", i, op);
     @if(e.literal != -1) @fmt(out, "% ", e.literal);
+    @if(e.literal2 != -1) @fmt(out, "% ", e.literal2);
     
-    if @is(op, .SetGlobal, .GetGlobal, .DefineGlobal, .Constant, .Class, .GetProperty, .SetProperty) {
+    if has_value_literal(op) || e.op == .Invoke {
         @fmt(out, "        % ", e.value);
     };
     
@@ -118,6 +128,7 @@ Encoded :: @struct {
     literal := -1;
     value := nil_value;
     upvalues: []UpvalueBytes = empty();
+    literal2 := -1;
     size := 0;
 };
 UpvalueBytes :: @struct(local: bool, index: u8);
@@ -129,14 +140,14 @@ fn decode_one(self: *Chunk, i: i64) Encoded = {
         e.size = 3;
     };
     
-    if @is(op, .SetGlobal, .GetGlobal, .DefineGlobal, .Constant, .Class, .GetProperty, .SetProperty) {
+    if has_value_literal(op) {
         e.literal = self.code[i + 1].zext();
         e.value = self.constants.get(e.literal);
         e.size = 2;
         return e;
     };
     
-    if @is(op, .SetLocal, .GetLocal, .Call, .GetUpvalue, .SetUpvalue) {
+    if has_index_literal(op) {
         e.literal = self.code[i + 1].zext();
         e.size = 2;
         return e;
@@ -156,6 +167,12 @@ fn decode_one(self: *Chunk, i: i64) Encoded = {
         fn Jump()        => offset16(1);
         fn JumpIfFalse() => offset16(1);
         fn Loop()        => offset16(-1);
+        fn Invoke() => {
+            e.literal = self.code[i + 1].zext();
+            e.value = self.constants.get(e.literal);
+            e.literal2 = self.code[i + 2].zext();
+            e.size = 3;
+        }
         @default => { e.size = 1; };
     };
     e

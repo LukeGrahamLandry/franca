@@ -1,7 +1,11 @@
 
-## (Mar 25)
+## (Mar 26) lox
 
-lox
+- ch27, ch28: classes
+- aot: function doesn't have a chunk so mark_roots all the constants seperately
+
+## (Mar 25) lox
+
 - ch25: upvalues, ch26: gc
 - lex: allow identifiers with keyword as prefix. oops. i.e. `returnXXX`
 - take_string: stop doing an extra allocation on intern hit

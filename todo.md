@@ -1454,6 +1454,8 @@ and not need to serialize the arguments to a string.
 - give data symbols readable names now that they show up in symbol table
 - error instead of hang on recursive inline
   and recursive constant declaration
+- locations for macros is always annoying and just .with_loc(loc) isn't always enough because of how expressions get flattened in sema. 
+  ie. ` @{ @enum(i64) @[varients] }` for `E :: @enum(a, b); E.c;` gives `declared here: lib/macros.fr:481:13` which is useless. 
 
 ## language decisions
 

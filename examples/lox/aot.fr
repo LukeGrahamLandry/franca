@@ -1,3 +1,10 @@
+// This compiles a lox program to bytecode and then to franca source code. 
+// It's a very naive mapping. Most opcodes are just a call to their vm implementation 
+// (all values are still on the vm's stack, not lifted to franca variables). 
+// Currently I don't preserve the source cfg. Jumps are represented as `loop(=> @switch(ip) { ... });`. 
+// However `ip` only needs to be reified for jump instructions, flat code avoids the interpreter's 
+// dispatch/decoding overhead. The extra bonus is that the Opcodes'FOO functions are #inline so 
+// it gives the backend some opportunity to remove junk across instructions.  
 
 main :: fn() void = {
     #use("@/lib/args.fr");
@@ -18,17 +25,11 @@ main :: fn() void = {
             translate(ctx&);
             @fmt(out, """
                 Lox :: import("@/examples/lox/lox_main.fr").Lox;
-                declare :: fn(vm: *Lox.Vm, name: Str, arity: i64, upvalue_count: i64, f: @FnPtr(vm: *Lox.Vm) void) *Lox.Obj = {
-                    it := vm.Lox'allocate_obj(Lox.ObjFunction);
-                    it.arity = arity; it.name = name; it.upvalue_count = upvalue_count;
-                    it.aot = bit_cast_unchecked(@type f, rawptr, f);
-                    it.obj&
-                };
-                
                 main :: fn() void = {
                     vm := @ref zeroed(Lox'Vm);
                     init(vm);
                     o := vm.gc.alloc_zeroed(*Lox.Obj, %);
+                    vm.aot_roots = o;
                     init_lox_constants(vm, o);
                     script := o[%].to(.Function);
                     vm.interpret(script, false);
@@ -46,28 +47,35 @@ Ctx :: @struct {
 
 fn translate(ctx: *Ctx) void = {
     prelude :: """init_lox_constants :: fn(vm: *Lox.Vm, o: []*Lox.Obj) void = {
-    S :: fn(s) => vm.copy_string(s)[].obj&;
-    N :: fn(s) => vm.globals&.get(S(s).to(.String)).unwrap().to_obj();::?Lox.Value;
-    O :: @static_mut(zeroed([]*Lox.Obj)); O[] = o;  // TODO: not thread safe, etc.
+    n :: %;
+    @assert_eq(o.len, n);
+    o := bit_cast_unchecked(::**Lox.Obj, ::*Array(*Lox.Obj, n), o.ptr);  // help elide bounds checks
+    S :: fn(s: Str) *Lox.Obj => vm.copy_string(s)[].obj&;
+    N :: fn(s: Str) *Lox.Obj => vm.globals&.get(S(s).to(.String)).unwrap().to_obj();::?Lox.Value;
+    F :: fn(name: Str, arity: i64, up: i64, f: Lox.OpFn) *Lox.Obj => Lox'declare(vm, name, arity, up, f);
+    O :: @static_mut(zeroed(*Array(*Lox.Obj, n))); O[] = o;  // TODO: not thread safe, etc.
     OP :: Lox'Opcodes;
     """;
-    @fmt(ctx.out, "%\n", prelude);
     o := ctx.vm.objects;
     while => !o.is_null() {
         n := ctx.constants.raw.len_including_tombstones;
         ctx.constants&.insert(Lox.Obj.int_from_ptr(o), n);
         o = o.next;
     };
+    @fmt(ctx.out, prelude, ctx.constants.raw.len_including_tombstones);
+    @fmt(ctx.out, "\n");
     o := ctx.vm.objects;
     while => !o.is_null() {
         n := ctx.get_runtime_index(o);
         @match(o.type) {
             fn Function() => {
                 it := o.to(.Function);
-                @fmt(ctx.out, "\to[%] = vm.declare(\"%\", %, %, fn(vm) = {", 
-                    n, it.name, it.arity, it.upvalue_count);
+                name := @if(it.name == "<script>", "script", it.name);
+                @fmt(ctx.out, "\to[%] = F(\"%\", %, %, %_L%);\n\t", 
+                    n, it.name, it.arity, it.upvalue_count, name, n);
+                @fmt(ctx.out, "%_L% :: fn(vm: *Lox.Vm) void = {", name, n);
                 ctx.translate_fn(it);
-                @fmt(ctx.out, "\n\t});\n");
+                @fmt(ctx.out, "\n\t};\n");
             }
             fn String() => {
                 s := o.to(.String);
@@ -87,6 +95,7 @@ fn translate(ctx: *Ctx) void = {
 
 fn translate_fn(ctx: *Ctx, it: *Lox.ObjFunction) void = {
     cfg := get_cfg_targets(it.chunk&);
+    @fmt(ctx.out, "\n\t\tO := O[];");
     @fmt(ctx.out, "\n\t\tip := 0;\n\t\tloop {| @switch(ip) {\n\t\t@case(0) => {");
     i := 0; 
     self := it.chunk&;
@@ -101,7 +110,7 @@ fn translate_fn(ctx: *Ctx, it: *Lox.ObjFunction) void = {
         
         @fmt(ctx.out, "\n\t\t");
         op := e.op;
-        if @is(op, .Constant, .SetGlobal, .GetGlobal, .DefineGlobal) {
+        if has_value_literal(op) {
             val := e.value;
             @fmt(ctx.out, "OP'%(vm, ", op);
             if val.is_obj() {
@@ -114,7 +123,7 @@ fn translate_fn(ctx: *Ctx, it: *Lox.ObjFunction) void = {
             continue();
         };
         
-        if @is(op, .SetLocal, .GetLocal, .Call, .GetUpvalue, .SetUpvalue) {
+        if has_index_literal(op) {
             @fmt(ctx.out, "OP'%(vm, %);", op, e.literal);
             i += e.size;
             continue();
@@ -147,6 +156,10 @@ fn translate_fn(ctx: *Ctx, it: *Lox.ObjFunction) void = {
             fn Jump()        => offset16(1);
             fn JumpIfFalse() => offset16(1);
             fn Loop()        => offset16(-1);
+            fn Invoke() => {
+                n := ctx.get_runtime_index(e.value.to_obj());
+                @fmt(ctx.out, "OP'%(vm, O[%].to_value(), %);", op, n, e.literal2);
+            }
             @default => {
                 @fmt(ctx.out, "OP'%(vm);", op);
                 if op == .Return {

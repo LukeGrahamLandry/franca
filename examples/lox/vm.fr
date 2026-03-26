@@ -18,6 +18,7 @@ Vm :: @struct(
     globals: Table,
     errors: List(u8),
     frames: List(CallFrame),
+    init_string: *ObjString,
     start_time: f64,
     // location still points to the stack. 
     // values captured by OpCode.Closure but not yet OpCode.CloseUpvalue. 
@@ -30,6 +31,7 @@ Vm :: @struct(
     print_callback: @FnPtr(vm: rawptr, user_data: rawptr, value: Value) void,
     except: ?*JumpBuf,
     xxxxx: rawptr,
+    aot_roots: []*Obj,
 );
 JumpBuf :: import("@/lib/sys/jump.fr").JumpBuf;
 
@@ -59,6 +61,7 @@ fn init(self: *Vm) *Vm = {
     self.reset_stack();
     self.errors = list(self.gc);
     self.frames = list(self.gc);
+    self.init_string = self.copy_string("init");
     self.define_native("clock", fn(vm, _) = {
         (timestamp_s() - vm.start_time).to_value()
     });
@@ -139,7 +142,7 @@ fn run(self: *Vm) void = {
     end := self.frames.len - 1;
     self.frame = self.frames[self.frames.len - 1]&;
     if !self.frame.function.aot.is_null() {
-        f := bit_cast_unchecked(rawptr, @FnPtr(vm: *Vm) void, self.frame.function.aot);
+        f := bit_cast_unchecked(rawptr, OpFn, self.frame.function.aot);
         return f(self);
     };
     loop {
@@ -156,12 +159,11 @@ fn run(self: *Vm) void = {
             op :: OpCode.from_name(name[].str()).unwrap();
             i := @as(OpCode) instruction;
             if op == i {
-                const_literal :: @is(op, .Constant, .DefineGlobal, .GetGlobal, .SetGlobal, .Class, .GetProperty, .SetProperty);
-                byte_literal :: @is(op, .SetLocal, .GetLocal, .Call, .GetUpvalue, .SetUpvalue);
-                @if(const_literal, 
+                @if(has_value_literal(op), 
                     fid(self, self.read_constant()), 
-                    @if(byte_literal, fid(self, self.read_byte().zext()), 
-                        fid(self)));
+                    @if(has_index_literal(op), fid(self, self.read_byte().zext()), 
+                        @if(op == .Invoke, fid(self, self.read_constant(), self.read_byte().zext()),
+                            fid(self))));
                 @if(op == .Return) @if(self.frames.len == end) return();
                 continue();
             };
@@ -318,21 +320,55 @@ Opcodes :: fix_opcodes(@struct {
                 self.push(obj.obj&.to_value());
             };
             GetProperty :: fn(self, name: Value) = {
-                it := self.pop();
-                name := name.to(.String);
-                @if(!it.is(.Instance)) self.runtime_error("only instances have properties");
-                value := it.to(.Instance)[].fields&.get(name)
-                    || self.runtime_error2(@tfmt("undefined property '%'", name.data));
+                it, n := self.check_property(name);
+                value := it.fields&.get(n)
+                    || self.bind_method(it, n)
+                    || self.undefined_property(n);
                 self.push(value);
             };
             SetProperty :: fn(self, name: Value) = {
                 value := self.pop();
-                it := self.pop();
-                @if(!it.is(.Instance)) self.runtime_error("only instances have properties");
-                it.to(.Instance)[].fields&.insert(name.to(.String), value, self.gc);
+                it, n := self.check_property(name);
+                it.fields&.insert(n, value, self.gc);
                 self.push(value);
             };
+            Method :: fn(self, name: Value) = {
+                closure := self.pop();
+                class := self.peek().to(.Class);
+                class.methods&.insert(name.to(.String), closure, self.gc);
+            };
+            Invoke :: fn(self, name: Value, arg_count: i64) = {
+                name := name.to(.String);
+                receiver := self.peek(arg_count);  // :ThisSlotZero
+                @if(!receiver.is(.Instance)) self.runtime_error("only instances have properties");
+                it := receiver.to(.Instance);
+                
+                if it.fields&.get(name) { callee |
+                    self.stack_top.offset(-arg_count - 1)[] = callee;  // :ThisSlotZero
+                    return self.call_value(callee, arg_count)
+                };
+                method := it.class.methods&.get(name) 
+                    || self.undefined_property(name);
+                self.call_value(method, arg_count);
+            }
 });
+
+fn undefined_property(self: *Vm, name: *ObjString) Never #noinline =
+    self.runtime_error2(@tfmt("undefined property '%'", name.data));
+
+check_property :: fn(self: *Vm, name: Value) Ty(*ObjInstance, *ObjString) #inline = {
+    it := self.pop();
+    @if(!it.is(.Instance)) self.runtime_error("only instances have properties");
+    (it.to(.Instance), name.to(.String))
+}
+
+fn bind_method(self: *Vm, it: *ObjInstance, name: *ObjString) ?Value = {
+    method := it.class.methods&.get(name) || return(.None);
+    bound := self.allocate_obj(ObjBoundMethod);
+    bound.receiver = it.obj&.to_value();
+    bound.method = method.to(.Closure);
+    (Some = bound.obj&.to_value())
+}
 
 binary_op :: fn(self: *Vm, $op: OverloadSet) void = {
     rhs := self.pop();
@@ -396,6 +432,11 @@ fn call_value(self: *Vm, callee: Value, arg_count: i64) void = {
     }
     f := @match(callee.to_obj()[].type) {
         fn Closure() => callee.to(.Closure);
+        fn BoundMethod() => {
+            it := callee.to(.BoundMethod)[];
+            self.stack_top.offset(-arg_count - 1)[] = it.receiver;  // :ThisSlotZero
+            it.method
+        }
         fn Native() => {
             callee := callee.to(.Native);
             args := self.stack_top.offset(-arg_count).slice(arg_count);
@@ -405,12 +446,14 @@ fn call_value(self: *Vm, callee: Value, arg_count: i64) void = {
             return()
         }
         fn Class() => {
-            callee := callee.to(.Class);
             obj := self.allocate_obj(ObjInstance);
-            obj.class = callee;
-            self.stack_top = self.stack_top.offset(-arg_count - 1);
+            obj.class = callee.to(.Class);
             self.push(obj.obj&.to_value());
-            return()
+            
+            callee = obj.class.methods&.get(self.init_string)
+                || return(@if(arg_count != 0, self.runtime_error("missing init()"), ()));
+            self.stack_top.offset(-arg_count - 1)[] = self.pop();;  // :ThisSlotZero
+            callee.to(.Closure)
         };
         @default => self.runtime_error("tried to call non-function");
     };
@@ -426,7 +469,7 @@ fn call_value(self: *Vm, callee: Value, arg_count: i64) void = {
     self.frame = self.frames[self.frames.len - 1]&;
     
     if !self.frame.function.aot.is_null() {
-        f := bit_cast_unchecked(rawptr, @FnPtr(vm: *Vm) void, self.frame.function.aot);
+        f := bit_cast_unchecked(rawptr, OpFn, self.frame.function.aot);
         return f(self);
     }; 
     // :FUCKED :FUCKED :FUCKED
@@ -434,7 +477,7 @@ fn call_value(self: *Vm, callee: Value, arg_count: i64) void = {
     //       so a bunch of trivial shit doesn't get inlined and it's like 3x slower because you're spilling all your registers for raw() in @is or whatever
     // @if(caller_aot) self.run();
     if caller_aot {
-        f := bit_cast_unchecked(rawptr, @FnPtr(vm: *Vm) void, self.xxxxx);
+        f := bit_cast_unchecked(rawptr, OpFn, self.xxxxx);
         return f(self);
     };
 }

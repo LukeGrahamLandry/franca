@@ -49,6 +49,7 @@ fn display(self: Value, out: *List(u8)) void = {
             fn Upvalue() => @fmt(out, "upvalue");
             fn Class() => @fmt(out, "%", self.to(.Class)[].name.data);
             fn Instance() => @fmt(out, "% instance", self.to(.Instance)[].class.name.data);
+            fn BoundMethod() => @fmt(out, "<fn %>", self.to(.BoundMethod)[].method.function.name);
         };
         return();
     };
@@ -117,8 +118,8 @@ fn eq(lhs: Value, rhs: Value) bool = {
     lhs.bits == rhs.bits // TODO: IEEE NaN
 }
 
-ObjType :: @enum(i64) (String, Function, Native, Closure, Upvalue, Class, Instance);
-object_types :: @const_slice(ObjString, ObjFunction, ObjNative, ObjClosure, ObjUpvalue, ObjClass, ObjInstance);
+ObjType :: @enum(i64) (String, Function, Native, Closure, Upvalue, Class, Instance, BoundMethod);
+object_types :: @const_slice(ObjString, ObjFunction, ObjNative, ObjClosure, ObjUpvalue, ObjClass, ObjInstance, ObjBoundMethod);
 Obj :: @rec @struct(
     type: ObjType,
     next: *Obj,
@@ -141,6 +142,7 @@ ObjFunction :: @struct {
     upvalue_count: i64;
     aot: rawptr; // @FnPtr(vm: *Vm) void;  // nullable. will only be filled if using aot.fr
 };
+OpFn :: @FnPtr(vm: *Vm) void;
 
 ObjNative :: @struct {
     TAG :: ObjType.Native;
@@ -169,6 +171,7 @@ ObjClass :: @struct {
     TAG :: ObjType.Class;
     obj: Obj;
     name: *ObjString;
+    methods: Table;
 };
 
 ObjInstance :: @struct {
@@ -176,6 +179,13 @@ ObjInstance :: @struct {
     obj: Obj;
     class: *ObjClass;
     fields: Table;
+};
+
+ObjBoundMethod :: @struct {
+    TAG :: ObjType.BoundMethod;
+    obj: Obj;
+    receiver: Value;
+    method: *ObjClosure;
 };
 
 fn obj_type(self: Value) ObjType #inline = {
@@ -284,6 +294,7 @@ fn free_objects(self: *Vm) void = {
         self.globals&.clear();
         self.frames&.clear();
         self.reset_stack();
+        self.init_string = zeroed(*ObjString);
         self.collect_garbage();
         @if(!self.objects.is_null()) @fmt(self.debug&, "--- free_objects: lost ---\n");
     };
@@ -305,8 +316,9 @@ fn free_obj(self: *Vm, obj: *Obj) void = {
         fn Native() => ();
         fn Closure() => self.gc.dealloc(*ObjUpvalue, obj.to(.Closure)[].upvalues);
         fn Upvalue() => ();
-        fn Class() => ();
+        fn Class() => drop(obj.to(.Class)[].methods&, self.gc);
         fn Instance() => drop(obj.to(.Instance)[].fields&, self.gc);
+        fn BoundMethod() => ();
     };
     inline_for object_types { $T |
         if obj.type == T[].TAG {
@@ -355,8 +367,13 @@ fn mark_roots(self: *Vm) void = {
         self.mark(it.obj&);
         it = it.next;
     };
+    // TODO: isn't this pointless because call_value leaves it on the stack in slot 0 (or via instance->class->methods->closures)?
     for self.frames& { it |
         self.mark(it.closure.obj&);
+    };
+    self.mark(self.init_string.obj&);
+    for self.aot_roots { it |
+        self.mark(it);
     };
     // i don't call collect_garbage while in the compiler
 }
@@ -401,11 +418,17 @@ fn mark(self: *Vm, obj: *Obj) void = {
         fn Class() => {
             obj := obj.to(.Class);
             self.mark(obj.name.obj&);
+            self.mark(obj.methods&);
         }
         fn Instance() => {
             obj := obj.to(.Instance);
             self.mark(obj.class.obj&);
             self.mark(obj.fields&);
+        }
+        fn BoundMethod() => {
+            obj := obj.to(.BoundMethod);
+            self.mark(obj.receiver);
+            self.mark(obj.method.obj&);
         }
     };
 }
@@ -454,6 +477,14 @@ CountingAllocator :: @struct {
     
     fn borrow(self: *CountingAllocator) Alloc = 
         (data = CountingAllocator.raw_from_ptr(self), vptr = impl);
+};
+
+// called by aot.fr's generated code
+declare :: fn(vm: *Vm, name: Str, arity: i64, upvalue_count: i64, f: OpFn) *Obj = {
+    it := vm.allocate_obj(ObjFunction);
+    it.arity = arity; it.name = name; it.upvalue_count = upvalue_count;
+    it.aot = bit_cast_unchecked(@type f, rawptr, f);
+    it.obj&
 };
 
 #use("@/examples/lox/chunk.fr");
