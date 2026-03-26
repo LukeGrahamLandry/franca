@@ -6,37 +6,51 @@
 // dispatch/decoding overhead. The extra bonus is that the Opcodes'FOO functions are #inline so 
 // it gives the backend some opportunity to remove junk across instructions.  
 
-main :: fn() void = {
+// TODO: put stuff in function.chunk.constants and pass it when calling function.aot 
+//       so multiple aot modules can coexist in one vm. 
+
+driver :: fn(_: *ImportVTable) void = impl(import("@/lib/sys/process.fr")'get_executable_path(temp()));
+main :: fn() void = impl("franca");
+
+impl :: fn(franca_path: Str) void = {
     #use("@/lib/args.fr");
     args := parse_args(@struct(i := "", o := ""));
-    @assert(args.i != "" && args.o != "", "USAGE: [lox/aot.fr] -i filename.lox -o a.fr");
-            #use("@/lib/sys/fs.fr");
-            src := read_entire_file_or_crash(temp(), args.i);
-            vm := zeroed Lox'Vm;
-            init(vm&);
-            script := vm&.compile(src) 
-                || panic(vm.errors.items());
-            out := @ref u8.list(temp());
-            ctx: Ctx = (
-                vm = vm&, 
-                out = out,
-                constants = init(temp()),
-            );
-            translate(ctx&);
-            @fmt(out, """
-                Lox :: import("@/examples/lox/lox_main.fr").Lox;
-                main :: fn() void = {
-                    vm := @ref zeroed(Lox'Vm);
-                    init(vm);
-                    o := vm.gc.alloc_zeroed(*Lox.Obj, %);
-                    vm.aot_roots = o;
-                    init_lox_constants(vm, o);
-                    script := o[%].to(.Function);
-                    vm.interpret(script, false);
-                }
-            """, ctx.constants.raw.len_including_tombstones, ctx&.get_runtime_index(script.obj&));
-            write_entire_file_or_crash(args.o, out.items());
-            vm&.drop();
+    @assert(args.i != "", "USAGE: [lox/aot.fr] -i filename.lox [-o a.fr]");
+    jit := args.o == "";
+    if jit {
+        // TODO: this sucks because it leaks compiler cache files until the end of time
+        args.o = anon_temp_path("target/a.fr");
+    };
+    #use("@/lib/sys/fs.fr");
+    src := read_entire_file_or_crash(temp(), args.i);
+    fr := translate_src(src);
+    write_entire_file_or_crash(args.o, fr);
+    if jit { 
+        #use("@/lib/sys/subprocess.fr");
+        ok := run_cmd_blocking(franca_path, @slice(args.o));
+        Syscall'remove(args.o.as_cstr());
+        @assert(ok, "runtime error");
+    };
+}
+
+translate_src :: fn(src: Str) Str = {
+    vm := zeroed Lox'Vm;
+    init(vm&);
+    script := vm&.compile(src) 
+        || panic(vm.errors.items());
+    out := @ref u8.list(temp());
+    ctx: Ctx = (
+        vm = vm&, 
+        out = out,
+        constants = init(temp()),
+    );
+    @fmt(out, prelude);
+    @fmt(out, "\n");
+    translate(ctx&);
+    @fmt(out, "const_count :: %;\n", ctx.constants.raw.len_including_tombstones);
+    @fmt(out, "script_index :: %;\n", ctx&.get_runtime_index(script.obj&));
+    vm&.drop();
+    out.items()
 }
 
 Ctx :: @struct {
@@ -47,14 +61,12 @@ Ctx :: @struct {
 
 fn translate(ctx: *Ctx) void = {
     prelude :: """init_lox_constants :: fn(vm: *Lox.Vm, o: []*Lox.Obj) void = {
-    n :: %;
-    @assert_eq(o.len, n);
-    o := bit_cast_unchecked(::**Lox.Obj, ::*Array(*Lox.Obj, n), o.ptr);  // help elide bounds checks
+    @assert_eq(o.len, const_count);
+    o := bit_cast_unchecked(::**Lox.Obj, ::*Array(*Lox.Obj, const_count), o.ptr);  // help elide bounds checks
     S :: fn(s: Str) *Lox.Obj => vm.copy_string(s)[].obj&;
     N :: fn(s: Str) *Lox.Obj => vm.globals&.get(S(s).to(.String)).unwrap().to_obj();::?Lox.Value;
     F :: fn(name: Str, arity: i64, up: i64, f: Lox.OpFn) *Lox.Obj => Lox'declare(vm, name, arity, up, f);
-    O :: @static_mut(zeroed(*Array(*Lox.Obj, n))); O[] = o;  // TODO: not thread safe, etc.
-    OP :: Lox'Opcodes;
+    O[] = o;  // TODO: not thread safe, etc.
     """;
     o := ctx.vm.objects;
     while => !o.is_null() {
@@ -62,8 +74,7 @@ fn translate(ctx: *Ctx) void = {
         ctx.constants&.insert(Lox.Obj.int_from_ptr(o), n);
         o = o.next;
     };
-    @fmt(ctx.out, prelude, ctx.constants.raw.len_including_tombstones);
-    @fmt(ctx.out, "\n");
+    @fmt(ctx.out, "%\n", prelude);
     o := ctx.vm.objects;
     while => !o.is_null() {
         n := ctx.get_runtime_index(o);
@@ -71,41 +82,56 @@ fn translate(ctx: *Ctx) void = {
             fn Function() => {
                 it := o.to(.Function);
                 name := @if(it.name == "<script>", "script", it.name);
-                @fmt(ctx.out, "\to[%] = F(\"%\", %, %, %_L%);\n\t", 
+                @fmt(ctx.out, "\to[%] = F(\"%\", %, %, %_L%);\n", 
                     n, it.name, it.arity, it.upvalue_count, name, n);
-                @fmt(ctx.out, "%_L% :: fn(vm: *Lox.Vm) void = {", name, n);
-                ctx.translate_fn(it);
-                @fmt(ctx.out, "\n\t};\n");
             }
-            fn String() => {
-                s := o.to(.String);
-                // lox strings don't have escape sequences so this isn't actually a problem
-                @fmt(ctx.out, "\to[%] = S(\"%\");\n", n, s.data);
-            }
-            fn Native() => {
-                name := o.to(.Native)[].name;
-                @fmt(ctx.out, "\to[%] = N(\"%\");\n", n, name);
-            }
+            // lox strings don't have escape sequences so this isn't actually a problem
+            fn String() => @fmt(ctx.out, "\to[%] = S(\"%\");\n", n, o.to(.String)[].data);
+            fn Native() => @fmt(ctx.out, "\to[%] = N(\"%\");\n", n, o.to(.Native)[].name);
             @default => @panic("% is a runtime only type % %", o.type, n, o.to_value());
         };
         o = o.next;
     };
-    @fmt(ctx.out, "}\n");
+    @fmt(ctx.out, "};\n");
+    o := ctx.vm.objects;
+    while => !o.is_null() {
+        @if(o.type == .Function) ctx.translate_fn(o.to(.Function));
+        o = o.next;
+    };
 }
 
 fn translate_fn(ctx: *Ctx, it: *Lox.ObjFunction) void = {
+    n := ctx.get_runtime_index(it.obj&);
     cfg := get_cfg_targets(it.chunk&);
-    @fmt(ctx.out, "\n\t\tO := O[];");
-    @fmt(ctx.out, "\n\t\tip := 0;\n\t\tloop {| @switch(ip) {\n\t\t@case(0) => {");
+    have_jumps := cfg.len_including_tombstones != 0;
+    name := @if(it.name == "<script>", "script", it.name);
+    @fmt(ctx.out, "%_L% :: fn(vm: *Lox.Vm) void = {", name, n);
+    @fmt(ctx.out, "\n\tO := O[];");
+    @if(have_jumps) @fmt(ctx.out, " ip := 0; loop {| @switch(ip)\n\t{  @case(0) => {");
     i := 0; 
     self := it.chunk&;
+    prev_line := self.lines[0] - 1;
+    last_was_jump := false;
     while => i < self.code.len {
         continue :: local_return;
         
         e := self.decode_one(i);
         is_jump_dest := cfg&.get(i).is_some();
         if is_jump_dest {
-            @fmt(ctx.out, "\n\t\t}; @case(%) => {", i);
+            @if(!last_was_jump) @fmt(ctx.out, "\n\t\tip = %;", i);  // fallthrough
+            @fmt(ctx.out, "\n\t}; @case(%) => {", i);
+        };
+        last_was_jump = false;
+        
+        if prev_line != self.lines[i] {
+            @fmt(ctx.out, "\n\t// %", self.lines[i]);
+            prev_line = self.lines[i];
+        };
+        if Lox.debug_trace_execution {
+            @fmt(ctx.out, "\n\t\tvm.aot_trace(\"\"\"");
+            self.dis_inst(ctx.out, i);
+            ctx.out.len -= int(ctx.out.items().ends_with("\n"));
+            @fmt(ctx.out, "\"\"\");");
         };
         
         @fmt(ctx.out, "\n\t\t");
@@ -115,9 +141,9 @@ fn translate_fn(ctx: *Ctx, it: *Lox.ObjFunction) void = {
             @fmt(ctx.out, "OP'%(vm, ", op);
             if val.is_obj() {
                 n := ctx.get_runtime_index(val.to_obj());
-                @fmt(ctx.out, "O[%].to_value());", n);
+                @fmt(ctx.out, "O[%].to_value()); // %", n, val);
             } else {
-                @fmt(ctx.out, "(bits = %));", val.bits);
+                @fmt(ctx.out, "(bits = %)); // %", val.bits, val);
             };
             i += e.size;
             continue();
@@ -133,6 +159,10 @@ fn translate_fn(ctx: *Ctx, it: *Lox.ObjFunction) void = {
             distance := e.literal;
             dest := 3 + i + distance * direction;
             
+            last_was_jump = true;
+            if op == .Loop {
+                @fmt(ctx.out, "vm.maybe_collect_garbage();\n\t\t");
+            };
             if op == .JumpIfFalse {
                 @fmt(ctx.out, "ip = @if(vm.peek().Lox'is_falsy(), %, %);", dest, i + 3);
             } else {
@@ -169,8 +199,8 @@ fn translate_fn(ctx: *Ctx, it: *Lox.ObjFunction) void = {
         };
         i += e.size;
     };
-    
-    @fmt(ctx.out, "\n}; @default => unreachable(); };};\n");
+    @if(have_jumps) @fmt(ctx.out, "\n\t}; @default => unreachable();};};");
+    @fmt(ctx.out, "\n};\n");
 }
 
 fn get_cfg_targets(self: *Lox.Chunk) RawHashMap(i64, void) = {
@@ -197,3 +227,22 @@ fn get_runtime_index(ctx: *Ctx, o: *Lox.Obj) i64 = {
 }
 
 Lox :: import("@/examples/lox/lox_main.fr").Lox;
+
+prelude :: """
+Lox :: import("@/examples/lox/lox_main.fr").Lox;
+main :: fn() void = {
+    vm := @ref zeroed(Lox'Vm);
+    init(vm);
+    o := vm.gc.alloc_zeroed(*Lox.Obj, const_count);
+    vm.aot_roots = o;
+    init_lox_constants(vm, o);
+    script := o[script_index].to(.Function);
+    vm.interpret(script, false);
+    vm.aot_roots = empty();
+    vm.gc.dealloc(*Lox.Obj, o);
+    drop(vm);
+}
+
+O :: @static_mut(zeroed(*Array(*Lox.Obj, const_count)));
+OP :: Lox'Opcodes;
+""";

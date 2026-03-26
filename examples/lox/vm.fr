@@ -54,7 +54,7 @@ fn init(self: *Vm) *Vm = {
         self.debug = list(a);
     }
     self.stack = self.gc.alloc_zeroed(Value, stack_max);
-    // EXTRA: grow stack but it's hard because of capture_upvalue
+    // TODO: EXTRA: grow stack but it's hard because of capture_upvalue
     self.objects = Obj.ptr_from_int(0); // EVIL
     self.strings = init(); 
     self.globals = init(); 
@@ -452,7 +452,8 @@ fn call_value(self: *Vm, callee: Value, arg_count: i64) void = {
             
             callee = obj.class.methods&.get(self.init_string)
                 || return(@if(arg_count != 0, self.runtime_error("missing init()"), ()));
-            self.stack_top.offset(-arg_count - 1)[] = self.pop();;  // :ThisSlotZero
+            this := self.pop();
+            self.stack_top.offset(-arg_count - 1)[] = this;  // :ThisSlotZero
             callee.to(.Closure)
         };
         @default => self.runtime_error("tried to call non-function");
@@ -535,7 +536,8 @@ fn runtime_error2(self: *Vm, msg: Str) Never = {
         chunk := frame.function.chunk&;
         p := chunk.code&.as_ptr();
         i := p.ptr_diff(frame.ip);
-        line := chunk.lines[i];
+        // aot doesn't give debug info because it doesn't track ip
+        line := @if(chunk.lines.len != 0, chunk.lines[i], -1);  
         @fmt(self.errors&, "\n[line %] in %", line, frame.function.name);
     };
     except := self.except 
@@ -548,25 +550,34 @@ fn flush_debug(self: *Vm) void = {
     self.debug&.clear();
 }
 
-fn trace_inst(self: *Vm) void = {
-    @if(!debug_trace_execution) return();
-    frame := self.frame;
-    ip := frame.ip&;
-    out := self.debug&;
+fn show_vm_state(self: *Vm, out: *List(u8)) void = {
     @fmt(out, "       stack:");
     for(self.stack.ptr, self.stack_top) {slot|
         @fmt(out, "[ % ]", slot);
     };
+    @fmt(out, "\n");
     @fmt(out, "\n      global:"); 
     each self.globals& { k, v |
         @fmt(out, "[ % = % ]", k.data, v);
     };
+}
 
+fn aot_trace(self: *Vm, inst: Str) void = {
+    @if(!debug_trace_execution) return();
+    out := self.debug&;
+    self.show_vm_state(out);
+    @fmt(out, "\n%\n", inst); 
+    self.flush_debug();
+}
+
+fn trace_inst(self: *Vm) void = {
+    @if(!debug_trace_execution) return();
+    out := self.debug&;
+    self.show_vm_state(out);
     @fmt(out, "\n"); 
-    p := frame.function.chunk.code&.as_ptr();
-    i := p.ptr_diff(ip[]);
-    frame.function.chunk&.dis_inst(out, i);
-    
+    p := self.frame.function.chunk.code&.as_ptr();
+    i := p.ptr_diff(self.frame.ip);
+    self.frame.function.chunk&.dis_inst(out, i);
     self.flush_debug();
 }
 
