@@ -1,4 +1,5 @@
 
+- make @is #fold somehow
 - autotest lox/aot.fr
 - backend: cancel redundant or+and (ie. to_obj(to_value(foo)) in lox)
 ```

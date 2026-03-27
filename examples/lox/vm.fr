@@ -162,7 +162,7 @@ fn run(self: *Vm) void = {
                 @if(has_value_literal(op), 
                     fid(self, self.read_constant()), 
                     @if(has_index_literal(op), fid(self, self.read_byte().zext()), 
-                        @if(op == .Invoke, fid(self, self.read_constant(), self.read_byte().zext()),
+                        @if(@run @is(op, .Invoke, .InvokeSuper), fid(self, self.read_constant(), self.read_byte().zext()),
                             fid(self))));
                 @if(op == .Return) @if(self.frames.len == end) return();
                 continue();
@@ -172,6 +172,7 @@ fn run(self: *Vm) void = {
     };
 }
 
+// see comment on maybe_collect_garbage (i'm lazy with the stack because don't run gc inside opcodes)
 Opcodes :: fix_opcodes(@struct {
             Constant :: fn(self, constant: Value) = {
                 self.push(constant);
@@ -314,7 +315,7 @@ Opcodes :: fix_opcodes(@struct {
                 ip[] = ip[].offset(distance);
                 self.maybe_collect_garbage();
             };
-            Class :: fn(self, name: Value) = {
+            Class :: fn(self, name: Value) #noinline = {
                 obj := self.allocate_obj(ObjClass);
                 obj.name = name.to(.String);
                 self.push(obj.obj&.to_value());
@@ -332,7 +333,7 @@ Opcodes :: fix_opcodes(@struct {
                 it.fields&.insert(n, value, self.gc);
                 self.push(value);
             };
-            Method :: fn(self, name: Value) = {
+            Method :: fn(self, name: Value) #noinline = {
                 closure := self.pop();
                 class := self.peek().to(.Class);
                 class.methods&.insert(name.to(.String), closure, self.gc);
@@ -347,14 +348,28 @@ Opcodes :: fix_opcodes(@struct {
                     self.stack_top.offset(-arg_count - 1)[] = callee;  // :ThisSlotZero
                     return self.call_value(callee, arg_count)
                 };
-                method := it.class.methods&.get(name) 
-                    || self.undefined_property(name);
-                self.call_value(method, arg_count);
+                self.invoke(it.class, name, arg_count);
+            }
+            Inherit :: fn(self) #noinline = {
+                subclass := self.pop().to(.Class);
+                superclass := self.peek();
+                @if(!superclass.is(.Class)) self.runtime_error("can only inherit from class");
+                each superclass.to(.Class)[].methods& { k, v |
+                    subclass.methods&.insert(k, v[], self.gc);
+                };
+            }
+            GetSuper :: fn(self, name: Value) = {
+                super := self.pop().to(.Class);
+                this := self.pop();
+                bound := self.bind_method(super, name.to(.String), this)
+                    || self.undefined_property(name.to(.String));
+                self.push(bound);
+            }
+            InvokeSuper :: fn(self, name: Value, arg_count: i64) = {
+                super := self.pop().to(.Class);
+                self.invoke(super, name.to(.String), arg_count);
             }
 });
-
-fn undefined_property(self: *Vm, name: *ObjString) Never #noinline =
-    self.runtime_error2(@tfmt("undefined property '%'", name.data));
 
 check_property :: fn(self: *Vm, name: Value) Ty(*ObjInstance, *ObjString) #inline = {
     it := self.pop();
@@ -362,10 +377,20 @@ check_property :: fn(self: *Vm, name: Value) Ty(*ObjInstance, *ObjString) #inlin
     (it.to(.Instance), name.to(.String))
 }
 
+fn invoke(self: *Vm, class: *ObjClass, name: *ObjString, arg_count: i64) void = {
+    method := class.methods&.get(name) 
+        || self.undefined_property(name);
+    self.call_value(method, arg_count);
+}
+
 fn bind_method(self: *Vm, it: *ObjInstance, name: *ObjString) ?Value = {
-    method := it.class.methods&.get(name) || return(.None);
+    self.bind_method(it.class, name, it.obj&.to_value())
+}
+
+fn bind_method(self: *Vm, class: *ObjClass, name: *ObjString, receiver: Value) ?Value #inline = {
+    method := class.methods&.get(name) || return(.None);
     bound := self.allocate_obj(ObjBoundMethod);
-    bound.receiver = it.obj&.to_value();
+    bound.receiver = receiver;
     bound.method = method.to(.Closure);
     (Some = bound.obj&.to_value())
 }
@@ -527,6 +552,9 @@ fn reset_stack(self: *Vm) void = {
     self.stack_top = self.stack.ptr;
 }
 
+fn undefined_property(self: *Vm, name: *ObjString) Never #noinline =
+    self.runtime_error2(@tfmt("undefined property '%'", name.data));
+
 fn runtime_error(self: *Vm, $msg: Str) Never #noinline =
     self.runtime_error2(msg);
 
@@ -590,7 +618,7 @@ fix_opcodes :: fn(t: Type) Type = {
         fid := FuncId.get_constant(S, name).unwrap();
         func := get_function_ast(fid, false, false, false, false);
         func.arg.bindings[0].ty = (Finished = *Vm);
-        func.set_flag(.Inline);
+        @if(!func.get_flag(.NoInline)) func.set_flag(.Inline);
     }
     t
 }

@@ -17,6 +17,7 @@ Parser :: @rec @struct(
 
 ClassCtx :: @rec @struct {
     enclosing: ?*ClassCtx;
+    has_super: bool;
 };
 
 FunctionType :: @enum(Function, Script, Method, Initializer);
@@ -64,6 +65,7 @@ rules :: {
     T(.Or,            null_rule,       parse_or,   .Or);
     T(.Dot,           null_rule,       parse_dot,  .Call);
     T(.This,          parse_this,      null_rule,  .Call);
+    T(.Super,         parse_super,     null_rule,  .None);
     
     T :: fn(t: TokenType, prefix: ParseFn, infix: ParseFn, prec: Prec) => 
         table.set(@as(i64) t, (prefix = prefix, infix = infix, prec = prec));
@@ -229,13 +231,30 @@ fn statement(self: *Parser, may_declare: bool) void = {
         }
         fn Class() => {
             self.advance();
+            @if(!may_declare) self.error("declaration not allowed here.");
             self.consume(TokenType.Ident, "expected class name after 'class'");
             name := self.previous;
             self.emit(OpCode.Class, self.ident_const(name));
             self.define_var_from_stack(name);
             
-            ctx: ClassCtx = (enclosing = self.class);
+            ctx: ClassCtx = (
+                enclosing = self.class, 
+                has_super = self.maybe(.Less),
+            );
             self.class = (Some = ctx&);
+            
+            if ctx.has_super {
+                self.consume(TokenType.Ident, "expected class name after '<'");
+                if name.lexeme == self.previous.lexeme {
+                    self.error("can't inherit from itself");
+                };
+                self.parse_ident(false);         // push super
+                self.ref_variable(name, false);  // push sub
+                self.emit(OpCode.Inherit);       // pop sub
+                self.scope_depth += 1;
+                self.define_var_from_stack(self.synthetic("super"));
+                ctx.has_super = true;
+            };
             
             self.ref_variable(name, false);  // push the class for op.Method
             self.consume(.LeftBrace, "before class body");
@@ -244,11 +263,13 @@ fn statement(self: *Parser, may_declare: bool) void = {
             };
             self.emit(OpCode.Pop);  // class
             
+            @if(ctx.has_super) self.end_scope();
             self.class = ctx.enclosing;
             return();
         }
         fn Fun() => {
             self.advance();
+            @if(!may_declare) self.error("declaration not allowed here.");
             self.consume(TokenType.Ident, "expected function name after 'fun'");
             name := self.previous;
             self.function(.Function);
@@ -414,10 +435,34 @@ parse_dot :: fn(self: *Parser, can_assign: bool) void = {
 
 parse_this :: fn(self: *Parser, _can_assign: bool) void = {
     if self.class.is_none() {
-        self.error_at(self.previous, "'this' outside class.");
+        self.error("'this' outside class.");
     };
     self.parse_ident(false);
 };
+
+parse_super :: fn(self: *Parser, _can_assign: bool) void = {
+    if self.class.is_none() || !self.class.Some.has_super {
+        self.error("invalid 'super'.");
+    };
+    self.ref_variable(self.synthetic("this"), false);  // push this instance
+    @if(!self.maybe(.Dot)) self.error("expect '.' after 'super'");
+    self.consume(TokenType.Ident, "expected method name after 'super.'");
+    name := self.ident_const(self.previous);
+    
+    if self.maybe(.LeftParen) {
+        arg_count := self.arg_list();
+        self.consume(.RightParen, "Expect ')' after call arguments.");
+        self.ref_variable(self.synthetic("super"), false);
+        self.emit(OpCode.InvokeSuper, name);
+        self.emit(arg_count);
+    } else {
+        self.ref_variable(self.synthetic("super"), false);
+        self.emit(OpCode.GetSuper, name);
+    };
+};
+
+fn synthetic(self: *Parser, name: Str) Token =
+    (type = .Ident, lexeme = name, line = self.scanner.line);
 
 fn end_scope(self: *Parser) void = {
     self.scope_depth -= 1;

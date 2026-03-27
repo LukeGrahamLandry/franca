@@ -42,6 +42,9 @@ OpCode :: @enum(u8) (
     SetProperty,
     Method,
     Invoke,  // GetProperty+Call (avoids allocating an ObjBoundMethod)
+    Inherit,
+    GetSuper,
+    InvokeSuper,
 );
 
 fn init() Chunk = (code = list(general_allocator()), constants = list(general_allocator()), lines = list(general_allocator()));
@@ -76,7 +79,7 @@ fn disassemble(self: *Chunk, vm: *import("@/examples/lox/vm.fr")'Vm, name: Str) 
 }
 
 fn has_value_literal(op: OpCode) bool #fold =  // followed by constant pool index
-    @is(op, .SetGlobal, .GetGlobal, .DefineGlobal, .Constant, .Class, .GetProperty, .SetProperty, .Method);
+    @is(op, .SetGlobal, .GetGlobal, .DefineGlobal, .Constant, .Class, .GetProperty, .SetProperty, .Method, .GetSuper);
 
 fn has_index_literal(op: OpCode) bool #fold =
     @is(op, .SetLocal, .GetLocal, .Call, .GetUpvalue, .SetUpvalue);
@@ -95,7 +98,7 @@ fn dis_inst(self: *Chunk, out: *List(u8), i: i64) i64 = {
     @if(e.literal != -1) @fmt(out, "% ", e.literal);
     @if(e.literal2 != -1) @fmt(out, "% ", e.literal2);
     
-    if has_value_literal(op) || e.op == .Invoke {
+    if has_value_literal(op) || @is(e.op, .Invoke, .InvokeSuper) {
         @fmt(out, "        % ", e.value);
     };
     
@@ -153,6 +156,14 @@ fn decode_one(self: *Chunk, i: i64) Encoded = {
         return e;
     };
     
+    if @is(op, .Invoke, .InvokeSuper) {
+        e.literal = self.code[i + 1].zext();
+        e.value = self.constants.get(e.literal);
+        e.literal2 = self.code[i + 2].zext();
+        e.size = 3;
+        return e;
+    };
+    
     @match(op) {
         fn Closure() => {
             e.literal = self.code[i + 1].zext();
@@ -167,12 +178,6 @@ fn decode_one(self: *Chunk, i: i64) Encoded = {
         fn Jump()        => offset16(1);
         fn JumpIfFalse() => offset16(1);
         fn Loop()        => offset16(-1);
-        fn Invoke() => {
-            e.literal = self.code[i + 1].zext();
-            e.value = self.constants.get(e.literal);
-            e.literal2 = self.code[i + 2].zext();
-            e.size = 3;
-        }
         @default => { e.size = 1; };
     };
     e

@@ -1,8 +1,20 @@
 
+## (Mar 27) lox
+
+- ch29: super
+- this was a nice reminder that i've actually made progress. 
+  when i first tried to follow the book in my language (like before i was even self hosted)
+  i was always getting stuck on compiler limitations, but this time everything 
+  just worked like mine was a real langauge. idk, that's a pretty cool feeling. 
+
 ## (Mar 26) lox
 
 - ch27, ch28: classes
 - aot: function doesn't have a chunk so mark_roots all the constants seperately
+- aot: i wasn't setting ip when falling out of a block that didn't end in a jump. 
+  dumb mistake, trivial after adding debug_trace_execution so can diff against vm. 
+- why can't i do benchmark/string_equality.lox? oh, need to reuse constants for GetGlobal. 
+- im reminded that the upvalues chapter is really fun and the classes chapters are kinda boring. 
 
 ## (Mar 25) lox
 
