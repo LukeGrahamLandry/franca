@@ -1,3 +1,5 @@
+ConstEncoding :: @if(false, u8, u16);
+
 // TODO: use RawList
 Chunk  :: @struct(
     code: List(u8),
@@ -143,10 +145,11 @@ fn decode_one(self: *Chunk, i: i64) Encoded = {
         e.size = 3;
     };
     
+    C :: size_of(ConstEncoding);
     if has_value_literal(op) {
-        e.literal = self.code[i + 1].zext();
+        e.literal = bit_cast_unchecked(*u8, *ConstEncoding, self.code.index(i + 1))[].int();
         e.value = self.constants.get(e.literal);
-        e.size = 2;
+        e.size = 1 + C;
         return e;
     };
     
@@ -157,23 +160,21 @@ fn decode_one(self: *Chunk, i: i64) Encoded = {
     };
     
     if @is(op, .Invoke, .InvokeSuper) {
-        e.literal = self.code[i + 1].zext();
+        e.literal = bit_cast_unchecked(*u8, *ConstEncoding, self.code.index(i + 1))[].int();
         e.value = self.constants.get(e.literal);
-        e.literal2 = self.code[i + 2].zext();
-        e.size = 3;
+        e.literal2 = self.code[i + 1 + C].zext();
+        e.size = 2 + C;
         return e;
     };
     
     @match(op) {
         fn Closure() => {
-            e.literal = self.code[i + 1].zext();
+            e.literal = bit_cast_unchecked(*u8, *ConstEncoding, self.code.index(i + 1))[].int();
             e.value = self.constants.get(e.literal);
-            val_i := self.code[i + 1];
-            val := self.constants.get(val_i.zext());
-            f := val.to(.Function);
-            i += 2;
+            f := e.value.to(.Function);
+            i += 1 + C;
             e.upvalues = bit_cast_unchecked(*u8, *UpvalueBytes, self.code.index(i)).slice(f.upvalue_count);
-            e.size = 2 + f.upvalue_count*2;
+            e.size = 1 + C + f.upvalue_count * size_of(UpvalueBytes);
         };
         fn Jump()        => offset16(1);
         fn JumpIfFalse() => offset16(1);

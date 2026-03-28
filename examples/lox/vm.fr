@@ -3,7 +3,7 @@ debug_trace_execution :: false;
 debug_print_code :: false;
 debug_stress_gc :: false;
 debug_log_gc :: false;
-stack_max :: 256;
+stack_max :: 128*256;
 gc_heap_grow_factor :: 2;
 gc_heap_base_size :: 1024 * 1024;
 
@@ -46,7 +46,7 @@ fn init(self: *Vm) *Vm = {
     self.except = .None;
     self.xxxxx = ::@as(@Fn(vm: *Vm) void) run;
     a := general_allocator();
-    self.print_callback = fn(_0, _1, value) = @println("%", value);
+    self.print_callback = fn(_0, _1, value) = @print("%\n", value);
     self.gc_storage.parent = a;
     self.gc_storage.bytes_next_gc = gc_heap_base_size;
     self.gc = self.gc_storage&.borrow();
@@ -56,18 +56,49 @@ fn init(self: *Vm) *Vm = {
     self.stack = self.gc.alloc_zeroed(Value, stack_max);
     // TODO: EXTRA: grow stack but it's hard because of capture_upvalue
     self.objects = Obj.ptr_from_int(0); // EVIL
-    self.strings = init(); 
-    self.globals = init(); 
     self.reset_stack();
     self.errors = list(self.gc);
-    self.frames = list(self.gc);
+    self.frames = list(128, self.gc);
     self.init_string = self.copy_string("init");
-    self.define_native("clock", fn(vm, _) = {
-        (timestamp_s() - vm.start_time).to_value()
-    });
+    inline_for get_constants(Natives) { $name |
+        fid :: FuncId.get_constant(Natives, name[]).unwrap();
+        self.define_native(@run name[].str(), fid);
+    };
     self.start_time = timestamp_s();
     self
 }
+
+Natives :: Type.scope_of(@struct {
+    clock :: fn(vm: *Vm, _: []Value) Value = 
+        (timestamp_s() - vm.start_time).to_value();
+        
+    getc :: fn(vm: *Vm, args: []Value) Value = {
+        @if(args.len != 0) vm.runtime_error("arity");
+        c := getchar_UNBUFFERED();  // TODO: let caller provide this like they do print?
+        c.intcast().float().to_value()
+    }
+    chr :: fn(vm: *Vm, args: []Value) Value = {
+        @if(args.len != 1) vm.runtime_error("arity");
+        @if(!args[0].is_number()) vm.runtime_error("type");
+        c := args[0].to_number().int();
+        @if(c < 0 || c > 255) vm.runtime_error("range");
+        c: u8 = c.trunc();
+        vm.copy_string(c&.slice(1)).to_value()
+    }
+    exit :: fn(vm: *Vm, args: []Value) Value = {
+        @if(args.len != 1) vm.runtime_error("arity");
+        @if(!args[0].is_number()) vm.runtime_error("type");
+        status := args[0].to_number().int();
+        @if(status < 0 || status > 255) vm.runtime_error("range");
+        Syscall'exit(status.intcast());
+    }
+    print_error :: fn(vm: *Vm, args: []Value) Value = {
+        @if(args.len != 1) vm.runtime_error("arity");
+        @if(!args[0].is(.String)) vm.runtime_error("type");
+        eprint(args[0].to(.String)[].data);
+        nil_value
+    }
+});
 
 fn define_native(self: *Vm, name: Str, callee: ObjNative.F) void = {
     name := self.copy_string(name);
@@ -185,8 +216,9 @@ Opcodes :: fix_opcodes(@struct {
                 self.maybe_collect_garbage();
                 value := self.pop();
                 self.close_upvalues(self.stack.index_unchecked(frame.first_local));
-                self.frames&.pop().unwrap();
+                self.frames.len -= 1;
                 if self.frames.len == 0 {
+                    self.frame = zeroed(*CallFrame);
                     self.last_return = value;
                     return();
                 }
@@ -269,9 +301,8 @@ Opcodes :: fix_opcodes(@struct {
             }
             SetGlobal :: fn(self, name: Value) = {
                 @debug_assert(name.is(.String), "LOX_ICE: SetGlobal expected string name.");
-                slot := self.globals&.get_ptr(name.to(.String))
-                    || self.runtime_error("Accessed undeclared global variable.");
-                slot[] = self.peek();
+                new := self.globals&.insert(name.to(.String), self.peek(), self.gc);
+                @if(new) self.runtime_error("Accessed undeclared global variable.");
             };
             SetLocal :: fn(self, idx: i64) = {
                 frame := self.frame;
@@ -355,7 +386,7 @@ Opcodes :: fix_opcodes(@struct {
                 superclass := self.peek();
                 @if(!superclass.is(.Class)) self.runtime_error("can only inherit from class");
                 each superclass.to(.Class)[].methods& { k, v |
-                    subclass.methods&.insert(k, v[], self.gc);
+                    subclass.methods&.insert(k, v, self.gc);
                 };
             }
             GetSuper :: fn(self, name: Value) = {
@@ -428,7 +459,7 @@ fn capture_upvalue(self: *Vm, value: *Value) *ObjUpvalue = {
     ::ptr_utils(ObjUpvalue);
     // dedup so they share a slot when closed even if referenced by multiple closures at the same nesting level. 
     link := self.open_upvalues&;
-    while => !link[].is_null() && ptr_diff(link.location, value) > 0 {
+    while => !link[].is_null() && ptr_diff(link.location, value) < 0 {
         link = link.next&;
     };
     if !link[].is_null() && identical(link.location, value) {
@@ -437,6 +468,7 @@ fn capture_upvalue(self: *Vm, value: *Value) *ObjUpvalue = {
 
     it := self.allocate_obj(ObjUpvalue);
     it.location = value;
+    it.next = link[];
     link[] = it;
     it
 }
@@ -444,7 +476,7 @@ fn capture_upvalue(self: *Vm, value: *Value) *ObjUpvalue = {
 fn close_upvalues(self: *Vm, last: *Value) void = {
     open := self.open_upvalues&;
     ::ptr_utils(@type open[][]);
-    while => !open[].is_null() && ptr_diff(open.location, last) >= 0 {
+    while => !open[].is_null() && ptr_diff(last, open.location) >= 0 {
         open.closed = open.location[];
         open.location = open.closed&;
         open[] = open.next;
@@ -509,24 +541,23 @@ fn call_value(self: *Vm, callee: Value, arg_count: i64) void = {
 }
 
 #inline fn read_byte(self: *Vm) u8 = {
-    ip := self.frames&[self.frames.len - 1].ip&;
+    ip := self.frame.ip&;
     b := ip[][];
     ip[] = ip[].offset(1);
     b
 }
 
 #inline fn read_u16(self: *Vm) i64 = {
-    ip := self.frames&[self.frames.len - 1].ip&;
+    ip := self.frame.ip&;
     a := bit_cast_unchecked(*u8, *u16, ip[])[];  // TODO: is alignment real?
     ip[] = ip[].offset(2);
     a.zext()
 }
 
 #inline fn read_constant(self: *Vm) Value = {
-    // TODO: you can't put the type annotation that does the cast on the var or the call because then it changes the overload resolution. 
-    index := self.read_byte();
+    index := @if(ConstEncoding == u8, @as(i64) self.read_byte().zext(), self.read_u16());
     chunk := self.frame.function.chunk&;
-    chunk.constants&.get(@as(i64) index.zext())
+    chunk.constants&[index]
 }
 
 fn push(self: *Vm, value: Value) void = {
@@ -583,10 +614,12 @@ fn show_vm_state(self: *Vm, out: *List(u8)) void = {
     for(self.stack.ptr, self.stack_top) {slot|
         @fmt(out, "[ % ]", slot);
     };
+    if false {
     @fmt(out, "\n");
     @fmt(out, "\n      global:"); 
     each self.globals& { k, v |
         @fmt(out, "[ % = % ]", k.data, v);
+    };
     };
 }
 

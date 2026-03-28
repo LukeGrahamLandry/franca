@@ -6,6 +6,23 @@
   when i first tried to follow the book in my language (like before i was even self hosted)
   i was always getting stuck on compiler limitations, but this time everything 
   just worked like mine was a real langauge. idk, that's a pretty cool feeling. 
+- use hashmap like the book's instead of my generic one. 
+  - (unsafe) bench/zoo(100000000) samples: vm:8560 -> vm:6100, vmO2:4215, aot:3090, aotO2: 1870. 
+    clox for reference: import_c:7320, clangO2:2840
+  - missed a `self.frames[_]` for read_byte/u16: vm:5800, vmO2:3190
+- want to run [lox.lox](https://github.com/benhoyt/loxlox/blob/64c0e2fc9621983a79da379a1bae2f4c3b5cece6/lox.lox) 
+  - need 16 bit constant indices. there's no way it's worth a branch for variable width decoding. 
+    could do something convoluted to split the top level script into multiple functions 
+    but the slightly longer encoding doesn't make a speed difference for the zoo so whatever. 
+  - more natives: getc,chr,exit,print_error 
+  - mistakes
+    - allow identifier starting with "_"
+    - missing a pop for if without else
+    - wrong upvalue order and missing `it.next = link[];`
+    - aot: if ip=0 is a jump target i was closing it immediately and reopening 
+      and @switch doesn't detect duplicates (unlike @match) so was discarding the 
+      real body and infinite looping in While::execute. 
+  - lox.lox < sum.lox: vm:1275, aot:655
 
 ## (Mar 26) lox
 

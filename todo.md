@@ -1,4 +1,6 @@
 
+- @switch needs to compile error on duplicate values 
+  (Expr.Switch from @match already does but @switch is just in user code)
 - make @is #fold somehow
 - autotest lox/aot.fr
 - backend: cancel redundant or+and (ie. to_obj(to_value(foo)) in lox)

@@ -151,17 +151,15 @@ fn statement(self: *Parser, may_declare: bool) void = {
             self.emit(OpCode.Pop);  // then
             self.statement(false);  // then
             
+            // the jump from if start has to skip this landing pad. 
+            skip_else := self.emit_jump(.Jump);  // then
+            self.patch_jump(skip_then);
+            self.emit(OpCode.Pop);  // else
             if self.current.type == .Else {
                 self.advance();
-                // the jump from if start has to skip this landing pad. 
-                skip_else := self.emit_jump(.Jump);  // then
-                self.patch_jump(skip_then);
-                self.emit(OpCode.Pop);  // else
                 self.statement(false);  // else
-                self.patch_jump(skip_else);
-            } else {
-                self.patch_jump(skip_then); 
             }
+            self.patch_jump(skip_else);
             
             return(); // no need for extra ; after if
         };
@@ -272,7 +270,10 @@ fn statement(self: *Parser, may_declare: bool) void = {
             @if(!may_declare) self.error("declaration not allowed here.");
             self.consume(TokenType.Ident, "expected function name after 'fun'");
             name := self.previous;
+            
+            if self.scope_depth > 0 {| self.locals&.push(name = name.lexeme, depth = self.scope_depth); };
             self.function(.Function);
+            if self.scope_depth > 0 {| self.locals.len -= 1; };
             self.define_var_from_stack(name);
             return();
         }
@@ -292,6 +293,7 @@ fn function(self: *Parser, type: FunctionType) void = {
     
     function.upvalue_count = upvalues.len;
     self.emit(OpCode.Closure, self.make_constant(function.to_value()));
+    @run @assert(size_of(UpvalueBytes) == 2 && UpvalueBytes.offset_of(.index) == 1, "UpvalueBytes layout");
     for upvalues { it |
         self.emit(int(it.local));
         self.emit(it.index);
@@ -392,8 +394,9 @@ fn patch_jump(self: *Parser, start: i64, end: i64) void = {
     if !distance.ule(0xFFFF) {
         self.error_at(self.current, "statement too large: cannot jump more than 0xFFFF");
     };
-    self.chunk.code[start - 2] = distance.bit_and(0xFF).trunc();
-    self.chunk.code[start - 1] = distance.shift_right_logical(8).bit_and(0xFF).trunc();
+    it := self.chunk.code.index(start - 2);
+    it := bit_cast_unchecked(*u8, *u16, it);
+    it[] = distance.trunc();
 }
 
 parse_and :: fn(self: *Parser, _can_assign: bool) void = {
@@ -691,7 +694,7 @@ fn add_upvalue(self: *Parser, var: i64, local: bool) i64 = {
     self.upvalues.len - 1
 }
 
-fn ident_const(self: *Parser, token: Token) i64 = {
+fn ident_const(self: *Parser, token: Token) ConstIndex = {
     s := self.vm.copy_string(token.lexeme);
     self.make_constant(s.to_value())
 }
@@ -744,18 +747,31 @@ fn emit(self: *Parser, a: OpCode, b: i64) void = {
     self.emit(b);
 }
 
-// TODO: EXTRA: OpCode.Constant16
+fn emit(self: *Parser, a: OpCode, i: ConstIndex) void = {
+    self.emit(a);
+    self.emit(i);
+}
+
+// EXTRA: 16 bit constant indices
 fn emit(self: *Parser, value: Value) void = self.emit(OpCode.Constant, self.make_constant(value));
 
-fn make_constant(self: *Parser, value: Value) i64 = {
+ConstIndex :: @struct(i: i64);
+
+fn emit(self: *Parser, i: ConstIndex) void = {
+    i := i.i;
+    self.emit(i.bit_and(0xFF));
+    @if(ConstEncoding != u8) self.emit(i.shift_right_logical(8).bit_and(0xFF));
+}
+
+fn make_constant(self: *Parser, value: Value) ConstIndex = {
     // EXTRA: reuse constants (ie. we access the same global many times and waste indices).
     enumerate self.chunk.constants& { i, it |
-        @if(it[] == value) return(i);
+        @if(it[] == value) return(i = i);
     };
     
     c := self.chunk.push(value);
-    if(c > 255, => self.error("Too many constants in one chunk."));
-    c
+    if(c > 1.shift_left(8*size_of(ConstEncoding)) - 1, => self.error("Too many constants in one chunk."));
+    (i = c)
 }
 
 // Skip until a statement boundary: last token ends one or current token starts one. 

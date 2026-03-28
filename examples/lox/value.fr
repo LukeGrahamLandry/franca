@@ -1,6 +1,6 @@
 // this file corresponds to value+object+memory+table in the clox codebase
 
-Value :: @struct(bits: i64);  // TODO: the world is probably a better place if this is u64 since I just care about the bits. 
+Value :: @struct(bits: i64);
 
 // TODO: better error message if you forget the format string in @fmt
 // TODO: higher prevision float rendering 
@@ -23,7 +23,11 @@ fn display(self: Value, out: *List(u8)) void = {
             extra := (f - f.int().float());
             @fmt(out, "%", int(f));
             if extra != 0 {
-                @fmt(out, ".%", int(extra * 1000));
+                extra := int(extra * 1000);
+                @fmt(out, ".");
+                @if(extra < 100) @fmt(out, "0");
+                @if(extra < 10) @fmt(out, "0");
+                @fmt(out, "%", extra);
             };
         };
         return();
@@ -209,76 +213,110 @@ fn copy_string(self: *Vm, s: Str) *ObjString = {
     self.take_string(s, false)
 }
 
-Table :: RawHashMap(*ObjString, Value);
+Table :: @struct {
+    items: []Bucket;
+    len: u32;
+    cap: u32;
+    Bucket :: @struct(key: *ObjString, value: Value);
+    tombstone: Bucket : (key = zeroed(*ObjString), value = tombstone_value);
+    tombstone_value: Value : (bits = 1);
+};
 
 fn take_string(self: *Vm, s: Str, owned: bool) *ObjString = {
     o := zeroed ObjString; o := o&;
     o.data = s;
-    o.update_hash();
+    o.hash = compute_hash(o);
     
-    // This is a copy paste of collections/map.fr/insert but using slow_eq instead to do the interning. 
-    // TODO: its dumb that my hash table stores the hashes because the strings store them too (i don't want to rehash for each new table)
-    
-    full := self.strings.len_including_tombstones.add(1).gt(self.strings.capacity);
-    if(full, => self.strings&.resize(self.gc)); // does it sooner than necessary (if replacing a slot) but thats fine. 
-    slot := self.strings&.slow_find_slot(o);
-    
-    // TODO: should do the tombstone in-band (null key + nonnull value) like clox save 8 bytes each slot :SLOW
-    self.strings.len_including_tombstones += int(slot.hash == 0);
-    if slot.hash == 0 || slot.hash == 1 {
+    hit := true;
+    result := self.strings&.insert(o, nil_value, self.gc, fn(a, b) => a.hash == b.hash && a.data == b.data) {
+        hit = false;
         if !owned {
             s = s.shallow_copy(self.gc);
         };
         o2 := self.allocate_obj(ObjString);
         o2.data = s;
         o2.hash = o.hash;
-        slot[] = (hash = o2.hash, key = o2, value = nil_value);
-    } else {
+        o2
+    };
+    if hit && owned {
         // already in the table, no need to promote `o` to the heap
-        if owned {
-            self.gc.dealloc(u8, s);
+        self.gc.dealloc(u8, s);
+    };
+    result
+}
+
+fn insert(self: *Table, key: *ObjString, value: Value, a: Alloc) bool = {
+    new := false;
+    self.insert(key, value, a, identical) {
+        new = true;
+        key
+    };
+    new
+}
+
+fn insert(self: *Table, key: *ObjString, value: Value, a: Alloc, $equal: @Fn(a: *ObjString, b: *ObjString) bool, $fix_key: @Fn() *ObjString) *ObjString = {
+    @if(self.len == self.cap) self.resize(a);
+    slot := self.find_slot(key, equal);
+    if slot.key.is_null() {
+        self.len += int(!(slot.value == Table.tombstone_value)).trunc();
+        slot[] = (key = fix_key(), value = value);
+    } else {
+        slot.value = value;
+    };
+    slot.key
+}
+
+fn get(self: *Table, key: *ObjString) ?Value = {
+    @if(self.items.len == 0) return(.None);
+    slot := self.find_slot(key, identical);
+    @if(slot.key.is_null(), .None, (Some = slot.value))
+}
+
+fn find_slot(self: *Table, key: *ObjString, $equal: @Fn(a: *ObjString, b: *ObjString) bool) *Table.Bucket = {
+    mask := self.items.len - 1;
+    n, i := (0, key.hash.bit_and(mask));
+    loop {
+        slot := self.items[i]&;
+        if slot.key.is_null() {
+            if !(slot.value == Table.tombstone_value) {
+                return(slot);
+            }; // else: keep looking
+        } else {
+            if equal(slot.key, key) {
+                return(slot);
+            };
+        };
+        i = (i + 1).bit_and(mask);
+        n += 1;
+        @debug_assert(n < self.items.len, "table can't be full");
+    };
+}
+
+fn resize(self: *Table, a: Alloc) void = {
+    old := self.items;
+    size := max(old.len * 2, 8);
+    self.items = a.alloc_zeroed(Table.Bucket, size);
+    self.cap = trunc(size * 75 / 100);
+    self.len = 0;
+    for old { it |
+        if !it.key.is_null() {
+            self.insert(it.key, it.value, a);
         }
     };
-    return slot.key;
-    
-    fn slow_find_slot(self: *Table, key: *ObjString) *Table.E = {
-        i := key.hash.mod(self.arr.len); // TODO: power of two trick
-        
-        range(0, self.arr.len) {_|
-            check := self.arr[i]&;
-            if check.hash == key.hash && check.key.slow_eq(key) {
-                return(check);
-            } else {
-                if(check.hash == 0, => return(check)); // empty, not in map
-                // 1 => placeholder for a removed value
-                //      TODO: if you're inserting, you could use it? 
-                // othewise, continue, might have been bumped
-            };
-            i = i.add(1).mod(self.arr.len);
-        };
-        
-        panic("Unreachable unless you set the load factor to 100%")
-    }
-    
-    fn slow_eq(lhs: *ObjString, rhs: *ObjString) bool = 
-        lhs.data == rhs.data;
+    a.dealloc(Table.Bucket, old);
 }
 
-fn hash(h: *TrivialHasher, obj: **ObjString) void = {
-    h.hash(obj.hash&);
-}
+fn drop(self: *Table, a: Alloc) void = a.dealloc(Table.Bucket, self.items);
+fn clear(self: *Table) void = self.retain(fn(_) => false);
+fn retain(self: *Table, $keep: @Fn(it: *Table.Bucket) bool) void = 
+    each(self.items, fn(it) => @if(!it.key.is_null() && !keep(it)) { it[] = Table.tombstone; });
+fn each(self: *Table, $body: @Fn(key: *ObjString, value: Value) void) void = 
+    each(self.items, fn(it) => @if(!it.key.is_null()) body(it.key, it.value));
 
-// this assumes the strings are already interned ,
-// so you can't use the normal hashmap insert functions to check if a string is unique when first creating it.
-fn eq(lhs: **ObjString, rhs: **ObjString) bool = {
-    ::ptr_utils(@type lhs[][]);
-    identical(lhs[], rhs[])
-}
-
-fn update_hash(obj: *ObjString) void = {
+compute_hash :: fn(obj: *ObjString) i64 = {
     h: TrivialHasher = init();
     h&.hash(obj.data&);
-    obj.hash = h&.end().bitcast().abs();
+    h&.end().bitcast()
 }
 
 fn new_closure(self: *Vm, function: *ObjFunction) *ObjClosure = {
@@ -344,7 +382,7 @@ fn collect_garbage(self: *Vm) void = {
     
     self.mark_roots();
     // interned strings are weak, get rid of pointers that will be freed
-    self.strings&.retain(fn(k, _) => k.obj.marked);  
+    self.strings&.retain(fn(it) => it.key.obj.marked);  
     self.sweep();
     self.gc_storage.bytes_next_gc = self.gc_storage.bytes_allocated * gc_heap_grow_factor;
     
@@ -436,7 +474,7 @@ fn mark(self: *Vm, obj: *Obj) void = {
 fn mark(self: *Vm, table: *Table) void = {
     each table { k, v |
         self.mark(k.obj&);
-        self.mark(v[]);
+        self.mark(v);
     };
 }
 
