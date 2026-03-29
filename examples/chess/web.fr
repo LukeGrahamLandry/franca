@@ -1,0 +1,220 @@
+// ./gui.fr also supports running in a "wnebsnite" and i think i prefer that 
+// style because it's more self describing and most of it can be tested without 
+// dealing with a browser. However, it relies on the web playground's convoluted 
+// webgpu bindings and examples/os posix-ish api which is overkill for simple programs 
+// like this one. Instead, ./web.fr builds a self contained wasm module that just exports
+// the chess logic for js to call. It provides the same api as my old zig one: 
+// https://github.com/LukeGrahamLandry/ChessBot/tree/3c267803614bef855f8ae278509d050b01fba09a/web (but need to add env.null and main.memory imports). 
+// This just exists as proof that franca can create embeddable wasm binaries without the heavy playground host. 
+//
+// franca examples/default_driver.fr build examples/chess/web.fr -arch wasm32 -dynamiclib -o ../ChessBot/web/main.wasm -unsafe
+// TODO: limit search to maxTimeMs
+// TODO: every wasm module i make needs these imports so it still doesn't exactly match the api of the old one, 
+//       but i don't really care enough to expose a way to ask the backend not to do that rn. 
+//       - main: { memory: new WebAssembly.Memory({ initial: 200, maximum: 10000, }), }, 
+//       - env: { null: () => {throw new Error("null");},
+::hack_remove_panic_imports();
+
+jsConsoleLog :: fn(ptr: u32, len: u32) f64 #import("env");
+jsAlert :: fn(ptr: u32, len: u32) f64 #import("env");
+jsPerformaceNow :: fn() f64 #import("env");
+JsResult :: @struct(Ok :: -1, Error :: -2, IllegalMove :: -3);
+
+#use("@/examples/chess/moves.fr");
+#use("@/examples/chess/search.fr");
+#use("@/examples/chess/uci.fr");
+state :: @static_mut { x: @struct {
+    ctx := zeroed(SearchGlobals);
+    promotionHint := Kind.Queen;
+    maxDepth := 0;
+    maxTimeMs := 0;
+} = (); x };
+
+fn protocolVersion() i32 #export = 5;
+
+fn alloc(len: u32) u32 #export = 
+    u8.int_from_ptr(wasm_leak_allocator.alloc_uninit(u8, len.zext()).as_ptr()).trunc();
+
+fn createBoard() *Board #export = 
+    wasm_leak_allocator.boxed(Board, initial());
+
+fn setup() void #export = {
+    init_tls();
+    state.ctx = init(100, wasm_leak_allocator);
+    initTables();
+}
+
+fn changeSettings(maxTimeMs: u32, maxDepth: u32) void #export = {
+    state.maxDepth = maxDepth.zext();
+    state.maxTimeMs = maxTimeMs.zext();
+}
+
+fn restartGame(board: *Board) void #export = {
+    board[] = initial();
+}
+
+fn getBoardData(board: *Board) u32 #export = {
+    @run @assert_eq(size_of(Piece), size_of(u8), "piece layout");
+    Piece.int_from_ptr(board.squares&.as_ptr()).trunc()
+}
+
+fn playBotMove(board: *Board, msgPtr: u32, maxLen: u32) i32 #export = {
+    opts :: @static { xxx: StratOpts = (); xxx };  
+    move := bestMove(opts, state.ctx&, board, state.maxDepth) || {
+        // Engine couldn't move.
+        len := checkGameOver(board, msgPtr, maxLen);
+        return(@if(len > 0, len, JsResult.Error));
+    };
+    _ := board.play(move);
+
+    len := checkGameOver(board, msgPtr, maxLen);
+    @if(len > 0, len, JsResult.Ok)
+}
+
+fn checkGameOver(board: *Board, ptr: u32, len: u32) i32 #export = {
+    reason := board.gameOverReason(state.ctx.lists&);
+    @if(reason == .Continue) return(0);
+    str := reason.name_str();
+    dest := u8.ptr_from_int(ptr.zext()).slice(len.zext());
+    dest.copy_from(str);
+    str.len.intcast()
+}
+
+fn getPossibleMovesBB(board: *Board, from: i32) i64 #export = {
+    @if(board.squares&[from.zext()].is_empty()) return(0);
+    allMoves := collectOnePieceMoves(board, from.intcast(), state.ctx.lists&);
+    result := 0;
+    for allMoves { move |
+        result = result.bit_or(1.shift_left(move.to.zext()));
+    };
+    state.ctx.lists&.release(allMoves);
+    result
+}
+
+fn setFromFen(board: *Board, ptr: u32, len: u32) bool #export = {
+    fen := u8.ptr_from_int(ptr.zext()).slice(len.zext());
+    ::?Board;
+    board[] = fromFen(fen) || return(false);
+    true
+}
+
+fn getFen(board: *Board, ptr: u32, len: u32) u32 #export = {
+    dest := u8.ptr_from_int(ptr.zext()).slice(len.zext());
+    dest: List(u8) = fixed_list(dest);
+    board.writeFen(dest&);
+    dest.len.trunc()
+}
+
+fn getMaterialEval(board: *Board) i32 #export = {
+    board.simpleEval.intcast()
+}
+
+fn playHumanMove(board: *Board, fromIndex: u32, toIndex: u32, msgPtr: u32, maxLen: u32) i32 #export = {
+    @if(fromIndex >= 64 || toIndex >= 64) return(JsResult.Error);
+    move := board.inferMove(fromIndex.zext(), toIndex.zext(), state.promotionHint, state.ctx.lists&)
+        || return(JsResult.IllegalMove);
+    _ := board.play(move);
+    len := checkGameOver(board, msgPtr, maxLen);
+    @if(len > 0, len, JsResult.Ok)
+}
+
+fn isPromotion(board: *Board, fromIndex: u32, toIndex: u32) bool #export = {
+    @if(fromIndex >= 64 || toIndex >= 64) return(false);
+    move := board.inferMove(fromIndex.zext(), toIndex.zext(), .Queen, state.ctx.lists&)
+        || return(false);
+    move.action == .promote
+}
+
+fn setPromotionHint(kind: Kind) void #export = {
+    state.promotionHint = kind;
+}
+
+fn getPositionsBB(board: *Board, colour: Colour) i64 #export = 
+    board.peicePositions&.getFlag(colour)[];
+
+fn getKingsBB(board: *Board, colour: Colour) i64 #export = 
+    1.shift_left(board.kingIndex&[colour]);
+
+fn getCastlingBB(board: *Board, colour: Colour) i64 #export = {
+    left := board.castling.get(colour, true);
+    right := board.castling.get(colour, false);
+    left.int().bit_or(right.int().shift_left(7))
+        .shift_left(int(colour == .Black) * 8*7)
+}
+
+fn getLastMoveBB(board: *Board) i64 #export = {
+    move := board.lastMove || return(0);
+    result := 1.shift_left(move.to.zext()).bit_or(1.shift_left(move.from.zext()));
+    if move.action == .castle {
+        info := castleMove(move, board.nextPlayer.other());
+        result = result.bit_or(1.shift_left(info.rookTo.zext()).bit_or(1.shift_left(info.rookFrom.zext())));
+    };
+    result
+}
+
+fn getFrenchMoveBB(board: *Board) i64 #export = {
+    targetFile := @match(board.frenchMove) {
+        fn none() => return(0);
+        fn file(it) => it;
+    };
+    index := (@if(board.nextPlayer == .White, 5, 2)) * 8 + targetFile.zext();
+    1.shift_left(index)
+}
+
+fn getAttackBB(board: *Board, colour: Colour) i64 #export = 
+    board.getTargetedSquares(colour);
+
+fn slidingChecksBB(b: *Board, c: Colour) i64 #export = checks_info_bitboard(b, c, .blockSingleCheck);
+fn pinsByBishopBB(b: *Board, c: Colour) i64 #export = checks_info_bitboard(b, c, .pinsByBishop);
+fn pinsByRookBB(b: *Board, c: Colour) i64 #export = checks_info_bitboard(b, c, .pinsByRook);
+fn pinsFrenchByBishopBB(b: *Board, c: Colour) i64 #export = checks_info_bitboard(b, c, .frenchPinByBishop);
+fn pinsFrenchByRookBB(b: *Board, c: Colour) i64 #export = checks_info_bitboard(b, c, .frenchPinByRook);
+checks_info_bitboard :: fn(board: *Board, colour: Colour, $field: Fields(ChecksInfo)) i64 = 
+    ChecksInfo.get_field(@ref board.getChecksInfo(colour), field)[];
+
+fn isWhiteTurn(board: *Board) bool #export = 
+    board.nextPlayer == .White;
+
+init_tls :: fn() void = {
+    tls(.panic_hook)[] = fn(msg) = {
+        jsAlert(u8.int_from_ptr(msg.ptr).trunc(), msg.len.trunc());
+        scary_exit()
+    };
+    tls(.temporary_allocator)[] = @ref @as(Arena.Allocator) init(panicking_allocator, 0);
+    tls(.general_allocator)[] = panicking_allocator;
+};
+
+wasm_leak_allocator: Alloc : (data = 0.rawptr_from_int(), vptr = wasm_leak_allocator_fn);
+wasm_leak_allocator_fn :: fn(_: rawptr, action: Alloc.Action, ptr: rawptr, size: i64, align: i64) []u8 = {
+    @if(action != .Allocate) return("");
+    P :: 1.shift_left(16);
+    pages := size.ualign_to(P).udiv(P);
+    prev := memory_grow(pages.intcast()).intcast();
+    @assert(prev != -1, "oom");
+    return u8.ptr_from_int(prev * P).slice(pages * P);
+    memory_grow :: AsmFunctionWasmOnly(fn(page_delta: i32) i32 = (), fn(out) = {
+        out.push(0x00);  // 0 locals
+        out.push(0x20);  // local.get(0)
+        out.push(0x00);  // ^
+        out.push(0x40);  // memory.grow()
+        out.push(0x00);  // ^
+        out.push(0x0B);  // end
+    });
+}
+
+// TODO: this is compilation order dependent (that's why it needs to be called at the very top)
+hack_remove_panic_imports :: fn() void = { 
+    replace(@as(@Fn() Never) scary_exit, fn() Never = {  // no exit()
+        zeroed(Never)  // hlt (this is Behaviour Considered Disrespectful)
+    });
+    replace(@as(@Fn(Str) void) scary_log, fn(msg: Str) void = {  // no write()
+        jsConsoleLog(u8.int_from_ptr(msg.ptr).trunc(), msg.len.trunc());
+    });
+    replace :: fn(dest, src) => {
+        it := get_function_ast(dest, false, false, false, false);
+        @if(it.get_flag(.EnsuredCompiled)) debug_log_str("hack_remove_imports: already compiled so might not work");
+        it.set_flag(.BodyIsSpecial);
+        it.set_flag(.EnsuredCompiled);
+        it.body = (Redirect = src);
+    };
+}

@@ -1,3 +1,6 @@
+## (Mar 28/29)
+
+chess/web.fr: demo that i can make standalone wasm modules
 
 ## (Mar 27) lox
 

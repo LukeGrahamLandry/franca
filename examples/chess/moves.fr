@@ -496,30 +496,24 @@ fn possibleMoves(board: *Board, me: Colour, lists: *ListPool) ListPool.List = {
     moves
 }
 
-// TODO: test this.
-// TODO: does the peace search need special handling for being in check?
-fn capturesOnlyMoves(board: *Board, me: Colour, lists: *ListPool) ListPool.List = {
-    // For non-king pieces blockSingleCheck already acts as a filter for target squares so can reuse that for this as well.
-    // For peace search 3, filtering this way instead of gening all moves and skipping captures is 1.25x as fast.
-    it := board.checks.blockSingleCheck&;
-    realSlidingChecks := it[];
-    otherPieces := board.peicePositions&.getFlag(board.nextPlayer.other())[];
-    it[] = it[].bit_and(otherPieces);
-    board.checks.kingGetCapturesOnly = true;
-
-    var moves = lists.get();
+fn collectOnePieceMoves(board: *Board, i: i64, lists: *ListPool) ListPool.List = {
+    moves := lists.get();
     out: CollectMoves = (moves = moves&);
-    genPossibleMoves(out&, board, me);
-    board.checks.kingGetCapturesOnly = false;
-    it[] = realSlidingChecks;
-    moves
+    ::MoveGen(CollectMoves);
+    genOnePieceMoves(out&, board, i);
+    return moves;
 }
 
-fn collectOnePieceMoves(board: *Board, i: i64, lists: *ListPool) ListPool.List = {
-    var moves = lists.get();
-    out: CollectMoves = (moves = moves);
-    genOnePieceMoves(out, board, i);
-    return moves;
+// does not play the move
+fn inferMove(self: *Board, from: i64, to: i64, promotionHint: Kind, lists: *ListPool) ?Move = {
+    @debug_assert(from.ult(64) && to.ult(64));
+    @if(self.squares&[from].kind() == .Empty) return(.None);
+    moves := self.collectOnePieceMoves(from, lists);
+    move := moves.items().find(fn(it) => 
+        it.to == to.trunc() && (it.action != .promote || it.promote == promotionHint));
+    move: ?Move = @if(move.is_some(), (Some = move.Some[]), .None);
+    lists.release(moves);
+    move
 }
 
 MoveFilter :: @enum(Any, CurrentlyCalcChecks);

@@ -1,4 +1,7 @@
 
+- wasm: don't put all the zeroes in the binary. 
+  put them after the data section and it's fine because linear memory starts zeroed. 
+  ex. chess/web is 2170kb but compresses to 28kb so it's all bss. 
 - @switch needs to compile error on duplicate values 
   (Expr.Switch from @match already does but @switch is just in user code)
 - make @is #fold somehow
@@ -308,8 +311,6 @@ cset	w0, eq
 - make sure not to keep sending events after a graphics program panics
 - don't hardcode pixel format in init_browser_wip_frame
 - need more printf to run the import_c and ssa tests
-- simple standalone wasm web example (without workers) to show you don't need to do my whole os-userspace thing 
-  (maybe provide same api as my old ChessBot would be an easy thing that isn't totally trivial)
 - make a driver demo that gives warnings for unused variables
 - should default to -keep-names so you get nice stack traces. 
   have -strip be explicit if you want small binaries. 
