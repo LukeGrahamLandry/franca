@@ -217,7 +217,7 @@ fn common_init(cmn: *Attachments.Common, desc: *Attachments.Desc, width: i32, he
     cmn.width = width;
     cmn.height = height;
     range(0, SG_MAX_COLOR_ATTACHMENTS) { i |
-        if (desc.colors[i].image.id != Sg.INVALID_ID) {
+        if (desc.colors&[i].image.id != Sg.INVALID_ID) {
             cmn.num_colors += 1;
             cmn.colors&[i] = desc.colors&[i];
             cmn.resolves&[i] = desc.resolves&[i];
@@ -345,7 +345,7 @@ fn is_compressed(fmt: PixelFormat) bool = @is(fmt,
     .EAC_R11, .EAC_R11SN, .EAC_RG11, .EAC_RG11SN, .ASTC_4x4_RGBA, .ASTC_4x4_SRGBA,
 );
 
-fn is_valid_rendertarget_color_format(fmt: sg_pixel_format) bool = {
+fn is_valid_rendertarget_color_format(sg: *Self, fmt: PixelFormat) bool = {
     sg.formats&[fmt]&[.render] && !sg.formats&[fmt]&[.depth]
 }
 
@@ -910,9 +910,8 @@ fn validate(sg: *Self, desc: *Pipeline.Desc) bool = @validate(sg) {
 };
 
 fn validate(sg: *Self, desc: *Attachments.Desc) bool = @validate(sg) {
-    @debug_assert(desc);
     atts_cont := true;
-    color_width := -1; color_height := -1; color_sample_count := -1;
+    color_width :i32= -1; color_height :i32= -1; color_sample_count :i32= -1;
     has_color_atts := false;
     range(0, SG_MAX_COLOR_ATTACHMENTS) { att_index |
         continue :: local_return;
@@ -923,9 +922,8 @@ fn validate(sg: *Self, desc: *Attachments.Desc) bool = @validate(sg) {
         }
         @V(atts_cont, VALIDATE_ATTACHMENTSDESC_NO_CONT_COLOR_ATTS);
         has_color_atts = true;
-        img := sg.lookup(att.image);
-        @V(img, VALIDATE_ATTACHMENTSDESC_IMAGE);
-        if !img.is_null() {
+        img := sg.lookup(att.image)
+            || { @V(false, VALIDATE_ATTACHMENTSDESC_IMAGE); unreachable(); };
             @V(img.slot.state == .VALID, VALIDATE_ATTACHMENTSDESC_IMAGE);
             @V(img.cmn.render_target, VALIDATE_ATTACHMENTSDESC_IMAGE_NO_RT);
             @V(att.mip_level < img.cmn.num_mipmaps, VALIDATE_ATTACHMENTSDESC_MIPLEVEL);
@@ -944,16 +942,15 @@ fn validate(sg: *Self, desc: *Attachments.Desc) bool = @validate(sg) {
                 @V(color_height == miplevel_dim(img.cmn.height, att.mip_level), VALIDATE_ATTACHMENTSDESC_IMAGE_SIZES);
                 @V(color_sample_count == img.cmn.sample_count, VALIDATE_ATTACHMENTSDESC_IMAGE_SAMPLE_COUNTS);
             }
-            @V(is_valid_rendertarget_color_format(img.cmn.pixel_format), VALIDATE_ATTACHMENTSDESC_COLOR_INV_PIXELFORMAT);
+            @V(sg.is_valid_rendertarget_color_format(img.cmn.pixel_format), VALIDATE_ATTACHMENTSDESC_COLOR_INV_PIXELFORMAT);
 
             // check resolve attachment
             res_att := desc.resolves&[att_index]&;
             if (res_att.image.id != Sg.INVALID_ID) {
                 // associated color attachment must be MSAA
                 @V(img.cmn.sample_count > 1, VALIDATE_ATTACHMENTSDESC_RESOLVE_COLOR_IMAGE_MSAA);
-                res_img := sg.lookup(res_att.image);
-                @V(res_img, VALIDATE_ATTACHMENTSDESC_RESOLVE_IMAGE);
-                if !res_img.is_null() {
+                res_img := sg.lookup(res_att.image)
+                    || { @V(false, VALIDATE_ATTACHMENTSDESC_RESOLVE_IMAGE); unreachable(); };
                     @V(res_img.slot.state == .VALID, VALIDATE_ATTACHMENTSDESC_RESOLVE_IMAGE);
                     @V(res_img.cmn.render_target, VALIDATE_ATTACHMENTSDESC_RESOLVE_IMAGE_NO_RT);
                     @V(res_img.cmn.sample_count == 1, VALIDATE_ATTACHMENTSDESC_RESOLVE_SAMPLE_COUNT);
@@ -967,21 +964,18 @@ fn validate(sg: *Self, desc: *Attachments.Desc) bool = @validate(sg) {
                     @V(img.cmn.pixel_format == res_img.cmn.pixel_format, VALIDATE_ATTACHMENTSDESC_RESOLVE_IMAGE_FORMAT);
                     @V(color_width == miplevel_dim(res_img.cmn.width, res_att.mip_level), VALIDATE_ATTACHMENTSDESC_RESOLVE_IMAGE_SIZES);
                     @V(color_height == miplevel_dim(res_img.cmn.height, res_att.mip_level), VALIDATE_ATTACHMENTSDESC_RESOLVE_IMAGE_SIZES);
-                }
-            }
         }
     }
     has_depth_stencil_att := false;
     if (desc.depth_stencil.image.id != Sg.INVALID_ID) {
         att := desc.depth_stencil&;
-        img := sg.lookup(att.image);
-        @V(img, VALIDATE_ATTACHMENTSDESC_DEPTH_IMAGE);
+        img := sg.lookup(att.image)
+            || { @V(false, VALIDATE_ATTACHMENTSDESC_DEPTH_IMAGE); unreachable(); };
         has_depth_stencil_att = true;
-        if !img.is_null() {
             @V(img.slot.state == .VALID, VALIDATE_ATTACHMENTSDESC_DEPTH_IMAGE);
             @V(att.mip_level < img.cmn.num_mipmaps, VALIDATE_ATTACHMENTSDESC_DEPTH_MIPLEVEL);
             @match(img.cmn.type) {
-                fn CUBE() => @V(img.slice < 6, VALIDATE_ATTACHMENTSDESC_DEPTH_FACE);
+                fn CUBE() => @V(att.slice < 6, VALIDATE_ATTACHMENTSDESC_DEPTH_FACE);
                 fn ARRAY() => @V(att.slice < img.cmn.num_slices, VALIDATE_ATTACHMENTSDESC_DEPTH_LAYER);
                 // NOTE: this can't actually happen because of VALIDATE_IMAGEDESC_DEPTH_3D_IMAGE
                 fn _3D() => @V(att.slice < img.cmn.num_slices, VALIDATE_ATTACHMENTSDESC_DEPTH_SLICE);
@@ -993,7 +987,6 @@ fn validate(sg: *Self, desc: *Attachments.Desc) bool = @validate(sg) {
             @V((color_sample_count == -1) || (color_sample_count == img.cmn.sample_count), VALIDATE_ATTACHMENTSDESC_DEPTH_IMAGE_SAMPLE_COUNT);
             @V(sg.is_valid_rendertarget_depth_format(img.cmn.pixel_format), VALIDATE_ATTACHMENTSDESC_DEPTH_INV_PIXELFORMAT);
         }
-    }
     @V(has_color_atts || has_depth_stencil_att, VALIDATE_ATTACHMENTSDESC_NO_ATTACHMENTS);
 };
 
@@ -1565,52 +1558,45 @@ fn init(sg: *Self, pip: *Pipeline.T, desc: *Pipeline.Desc) ResourceState = {
     s
 }
 
-// TODO
 fn init(sg: *Self, atts: *Attachments.T, desc: *Attachments.Desc) ResourceState = {
-    @debug_assert(atts && atts.slot.state == SG_RESOURCESTATE_ALLOC);
-    @debug_assert(desc);
-    if !_sg_validate_attachments_desc(desc)) {
-        atts.slot.state = SG_RESOURCESTATE_FAILED;
-        return();
+    @debug_assert(atts.slot.state == .ALLOC);
+    if !sg.validate(desc) {
+        return(.FAILED);
     };
     // lookup pass attachment image pointers
     color_images := zeroed Array(*Image.T, SG_MAX_COLOR_ATTACHMENTS);
     resolve_images := zeroed Array(*Image.T, SG_MAX_COLOR_ATTACHMENTS);
     ds_image := zeroed(*Image.T);
     // NOTE: validation already checked that all surfaces are same width/height
-    width, height := (0, 0);
+    (width: i32, height: i32) := (0, 0);
     range(0, SG_MAX_COLOR_ATTACHMENTS) { i |
-        if (desc.colors[i].image.id) {
-            color_images[i] = _sg_lookup_image(&sg.pools, desc.colors[i].image.id);
-            if (!(color_images[i] && color_images[i].slot.state == .VALID)) {
-                atts.slot.state = SG_RESOURCESTATE_FAILED;
-                return();
-            }
-            mip_level := desc.colors[i].mip_level;
-            width = miplevel_dim(color_images[i].cmn.width, mip_level);
-            height = miplevel_dim(color_images[i].cmn.height, mip_level);
+        if desc.colors&[i].image.id != 0 {
+            ::?*Image.T;
+            color_images&[i] = sg.lookup(desc.colors&[i].image)
+                || return(.FAILED);
+            @if(color_images&[i].slot.state != .VALID) return(.FAILED);
+            mip_level := desc.colors&[i].mip_level;
+            width = miplevel_dim(color_images&[i].cmn.width, mip_level);
+            height = miplevel_dim(color_images&[i].cmn.height, mip_level);
         }
-        if (desc.resolves[i].image.id) {
-            resolve_images[i] = _sg_lookup_image(&sg.pools, desc.resolves[i].image.id);
-            if (!(resolve_images[i] && resolve_images[i].slot.state == .VALID)) {
-                atts.slot.state = SG_RESOURCESTATE_FAILED;
-                return();
-            }
+        if desc.resolves&[i].image.id != 0 {
+            resolve_images&[i] = sg.lookup(desc.resolves&[i].image)
+                || return(.FAILED);
+            @if(resolve_images&[i].slot.state != .VALID) return(.FAILED);
         }
     }
-    if (desc.depth_stencil.image.id) {
-        ds_image = _sg_lookup_image(&sg.pools, desc.depth_stencil.image.id);
-        if (!(ds_image && ds_image.slot.state == .VALID)) {
-            atts.slot.state = SG_RESOURCESTATE_FAILED;
-            return();
-        }
+    if desc.depth_stencil.image.id != 0 {
+        ds_image = sg.lookup(desc.depth_stencil.image)
+            || return(.FAILED);
+        @if(ds_image.slot.state != .VALID) return(.FAILED);
         mip_level := desc.depth_stencil.mip_level;
         width = miplevel_dim(ds_image.cmn.width, mip_level);
         height = miplevel_dim(ds_image.cmn.height, mip_level);
     }
     common_init(atts.cmn&, desc, width, height);
-    atts.slot.state = sg.impl().create(atts, color_images, resolve_images, ds_image, desc);
-    @debug_assert((atts.slot.state == .VALID)||(atts.slot.state == SG_RESOURCESTATE_FAILED));
+    r := sg.impl().create(atts, color_images&, resolve_images&, ds_image, desc);
+    @debug_assert(r == .VALID || r == .FAILED);
+    r
 }
 
 // - trying to add_commit_listener() twice needs to stay an "error" 
@@ -1990,6 +1976,22 @@ fn update_image(sg: *Self, img_id: Image, data: *ImageData) void #trace = {
     @if(!sg.validate(img, data)) return();
     sg.impl().update_image(img, data);
     img.cmn.upd_frame_index = sg.frame_index;
+}
+
+// copy(Buffer <- Image) with a cpu readable buffer lets you read the output of a render target. 
+// currently this only lets you read the whole image and write to the start of the buffer. 
+// TODO: the real apis let you do fancy stuff like copying only part of the image or different mipmap levels 
+//       and copying to a different offset or stride in the dest so you can 
+//       efficiently splice images together. i probably want to expose that 
+//       eventually. i want to think of an example program where that's a 
+//       noticable performace improvement first. 
+// TODO: webgpu
+fn copy(sg: *Sg.Self, dest: Buffer, src: Image) void = {
+    dest := sg.lookup(dest) 
+        || @panic("copy dest invalid");
+    src := sg.lookup(src) 
+        || @panic("copy src invalid");
+    sg.impl().copy(dest, src);
 }
 
 fn push_debug_group(sg: *Self, name: Str) void #trace = {
@@ -2383,6 +2385,7 @@ Swapchain :: @struct(
     metal: MetalSwapchain,
     wgpu: WgpuSwapchain,
 );
+// noncompute must supply either swapchain or attachments
 Pass :: @struct(
     action: PassAction,
     attachments: Attachments,
@@ -2419,7 +2422,7 @@ ImageDesc :: @struct(
     usage := zeroed Usage,
     pixel_format := zeroed PixelFormat,
     sample_count := zeroed i32,
-    data: ImageData,
+    data := zeroed ImageData,
     label: Str = "",
     mtl_textures := zeroed Array(rawptr, 2),
     wgpu_texture := zeroed rawptr,
@@ -2559,47 +2562,15 @@ PipelineDesc :: @struct {
     label: Str = "";
 };
 AttachmentDesc :: @struct(
-    image: Image,
-    mip_level: i32,
-    slice: i32,
+    image: Image = (id = 0),
+    mip_level: i32 = 0,
+    slice: i32 = 0,
 );
 AttachmentsDesc :: @struct(
     colors: Array(AttachmentDesc, 4),
-    resolves: Array(AttachmentDesc, 4),
-    depth_stencil: AttachmentDesc,
-    label: Str,
-);
-
-SlotInfo :: @struct(
-    state: ResourceState,
-    res_id: u32,
-);
-BufferInfo :: @struct(
-    slot: SlotInfo,
-    update_frame_index: u32,
-    append_frame_index: u32,
-    append_pos: i32,
-    append_overflow: bool,
-    num_slots: i64,
-    active_slot: i64,
-);
-ImageInfo :: @struct(
-    slot: SlotInfo,
-    upd_frame_index: u32,
-    num_slots: i64,
-    active_slot: i64,
-);
-SamplerInfo :: @struct(
-    slot: SlotInfo,
-);
-ShaderInfo :: @struct(
-    slot: SlotInfo,
-);
-PipelineInfo :: @struct(
-    slot: SlotInfo,
-);
-AttachmentsInfo :: @struct(
-    slot: SlotInfo,
+    resolves := zeroed Array(AttachmentDesc, 4),
+    depth_stencil := zeroed AttachmentDesc,
+    label := "",
 );
 
 /*

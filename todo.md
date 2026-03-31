@@ -90,7 +90,6 @@ reproducibility
 
 - collect_tests: tag the tests about which to skip in a more structured way?
   - run everything in a @run since that's different than jit now
-- my hopes of vzf just reliably working were crushed by going back to sequoia and now it just instantly exits
 - make the hare tests work in my examples/elf_loader.fr
 - https://en.wikipedia.org/wiki/ICO_(file_format)#File_structure
 - make run_franca_file less insane
@@ -1232,7 +1231,6 @@ actually that's a bit too agressive but certainly stop processing ANSI escape co
 
 ## Graphics
 
-- get rid of image_sampler_pairs if i don't care about opengl
 - shaders: unconditional early return fucks it up
 - webgpu: array type, transpose, load (for index), addrof
 - the cpu code generated for individual graphics/vec.fr functions is garbage

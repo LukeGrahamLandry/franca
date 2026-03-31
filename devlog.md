@@ -1,3 +1,21 @@
+
+## (Mar 31)
+
+- vzf isn't dying in the same way as if entitlements are wrong, its just exiting 
+  because im calling kpanic before it manages to setup the console. used the thrilling 
+  1 bit of information per run to find that it's hitting the "invalid bar: 32-bit" assertion. 
+  i guess i misread the giant pdf...?
+- in the spirit of "if there's no tests it doesn't work", i really need to do something about examples/gpu. 
+  should at least render the first frame into an image and look at it occasionally. 
+  - finish create(Attachments)
+  - give a way to intercept glue_begin_pass and make it go to an Image instead of swapchain 
+    so can drop in run the examples headless with a fake Sapp instance. 
+  - add api to copy texture to buffer so can read the frame on the cpu. (start with metal). 
+  - similar to multiplexer example, run mandelbrot but manually poll it instead of calling setup(), 
+    but now do offscreen pass and save it to a ppm. 
+  - yay, if it compiles then it works! first try, that never happens :)
+- very confusing; internet says github actions doesn't do metal but it's printing "the gpu did math"... is that test totally fucked somehow?
+
 ## (Mar 28/29)
 
 chess/web.fr: demo that i can make standalone wasm modules

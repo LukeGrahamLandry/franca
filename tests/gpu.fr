@@ -1,0 +1,143 @@
+// TODO: add this to autotest. make all the examples work with it.  
+//       have it drive specific interactions and save a few frames 
+//       to one big image that i can look at (put it in the release artifact i guess?)
+
+main :: fn() void = {
+    sg := @ref zeroed(Sg.Self);
+    setup(sg, (
+        environment = Easy'headless_environment(),
+        allocator = general_allocator(),
+    ));
+    
+    W :: 500;
+    H :: W;
+    scratch: Sg.Buffer = sg.make(
+        usage = .DYNAMIC,
+        size = W * H * 4,
+    );
+    image: Sg.Image = sg.make(
+        width = W,
+        height = H,
+        pixel_format = .BGRA8,
+        render_target = true,
+    );
+    dimage: Sg.Image = sg.make(
+        width = W,
+        height = H,
+        pixel_format = .DEPTH_STENCIL,
+        render_target = true,
+    );
+    at: Sg.Attachments = sg.make(
+        colors = ((
+            image = image,
+        ), ..),
+        depth_stencil = (image = dimage),
+    );
+
+    app := init_headless_app("@/examples/gpu/mandelbrot.fr", sg, at, W, H);
+    app.frame();
+    sg.perform_copy(scratch, image);
+    result := sg.read_buffer_borrow(scratch);
+    #use("@/lib/sys/fs.fr");
+    out := @ref u8.list(temp());
+    write_bgra8_ppm(out, result, W, H);
+    println(Sha256'hex(out.items()));
+    write_entire_file_or_crash("target/a.ppm", out.items());
+}
+
+// :paste from multiplexer example. TODO: factor out stuff that lets you run a headless app?
+init_headless_app :: fn($path: Str, sg: *Sg.Self, at: Sg.Attachments, W: i64, H: i64) *Sapp.Self = {
+    a := general_allocator();
+    app := a.box_zeroed(Sapp.Self);
+    app.first_frame = true; 
+    app.events = list(a);  // annoying to reset after temp()
+    user := a.box_zeroed(UserData);
+    instance := a.boxed(Instance, (sg = sg, app = app, user = user));
+    UserData :: import(path).State;
+    app.desc.init_cb = fn(it) = {
+        it := Instance.ptr_from_raw(it);
+        it.user.on_init(it.app, it.sg);
+    };
+    app.desc.frame_cb = fn(it) = {
+        it := Instance.ptr_from_raw(it);
+        it.user.on_render(it.app, it.sg);
+    };
+    app.desc.event_cb = fn(it, e) = {
+        it := Instance.ptr_from_raw(it);
+        it.user.on_event(it.app, e);
+    };
+    Instance :: @struct(sg: *Sg.Self, app: *Sapp.Self, user: *UserData);
+    app.desc.user_data = Instance.raw_from_ptr(instance);
+    app.first_frame = true;
+    app.valid = true;
+    app.force_render_target = at.id;
+    app.window_width = W;
+    app.window_height = H;
+    app.framebuffer_width = W;
+    app.framebuffer_height = H;
+    app.dpi_scale = 1;
+    app
+} 
+
+perform_copy :: fn(sg: *Sg.Self, dest: Sg.Buffer, src: Sg.Image) void = {
+    pass := zeroed Sg.Pass;
+    pass.compute = true;
+    sg.begin_pass(pass&);
+
+    sg.copy(dest, src);
+    
+    sg.end_pass();
+    sg.commit(true);
+}
+
+// TODO: move this to gfx.fr
+fn read_buffer_borrow(sg: *Sg.Self, buf: Sg.Buffer) []u8 = {
+    @if(SOKOL_BACKEND == .METAL_MACOS, {
+        mtl := sg.mtl&;
+        sbuf := sg.lookup(buf).unwrap();
+        it := mtl.get_id(sbuf.mtl.buf&[sbuf.cmn.active_slot]);
+        result := @objc @as(*u8) it.contents();
+        @debug_assert(!result.is_null(), "buffer.contents() failed");
+        result := result.slice(sbuf.cmn.size.intcast());
+        result
+    }, {
+        panic("TODO: abstract copy from buffer to cpu");
+    })
+}
+
+write_bgra8_ppm :: fn(out: *List(u8), in: []u8, W: i64, H: i64) void  = {
+    out.reserve(W*H*3 + 30);
+    @fmt(out, "P6 % % 255\n", W, H);
+    i := 0;
+    range(0, W*H) { _ |
+        out.push(in[i+2]);
+        out.push(in[i+1]);
+        out.push(in[i+0]);
+        i += 4;
+    };
+}
+
+/*  // TODO: how can this one be slower?
+write_bgra8_ppm :: fn(out: *List(u8), in: []u8, W: i64, H: i64) void = {
+    size := W*H*3;
+    out.reserve(size + 30);
+    @fmt(out, "P6 % % 255\n", W, H);
+    p := out.maybe_uninit.subslice(out.len, size);
+    out.len += size;
+    i, j := (0, 0);
+    range(0, W*H) { _ |
+        operator_index :: index_unchecked;
+        p[j+0] = in[i+2];
+        p[j+1] = in[i+1];
+        p[j+2] = in[i+0];
+        i += 4; 
+        j += 3;
+    };
+}
+*/
+
+
+#use("@/graphics/lib.fr");
+
+driver :: fn(vtable: *ImportVTable) void = 
+    Easy'build_for_graphics(vtable, @source_file_name());

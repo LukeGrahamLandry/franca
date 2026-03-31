@@ -50,7 +50,7 @@ for now what I have already is enough to draw some pretty pictures.
 
 ### gfx
 
-- no special handling of vertex buffers. just use storage buffers. 
+- no special handling of vertex/index buffers. just use storage buffers. 
 - removed the `query_*_(desc/info/____)` functions
 - no limit for commit listeners. removing doesn't make holes in the array 
   so the order will be different. 

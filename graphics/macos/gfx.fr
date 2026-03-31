@@ -9,6 +9,14 @@
 // 
 // you should probably run your program with METAL_DEVICE_WRAPPER_TYPE=1 
 // 
+// TODO: explain the active_slot thing. each buffer/image id exposed to user code 
+//       is backed by multiple of the native resource (one per SG_NUM_INFLIGHT_FRAMES). 
+//       swapchain like situation. 
+// TODO: explain the IdPool thing. all objc objects are owned by one nsarray. 
+//       feels convoluted to avoid calling the objc release method manually. 
+//       but also commandBufferWithUnretainedReferences so get schedualed to be 
+//       released on a later frame because might still be used because of the slots thing. 
+// 
 
 #use("@/graphics/macos/frameworks.fr");
 
@@ -501,7 +509,6 @@ fn copy_image_data(mtl: *Impl, img: *Sg.Image.T, mtl_tex: id("MTLTexture"), data
 
                 "Supply a nonzero value only when you copy data to a MTLTextureType3D type texture"
             */
-            MTLOrigin :: @struct(x: i64, y: i64, z: i64);
             MTLRegion :: @struct(origin := zeroed MTLOrigin, size: MTLSize);
 
             ::if(Ty(i64, i64));
@@ -528,6 +535,7 @@ fn copy_image_data(mtl: *Impl, img: *Sg.Image.T, mtl_tex: id("MTLTexture"), data
         }
     }
 }
+MTLOrigin :: @struct(x: i64, y: i64, z: i64);
 
 // i happen to know the abi for u64 is the same as i32, mov(Kw) zeroes the high bits
 
@@ -967,33 +975,32 @@ fn discard(mtl: *Impl, pip: *Sg.Pipeline.T) void = {
     mtl.release_resource(mtl.sg.frame_index, pip.mtl.dss);
 }
 
-// TODO
-fn create(mtl: *Impl, atts: *Sg.Attachments.T, color_images: **Sg.Image.T, resolve_images: **Sg.Image.T, ds_img: *Sg.Image.T, desc: *Sg.Attachments.Desc) sg_resource_state = {
+fn create(mtl: *Impl, atts: *Sg.Attachments.T, color_images: *Array(*Sg.Image.T, Sg.SG_MAX_COLOR_ATTACHMENTS), resolve_images: *Array(*Sg.Image.T, Sg.SG_MAX_COLOR_ATTACHMENTS), ds_img: *Sg.Image.T, desc: *Sg.Attachments.Desc) Sg.ResourceState = {
     // copy image pointers
-    range(0, atts.cmn.num_colors) { i |
+    range(0, atts.cmn.num_colors.intcast()) { i |
         color_desc := desc.colors&.index(i);
         @debug_assert(color_desc.image.id != Sg.INVALID_ID);
-        @debug_assert(0 == atts.mtl.colors[i].image);
-        @debug_assert(color_images[i] && (color_images[i].slot.id == color_desc.image.id));
-        @debug_assert(_sg_is_valid_rendertarget_color_format(color_images[i].cmn.pixel_format));
-        atts.mtl.colors[i].image = color_images[i];
+        @debug_assert(atts.mtl.colors&[i].image.is_null());
+        @debug_assert(!color_images[i].is_null() && color_images[i].slot.id == color_desc.image.id);
+        // TODO: @debug_assert(is_valid_rendertarget_color_format(color_images[i].cmn.pixel_format));
+        atts.mtl.colors&[i].image = color_images[i];
 
-        resolve_desc := &desc.resolves&.index(i);
-        if (resolve_desc.image.id != Sg.INVALID_ID) {
-            @debug_assert(0 == atts.mtl.resolves[i].image);
-            @debug_assert(resolve_images[i] && (resolve_images[i].slot.id == resolve_desc.image.id));
-            @debug_assert(color_images[i] && (color_images[i].cmn.pixel_format == resolve_images[i].cmn.pixel_format));
-            atts.mtl.resolves[i].image = resolve_images[i];
+        resolve_desc := desc.resolves&.index(i);
+        if resolve_desc.image.id != Sg.INVALID_ID {
+            @debug_assert(atts.mtl.resolves&[i].image.is_null());
+            @debug_assert(!resolve_images[i].is_null() && resolve_images[i].slot.id == resolve_desc.image.id);
+            @debug_assert(!color_images[i].is_null() && color_images[i].cmn.pixel_format == resolve_images[i].cmn.pixel_format);
+            atts.mtl.resolves&[i].image = resolve_images[i];
         }
     }
-    @debug_assert(0 == atts.mtl.depth_stencil.image);
+    @debug_assert(atts.mtl.depth_stencil.image.is_null());
     ds_desc := desc.depth_stencil&;
-    if (ds_desc.image.id != Sg.INVALID_ID) {
-        @debug_assert(ds_img && (ds_img.slot.id == ds_desc.image.id));
-        @debug_assert(_sg_is_valid_rendertarget_depth_format(ds_img.cmn.pixel_format));
+    if ds_desc.image.id != Sg.INVALID_ID {
+        @debug_assert(!ds_img.is_null() && ds_img.slot.id == ds_desc.image.id, "missing depth_stencil");
+        // TODO: @debug_assert(is_valid_rendertarget_depth_format(ds_img.cmn.pixel_format));
         atts.mtl.depth_stencil.image = ds_img;
-    }
-    return SG_RESOURCESTATE_VALID;
+    };
+    .VALID
 }
 
 // TODO: make `_` not be a real identifier so you can ignore both of these with one. 
@@ -1533,6 +1540,41 @@ fn update_image(mtl: *Impl, img: *Sg.Image.T, data: *Sg.ImageData) void #once = 
     inc_active_slot(img);
     mtl_tex := mtl.get_id(img.mtl.tex[img.cmn.active_slot]);
     mtl.copy_image_data(img, mtl_tex, data);
+}
+
+// :SLOW
+fn copy(mtl: *Impl, dest: *Sg.Buffer.T, src: *Sg.Image.T) void = {
+    @debug_assert(!mtl.compute_cmd_encoder.is_nil(), "must start_pass(compute=true) before copy()");
+    inc_active_slot(dest);
+    d := mtl.get_id(dest.mtl.buf&[dest.cmn.active_slot]);
+    s := mtl.get_id(src.mtl.tex&[src.cmn.active_slot]);
+    bpp := src.cmn.pixel_format.pixelformat_bytesize().intcast();
+    @debug_assert_ge(dest.cmn.size.intcast(), src.cmn.width.intcast()*src.cmn.height.intcast()*bpp, "copy dest too small");
+    
+    // TODO: reuse the same encoder if multiple copies in one pass. 
+    // TODO: making a bunch of compute encoders seems dumb. 
+    //       i have no intuition for what types of things are slow. 
+    //       should i expose a different pass type for this? do other apis have an equivilent restriction? 
+    
+    @objc mtl.compute_cmd_encoder.endEncoding();
+    blit := @objc mtl.cmd_buffer.blitCommandEncoder();  
+    @objc blit.copyFromTexture(
+        copyFromTexture = s,
+        sourceSlice = 0,
+        sourceLevel = 0,
+        sourceOrigin = zeroed(MTLOrigin),
+        sourceSize = @as(MTLSize) (
+            width = src.cmn.width.intcast(), 
+            height = src.cmn.height.intcast(), 
+            depth = 1,
+        ),
+        toBuffer = d,
+        destinationOffset = 0,
+        destinationBytesPerRow = src.cmn.width.intcast() * bpp,
+        destinationBytesPerImage = src.cmn.width.intcast() * bpp,
+    );
+    @objc blit.endEncoding();
+    mtl.compute_cmd_encoder = @objc mtl.cmd_buffer.computeCommandEncoder();
 }
 
 fn push_debug_group(mtl: *Impl, name: Str) void = {
