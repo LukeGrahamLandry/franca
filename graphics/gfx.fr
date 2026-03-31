@@ -46,7 +46,6 @@ SG_MAX_UNIFORMBLOCK_BINDSLOTS :: 8;
 SG_MAX_IMAGE_BINDSLOTS :: 16;
 SG_MAX_SAMPLER_BINDSLOTS :: 16;
 SG_MAX_STORAGEBUFFER_BINDSLOTS :: 8;
-SG_MAX_IMAGE_SAMPLER_PAIRS :: 16;
 
 fn _sg_def(val: ~T, def: T) T #where = {
     @if(@run(T == Str)) return(@if(val == "", def, val));
@@ -131,13 +130,6 @@ _sg_shader_sampler_t :: @struct {
     sampler_type: SamplerType;
 };
 
-// combined image sampler mappings, only needed on GL
-_sg_shader_image_sampler_t :: @struct {
-    stage: ShaderStage;
-    image_slot: u8;
-    sampler_slot: u8;
-};
-
 ShaderCommon :: @struct {
     required_bindings_and_uniforms: u32;
     is_compute: bool;
@@ -145,7 +137,6 @@ ShaderCommon :: @struct {
     storage_buffers: Array(_sg_shader_storage_buffer_t, SG_MAX_STORAGEBUFFER_BINDSLOTS);
     images: Array(_sg_shader_image_t, SG_MAX_IMAGE_BINDSLOTS);
     samplers: Array(_sg_shader_sampler_t, SG_MAX_SAMPLER_BINDSLOTS);
-    image_samplers: Array(_sg_shader_image_sampler_t, SG_MAX_IMAGE_SAMPLER_PAIRS);
 };
 
 fn common_init(cmn: *ShaderCommon, desc: *Shader.Desc) void = {
@@ -191,19 +182,6 @@ fn common_init(cmn: *ShaderCommon, desc: *Shader.Desc) void = {
             it[] = bit_or(it[], required_bindings_flag);
             dst.stage = src.stage;
             dst.sampler_type = src.sampler_type;
-        }
-    }
-    range(0, SG_MAX_IMAGE_SAMPLER_PAIRS) { i |
-        src := desc.image_sampler_pairs&[i]&;
-        dst := cmn.image_samplers&[i]&;
-        if src.stage != .NONE {
-            dst.stage = src.stage;
-            @debug_assert((src.image_slot >= 0) && (src.image_slot < SG_MAX_IMAGE_BINDSLOTS));
-            @debug_assert(desc.images&[zext src.image_slot].stage == src.stage);
-            dst.image_slot = src.image_slot;
-            @debug_assert((src.sampler_slot >= 0) && (src.sampler_slot < SG_MAX_SAMPLER_BINDSLOTS));
-            @debug_assert(desc.samplers&[zext src.sampler_slot].stage == src.stage);
-            dst.sampler_slot = src.sampler_slot;
         }
     }
 }
@@ -611,9 +589,7 @@ fn _sg_validate_end(sg: *Self) bool = {
 
 fn validate(sg: *Self, desc: *Buffer.Desc) bool = @validate(sg) {
     @V(desc.size > 0, VALIDATE_BUFFERDESC_EXPECT_NONZERO_SIZE);
-    injected := desc.gl_buffers&[0] != 0 ||
-                    !desc.mtl_buffers&[0].is_null() ||
-                    !desc.d3d11_buffer.is_null() ||
+    injected := !desc.mtl_buffers&[0].is_null() ||
                     !desc.wgpu_buffer.is_null();
     if !injected && desc.usage == .IMMUTABLE {
         if !desc.data.ptr.is_null() {
@@ -653,9 +629,7 @@ fn validate(sg: *Self, desc: *Image.Desc) bool = @validate(sg) {
     @V(desc.height > 0, VALIDATE_IMAGEDESC_HEIGHT);
     fmt := desc.pixel_format;
     usage := desc.usage;
-    injected := desc.gl_textures&[0] != 0 ||
-                            !desc.mtl_textures&[0].is_null() ||
-                            !desc.d3d11_texture.is_null() ||
+    injected := !desc.mtl_textures&[0].is_null() ||
                             !desc.wgpu_texture.is_null();
     if (is_depth_or_depth_stencil_format(fmt)) {
         @V(desc.type != ._3D, VALIDATE_IMAGEDESC_DEPTH_3D_IMAGE);
@@ -811,7 +785,6 @@ fn is_set(self: ShaderFunction) bool =
 // TODO: much of this would disappear by using @tagged
 fn validate(sg: *Self, desc: *Shader.Desc) bool = @validate(sg) {
     is_compute_shader := desc.compute_func.has_source() || desc.compute_func.has_bytecode();
-    // on Metal or D3D11, must provide shader source code or byte code
     if @is(SOKOL_BACKEND, .METAL_MACOS) {
         if (is_compute_shader) {
             @V(desc.compute_func.is_set(), VALIDATE_SHADERDESC_COMPUTE_SOURCE_OR_BYTECODE);
@@ -906,42 +879,6 @@ fn validate(sg: *Self, desc: *Shader.Desc) bool = @validate(sg) {
         msl_smp_bits = _sg_validate_set_slot_bit(msl_smp_bits, smp_desc.stage, smp_desc.msl_sampler_n);
         ASSERT_METAL();
     }
-
-    uint32_t ref_img_slot_mask = 0;
-    uint32_t ref_smp_slot_mask = 0;
-    range(0, SG_MAX_IMAGE_SAMPLER_PAIRS) { img_smp_idx |
-        continue :: local_return;
-        img_smp_desc := desc.image_sampler_pairs&[img_smp_idx]&;
-        if (img_smp_desc.stage == .NONE) {
-            continue();
-        }
-        ASSERT_METAL();
-        img_slot_in_range := img_smp_desc.image_slot < SG_MAX_IMAGE_BINDSLOTS;
-        smp_slot_in_range := img_smp_desc.sampler_slot < SG_MAX_SAMPLER_BINDSLOTS;
-        @V(img_slot_in_range, VALIDATE_SHADERDESC_IMAGE_SAMPLER_PAIR_IMAGE_SLOT_OUT_OF_RANGE);
-        @V(smp_slot_in_range, VALIDATE_SHADERDESC_IMAGE_SAMPLER_PAIR_SAMPLER_SLOT_OUT_OF_RANGE);
-        if (img_slot_in_range && smp_slot_in_range) {
-            ref_img_slot_mask = bit_or(ref_img_slot_mask, 1.shift_left(img_smp_desc.image_slot));
-            ref_smp_slot_mask = bit_or(ref_smp_slot_mask, 1.shift_left(img_smp_desc.sampler_slot));
-            img_desc := desc.images&[img_smp_desc.image_slot]&;
-            smp_desc := desc.samplers&[img_smp_desc.sampler_slot]&;
-            @V(img_desc.stage == img_smp_desc.stage, VALIDATE_SHADERDESC_IMAGE_SAMPLER_PAIR_IMAGE_STAGE_MISMATCH);
-            @V(smp_desc.stage == img_smp_desc.stage, VALIDATE_SHADERDESC_IMAGE_SAMPLER_PAIR_SAMPLER_STAGE_MISMATCH);
-            needs_nonfiltering := (img_desc.sample_type == SG_IMAGESAMPLETYPE_UINT)
-                                            || (img_desc.sample_type == SG_IMAGESAMPLETYPE_SINT)
-                                            || (img_desc.sample_type == SG_IMAGESAMPLETYPE_UNFILTERABLE_FLOAT);
-            needs_comparison := img_desc.sample_type == SG_IMAGESAMPLETYPE_DEPTH;
-            if (needs_nonfiltering) {
-                @V(needs_nonfiltering && (smp_desc.sampler_type == SG_SAMPLERTYPE_NONFILTERING), VALIDATE_SHADERDESC_NONFILTERING_SAMPLER_REQUIRED);
-            }
-            if (needs_comparison) {
-                @V(needs_comparison && (smp_desc.sampler_type == SG_SAMPLERTYPE_COMPARISON), VALIDATE_SHADERDESC_COMPARISON_SAMPLER_REQUIRED);
-            }
-        }
-    }
-    // each image and sampler must be referenced by an image sampler
-    @V(img_slot_mask == ref_img_slot_mask, VALIDATE_SHADERDESC_IMAGE_NOT_REFERENCED_BY_IMAGE_SAMPLER_PAIRS);
-    @V(smp_slot_mask == ref_smp_slot_mask, VALIDATE_SHADERDESC_SAMPLER_NOT_REFERENCED_BY_IMAGE_SAMPLER_PAIRS);
     */
 }
 
@@ -1075,7 +1012,6 @@ fn validate_begin_pass(sg: *Self, pass: *Pass) bool = @validate(sg) {
         @V(pass.swapchain.sample_count > 0, VALIDATE_BEGINPASS_SWAPCHAIN_EXPECT_SAMPLECOUNT);
         @V(!@is(pass.swapchain.color_format, .NONE, .DEFAULT), VALIDATE_BEGINPASS_SWAPCHAIN_EXPECT_COLORFORMAT);
         // NOTE: depth buffer is optional, so depth_format is allowed to be invalid
-        // NOTE: the GL framebuffer handle may actually be 0
         
         if SOKOL_BACKEND == .METAL_MACOS {
             @V(!pass.swapchain.metal.current_drawable.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_CURRENTDRAWABLE);
@@ -1365,7 +1301,6 @@ fn desc_defaults(_: *Self, desc: *Shader.Desc) Shader.Desc = {
     def.vertex_func.entry = _sg_def(def.vertex_func.entry, entry);
     def.fragment_func.entry = _sg_def(def.fragment_func.entry, entry);
     def.compute_func.entry = _sg_def(def.compute_func.entry, entry);
-    // TODO: d3d11_target
     def.mtl_threads_per_threadgroup.y = _sg_def(desc.mtl_threads_per_threadgroup.y, 1);
     def.mtl_threads_per_threadgroup.z = _sg_def(desc.mtl_threads_per_threadgroup.z, 1);
     range(0, SG_MAX_IMAGE_BINDSLOTS) { img_index |
@@ -2120,7 +2055,7 @@ fn fill_formats(dest: FatExpr, pat: FatExpr) FatExpr #macro = {
     @{ @[@as(FatExpr) (expr = (Tuple = out.as_raw()), loc = dest.loc, ty = UnknownType, done = false)]; }
 }
 
-// platform specific state is the same for metal/webgpu/d3d11
+// platform specific state is the same for metal/webgpu
 AttachmentsImpl :: fn($Impl: Type, $Attachment: Type) Type = {
     A :: @struct {
         colors: Array(Attachment, SG_MAX_COLOR_ATTACHMENTS);
@@ -2430,11 +2365,6 @@ MetalSwapchain :: @struct(
     depth_stencil_texture: id"MTLTexture",
     msaa_color_texture: id"MTLTexture",
 );
-D3d11Swapchain :: @struct(
-    render_view: rawptr,
-    resolve_view: rawptr,
-    depth_stencil_view: rawptr,
-);
 // TODO: this @if is annoying because it forces consumers to also have it. 
 //       but i want to make the metal one compile without needing dawn.json. 
 //       maybe i should just put the handle structs in webgpu.fr instead of generating them. 
@@ -2444,9 +2374,6 @@ WgpuSwapchain :: @if(::(SOKOL_BACKEND == .WGPU), @struct(
     resolve_view: Webgpu.WGPU.TextureView,
     depth_stencil_view: Webgpu.WGPU.TextureView,
 ), @struct(_: Array(rawptr, 3)));
-GlSwapchain :: @struct(
-    framebuffer: u32,
-);
 Swapchain :: @struct(
     width: i32,
     height: i32,
@@ -2454,9 +2381,7 @@ Swapchain :: @struct(
     color_format: PixelFormat,
     depth_format: PixelFormat,
     metal: MetalSwapchain,
-    d3d11: D3d11Swapchain,
     wgpu: WgpuSwapchain,
-    gl: GlSwapchain,
 );
 Pass :: @struct(
     action: PassAction,
@@ -2475,9 +2400,7 @@ BufferDesc :: @struct(
     usage := Usage.IMMUTABLE,
     data: []u8 = empty(),
     label: Str = "",
-    gl_buffers := zeroed Array(u32, 2),
     mtl_buffers := zeroed Array(rawptr, 2),
-    d3d11_buffer := zeroed rawptr,
     wgpu_buffer := zeroed rawptr,
 );
 // TODO: why is this not just a flat byte array?
@@ -2498,11 +2421,7 @@ ImageDesc :: @struct(
     sample_count := zeroed i32,
     data: ImageData,
     label: Str = "",
-    gl_textures := zeroed Array(u32, 2),
-    gl_texture_target := zeroed u32,
     mtl_textures := zeroed Array(rawptr, 2),
-    d3d11_texture := zeroed rawptr,
-    d3d11_shader_resource_view := zeroed rawptr,
     wgpu_texture := zeroed rawptr,
     wgpu_texture_view := zeroed rawptr,
 );
@@ -2526,9 +2445,7 @@ SamplerCommon :: @struct(
 SamplerDesc :: @struct {
     common: SamplerCommon #use = ();
     label: Str = "";
-    gl_sampler: u32 = 0;
     mtl_sampler := zeroed rawptr;
-    d3d11_sampler := zeroed rawptr;
     wgpu_sampler := zeroed rawptr;
 };
 ShaderStage :: @enum(u32) (
@@ -2547,7 +2464,6 @@ ShaderFunction :: @struct(
 ShaderUniformBlock :: @struct(
     stage: ShaderStage,
     size: u32,
-    hlsl_register_b_n: u8 = 0,
     msl_buffer_n: u8,
     wgsl_group0_binding_n: u8,
 );
@@ -2556,32 +2472,21 @@ ShaderImage :: @struct(
     image_type: ImageType,
     sample_type: ImageSampleType,
     multisampled: bool,
-    hlsl_register_t_n: u8,
     msl_texture_n: u8,
     wgsl_group1_binding_n: u8,
 );
 ShaderSampler :: @struct(
     stage: ShaderStage,
     sampler_type: SamplerType,
-    hlsl_register_s_n: u8,
     msl_sampler_n: u8,
     wgsl_group1_binding_n: u8,
 );
 ShaderStorageBuffer :: @struct(
     stage: ShaderStage,
     readonly: bool,
-    hlsl_register_t_n: u8 = 0,
     msl_buffer_n: u8,
     wgsl_group1_binding_n: u8,
-    glsl_binding_n: u8 = 0,
 );
-ShaderImageSamplerPair :: @struct(
-    stage: ShaderStage,
-    image_slot: u8,
-    sampler_slot: u8,
-    glsl_name: Str,
-);
-
 ShaderDesc :: @struct(
     vertex_func := zeroed ShaderFunction,
     fragment_func := zeroed ShaderFunction,
@@ -2590,7 +2495,6 @@ ShaderDesc :: @struct(
     storage_buffers := zeroed Array(ShaderStorageBuffer, SG_MAX_STORAGEBUFFER_BINDSLOTS),
     images := zeroed Array(ShaderImage, SG_MAX_IMAGE_BINDSLOTS),
     samplers := zeroed Array(ShaderSampler, SG_MAX_SAMPLER_BINDSLOTS),
-    image_sampler_pairs := zeroed Array(ShaderImageSamplerPair, SG_MAX_IMAGE_SAMPLER_PAIRS),
     mtl_threads_per_threadgroup: MtlShaderThreadsPerThreadGroup = (x = 0),
     label := "",
 );
@@ -2715,10 +2619,6 @@ EnvironmentDefaults :: @struct(
 MetalEnvironment :: @struct(
     device: import("@/graphics/macos/frameworks.fr").MTLDevice,
 );
-D3d11Environment :: @struct(
-    device: rawptr,
-    device_context: rawptr,
-);
 WgpuEnvironment :: @if(@run(SOKOL_BACKEND == .WGPU), @struct(
     device: import("@/graphics/web/webgpu.fr").Device,
 ), @struct(_: rawptr));
@@ -2727,7 +2627,6 @@ WgpuEnvironment :: @if(@run(SOKOL_BACKEND == .WGPU), @struct(
 Environment :: @struct(
     defaults: EnvironmentDefaults = (),
     metal := zeroed MetalEnvironment,
-    d3d11 := zeroed D3d11Environment,
     wgpu := zeroed WgpuEnvironment,
 );
 CommitListener :: @struct(
@@ -2746,7 +2645,6 @@ Desc :: @struct(
     max_dispatch_calls_per_pass := 1024,
     max_commit_listeners := 1024,
     disable_validation: bool = false,
-    d3d11_shader_debugging := false,
     mtl_force_managed_storage_mode := false,
     mtl_use_command_buffer_with_retained_references := false,
     wgpu_disable_bindgroups_cache := false,
