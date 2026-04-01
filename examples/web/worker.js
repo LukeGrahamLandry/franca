@@ -355,6 +355,8 @@ const show_error = (s) => {
         show(`${s.toString()}\n\n${s.stack}`);
         console.error(s);
         s = s.toString();
+    } else {
+        show(s.toString());
     }
     self.postMessage({ tag: "err", text: s });
 };

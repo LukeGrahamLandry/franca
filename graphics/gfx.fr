@@ -80,6 +80,7 @@ ImageCommon :: @struct {
     active_slot: i64;
     type: ImageType;
     render_target: bool;
+    copy_source: bool;
     width: i32;
     height: i32;
     num_slices: i32;
@@ -95,6 +96,7 @@ fn common_init(cmn: *ImageCommon, desc: *Image.Desc) void = {
     cmn.active_slot = 0;
     cmn.type = desc.type;
     cmn.render_target = desc.render_target;
+    cmn.copy_source = desc.copy_source;
     cmn.width = desc.width;
     cmn.height = desc.height;
     cmn.num_slices = desc.num_slices;
@@ -1019,7 +1021,7 @@ fn validate_begin_pass(sg: *Self, pass: *Pass) bool = @validate(sg) {
                 @V(pass.swapchain.metal.msaa_color_texture.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_MSAACOLORTEXTURE_NOTSET);
             }
         };
-        
+        // TODO: if webgpu {}
     };
     @else => {
         // this is an 'offscreen pass'
@@ -1054,10 +1056,18 @@ fn validate_begin_pass(sg: *Self, pass: *Pass) bool = @validate(sg) {
         @V(it.sample_count == 0, VALIDATE_BEGINPASS_SWAPCHAIN_EXPECT_SAMPLECOUNT_NOTSET);
         @V(it.color_format == .DEFAULT, VALIDATE_BEGINPASS_SWAPCHAIN_EXPECT_COLORFORMAT_NOTSET);
         @V(it.depth_format == .DEFAULT, VALIDATE_BEGINPASS_SWAPCHAIN_EXPECT_DEPTHFORMAT_NOTSET);
-        @V(it.metal.current_drawable.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_CURRENTDRAWABLE_NOTSET);
-        @V(it.metal.depth_stencil_texture.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_DEPTHSTENCILTEXTURE_NOTSET);
-        @V(it.metal.msaa_color_texture.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_MSAACOLORTEXTURE_NOTSET);
-        ASSERT_METAL();
+        @inline_switch(SOKOL_BACKEND) {
+            @case(.METAL_MACOS) => {
+                @V(it.metal.current_drawable.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_CURRENTDRAWABLE_NOTSET);
+                @V(it.metal.depth_stencil_texture.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_DEPTHSTENCILTEXTURE_NOTSET);
+                @V(it.metal.msaa_color_texture.is_nil(), VALIDATE_BEGINPASS_SWAPCHAIN_METAL_EXPECT_MSAACOLORTEXTURE_NOTSET);
+            };
+            @case(.WGPU) => {
+                @V(it.wgpu.render_view._.is_null(), VALIDATE_BEGINPASS_SWAPCHAIN_WGPU_EXPECT_RENDERVIEW_NOTSET);
+                @V(it.wgpu.depth_stencil_view._.is_null(), VALIDATE_BEGINPASS_SWAPCHAIN_WGPU_EXPECT_DEPTHSTENCILVIEW_NOTSET);
+                @V(it.wgpu.resolve_view._.is_null(), VALIDATE_BEGINPASS_SWAPCHAIN_WGPU_EXPECT_RESOLVEVIEW_NOTSET);
+            };
+        };
     }
 };
 
@@ -1985,13 +1995,20 @@ fn update_image(sg: *Self, img_id: Image, data: *ImageData) void #trace = {
 //       efficiently splice images together. i probably want to expose that 
 //       eventually. i want to think of an example program where that's a 
 //       noticable performace improvement first. 
-// TODO: webgpu
 fn copy(sg: *Sg.Self, dest: Buffer, src: Image) void = {
     dest := sg.lookup(dest) 
         || @panic("copy dest invalid");
     src := sg.lookup(src) 
         || @panic("copy src invalid");
+    @debug_assert(src.cmn.num_slices == 1 && src.cmn.num_mipmaps == 1 && src.cmn.type == ._2D, 
+        "TODO: more image copy plumbing");
     sg.impl().copy(dest, src);
+}
+
+// TODO: this doesn't work in browser
+fn read_buffer_borrow_blocking(sg: *Sg.Self, buf: Sg.Buffer) []u8 = {
+    buf := sg.lookup(buf) || return("");
+    sg.impl().read_buffer_borrow_blocking(buf)
 }
 
 fn push_debug_group(sg: *Self, name: Str) void #trace = {
@@ -2197,6 +2214,7 @@ Usage :: @enum(u32) (
     IMMUTABLE,
     DYNAMIC,
     STREAM,
+    MAP_READ,
 );
 ImageType :: @enum(u32) (
     DEFAULT,
@@ -2415,6 +2433,7 @@ ImageData :: @struct(
 ImageDesc :: @struct(
     type := zeroed ImageType,
     render_target := false,
+    copy_source := false,
     width: i32,
     height: i32,
     num_slices := zeroed i32,

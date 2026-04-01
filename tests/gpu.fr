@@ -9,24 +9,33 @@ main :: fn() void = {
         allocator = general_allocator(),
     ));
     
-    W :: 500;
+    // TODO: deal with this when copying out of the buffer instead. 
+    //       so then need to support asking for padding when the copying to the buffer so the image doesn't have to be a multiple of this size. 
+    COPY_BYTES_PER_ROW_ALIGNMENT :: 256;  // fuckin wnebsnites :(
+    @run @assert_eq(W.mod(COPY_BYTES_PER_ROW_ALIGNMENT), 0, "COPY_BYTES_PER_ROW_ALIGNMENT :(");
+    W :: 512;
     H :: W;
     scratch: Sg.Buffer = sg.make(
-        usage = .DYNAMIC,
+        usage = .MAP_READ,
         size = W * H * 4,
     );
+    // TODO: allow making pixel format not match default. need to change it in pipelinedesc.colors.pixel_format. 
+    //       actually i guess just pass it into headless_environment instead. 
+    //       it's just the blessed one that's pretending to be the screen that has this restriction 
     image: Sg.Image = sg.make(
         width = W,
         height = H,
         pixel_format = .BGRA8,
         render_target = true,
+        copy_source = true,
     );
-    dimage: Sg.Image = sg.make(
+    // TODO: in website ask for features: Depth32FloatStencil8
+    dimage: Sg.Image = @if(SOKOL_BACKEND == .WGPU, (id = 0), sg.make(
         width = W,
         height = H,
         pixel_format = .DEPTH_STENCIL,
         render_target = true,
-    );
+    ));
     at: Sg.Attachments = sg.make(
         colors = ((
             image = image,
@@ -37,7 +46,7 @@ main :: fn() void = {
     app := init_headless_app("@/examples/gpu/mandelbrot.fr", sg, at, W, H);
     app.frame();
     sg.perform_copy(scratch, image);
-    result := sg.read_buffer_borrow(scratch);
+    result := sg.read_buffer_borrow_blocking(scratch);
     #use("@/lib/sys/fs.fr");
     out := @ref u8.list(temp());
     write_bgra8_ppm(out, result, W, H);
@@ -76,48 +85,21 @@ init_headless_app :: fn($path: Str, sg: *Sg.Self, at: Sg.Attachments, W: i64, H:
     app.framebuffer_width = W;
     app.framebuffer_height = H;
     app.dpi_scale = 1;
+    app.webgpu.headless = true;
     app
 } 
 
 perform_copy :: fn(sg: *Sg.Self, dest: Sg.Buffer, src: Sg.Image) void = {
+    // hack: create an encoder outside a frame
     pass := zeroed Sg.Pass;
     pass.compute = true;
     sg.begin_pass(pass&);
-
-    sg.copy(dest, src);
-    
     sg.end_pass();
+    
+    sg.copy(dest, src);
     sg.commit(true);
 }
 
-// TODO: move this to gfx.fr
-fn read_buffer_borrow(sg: *Sg.Self, buf: Sg.Buffer) []u8 = {
-    @if(SOKOL_BACKEND == .METAL_MACOS, {
-        mtl := sg.mtl&;
-        sbuf := sg.lookup(buf).unwrap();
-        it := mtl.get_id(sbuf.mtl.buf&[sbuf.cmn.active_slot]);
-        result := @objc @as(*u8) it.contents();
-        @debug_assert(!result.is_null(), "buffer.contents() failed");
-        result := result.slice(sbuf.cmn.size.intcast());
-        result
-    }, {
-        panic("TODO: abstract copy from buffer to cpu");
-    })
-}
-
-write_bgra8_ppm :: fn(out: *List(u8), in: []u8, W: i64, H: i64) void  = {
-    out.reserve(W*H*3 + 30);
-    @fmt(out, "P6 % % 255\n", W, H);
-    i := 0;
-    range(0, W*H) { _ |
-        out.push(in[i+2]);
-        out.push(in[i+1]);
-        out.push(in[i+0]);
-        i += 4;
-    };
-}
-
-/*  // TODO: how can this one be slower?
 write_bgra8_ppm :: fn(out: *List(u8), in: []u8, W: i64, H: i64) void = {
     size := W*H*3;
     out.reserve(size + 30);
@@ -134,8 +116,6 @@ write_bgra8_ppm :: fn(out: *List(u8), in: []u8, W: i64, H: i64) void = {
         j += 3;
     };
 }
-*/
-
 
 #use("@/graphics/lib.fr");
 

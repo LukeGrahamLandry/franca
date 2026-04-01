@@ -1,4 +1,19 @@
 
+## (Apr 1)
+
+- gfx/wgpu
+  - attachments; hacky headless init callbacks & don't do the surface stuff. 
+  - put errors in the textbox so can't forget to open the console.
+  - ugh really? COPY_BYTES_PER_ROW_ALIGNMENT, i can't just do computation on an image?
+  - they make reading a buffer such a pain in the ass. can't be Storage+MapRead. 
+    more importantly need to deal with it being async somehow. i think it can't be done. 
+    even if i was ok with writing the program inside out, there's no top level loop for me 
+    to return to if i didn't start with calling app.run().
+  - works in dawn tho... kinda, it's crashy :(. 
+    also not pixel perfect the same as the metal one which is sad. 
+    the later is just because of metal_disable_fast_math (which i can't ask webgpu for), 
+    if i turn on fast math in the metal one then they match. 
+
 ## (Mar 31)
 
 - vzf isn't dying in the same way as if entitlements are wrong, its just exiting 
@@ -15,6 +30,8 @@
     but now do offscreen pass and save it to a ppm. 
   - yay, if it compiles then it works! first try, that never happens :)
 - very confusing; internet says github actions doesn't do metal but it's printing "the gpu did math"... is that test totally fucked somehow?
+  it sure seems to work? the mandelbrot test image gets the same hash on the arm one (but not the amd one which is concerning, works on my machine (in rosetta)...)
+- noticed uninit memory in elf exports hash by luck when checking that dump_elf(web.fr) looks like its exporting the right things dispite being intended for wasm. 
 
 ## (Mar 28/29)
 

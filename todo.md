@@ -1,4 +1,8 @@
 
+- `-use-linker` flag for easy.fr/default_driver.fr that does -c and then links and passes all the `-framework`
+  since my `-keep-names` isn't enough for Instruments to find the symbols (also should fix the actual problem there). 
+  - detect missing frameworks better than stack overflowing inside os code in glue_environment 
+    (probably not caught sooner because i have to pass the flag to ignore undefined symbols to make my #weak work)
 - wasm: don't put all the zeroes in the binary. 
   put them after the data section and it's fine because linear memory starts zeroed. 
   ex. chess/web is 2170kb but compresses to 28kb so it's all bss. 

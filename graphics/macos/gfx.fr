@@ -137,7 +137,7 @@ fn resource_options_storage_mode_managed_or_shared(mtl: *Impl) M("MTLResourceOpt
 }
 
 fn to_mtl(mtl: *Impl, it: Sg.Usage) M("MTLResourceOptions") = {
-    @debug_assert(@is(it, .IMMUTABLE, .DYNAMIC, .STREAM));
+    @debug_assert(@is(it, .IMMUTABLE, .DYNAMIC, .MAP_READ, .STREAM));
     x := mtl.resource_options_storage_mode_managed_or_shared();
     if it != .IMMUTABLE {
         x = bit_or(x, 1);  // MTLResourceCPUCacheModeWriteCombined;
@@ -1273,7 +1273,7 @@ fn end_pass(mtl: *Impl) void = {
 fn commit(mtl: *Impl, stall: bool) void = {
     @debug_assert(mtl.render_cmd_encoder.is_nil());
     @debug_assert(mtl.compute_cmd_encoder.is_nil());
-    @debug_assert(!mtl.cmd_buffer.is_nil());
+    @debug_assert(!mtl.cmd_buffer.is_nil(), "commit() misssing cmd_buffer. call start+end pass first");
 
     // commit the frame's command buffer
     @objc mtl.cmd_buffer.commit();
@@ -1544,7 +1544,7 @@ fn update_image(mtl: *Impl, img: *Sg.Image.T, data: *Sg.ImageData) void #once = 
 
 // :SLOW
 fn copy(mtl: *Impl, dest: *Sg.Buffer.T, src: *Sg.Image.T) void = {
-    @debug_assert(!mtl.compute_cmd_encoder.is_nil(), "must start_pass(compute=true) before copy()");
+    @debug_assert(mtl.render_cmd_encoder.is_nil() && mtl.compute_cmd_encoder.is_nil(), "copy() must be outside pass");
     inc_active_slot(dest);
     d := mtl.get_id(dest.mtl.buf&[dest.cmn.active_slot]);
     s := mtl.get_id(src.mtl.tex&[src.cmn.active_slot]);
@@ -1556,7 +1556,6 @@ fn copy(mtl: *Impl, dest: *Sg.Buffer.T, src: *Sg.Image.T) void = {
     //       i have no intuition for what types of things are slow. 
     //       should i expose a different pass type for this? do other apis have an equivilent restriction? 
     
-    @objc mtl.compute_cmd_encoder.endEncoding();
     blit := @objc mtl.cmd_buffer.blitCommandEncoder();  
     @objc blit.copyFromTexture(
         copyFromTexture = s,
@@ -1571,10 +1570,16 @@ fn copy(mtl: *Impl, dest: *Sg.Buffer.T, src: *Sg.Image.T) void = {
         toBuffer = d,
         destinationOffset = 0,
         destinationBytesPerRow = src.cmn.width.intcast() * bpp,
-        destinationBytesPerImage = src.cmn.width.intcast() * bpp,
+        destinationBytesPerImage = src.cmn.width.intcast() * src.cmn.height.intcast() * bpp,
     );
     @objc blit.endEncoding();
-    mtl.compute_cmd_encoder = @objc mtl.cmd_buffer.computeCommandEncoder();
+}
+
+fn read_buffer_borrow_blocking(mtl: *Impl, sbuf: *Sg.Buffer.T) []u8 = {
+    it := mtl.get_id(sbuf.mtl.buf&[sbuf.cmn.active_slot]);
+    result := @objc @as(*u8) it.contents();
+    @debug_assert(!result.is_null(), "buffer.contents() failed");
+    result.slice(sbuf.cmn.size.intcast())
 }
 
 fn push_debug_group(mtl: *Impl, name: Str) void = {

@@ -11,7 +11,7 @@
 //
 
 WGPU :: import("@/graphics/web/webgpu.fr");
-GraphicsState :: @if(@run(SOKOL_BACKEND == .WGPU), RealGraphicsState, @struct(noframe: bool));
+GraphicsState :: @if(@run(SOKOL_BACKEND == .WGPU), RealGraphicsState, @struct(noframe: bool, headless: bool));
 
 RealGraphicsState :: @struct {
     instance: WGPU.Instance;
@@ -26,17 +26,28 @@ RealGraphicsState :: @struct {
     msaa_view: WGPU.TextureView;
     swapchain_view: WGPU.TextureView;
     
+    // in the browser, after calling getCurrentTexture on the canvas it will always be presented, 
+    // so if you directly render into that texture, you can't decide to drop a frame in the middle 
+    // (which i want to do for things like mandelbrot that don't need to update if !dirty which is checked in the frame callback). 
+    // so instead render into a scratch texture and copy it to the canvas surface if presented. 
+    // when using dawn natively you can just not call present like on metal. 
     wip_frame: Ty(WGPU.Texture, WGPU.TextureView);
     noframe: bool;
     is_browser: bool;
+    // when using a fake Sapp.Self (manually calling frame()) without a main 
+    // surface (so just offscreen attachments), don't do the extra fucking around 
+    // for get_current_surface (especially because it won't work because won't have called pre_init). 
+    headless: bool;
 };
 
 // TODO: do i have to do anything to get logging info? 
 //       wgpuDevicePushErrorScope/wgpuDevicePopErrorScope?
 pre_init :: fn(sapp: *Sapp.Self) void = {
+    web := sapp.webgpu&;
+    @if(web.headless) return();
+    @assert(query_current_os() == .macos);
     macos: *Sapp.Macos.Impl = sapp.impl();
     layer := @objc @as(rawptr) macos.view.layer();
-    web := sapp.webgpu&;
     web.native_init_device(Some = layer);
     caps := zeroed WGPU.SurfaceCapabilities;
     getCapabilities(web.surface, web.adapter, caps&);
@@ -81,6 +92,7 @@ fn native_init_device(web: *RealGraphicsState, metal_layer: ?rawptr) void = {
     ));
     @debug_assert(!web.adapter._.is_null(), "we don't fuck with async here");
     
+    // TODO: my browser bindings don't use this config
     web.adapter.requestDevice(@ref @as(WGPU.DeviceDescriptor) (
         defaultQueue = (),
         requiredFeatureCount = 1,
@@ -113,6 +125,7 @@ fn get_swapchain(wgpu: *GraphicsState) Sg.WgpuSwapchain = (
 
 pre_frame :: fn(sapp: *Sapp.Self) void = {
     web := sapp.webgpu&;
+    @if(web.headless) return();
     
     if web.is_browser {
         web.swapchain_view = web.wip_frame._1;
@@ -145,6 +158,7 @@ get_current_surface :: fn(web: *GraphicsState) WGPU.Texture = {
 
 post_frame :: fn(sapp: *Sapp.Self) void = {
     web := sapp.webgpu&;
+    @if(web.headless) return();
     if web.is_browser {
         @if(web.noframe) return();
         surface_tex := get_current_surface(web);
@@ -165,6 +179,7 @@ copy_scratch_to_surface :: fn(web: *GraphicsState, surface_tex: WGPU.Texture) vo
     q := web.device.getQueue();
     enc := createCommandEncoder(web.device, @ref(zeroed WGPU.CommandEncoderDescriptor));
     dest, src := (surface_tex, web.wip_frame._0);
+    @debug_assert(!dest._.is_null() && !src._.is_null(), "didn't init_browser_wip_frame");
     enc.copyTextureToTexture(
         @ref(@as(WGPU.TexelCopyTextureInfo) (texture = src, origin = zeroed(WGPU.Origin3D))), 
         @ref(@as(WGPU.TexelCopyTextureInfo) (texture = dest, origin = zeroed(WGPU.Origin3D))), 
@@ -182,7 +197,7 @@ init_browser_wip_frame :: fn(web: *GraphicsState) void = {
         ::Sg.Webgpu;
         release(web.wip_frame._0);
         release(web.wip_frame._1);
-    };
+    };  // else: first time being called (ie. for init not resize)
     ::Sg.Webgpu;
     tex := createTexture(web.device, @ref(@as(WGPU.TextureDescriptor) (
         label = "saved-frame",

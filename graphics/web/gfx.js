@@ -65,6 +65,10 @@ export const init_gpu = async (wasm_instance, canvas, devicePixelRatio) => {
     const adapter = await navigator.gpu.requestAdapter();
     G.adapter = G.push(adapter);
     const device = await adapter.requestDevice();
+    device.addEventListener('uncapturederror', (event) => {
+        console.trace(event.error.message);
+        G.show_error(event.error.message);
+    });
     G.device = G.push(device);
     const surface = canvas.getContext('webgpu');
     G.surface = G.push(surface);
@@ -106,6 +110,23 @@ webgpu.francaRequestState = (I, frame_callback_p, francaSaveState) => {
     //       but need to be careful because that changes the semantics of app.run
     throw ESCAPE_MAIN;
 };
+
+// i hate this i hate this i hate this
+// TODO: use the descriptors, it's annoying because the real functions are async
+webgpu.wgpuCreateInstance = (_desc) => { return G.push({}); };
+webgpu.wgpuInstanceRequestAdapter = (instance, _desc, cb) => { 
+    do_callback(cb, G.adapter);
+    return 0n;
+};
+webgpu.wgpuAdapterRequestDevice = (adapter, _desc, cb) => { 
+    do_callback(cb, G.device);
+    return 0n;
+};
+const StatusSuccess = 1;
+function do_callback(cb, value) {
+    const [f, u1, u2] = R.Callback(cb);
+    f(StatusSuccess, value, /*msg*/0n, u1, u2);
+}
 
 webgpu.wgpuDeviceGetQueue = (device) => {
     return G.push(G.get(device).queue);
@@ -164,11 +185,20 @@ webgpu.wgpuCommandEncoderBeginRenderPass = (encoder, i) => {
     const o = R.RenderPassDescriptor(i);
     return G.push(G.get(encoder).beginRenderPass(o));
 };
-
+webgpu.wgpuCommandEncoderBeginComputePass = (encoder, i) => {
+    const o = R.ComputePassDescriptor(i);
+    return G.push(G.get(encoder).beginComputePass(o));
+};
 webgpu.wgpuRenderPassEncoderSetBindGroup = (self, group_index, group, dynamic_offset_count, dynamic_offsets) => {
     let offsets = R.array_loaded(R.u32, 4n, dynamic_offset_count, dynamic_offsets);
     G.get(self).setBindGroup(group_index, G.get(group), offsets);
 };
+webgpu.wgpuComputePassEncoderSetBindGroup = webgpu.wgpuRenderPassEncoderSetBindGroup;
+webgpu.wgpuCommandEncoderCopyTextureToBuffer = (self, source, destination, copy_size, ) => { 
+    const d = R.TexelCopyBufferInfo(destination);
+    G.get(self).copyTextureToBuffer(R.TexelCopyTextureInfo(source), { ...d, ...d.layout }, R.Extent3D(copy_size));
+};
+
 webgpu.wgpuRenderPassEncoderSetPipeline = (self, pipeline) => {
     G.get(self).setPipeline(G.get(pipeline));
 };
@@ -186,6 +216,7 @@ webgpu.wgpuRenderPassEncoderDraw = (self, vertex_count, instance_count, first_ve
 webgpu.wgpuRenderPassEncoderEnd = (self) => {
     G.get(self).end();
 };
+webgpu.wgpuComputePassEncoderEnd = webgpu.wgpuRenderPassEncoderEnd;
 
 webgpu.wgpuQueueSubmit = (self, command_count, commands) => {
     let o = R.array_loaded(R.CommandBuffer, 8n, command_count, commands);
@@ -244,6 +275,24 @@ webgpu.wgpuDeviceCreateSampler = (self, descriptor) => {
 webgpu.wgpuRenderPassEncoderSetViewport = (self, x, y, width, height, min_depth, max_depth) => {
     G.get(self).setViewport(x, y, width, height, min_depth, max_depth);
 };
+
+webgpu.wgpuBufferMapAsync = (self, mode, offset, size, cb) => {
+    const [f, u1, u2] = R.Callback(cb);
+    let fut = G.get(self).mapAsync(Number(mode), Number(offset), Number(size));
+    fut.then(() => {
+        f(StatusSuccess, /*msg*/0n, u1, u2);
+    });
+    return 0n;
+};
+webgpu.wgpuBufferReadMappedRange = (self, offset, data, size) => {
+    const src = new Uint8Array(G.get(self).getMappedRange(Number(offset), Number(size)));
+    const dest = new Uint8Array(G.M(), Number(data), Number(size));
+    dest.set(src);
+    return StatusSuccess; 
+};
+webgpu.wgpuBufferUnmap = (self) => {
+    G.get(self).unmap();
+},
 
 R.u32 = (i) => new DataView(G.M()).getUint32(Number(i), true);
 R.u16 = (i) => new DataView(G.M()).getUint16(Number(i), true);
@@ -343,3 +392,8 @@ for (let name of Object.keys(webgpu)) {
 
 W.u32 = (i, o) => new DataView(G.M()).setUint32(Number(i), o, true);
 W.i64 = (i, o) => new DataView(G.M()).setBigUint64(Number(i), BigInt(o), true);
+
+R.Callback = function(i) {
+  const [f, u1, u2] = [this.i64(i + 16n), this.p64(i + 24n), this.p64(i + 32n)];
+  return [G.wasm_instance.exports.__indirect_table.get(f), u1, u2];
+}

@@ -165,13 +165,10 @@ fn to_wgpu(b: bool) WGPU.Bool =
     @if(b, .True, .False);
 
 fn to_wgpu(u: Sg.Usage) WGPU.BufferUsage = {
-    // FIXME: change to WGPU.BufferUsage once Emscripten and Dawn webgpu.h agree
-    // TODO: ?^ sure seems like this is using WGPU.BufferUsage?
-    
     // TODO: better things for flags and then put these numbers in the bindings instead so 
     //       you can sanely use wgpu from franca without the gfx abstraction layer. :LazyMagicNumbers
-    res: i64 = 0x80;
-    (_ = res.bit_or(@if(u == .IMMUTABLE, 0, 0x8))) // CopyDst
+    res: i64 = @if(u == .MAP_READ, WGPU.BufferUsage.MapRead, WGPU.BufferUsage.Storage);
+    (_ = res.bit_or(@if(u == .IMMUTABLE, 0, WGPU.BufferUsage.CopyDst)))
 }
 
 fn to_wgpu(view: WGPU.TextureView, a: Sg.LoadAction) WGPU.LoadOp = 
@@ -884,6 +881,9 @@ fn create(wgpu: *Impl, img: *Sg.Image.T, desc: *Sg.Image.Desc) Sg.ResourceState 
                 if desc.render_target {
                     u = u.bit_or(WGPU.TextureUsage.RenderAttachment);
                 };
+                if desc.copy_source {
+                    u = u.bit_or(WGPU.TextureUsage.CopySrc);
+                };
                 (_ = u)
             },
             dimension = to_wgpu(img.cmn.type),
@@ -1334,65 +1334,46 @@ fn discard(wgpu: *Impl, pip: *Sg.Pipeline.T) void = {
     }
 }
 
-// TODO
-fn create(wgpu: *Impl, atts: *Sg.Attachments.T, color_images: **Sg.Image.T, resolve_images: **Sg.Image.T, ds_img: *Sg.Image.T, desc: *Sg.Attachments.Desc) Sg.ResourceState = {
-    @debug_assert(atts && desc);
-    @debug_assert(color_images && resolve_images);
-
+// TODO: all these assertions are such a paste from the metal ones
+fn create(wgpu: *Impl, atts: *Sg.Attachments.T, color_images: *Array(*Sg.Image.T, Sg.SG_MAX_COLOR_ATTACHMENTS), resolve_images: *Array(*Sg.Image.T, Sg.SG_MAX_COLOR_ATTACHMENTS), ds_img: *Sg.Image.T, desc: *Sg.Attachments.Desc) Sg.ResourceState = {
     // copy image pointers and create renderable wgpu texture views
-    for (int i = 0; i < atts.cmn.num_colors; i++) {
-        const sg_attachment_desc* color_desc = &desc.colors[i];
-        _SOKOL_UNUSED(color_desc);
+    range(0, atts.cmn.num_colors.intcast()) { i |
+        color_desc := desc.colors&.index(i);
         @debug_assert(color_desc.image.id != Sg.INVALID_ID);
-        @debug_assert(0 == atts.wgpu.colors[i].image);
-        @debug_assert(color_images[i] && (color_images[i].slot.id == color_desc.image.id));
-        @debug_assert(_sg_is_valid_rendertarget_color_format(color_images[i].cmn.pixel_format));
-        @debug_assert(color_images[i].wgpu.tex);
-        atts.wgpu.colors[i].image = color_images[i];
+        @debug_assert(atts.mtl.colors&[i].image.is_null());
+        @debug_assert(!color_images[i].is_null() && color_images[i].slot.id == color_desc.image.id);
+        // TODO: @debug_assert(is_valid_rendertarget_color_format(color_images[i].cmn.pixel_format));
+        @debug_assert(!color_images[i].mtl.tex._.is_null());
+        atts.mtl.colors&[i].image = color_images[i];
 
         wgpu_color_view_desc := color_desc.to_wgpu();
-        atts.wgpu.colors[i].view = wgpuTextureCreateView(color_images[i].wgpu.tex, &wgpu_color_view_desc);
-        if (0 == atts.wgpu.colors[i].view) {
-            _SG_ERROR(WGPU._ATTACHMENTS_CREATE_TEXTURE_VIEW_FAILED);
-            return SG_RESOURCESTATE_FAILED;
-        }
-
-        const sg_attachment_desc* resolve_desc = &desc.resolves[i];
-        if (resolve_desc.image.id != Sg.INVALID_ID) {
-            @debug_assert(0 == atts.wgpu.resolves[i].image);
-            @debug_assert(resolve_images[i] && (resolve_images[i].slot.id == resolve_desc.image.id));
-            @debug_assert(color_images[i] && (color_images[i].cmn.pixel_format == resolve_images[i].cmn.pixel_format));
-            @debug_assert(resolve_images[i].wgpu.tex);
-            atts.wgpu.resolves[i].image = resolve_images[i];
+        atts.mtl.colors&[i].view = createView(color_images[i].mtl.tex, wgpu_color_view_desc&);
+        @debug_assert(!atts.mtl.colors&[i].view._.is_null(), "ATTACHMENTS_CREATE_TEXTURE_VIEW_FAILED");
+        
+        resolve_desc := desc.resolves&.index(i);
+        if resolve_desc.image.id != Sg.INVALID_ID {
+            @debug_assert(atts.mtl.resolves&[i].image.is_null());
+            @debug_assert(!resolve_images[i].is_null() && resolve_images[i].slot.id == resolve_desc.image.id);
+            @debug_assert(!color_images[i].is_null() && color_images[i].cmn.pixel_format == resolve_images[i].cmn.pixel_format);
+            atts.mtl.resolves&[i].image = resolve_images[i];
 
             wgpu_resolve_view_desc := resolve_desc.to_wgpu();
-            atts.wgpu.resolves[i].view = wgpuTextureCreateView(resolve_images[i].wgpu.tex, &wgpu_resolve_view_desc);
-            if (0 == atts.wgpu.resolves[i].view) {
-                _SG_ERROR(WGPU._ATTACHMENTS_CREATE_TEXTURE_VIEW_FAILED);
-                return SG_RESOURCESTATE_FAILED;
-            }
+            atts.mtl.resolves&[i].view = createView(resolve_images[i].mtl.tex, wgpu_resolve_view_desc&);
+            @debug_assert(!atts.mtl.resolves&[i].view._.is_null(), "ATTACHMENTS_CREATE_TEXTURE_VIEW_FAILED");
         }
-    }
-    @debug_assert(0 == atts.wgpu.depth_stencil.image);
-    const sg_attachment_desc* ds_desc = &desc.depth_stencil;
-    if (ds_desc.image.id != Sg.INVALID_ID) {
-        @debug_assert(ds_img && (ds_img.slot.id == ds_desc.image.id));
-        @debug_assert(_sg_is_valid_rendertarget_depth_format(ds_img.cmn.pixel_format));
-        @debug_assert(ds_img.wgpu.tex);
-        atts.wgpu.depth_stencil.image = ds_img;
-        wgpu_ds_view_desc: WGPU.TextureViewDescriptor = (
-            baseMipLevel = (uint32_t) ds_desc.mip_level,
-            mipLevelCount = 1,
-            baseArrayLayer = (uint32_t) ds_desc.slice,
-            arrayLayerCount = 1,
-        );
-        atts.wgpu.depth_stencil.view = wgpuTextureCreateView(ds_img.wgpu.tex, wgpu_ds_view_desc&);
-        if (0 == atts.wgpu.depth_stencil.view) {
-            _SG_ERROR(WGPU._ATTACHMENTS_CREATE_TEXTURE_VIEW_FAILED);
-            return SG_RESOURCESTATE_FAILED;
-        }
-    }
-    return SG_RESOURCESTATE_VALID;
+    };
+    
+    @debug_assert(atts.mtl.depth_stencil.image.is_null());
+    ds_desc := desc.depth_stencil&;
+    if ds_desc.image.id != Sg.INVALID_ID {
+        @debug_assert(!ds_img.is_null() && ds_img.slot.id == ds_desc.image.id, "missing depth_stencil");
+        // TODO: @debug_assert(is_valid_rendertarget_depth_format(ds_img.cmn.pixel_format));
+        atts.mtl.depth_stencil.image = ds_img;
+        wgpu_ds_view_desc := ds_desc.to_wgpu();
+        atts.mtl.depth_stencil.view = createView(ds_img.mtl.tex, wgpu_ds_view_desc&);
+        @debug_assert(!atts.mtl.depth_stencil.view._.is_null(), "ATTACHMENTS_CREATE_TEXTURE_VIEW_FAILED");
+    };
+    .VALID
 }
 
 fn to_wgpu(it: *Sg.AttachmentDesc) WGPU.TextureViewDescriptor = (
@@ -1400,6 +1381,7 @@ fn to_wgpu(it: *Sg.AttachmentDesc) WGPU.TextureViewDescriptor = (
     mipLevelCount = 1,
     baseArrayLayer = bitcast it.slice,
     arrayLayerCount = 1,
+    usage = (_ = WGPU.TextureUsage.RenderAttachment),
 );
 
 // TODO
@@ -1657,6 +1639,61 @@ fn append_buffer(wgpu: *Impl, buf: *Sg.Buffer.T, data: []u8, _new_frame: bool) v
 
 fn update_image(wgpu: *Impl, img: *Sg.Image.T, data: *Sg.ImageData) void #once = 
     wgpu.copy_image_data(img, img.mtl.tex, data);
+
+fn copy(wgpu: *Impl, dest: *Sg.Buffer.T, src: *Sg.Image.T) void = {
+    @debug_assert(!wgpu.dev._.is_null() && !wgpu.cmd_enc._.is_null());
+    @debug_assert(wgpu.rpass_enc.is_none() && wgpu.cpass_enc.is_none(), "copy() must be outside pass");
+    
+    bpp := src.cmn.pixel_format.pixelformat_bytesize().intcast();
+    @debug_assert_ge(dest.cmn.size.intcast(), src.cmn.width.intcast()*src.cmn.height.intcast()*bpp, "copy dest too small");
+    
+    wgpu.cmd_enc.copyTextureToBuffer(@ref @as(WGPU.TexelCopyTextureInfo) (
+        texture = src.mtl.tex,
+        origin = zeroed(WGPU.Origin3D),
+    ), @ref @as(WGPU.TexelCopyBufferInfo) (
+        layout = (
+            offset = 0,
+            bytesPerRow = trunc(src.cmn.width.intcast() * bpp),
+            rowsPerImage = src.cmn.height.bitcast(),
+        ),
+        buffer = dest.mtl.buf,
+    ), @ref @as(WGPU.Extent3D) (
+        width = src.cmn.width.bitcast(),
+        height = src.cmn.height.bitcast(),
+        depthOrArrayLayers = 1,
+    ));
+}
+
+fn read_buffer_borrow_blocking(_: *Impl, sbuf: *Sg.Buffer.T) []u8 = {
+    out := temp().alloc_uninit(u8, sbuf.cmn.size.intcast());
+    S :: @struct(futex: *u32, out: []u8, buf: *Sg.Buffer.T);
+    Futex :: import("@/lib/sys/sync/futex.fr");
+    futex: u32 = 0;
+    sbuf.mtl.buf.mapAsync((_ = Sg.Webgpu.WGPU.MapMode.Read), 0, out.len, (
+        mode = .AllowSpontaneous,
+        userdata1 = S.raw_from_ptr(@ref @as(S) (
+            futex = futex&, out = out, buf = sbuf,
+        )),
+        callback = fn(status, message, s, _) = {
+            @assert_eq(status, .Success, "mapAsync: %", message);
+            s := S.ptr_from_raw(s);
+            status := s.buf.mtl.buf.readMappedRange(0, u8.raw_from_ptr(s.out.ptr), s.out.len);
+            @assert_eq(status, .Success, "readMappedRange");
+            s.buf.mtl.buf.unmap();
+            s.futex[] = 1;
+            Futex'wake(s.futex, 1);
+        }
+    ));
+    if futex == 0 && GRAPHICS_TARGET_WEB {
+        @panic("this doesn't work in a website :(");
+    };
+    // TODO: native segfaults before calling the callback like half the time ??
+
+    // TODO: ... i think this can't be done in a website
+    //       the thing doesn't run until you yield to the event loop and i can't do that
+    Futex'wait_while(futex&, fn(tmp) => tmp == 0); // alas this blocks the thread
+    out
+}
 
 fn push_debug_group(_: *Impl, __: Str) void = ();
 fn pop_debug_group(wgpu: *Impl) void = ();
