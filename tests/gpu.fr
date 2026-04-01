@@ -1,6 +1,56 @@
-// TODO: add this to autotest. make all the examples work with it.  
-//       have it drive specific interactions and save a few frames 
-//       to one big image that i can look at (put it in the release artifact i guess?)
+
+TestCase :: Ty(Str, i64, @FnPtr(t: *Test) void);
+tests :: filter_tests @const_slice(@as(TestCase)
+    ("@/examples/gpu/mandelbrot.fr", 5, fn(t) = {
+        range(0, 5) { _ |
+            t.frame();
+            t.drag(delta = vec2(-40, 20));
+        };
+    }),
+    ("@/examples/gpu/stackie.fr", 5, fn(t) = {
+        t.frame();
+        // TODO: have delta time be passed in instead of calling timestamp
+        range(0, 50, fn(_) => t.app.frame());  
+        t.frame();
+        range(0, 3, fn(_) => t.key(press = .BACKSPACE));
+        t.keys(text = "xyto");
+        t.frame();
+        range(0, 50, fn(_) => t.app.frame());  
+        t.frame();
+        range(0, 4, fn(_) => t.key(press = .BACKSPACE));
+        t.keys(text = "z!eZvz/9+duz/9+d;:3w0:-;:t8/-8%7w+ze2*1-:z*<|xy!+");  // from c50.fingswotidun.com
+        t.frame();
+    }),
+    ("@/examples/gpu/farm_game.fr", 1, fn(t) = t.frame()),
+    ("@/examples/gpu/rtc.fr", 1, fn(t) = t.frame()),
+    ("@/examples/gpu/hello_triangle.fr", 1, fn(t) = t.frame()),
+    ("@/examples/gpu/epicycles.fr", 1, fn(t) = t.frame()),  // TODO: empty without input
+    ("@/examples/gpu/lambda.fr", 1, fn(t) = t.frame()),
+    //("@/examples/chess/gui.fr", 1, fn(t) = t.frame()),  // TODO: compiler bug if you have both this and farmgame?? "ICE: struct field count mismatch but we don't know which is missing"
+    //("@/examples/gpu/viewer.fr", 1, fn(t) = t.frame()),  // ^^^^^^; TODO: also give it an input file
+    // TODO: terminal and app_events don't use Easy'start. 
+    // TODO: geo " and also needs an input file
+);
+
+filter_tests :: fn(tests: []TestCase) []TestCase = {
+    if query_current_arch() == .x86_64 && query_current_os() == .macos {
+        // TODO: shader compiler for old versions of metal
+        tests&.ordered_retain(fn(it) => false 
+            || it._0.ends_with("mandelbrot.fr") 
+            || it._0.ends_with("hello_triangle.fr")
+        );
+    }
+    tests
+}
+
+// TODO: deal with this when copying out of the buffer instead. 
+//       so then need to support asking for padding when the copying to the buffer so the image doesn't have to be a multiple of this size. 
+COPY_BYTES_PER_ROW_ALIGNMENT :: 256;  // fuckin wnebsnites :(
+@run @assert_eq(W.mod(COPY_BYTES_PER_ROW_ALIGNMENT), 0, "COPY_BYTES_PER_ROW_ALIGNMENT :(");
+W :: 512;
+H :: W;
+N_DEMO :: { x := 0; for tests { _, n, __ | x += n; }; x.align_to(N_FRAME) / N_FRAME };
+N_FRAME :: 5;
 
 main :: fn() void = {
     sg := @ref zeroed(Sg.Self);
@@ -9,12 +59,6 @@ main :: fn() void = {
         allocator = general_allocator(),
     ));
     
-    // TODO: deal with this when copying out of the buffer instead. 
-    //       so then need to support asking for padding when the copying to the buffer so the image doesn't have to be a multiple of this size. 
-    COPY_BYTES_PER_ROW_ALIGNMENT :: 256;  // fuckin wnebsnites :(
-    @run @assert_eq(W.mod(COPY_BYTES_PER_ROW_ALIGNMENT), 0, "COPY_BYTES_PER_ROW_ALIGNMENT :(");
-    W :: 512;
-    H :: W;
     scratch: Sg.Buffer = sg.make(
         usage = .MAP_READ,
         size = W * H * 4,
@@ -42,21 +86,36 @@ main :: fn() void = {
         ), ..),
         depth_stencil = (image = dimage),
     );
-
-    app := init_headless_app("@/examples/gpu/mandelbrot.fr", sg, at, W, H);
-    app.frame();
-    sg.perform_copy(scratch, image);
-    result := sg.read_buffer_borrow_blocking(scratch);
+    
+    all_w, all_h := (W*N_FRAME, H*N_DEMO);
+    prefix := @tfmt("P6 % % 255\n", all_w, all_h);
+    out := temp().alloc_zeroed(u8, all_w*all_h*3 + prefix.len);
+    out.slice(0, prefix.len).copy_from(prefix);
+    
+    demo_i := 0;
+    out_index := 0;
+    inline_for tests { $it |
+        mark := temp().mark();
+        app := init_headless_app(it._0, sg, at, W, H);
+        t := @ref @as(Test) (
+            app = app, sg = sg, scratch = scratch, image = image,
+            out = out.rest(prefix.len),
+            out_index = out_index,
+        );
+        
+        (it._2)(t);
+        out_index = t.out_index;
+        // TODO: release gpu resources (and remove commit listeners)
+        //temp().reset(mark);
+    };
     #use("@/lib/sys/fs.fr");
-    out := @ref u8.list(temp());
-    write_bgra8_ppm(out, result, W, H);
-    println(Sha256'hex(out.items()));
-    write_entire_file_or_crash("target/a.ppm", out.items());
+    println(Sha256'hex(out));
+    write_entire_file_or_crash("target/a.ppm", out);
 }
 
 // :paste from multiplexer example. TODO: factor out stuff that lets you run a headless app?
 init_headless_app :: fn($path: Str, sg: *Sg.Self, at: Sg.Attachments, W: i64, H: i64) *Sapp.Self = {
-    a := general_allocator();
+    a := temp();
     app := a.box_zeroed(Sapp.Self);
     app.first_frame = true; 
     app.events = list(a);  // annoying to reset after temp()
@@ -70,6 +129,7 @@ init_headless_app :: fn($path: Str, sg: *Sg.Self, at: Sg.Attachments, W: i64, H:
     app.desc.frame_cb = fn(it) = {
         it := Instance.ptr_from_raw(it);
         it.user.on_render(it.app, it.sg);
+        it.app.clear_requests();  // nowhere for these to go
     };
     app.desc.event_cb = fn(it, e) = {
         it := Instance.ptr_from_raw(it);
@@ -100,20 +160,77 @@ perform_copy :: fn(sg: *Sg.Self, dest: Sg.Buffer, src: Sg.Image) void = {
     sg.commit(true);
 }
 
-write_bgra8_ppm :: fn(out: *List(u8), in: []u8, W: i64, H: i64) void = {
-    size := W*H*3;
-    out.reserve(size + 30);
-    @fmt(out, "P6 % % 255\n", W, H);
-    p := out.maybe_uninit.subslice(out.len, size);
-    out.len += size;
-    i, j := (0, 0);
-    range(0, W*H) { _ |
-        operator_index :: index_unchecked;
-        p[j+0] = in[i+2];
-        p[j+1] = in[i+1];
-        p[j+2] = in[i+0];
-        i += 4; 
-        j += 3;
+Test :: @struct {
+    app: *Sapp.Self;
+    sg: *Sg.Self;
+    scratch: Sg.Buffer;
+    image: Sg.Image;
+    out_index: i64;
+    out: []u8;
+};
+
+fn frame(t: *Test) void = {
+    t.app.frame();
+    t.sg.perform_copy(t.scratch, t.image);
+    result := t.sg.read_buffer_borrow_blocking(t.scratch);
+    y, x := t.out_index.div_mod(N_FRAME);
+    copy_bgra8_ppm(t.out, result, W, H, W*N_FRAME, x*W, y*H);
+    t.out_index += 1;
+}
+
+fn drag(t: *Test, a: @struct(delta: Vec2, button := Sapp.Mousebutton.LEFT)) void = {
+    t := t.app;
+    e := t.init_event(.MOUSE_DOWN);
+    t.call_event(e);
+    e.mouse_button = a.button;
+    t.mouse.dx = a.delta.x; 
+    t.mouse.dy = a.delta.y;
+    t.mouse.x += e.mouse_dx;  
+    t.mouse.y += e.mouse_dy;
+    e := t.init_event(.MOUSE_MOVE);
+    e.modifiers&.set(.left_mouse, 1);
+    t.call_event(e);
+    t.mouse.dx = 0; 
+    t.mouse.dy = 0;
+    e := t.init_event(.MOUSE_UP);
+    e.mouse_button = a.button;
+    t.call_event(e);
+}
+
+fn keys(t: *Test, a: @struct(text: Str)) void = {
+    for a.text { c |
+        t.key(press = @as(Sapp.Keycode) @as(u16) c.zext());
+    };
+}
+
+fn key(t: *Test, a: @struct(press: Sapp.Keycode)) void = {
+    code := a.press;
+    t := t.app;
+    e := t.init_event(.KEY_DOWN);
+    e.key_code = code;
+    t.call_event(e);
+    c := @as(u16) code;
+    if c >= 32 && c < 127 {
+        e := t.init_event(.CHAR);
+        e.char_code = c.zext();
+        t.call_event(e);
+    };
+    e := t.init_event(.KEY_UP);
+    e.key_code = code;
+    t.call_event(e);
+}
+
+copy_bgra8_ppm :: fn(p: []u8, in: []u8, W: i64, H: i64, stride: i64, X: i64, Y: i64) void = {
+    i := 0;
+    range(Y, Y+H) { y |
+        range(X, X+W) { x |
+            operator_index :: index_unchecked;
+            j := (y*stride + x) * 3;
+            p[j+0] = in[i+2];
+            p[j+1] = in[i+1];
+            p[j+2] = in[i+0];
+            i += 4;
+        };
     };
 }
 
