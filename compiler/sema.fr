@@ -1334,7 +1334,7 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
                 if !self.find_field_use(raw_container_type, name, path&) {
                     return(Err = self.error(InvalidField = (name = name, container = requested, span = expr.loc)))
                 };
-                top_field := path[0];
+                top_field := path[path.len - 1];
                 
                 // there might be an incomplete inner pattern to add this binding to
                 each bindings { it |
@@ -1353,12 +1353,12 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
                 new&.push(b[]);
                 b.default.expr = (StructLiteralP = (bindings = new.as_raw(), loc = b.default.loc));
                 b.default.ty = UnknownType;
+                b.default.done = false;
                 b.name = (Ident = top_field.name);
                 b.ty = (Finished = top_field.ty);
             };
             for_rev to_remove { i |
-                bindings.items().unordered_remove(i);
-                bindings.len -= 1;
+                bindings.unordered_remove(i);
             };
             
             // since we allow incomplete patterns that get filled in later by a #use field, 
@@ -1397,7 +1397,9 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
                         self.get_alloc()
                     );
                     // TODO: would be more clear to manually do the find_const->coerce_const_expr here? this way is less code but less explicit. 
-                    @check(self.compile_expr(bindings.index(bindings.len - 1)[].default&, (Specific = field.ty))) return;
+                    e := bindings.index(bindings.len - 1)[].default&;
+                    @check(self.compile_expr(e, (Specific = field.ty))) return;
+                    done = done && e.done;
                 };
                 @err_assert(f.fields.len == bindings.len, "ICE: struct field count mismatch but we don't know which is missing") return;
             };
@@ -1432,13 +1434,22 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
 // given @struct(foo: @struct(x = 0, 1 = 1) #use); 
 // (foo = (x = 0), y = 1)); -> (foo = (x = 0, y = 1));
 fn poke_used_binding(self: *SelfHosted, dest: *Binding, src: *Binding) CRes(void) #once = {
-    @match(dest.get_default().unwrap()[].expr&) {
+    e := dest.get_default().unwrap();
+    @match(e.expr&) {
         fn StructLiteralP(it) => {
             it.bindings&.push(src[], self.get_alloc());
-            .Ok
+            return(.Ok);
         }
-        @default => @err("trying to assign #use-d field but the value for inner struct is not a pattern"); // incomprehensible
-    }
+        fn Value(it) => if it.bytes&.len() == 0 {
+            // it can be a unit literal if all fields have defaults (and this field will override one of them)
+            new := Binding.list(self.get_alloc());
+            new&.push(src[]);
+            e.expr = (StructLiteralP = (bindings = new.as_raw(), loc = e.loc));
+            return(.Ok);
+        }
+        @default => ();
+    };
+    @err("trying to assign #use-d field but the value for inner struct is not a pattern\n%", self.log(e)) // incomprehensible
 }
 
 fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: Type) Maybe(void) = {

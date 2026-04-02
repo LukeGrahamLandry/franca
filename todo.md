@@ -1,4 +1,7 @@
 
+- should i allow @run in @struct blocks? have to be careful of when it's ok to suspend tho. 
+  make sure the rules about cycles are consistant with how import() works. 
+- tests/gpu.fr on (github actions macos intel) is all black
 - `-use-linker` flag for easy.fr/default_driver.fr that does -c and then links and passes all the `-framework`
   since my `-keep-names` isn't enough for Instruments to find the symbols (also should fix the actual problem there). 
   - detect missing frameworks better than stack overflowing inside os code in glue_environment 
@@ -437,7 +440,7 @@ cset	w0, eq
 ## things i don't autotest
 
 - many i compile in ci but don't run
-  - run_tests.graphics_demos (@/graphics)
+  - things commented out in tests/gpu.fr
   - run_tests.deps_compile_only
   - run_tests.dylib_compile_only
   - tests/compiler.compile_only

@@ -1,4 +1,14 @@
 
+## (Apr 2)
+
+- viewer: support P6 (rgb) ppm so `gui.fr -show` works without FEAT_PNG. 
+  nicer errors. press r to reload. 
+- sema: construct_struct_literal: top_field is from the other end of #use path. 
+  fixes "ICE: struct field count mismatch" when compiling multiple that use gl.init_pipeline (which changed yielding situation?)
+- tests/gpu: send more events. 
+- chess: don't fail an assertion if try to move on wrong turn.
+  allow toggle on ugly pieces so don't have to recompile to draw a frame that way. 
+
 ## (Apr 1)
 
 - gfx/wgpu
@@ -13,6 +23,7 @@
     also not pixel perfect the same as the metal one which is sad. 
     the later is just because of metal_disable_fast_math (which i can't ask webgpu for), 
     if i turn on fast math in the metal one then they match. 
+- tests/gpu: send a few events to the programs and render multiple frames into one image. 
 
 ## (Mar 31)
 

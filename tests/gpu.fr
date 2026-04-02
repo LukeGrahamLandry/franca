@@ -1,21 +1,48 @@
+//
+// this compiles the graphical programs in one compilation unit 
+// and runs them with a headless app instance. each program is sent  
+// a few events and renders a few frames which are merged into one image. 
+// very fragile (click at (x, y) pixel, etc.) and not comprehensive 
+// (not all features tested and no output assertions beyond not crashing) 
+// but it's a big improvement over ci not running them at all. 
+//
+// TODO: this doesn't work in browser because i can't read_buffer_borrow_blocking, 
+//       but since just want to show the result anyway could keep the textures on gpu
+//       and have this program include viewer.fr with the same Sg instance to show them 
+//       (instead of exec-ing franca to compile it, then will also work without -jit)
+// TODO: would be cool if it was easy to pass arguments to import() to recompile with 
+//       redefined variables. ie. FEAT_PNG, so could make sure both ways compile. 
+//       letting the more dependencies way toggle into the ugly rendering at runtime 
+//       gets most of the benefit for zero work tho so not a priority rn. 
+// TODO: could also do tests that directly poke at the state instead of indirectly through events. 
+//       
 
+// clunky: contain the #use(graphics) so the child programs can't depend on the top level scope importing things. 
+// (import() inherits the main program's top level scope, not the caller's)
+// TODO: this should work as @struct. it doesn't like the @run :compiler
+local_scope :: FuncId.scope_of(fn() = {  
+#use("@/graphics/lib.fr");
+
+// [](entry file, frame count, event generator)
 TestCase :: Ty(Str, i64, @FnPtr(t: *Test) void);
 tests :: filter_tests @const_slice(@as(TestCase)
     ("@/examples/gpu/mandelbrot.fr", 5, fn(t) = {
-        range(0, 5) { _ |
+        range(0, 4) { _ |
             t.frame();
             t.drag(delta = vec2(-40, 20));
         };
+        t.scroll(y = -500);
+        t.frame();
     }),
     ("@/examples/gpu/stackie.fr", 5, fn(t) = {
         t.frame();
         // TODO: have delta time be passed in instead of calling timestamp
         range(0, 50, fn(_) => t.app.frame());  
         t.frame();
-        range(0, 3, fn(_) => t.key(press = .BACKSPACE));
-        t.keys(text = "xyto");
+        t.keys(text = "oooooooo");  // make an error
         t.frame();
-        range(0, 50, fn(_) => t.app.frame());  
+        range(0, 10, fn(_) => t.key(press = .BACKSPACE));
+        t.keys(text = "xy9o");  // the xor texture
         t.frame();
         range(0, 4, fn(_) => t.key(press = .BACKSPACE));
         t.keys(text = "z!eZvz/9+duz/9+d;:3w0:-;:t8/-8%7w+ze2*1-:z*<|xy!+");  // from c50.fingswotidun.com
@@ -24,10 +51,37 @@ tests :: filter_tests @const_slice(@as(TestCase)
     ("@/examples/gpu/farm_game.fr", 1, fn(t) = t.frame()),
     ("@/examples/gpu/rtc.fr", 1, fn(t) = t.frame()),
     ("@/examples/gpu/hello_triangle.fr", 1, fn(t) = t.frame()),
-    ("@/examples/gpu/epicycles.fr", 1, fn(t) = t.frame()),  // TODO: empty without input
+    ("@/examples/gpu/epicycles.fr", 1, fn(t) = {
+        t.drag(delta = vec2(10, 10));
+        t.frame();
+    }),
     ("@/examples/gpu/lambda.fr", 1, fn(t) = t.frame()),
-    //("@/examples/chess/gui.fr", 1, fn(t) = t.frame()),  // TODO: compiler bug if you have both this and farmgame?? "ICE: struct field count mismatch but we don't know which is missing"
-    //("@/examples/gpu/viewer.fr", 1, fn(t) = t.frame()),  // ^^^^^^; TODO: also give it an input file
+    ("@/examples/chess/gui.fr", 5, fn(t) = {
+        t.frame();
+        t.click(at = vec2(177, 297));
+        t.frame();
+        t.click(at = vec2(184, 222));
+        t.frame();
+        t.key(press = .SPACE);  // show fen
+        t.frame();
+        t.key(press = .P);  // toggle ugly
+        t.frame();
+    }), 
+    ("@/examples/gpu/viewer.fr", 3, fn(t) = {
+        t.frame();
+        t.paste(text = "target/a.ppm");
+        t.frame();
+        t.key(press = .SPACE);  // show title
+        t.drag(delta = vec2(40, 40));
+        t.scroll(y = 50);
+        t.frame();
+    }),
+    ("@/examples/gpu/multiplexer.fr", 2, fn(t) = {
+        t.frame();
+        t.key(press = ._2, ctrl = true);
+        t.key(press = .BACKSPACE);  // HACK: switching active app doesn't eat the event so still types a "2"
+        t.frame();
+    }),
     // TODO: terminal and app_events don't use Easy'start. 
     // TODO: geo " and also needs an input file
 );
@@ -100,17 +154,29 @@ main :: fn() void = {
         t := @ref @as(Test) (
             app = app, sg = sg, scratch = scratch, image = image,
             out = out.rest(prefix.len),
-            out_index = out_index,
+            out_index = out_index, limit = it._1,
         );
         
         (it._2)(t);
+        @debug_assert(sg.valid, "don't deinit the Sg instance");
         out_index = t.out_index;
         // TODO: release gpu resources (and remove commit listeners)
         //temp().reset(mark);
     };
     #use("@/lib/sys/fs.fr");
     println(Sha256'hex(out));
-    write_entire_file_or_crash("target/a.ppm", out);
+    write_entire_file_or_crash(dest, out);
+    
+    dest :: "target/a.ppm";
+    if cli_args().contains(fn(it) => it[] == "-show") {
+        #use("@/lib/sys/subprocess.fr");
+        @assert(cli_args().contains(fn(it) => it[] == "-jit"), "// TODO: only works if not aot");
+        franca := get_executable_path(temp());
+        a := make_args_for_exec(franca, @slice("examples/gpu/viewer.fr", "-jit", dest), temp());
+        become(a[0], a);
+    } else {
+        @println("wrote frames to %\n(pass '-show' cli arg to open the viewer)", dest);
+    };
 }
 
 // :paste from multiplexer example. TODO: factor out stuff that lets you run a headless app?
@@ -167,9 +233,12 @@ Test :: @struct {
     image: Sg.Image;
     out_index: i64;
     out: []u8;
+    limit: i64;
 };
 
 fn frame(t: *Test) void = {
+    @assert(t.limit > 0, "called frame() more times than declared in test data");
+    t.limit -= 1;
     t.app.frame();
     t.sg.perform_copy(t.scratch, t.image);
     result := t.sg.read_buffer_borrow_blocking(t.scratch);
@@ -178,9 +247,25 @@ fn frame(t: *Test) void = {
     t.out_index += 1;
 }
 
+// TODO: this event sending stuff is very clunky. 
+//       should unify the way modifers are handled and be symetric for key and mouse button. 
+
+fn click(t: *Test, a: @struct(at: Vec2, button := Sapp.Mousebutton.LEFT)) void = {
+    t := t.app;
+    t.mouse.x = a.at.x;  
+    t.mouse.y = a.at.y;
+    e := t.init_event(.MOUSE_DOWN);
+    e.mouse_button = a.button;
+    t.call_event(e);
+    e := t.init_event(.MOUSE_UP);
+    e.mouse_button = a.button;
+    t.call_event(e);
+}
+
 fn drag(t: *Test, a: @struct(delta: Vec2, button := Sapp.Mousebutton.LEFT)) void = {
     t := t.app;
     e := t.init_event(.MOUSE_DOWN);
+    e.mouse_button = a.button;
     t.call_event(e);
     e.mouse_button = a.button;
     t.mouse.dx = a.delta.x; 
@@ -188,12 +273,21 @@ fn drag(t: *Test, a: @struct(delta: Vec2, button := Sapp.Mousebutton.LEFT)) void
     t.mouse.x += e.mouse_dx;  
     t.mouse.y += e.mouse_dy;
     e := t.init_event(.MOUSE_MOVE);
-    e.modifiers&.set(.left_mouse, 1);
+    @if(a.button == .LEFT) e.modifiers&.set(.left_mouse, 1);
+    @if(a.button == .RIGHT) e.modifiers&.set(.right_mouse, 1);
     t.call_event(e);
     t.mouse.dx = 0; 
     t.mouse.dy = 0;
     e := t.init_event(.MOUSE_UP);
     e.mouse_button = a.button;
+    t.call_event(e);
+}
+
+fn scroll(t: *Test, a: @struct(x: f32 = 0, y: f32 = 0)) void = {
+    t := t.app;
+    e := t.init_event(.MOUSE_SCROLL);
+    e.scroll_x = a.x;
+    e.scroll_y = a.y;
     t.call_event(e);
 }
 
@@ -203,20 +297,30 @@ fn keys(t: *Test, a: @struct(text: Str)) void = {
     };
 }
 
-fn key(t: *Test, a: @struct(press: Sapp.Keycode)) void = {
+fn key(t: *Test, a: @struct(press: Sapp.Keycode, ctrl := false)) void = {
     code := a.press;
     t := t.app;
     e := t.init_event(.KEY_DOWN);
+    @if(a.ctrl) e.modifiers&.set(.control, 1);
     e.key_code = code;
     t.call_event(e);
     c := @as(u16) code;
     if c >= 32 && c < 127 {
         e := t.init_event(.CHAR);
+        @if(a.ctrl) e.modifiers&.set(.control, 1);
         e.char_code = c.zext();
         t.call_event(e);
     };
     e := t.init_event(.KEY_UP);
+    @if(a.ctrl) e.modifiers&.set(.control, 1);
     e.key_code = code;
+    t.call_event(e);
+}
+
+fn paste(t: *Test, a: @struct(text: Str)) void = {
+    t := t.app;
+    e := t.init_event(.CLIPBOARD_PASTED);
+    e.pasted = a.text;
     t.call_event(e);
 }
 
@@ -234,7 +338,9 @@ copy_bgra8_ppm :: fn(p: []u8, in: []u8, W: i64, H: i64, stride: i64, X: i64, Y: 
     };
 }
 
-#use("@/graphics/lib.fr");
-
 driver :: fn(vtable: *ImportVTable) void = 
     Easy'build_for_graphics(vtable, @source_file_name());
+});
+
+main :: local_scope.main;
+driver :: local_scope.driver;

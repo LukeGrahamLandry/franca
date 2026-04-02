@@ -1,11 +1,20 @@
 // some of my programs output image files 
 // and my belief system is that my stuff should be self contained 
 // so i want to provide a way to view them.
-// CONTROLS: drag to pan and scroll to zoom. cli/dragndrop/paste to open image. left/right to cycle images. 
+HELP :: """
+drag to pan and scroll to zoom. 
+cli/dragndrop/paste to open image. 
+left/right to cycle images. 
+r: reload file.
+space: toggle file name. 
+h: toggle help (always on if no image).
+""";
+
+// TODO: figure out how to get os events to watch files
 
 FEAT_PNG :: true; // adds dependency on stb_image to support more formats, otherwise only a subset of ppm. 
 
-open_image :: fn(state: *State, path: Str) void = {
+load_texture_from_file :: fn(sg: *Sg.Self, path: Str) Result(Ty(Sg.Image, i64, i64), Str) = {
     #use("@/lib/sys/fs.fr");
     
     prefix := "data:image/png;base64,";
@@ -15,63 +24,95 @@ open_image :: fn(state: *State, path: Str) void = {
         decode(out&, path.rest(prefix.len));
         out.items()
     } else {
-        read_entire_file(temp(), path) || {
-            @eprintln("failed to read [%]", path);
-            return()
-        }
+        read_entire_file(temp(), path) 
+            || return(Err = "failed to read")
     };
     
     data, width, height := @if(FEAT_PNG, {
         (w: i32, h: i32, c: i32) := (0, 0, 4);
-        // :LEAK
         pixels := Stb'stbi_load_from_memory(in.ptr, in.len.intcast(), w&, h&, zeroed(*i32), c);
         if pixels.is_null() {
-            @eprintln("failed to load [%]", path);
-            return()
+            // TODO: import_c support thread locals :FUCKED
+            s := Stb'stbi_failure_reason();
+            s: CStr = (ptr = bit_cast_unchecked(*i8, *u8, s));
+            return(Err = s.str());
         };
         (pixels.slice(intcast(w*h*c)), w, h)
     }, {
         // https://netpbm.sourceforge.net/doc/ppm.html
-        prefix := "P5";
-        if !in.starts_with(prefix) {
-            @eprintln("not ppm P5 [%]", path);
-            return();
+        ppm := @try(read_ppm_header(in)) return;
+        size := ppm.width * ppm.height;
+        bpp := @switch(ppm.magic) {
+            @case(5) => 1;
+            @case(6) => 3;
+            @default => return(Err = "unsupported ppm");
         };
-        in = in.rest(prefix.len);
-        n := @ref zeroed(Array(i64, 3));
-        range(0, 3) { i |
-            while => in.len > 0 && in[0].is_ascii_whitespace() {
-                in = in.rest(1);
-            };
-            it, ss := convert_number(in, 10, dec_digit);
-            n[i] = it;
-            in = ss;
+        if size * bpp < ppm.rest.len || ppm.max != 255 {
+            return(Err = "unsupported ppm");
         };
-        in = in.rest(1);
-        width, height, max_colour := (n[0], n[1], n[2]);
-        if in.len != width * height {
-            @eprintln("bad ppm dimensions [%]", path);
-            return();
+        in = ppm.rest.slice(0, size*bpp);
+        data := @switch(ppm.magic) {
+            @case(5) => temp().alloc_init(u32, size, fn(i) => pack_rgba(in[i], in[i], in[i], 255));
+            @case(6) => temp().alloc_init(u32, size, fn(i) => pack_rgba(in[i*3+0], in[i*3+1], in[i*3+2], 255));
+            @default => unreachable();
         };
-        data := temp().alloc_init(u32, width*height, fn(i) => pack_rgba(in[i], in[i], in[i], 255));
-        (data.interpret_as_bytes(), width.intcast(), height.intcast())
+        (data.interpret_as_bytes(), ppm.width.intcast(), ppm.height.intcast())
     });
 
     d := zeroed(Sg.ImageData);
     d.subimage&[0]&[0] = data;
-    img: Sg.Image = state.sg.make(
+    img: Sg.Image = sg.make(
         width = width, height = height,
         pixel_format = .RGBA8,
         data = d,
     );
+    @if(FEAT_PNG) Stb'stbi_image_free(u8.raw_from_ptr(data.ptr));
+    (Ok = (img, width.intcast(), height.intcast()))
+}
+
+open_image :: fn(state: *State, it: Str) bool = {
+    img, width, height := @match(load_texture_from_file(state.sg, it)) {
+        fn Ok(it) => it;
+        fn Err(err) => {
+            @eprintln("[%]: %", it, err);
+            return false;
+        }
+    };
+    @eprintln("[%]: ok", it);
+    push_image(state, it, img, width, height);
+    true
+}
+
+push_image :: fn(state: *State, title: Str, img: Sg.Image, width: i64, height: i64) void = {
     state.images&.push(
         img = img, 
-        name = path.shallow_copy(general_allocator()), 
-        aspect = width.intcast().float() / height.intcast().float(),
+        name = title.shallow_copy(state.images.gpa), 
+        aspect = width.float() / height.float(),
     );
     state.dirty = true;
     state.image_i = state.images.len - 1;
-    @eprintln("loaded [%]", path);
+}
+
+Ppm :: @struct(magic: i64, width: i64, height: i64, max: i64, rest: []u8);
+read_ppm_header :: fn(in: []u8) Result(Ppm, Str) = {
+    if in.len < 3 || in[0] != "P".ascii() || !in[2].is_ascii_whitespace() {
+        return(Err = "bad ppm magic");
+    };
+    magic: i64 = in[1].zext() - "0".char();
+    in = in.rest(2);
+    n := @ref zeroed(Array(i64, 3));
+    range(0, 3) { i |
+        while => in.len > 0 && in[0].is_ascii_whitespace() {
+            in = in.rest(1);
+        };
+        it, ss := convert_number(in, 10, dec_digit);
+        @if(ss.len == in.len) return(Err = @tfmt("missing header component %", i));
+        n[i] = it;
+        in = ss;
+    };
+    in = in.rest(1);
+    width, height, max_colour := (n[0], n[1], n[2]);
+    (Ok = (magic = magic, width = n[0], height = n[1], max = n[2], rest = in))
 }
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -84,17 +125,22 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     sdtx := state.text.default_context&;
     image_aspect := 1.0;
+    x := 1.0 / sapp.dpi_scale;
+    sdtx.canvas(sapp.width().float().cast().mul(x), sapp.height().float().cast().mul(x));
     if state.images.len > 0 {
         it := state.images[state.image_i];
         sgl.texturing_enabled = true;
         sgl.texture(it.img, (id = Sg.INVALID_ID));
         
-        x := 1.0 / sapp.dpi_scale;
-        sdtx.canvas(sapp.width().float().cast().mul(x), sapp.height().float().cast().mul(x));
         sdtx.color = 0xFF005555;
         @if(state.show_name) sdtx.put(it.name);
         
         image_aspect = it.aspect;
+    };
+    if state.show_help || state.images.len == 0 {
+        sdtx.color = 0xFF000000;
+        sdtx.put(HELP);
+        sdtx.put(@tfmt("\nFEAT_PNG=%;\n", FEAT_PNG));
     };
     
     sgl.begin(.QUADS);
@@ -134,6 +180,7 @@ State :: @struct {
     image_i: i64;
     dirty: bool;
     show_name: bool;
+    show_help: bool;
 };
 
 Img :: @struct {
@@ -188,6 +235,17 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             fn LEFT() => state.next_example(-1);
             fn RIGHT() => state.next_example(1);
             fn SPACE() => { state.show_name = !state.show_name; }
+            fn H() => { state.show_help = !state.show_help; }
+            fn R() => if state.images.len > 0 {
+                i := state.image_i;
+                if open_image(state, state.images[i].name) {
+                    state.images&.swap(i, state.images.len - 1);
+                    old := state.images&.pop().unwrap();
+                    state.sg.destroy(old.img);
+                    state.images.gpa.dealloc(u8, old.name);
+                    state.image_i = i;
+                }
+            }
             @default => return();
         };
         fn MOUSE_MOVE() => {
@@ -237,6 +295,7 @@ Stb :: {
         #define STB_IMAGE_IMPLEMENTATION
         #define STBI_NO_SIMD
         #define STBI_NO_STDIO
+        #define STBI_FAILURE_USERMSG
         #include "%/stb_image.h"
     """, root);
     Ffi'include(current_compiler_context(), c_source)
