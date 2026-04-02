@@ -28,18 +28,21 @@ test_cmds :: @S(
     @S("examples/minijinja.fr"),
 );
 
-with_deps :: @S(
-    @S("tests/backend.fr", "all", "-bin", "./target/q.out", "-cc", "-force_linker"), // dep:clang
-    @S("tests/backend.fr", "all", "-bin", "./target/q.out"),  // dep:clang
+with_fetch_deps :: @S(
     @S("tests/external/lox.fr", "-pass", "-hush"), // dep:lox
     @S("tests/external/lox.fr", "-pass", "-hush", "-clox"),
     @S("examples/import_wuffs/test.fr"),
     @S("tests/exe/generate.fr"),
-    @S("tests/external/tcc.fr", "-ddc"),
     @S("tests/external/lua.fr"),
     // TODO: this only has deps because it runs webgpu_api.fr but don't really need that
     @S("tests/exe/wasm.fr"),
     @S("tests/external/wuffs.fr"),  // dep:wuffs
+);
+
+with_cc_deps :: @S(
+    @S("tests/backend.fr", "all", "-bin", "./target/q.out", "-cc", "-force_linker"), // dep:clang
+    @S("tests/backend.fr", "all", "-bin", "./target/q.out"),  // dep:clang
+    @S("tests/external/tcc.fr", "-ddc"),  // ddc is dep:clang and tcc bootstrap is dep:headers anyway.
 );
 
 driver :: fn(vtable: *ImportVTable) void = {
@@ -110,6 +113,16 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
                 // the rules are everything before this must not download dependencies or exec system binaries. 
                 println("=== end of dependency free tests ===");
                 do_it(vtable, "run-yes-deps");
+                // on macos everything before this works without installing the xcode commandline tools
+                println("=== end of sys-c-toolchain free tests ===");
+                
+                skip_cc := query_current_os() == .macos && !check_for_xcode();
+                if !skip_cc {
+                    do_it(vtable, "run-cc-deps");
+                } else {
+                    eprintln("SKIP: run-cc-deps (on macos and doesn't look like xcode cli is installed)");
+                    @assert(!IS_GITHUB, "seems unlikely they're break everyone else");
+                };
                 finish_repro_file();
                 println(choose_repro_path());
                 maybe_deploy_srht_site();
@@ -136,6 +149,10 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
                 for dylib_compile_only { file |
                     sh(@slice(franca_path, "examples/default_driver.fr", "build", file, "-dynamiclib", "-o", "target/out/compileonly.dylib"));
                 };
+                
+                run(@slice("examples/os/build.fr"));
+                @if(false)  // :TodoSketchyRepro
+                cross_repro("target/kernel.out", "examples/os/build.fr", "kernel-aarch64");
                 
                 // TODO: this is a source of confusion if you had run run_tests.fr with the release compiler
                 do_it(vtable, "release");
@@ -175,22 +192,52 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
             @case("build_graphics") => build_graphics(franca_path);
             @case("run-yes-deps") => {
                 prospero(franca_path);
-                for(with_deps, fn(it) => run(it));
+                for(with_fetch_deps, fn(it) => run(it));
+                
+                // (with_fetch_deps -> tests/exe/wasm -> examples/web/build) creates these files
                 @if(false)  // :TodoSketchyRepro
                 cross_repro("target/web/target/demo.wasm", "examples/web/build.fr", "wasm32");
+                rootfs_hash := temp().read_entire_file_or_crash("target/web/target/rootfs_hash.txt");
+                cross_repro_hash(rootfs_hash, "examples/web/build.fr", "rootfs");
+                
                 build_graphics(franca_path);
                 for deps_compile_only { file |
                     run(@slice("examples/default_driver.fr", "build", file, "-o", "target/a.out"));
                 };
                 
+                ci := IS_GITHUB;
+                if current_os() == .macos {
+                    run(@slice("examples/gpu/trivial_compute.fr", "-jit"));  // only supports metal so far
+                    run(@slice("tests/gpu.fr", "-jit"));  // "
+                    print("SKIP: 'Hare does not and will not officially support proprietary operating systems upstream.'\n");
+                } else {
+                    print("SKIP: @/graphics is metal only rn\n");
+                    run(@slice("tests/external/hare.fr"));
+                    write_entire_file_or_crash("target/a.ppm", "");  // test.yml wants to upload output from tests/gpu.fr
+                };
+                @if(false)
+                if current_os() == .macos && current_arch() == .aarch64 && !ci {
+                    // TODO: -smp 1 frequently hangs
+                    // TODO: need to error if it errors (host/vzf.fr doesn't know if you crashed) 
+                    run(@slice("examples/os/build.fr", "-vzf", "-smp", "2", "-append", "nocache on; kaleidoscope; quit;"));
+                };
+                if ci {
+                    run(@slice("tests/external/other.fr"));
+                };
+            };
+            // TODO: hare and luajit should be here on amd64 (because i didn't do assembler there yet)
+            @case("run-cc-deps") => {
                 more_cache := Foreign.ENV.FRANCA_MORE_CACHE.get_environment_variable().is_some() ;
+                ci := IS_GITHUB;
+                for(with_cc_deps, fn(it) => run(it));
+                
+                // dep:clang
                 // TODO: doesn't implement all the ops yet
                 @if(!more_cache)
                 do_it(vtable, "emit-c");
-                ci := Foreign.ENV.GITHUB_REPOSITORY.get_environment_variable().is_some();
+                
+                // dep:headers
                 if current_os() == .linux {
-                    run(@slice("tests/external/hare.fr"));
-                    
                     @if(query_current_arch() != .rv64)  // TODO: doesn't work with my multiarch situation so idk if it actually works. this is why we can't be depending on the system headers. 
                     if ci {
                         // github actions can't actually run it (sr.ht works tho)
@@ -204,39 +251,23 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
                     };
                     print("SKIP: (TODO) raylib.\n");
                 } else {
-                    print("SKIP: 'Hare does not and will not officially support proprietary operating systems upstream.'\n");
-                    print("SKIP: bubblewrap does linux specific sandboxing stuff.\n");
-                    print("SKIP: (TODO) curl.\n");
-                };
-                
-                // SKIP: these dynamically link to apple's frameworks (metal and virtualization respectively).  
-                if current_os() == .macos {
-                    run(@slice("examples/gpu/trivial_compute.fr", "-jit"));  // only supports metal so far
-                    run(@slice("tests/gpu.fr", "-jit"));  // "
-                    
                     @if(!ci || query_current_arch() == .aarch64)  // TODO: should make it work but debugging when it only dies in github actions is ass
                     if dir_exists("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk") {
                         run(@slice("tests/external/raylib.fr", "-compileonly"));
                     } else {
                         print("SKIP: compile raylib (didn't find xcode sdk)\n");
                     };
-                } else {
-                    write_entire_file_or_crash("target/a.ppm", "");  // test.yml wants to upload output from tests/gpu.fr
+                    
+                    print("SKIP: bubblewrap does linux specific sandboxing stuff.\n");
+                    print("SKIP: (TODO) curl.\n");
                 };
-                @if(false)
-                if current_os() == .macos && current_arch() == .aarch64 && !ci {
-                    // TODO: -smp 1 frequently hangs
-                    // TODO: need to error if it errors (host/vzf.fr doesn't know if you crashed) 
-                    run(@slice("examples/os/build.fr", "-vzf", "-smp", "2", "-append", "nocache on; kaleidoscope; quit;"));
-                };
-                run(@slice("examples/os/build.fr"));
-                @if(false)  // :TodoSketchyRepro
-                cross_repro("target/kernel.out", "examples/os/build.fr", "kernel-aarch64");
                 
+                // dep:node
                 if ci {
-                    rootfs_hash := build_web_and_get_hash(franca_path);
+                    rootfs_hash := temp().read_entire_file_or_crash("target/web/target/rootfs_hash.txt");
                     sh(@slice("node", "target/web/test.js", rootfs_hash));
-                    run(@slice("tests/external/other.fr"));
+                } else {
+                    eprintln("SKIP: node/wasm tests are :SLOW, only run in actions");
                 };
             };
             @default => @eprintln("IGNORE: %", s);
@@ -244,7 +275,6 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
 };
 
 build_web_and_get_hash :: fn(franca_path: Str) Str = {
-    #use("@/lib/sys/subprocess.fr");
     ok, out, err := exec_and_catch(franca_path, @slice("examples/web/build.fr"), temp());
     err := err.items();
     @assert(ok, "%%", out.items(), err);
@@ -542,7 +572,7 @@ maybe_deploy_srht_site :: fn() void = {
     each files { it |
         @fmt(out&, "<a href='./%'> % </a><br>\n", it.name, it.name);
     };
-    @fmt(out&, "<hr><pre>%</pre>", commit);
+    @fmt(out&, "<hr><a href='https://git.sr.ht/~lukegrahamlandry/franca/commit/%'>%</a>", commit, commit);
     @fmt(out&, "\n<script>console.log(new SharedArrayBuffer());</script> <!-- this is why i can't use srht for the compiler demo -->");
     write_entire_file_or_crash("target/release/index.html", out.items());
     
@@ -575,3 +605,10 @@ git_rev_parse :: fn() Str = {
 
 #use("@/lib/sys/subprocess.fr");
 #use("@/examples/testing.fr");
+
+IS_GITHUB :: Foreign.ENV.GITHUB_REPOSITORY.get_environment_variable().is_some();
+
+check_for_xcode :: fn() bool = {    
+    ok, _o, _e := exec_and_catch("xcode-select", @slice("-p"), temp());
+    ok
+};

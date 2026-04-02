@@ -242,7 +242,7 @@ const load_example = async (path) => {
     try {
         document.getElementById("in").value = get_file(path);
     } catch (s) {
-        document.getElementById("in").value = `/*\n${s.toString()}\n\n${s.stack}*/`;
+        document.getElementById("in").value = `/*\n${s.toString()}\n\n${s.stack}\n*/`;
     }
     document.getElementById("err").innerText = "";
     document.getElementById("stale").hidden = false;

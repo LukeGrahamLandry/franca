@@ -190,7 +190,7 @@ export function w $main() {
 - it's dumb that my opt/promote is defeated by add 0 
   so if your frontend is lazy and always emits the add for struct fields,
   i won't promote single field structs to scalars early. 
-- sort the yes-deps tests that need clang vs ones that just need to download something but then use only my compilers. 
+- tests support weird systems
   - sort the ones that need libc out of the no-deps tests
 - wasteful that i actually produce 0xDEADDEAD in a register when 
   there's a codepath with a stack slot used before defined and can't prove its unreachable. 
@@ -440,7 +440,7 @@ cset	w0, eq
 ## things i don't autotest
 
 - many i compile in ci but don't run
-  - things commented out in tests/gpu.fr
+  - examples/gpu/(geo, terminal, app_events)
   - run_tests.deps_compile_only
   - run_tests.dylib_compile_only
   - tests/compiler.compile_only
@@ -1185,6 +1185,7 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 
 ### Terminal
 
+- i've seen it crash :FUCKED
 - cmd+f only search the cursor's current output block. cmd+shift+f to search the whole buffer
 - cmd+enter be same as cmd+click (open link the cursor's on)
 - change save file while running

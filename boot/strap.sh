@@ -28,10 +28,10 @@ if [ -z "${exe_path}" ]; then
     exe_path="./target/franca/fetch/${hash}.out"
 fi
 if [ ! -x "$exe_path" ]; then
-    # TODO: curling stuff is not acceptable
-    curl "https://lukegrahamlandry.ca/franca/bin/${url}" -o "$exe_path"
-    echo "$hash $exe_path" > ./target/franca/fetch/${hash}.hash 
+    curl "https://lukegrahamlandry.ca/franca/bin/${url}" -o "$exe_path.check"
+    echo "$hash $exe_path.check" > ./target/franca/fetch/${hash}.hash 
     sha256sum --check ./target/franca/fetch/${hash}.hash
+    mv "$exe_path.check" "$exe_path"
     chmod +x "$exe_path"
 fi
 

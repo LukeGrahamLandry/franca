@@ -7,7 +7,8 @@ A self sufficient programming language.
 The main gimmick is full compile-time code execution: anything you can do at runtime, you can do at comptime. 
 Comptime code doesn't run in an interpreter. It's JITted to machine code by the same backend as the rest of your program. 
 Supporting that while also allowing cross compilation and reproducible builds is... nontrivial, but it mostly works. 
-Comptime code can dynamically allocate memory, make syscalls, and generate code. Any data structures that are reachable from 
+Comptime code can dynamically allocate memory, make syscalls, and generate code. 
+(approx.) Any data structures that are reachable from 
 runtime code will automatically be included in the final binary. 
 
 - macros are functions that run at compile time, call compiler apis, and return ast nodes
@@ -19,6 +20,7 @@ runtime code will automatically be included in the final binary.
 - manual memory management with explicit allocators 
 - no seperate build system language. write a program that builds your program
 - full c abi support so you can call extern-c code written in other languages
+  - (limitations: no f16,f80,f128,i128,bitfields,tls,stack switching)
 
 ## Supported Targets
 
@@ -79,13 +81,22 @@ These are not polished yet but hopefully better than nothing.
 There's no global "install" process, you just need the compiler binary and the code in this repository.  
 
 ```
-git clone https://git.sr.ht/~lukegrahamlandry/franca && cd franca && make
+git clone https://git.sr.ht/~lukegrahamlandry/franca && cd franca && sh ./boot/strap.sh -no-test
 ```
 
 That will download the source and an old version of the compiler, use it to compile 
-the new compiler, then run all the tests. The tests have more system dependencies 
-(mainly: libc, clang, curl, git) than the compiler itself. If the later tests fail, 
-you'll still end up with a working compiler. 
+the new compiler (a few times until it stabilizes). Alternatively, you can download 
+prebuilt binaries from <https://fr.lukegrahamlandry.ca> 
+(only the latest so if you're automating it, prefer to bootstrap 
+and pin to a specific commit to avoid breaking changes). 
+
+To run the tests, remove the `-no-test` argument or (once you have the compiler) run 
+```
+./target/franca.out ./tests/run_tests.fr core
+```
+The tests have more system dependencies (mainly: libc, clang, curl, git) than the compiler itself. 
+See tests/external/deps.fr for source that will be curl-ed for testing import_c. 
+All downloads have their hash checked and are saved in target/franca/fetch so network is only needed the first time. 
 
 ## Goals
 
@@ -126,10 +137,11 @@ there must be proportional terrible things or I'm probably just lying.
 - Stability is not a core tenet. If it was worth writing once, it's probably worth writing twice.
 - I don't care about being easy to learn. I want it to be fun. Rust is fun.
 - Stuff's unsafe, deal with it, simply don't make a mistake. 
-  - i.e. `main :: fn() void = { evil := i64.int_to_ptr(123); println(evil[]); }` will compile, run, and (probably) crash.
+  - i.e. `main :: fn() void = { evil := i64.ptr_from_int(-123); println(evil[]); }` will compile, run, and crash.
   - You can screw up managing pointers because the languge was made by goblins in the 70s and just start trimming your os.
 - I don't care about fallibile memory allocation
 - I believe I've never touched a big endian computer so I don't care.
+- I do unaligned memory accesses (again, i believe i've never touched a computer that disallows them)
 - Pointers are 64 bits. Wasm can just use twice as much memory as it should, not my problem, tho it irks me.
 - It's probably not a good fit for large teams where you want the language to help you design your whole program defensively because you don't trust your coworkers.
 - The error messages are completely incomprehensible.
@@ -151,3 +163,4 @@ there must be proportional terrible things or I'm probably just lying.
   So there's some unpleasent stuff (order dependent overload set instantiations) 
   that could be fixed by unfinished features (#where) that I haven't bothered to work on. 
 - Similarly, there are some known bugs (see tests/todo/) that I don't care enough to fix until they annoy me (or someone else) more. 
+- No source level debugging

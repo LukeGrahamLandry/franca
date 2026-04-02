@@ -104,7 +104,7 @@ Talk about doing stuff from within comptime vs through a CompCtx.
 
 ## Fetching Dependencies
 
-See `@/examples/fetch.fr/(single, group)`. 
+See `@/examples/fetch.fr/(single, group)` and `@/tests/deps.fr`. 
 The only situation I help with is when you know exactly what files you want 
 (the hash of their contents and a url to get it). 
 I don't provide anything for version resolution of transitive dependencies
