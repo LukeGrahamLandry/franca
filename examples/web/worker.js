@@ -3,7 +3,8 @@ let Franca;
 let module;
 let canvas;
 let current_exit_futex;
-
+let epoch = -1;
+const postMessage = (msg) => { msg.epoch = epoch; self.postMessage(msg); };
 let known_wasm_jit_event = 0n;
 
 function handle_child_thread(child) {
@@ -16,7 +17,7 @@ function handle_child_thread(child) {
         if (e !== "called exit 0") show_error(e);
     };
     set_zero_and_wake(exit_futex);
-    self.postMessage({ tag: "recycle" });
+    postMessage({ tag: "recycle" });
 }
 
 function set_zero_and_wake(exit_futex) {
@@ -24,6 +25,7 @@ function set_zero_and_wake(exit_futex) {
     mem.setInt32(Number(exit_futex), 0);
     let buf = new Int32Array(Franca.memory.buffer, Number(exit_futex), 1);
     Atomics.notify(buf, 0);
+    current_exit_futex = undefined;
 }
 
 export async function handleWasmLoaded(wasm_instance, msg) {
@@ -50,7 +52,7 @@ export async function handleWasmLoaded(wasm_instance, msg) {
     }
     let time = Math.round(performance.now() - load_end);
     show_log(" Ran in " + time + "ms.");
-    self.postMessage({ tag: "done", ok: ok, });
+    postMessage({ tag: "done", ok: ok, });
 }
 
 // i this so much
@@ -107,14 +109,13 @@ export const imports = {
 
         js_worker_stop: (status, known_wasm_jit_event_) => {
             known_wasm_jit_event = known_wasm_jit_event_;
-            if (current_exit_futex !== undefined) set_zero_and_wake(current_exit_futex);
             throw "called exit 0";
         },
         js_shutdown: (ok) => {
             let G = get_G();
             cancelAnimationFrame(G.animation_id);
-            if (ok == 0) self.postMessage({ tag: "err", text: "shutdown(error)" });
-            self.postMessage({ tag: "done" });
+            if (ok == 0) postMessage({ tag: "err", text: "shutdown(error)" });
+            postMessage({ tag: "done" });
             throw "called exit 0";
         },
         jit_instantiate_module: (ptr, len, first_export, table_index) => {
@@ -204,16 +205,16 @@ export const imports = {
         },
         js_performace_now: () => performance.now(),
         js_worker_spawn: (userdata, stack, exit_futex) => {
-            self.postMessage({ tag: "spawn", child: [userdata, stack, exit_futex], memory: imports.main.memory });
+            postMessage({ tag: "spawn", child: [userdata, stack, exit_futex], memory: imports.main.memory });
         },
         js_set_clipboard_string: (ptr, len) => {
-            self.postMessage({ 
+            postMessage({ 
                 tag: "handle_app_request", 
                 data: ["set_clipboard_string", get_wasm_string(ptr, len)],
             });
         },
         js_get_clipboard_string: () => {
-            self.postMessage({ 
+            postMessage({ 
                 tag: "handle_app_request", 
                 data: ["get_clipboard_string"],
             });
@@ -222,7 +223,7 @@ export const imports = {
 };
 
 function yield_file(bytes, name) {
-    self.postMessage({
+    postMessage({
         tag: "download",
         content: new Blob([bytes], { type: "octet/stream" }),
         name: name,
@@ -297,15 +298,16 @@ function handle(_msg) {
     const msg = _msg.data;
     switch (msg.tag) {
         case "start": {
+            epoch = msg.epoch;
+            current_exit_futex = undefined;
+            imports.main.memory = msg.memory;
             if (known_wasm_jit_event != 0n) {
                 if (msg.child === undefined) throw new Error("expected to be a child thread");
                 handle_child_thread(msg.child);
                 return;
             }
             get_G().show_error = show_error;
-            imports.main.memory = msg.memory;
             canvas = msg.canvas;
-            current_exit_futex = undefined;
             if (module === undefined) show_error("must setmodule before start"); 
             WebAssembly.instantiate(module, imports)
                 .then(it => handleWasmLoaded(it, msg))
@@ -313,6 +315,7 @@ function handle(_msg) {
             break;
         }
         case "event": {
+            if (epoch !== msg.epoch) return;
             let G = get_G();
             if (!G.valid || G.I === null || canvas === undefined) break;
             msg.args[0] = G.I;
@@ -349,7 +352,7 @@ function handle(_msg) {
     }
 };
 
-const show = (s) => self.postMessage({ tag: "show", text: s });
+const show = (s) => postMessage({ tag: "show", text: s });
 const show_error = (s) => {
     if (s instanceof Error) {
         show(`${s.toString()}\n\n${s.stack}`);
@@ -358,9 +361,9 @@ const show_error = (s) => {
     } else {
         show(s.toString());
     }
-    self.postMessage({ tag: "err", text: s });
+    postMessage({ tag: "err", text: s });
 };
-const show_log = (s) => self.postMessage({ tag: "log", text: s });
+const show_log = (s) => postMessage({ tag: "log", text: s });
 
 function get_wasm_string(ptr, len) {
     if (len == 0) return "";
@@ -390,4 +393,4 @@ function sync_fetch(url) {
 
 
 self.onmessage = handle;
-self.postMessage({ tag: "ready" })
+postMessage({ tag: "ready" })

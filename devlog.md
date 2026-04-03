@@ -130,6 +130,11 @@ stackie: random programs. farm_game: hour glass + more messages. random: rand_(i
 - cleanup: @if(TODOWASM) is official now. run_tests skips for os. 
 - started splitting wasm/isel legalization part from ssa->stack in the hopes it will be less confusing 
   to be smarter about leaving values on the stack. stashed that for now. 
+- web: get_file: just read the rootfs bytes on the js side. 
+- web: Test All set_futex_and_wake: `RangeError: offset is outside the bounds of the DataView`. 
+  i think problem is js_shutdown sends "done" and then throws back to handle which does more stuff so it gets desynced. 
+  fixed by tracking which universe each request is in so can throw away junk ones after we've moved on. 
+  hacky but i think the only reason it worked before was get_file spawning a worker gave it an extra chance to reset. 
 
 ## (Mar 20)
 

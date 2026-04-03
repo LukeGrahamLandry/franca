@@ -33,12 +33,80 @@ fn wasm_isel(f: *Qbe.Fn) void = {
     f.requires(.UseCounts);  // for try_kill_inst
     assign_alloc_slots(f);
     insert_blocks_for_conditional_phis(f);
-    
     fillpreds(f);
     fillrpo(f);
-    
-    f.collapse_addr();
-    
+    collapse_addr(f);
+    legalize(f);
+    ssa_to_stack(f);
+    wasm_flow(f);
+    when_debug_printfn(f, .InstSelect, "\n## After instruction selection:\n");
+}
+
+legalize :: fn(f: *Qbe.Fn) void = {
+    f.reset_scratch();
+    for_blocks f { b | 
+        for_insts_rev b { i |
+            f.sel_wasm_legal(i[]);
+        };
+        f.copy_instructions_from_scratch(b);
+    };
+};
+
+sel_wasm_legal :: fn(f: *Qbe.Fn, i: *Qbe.Ins) void = {
+    k := i.cls();
+    @match(i.op()) {
+        fn cod()  => return(sel_nan_cmp(f, i, .ceqd, .and, .Kd));
+        fn cuod() => return(sel_nan_cmp(f, i, .cned, .or, .Kd));
+        fn cos()  => return(sel_nan_cmp(f, i, .ceqs, .and, .Ks));
+        fn cuos() => return(sel_nan_cmp(f, i, .cnes, .or, .Ks));
+        fn call() => {
+            @debug_assert(i.to == QbeNull);
+            need_indirect := rtype(i.arg&[0]) != .RCon || {
+                c := f.get_constant(i.arg&[0]);
+                // the way i do jit you don't get any imports. TODO: maybe that's bad and slow, idk. 
+                // but now i want to be able to intercept my own imports anyway 
+                // for redo_relocations_static_linux equivilent so imports just always have to be indirect
+                no_direct := /* f.globals.goal.type == .JitOnly) && */ could_be_import(f, c);
+                // calling a literal function pointer is fine when jitting but needs indirect to load from table. 
+                // TODO: warn on that if not jitting?
+                no_direct || c.type() == .CBits
+            };
+            if need_indirect {
+                i.set_op(.call_indirect);
+            };
+        }
+        fn loadsw() => if k == .Kw {
+            i.set_op(.load);
+        };
+        fn loaduw() => if k == .Kw {
+            i.set_op(.load);
+        };
+        fn byteswap() => return(f.sel_byteswap(i));
+        fn neg() => if k.is_int() {
+            i[] = make_ins(.sub, k, i.to, Qbe.ConZero, i.arg&[0]);
+        };
+        // wasm doesn't have zero extend from 8/16 so it becomes a mask
+        fn extub() => { i[] = make_ins(.and, k, i.to, i.arg&[0], f.getcon(0x00FF)); }
+        fn extuh() => { i[] = make_ins(.and, k, i.to, i.arg&[0], f.getcon(0xFFFF)); }
+        @default => {
+            // TODO: this is kinda wrong for the ext, it's only if k=kl && k(arg)=kw, but this way works just with two casts instead of one. 
+            //       (problem is argcls is Kw but wasm wants i64 input if the output is i64)
+            // cmp can return Kw or Kl, but wasm always returns I32
+            if iscmp(i.op()) || @is(i.op(), .extsh, .extsb) {
+                maybe_extend_output(f, i);
+            };
+        };
+    };
+    i := f.emit(i);
+};
+
+want_addr :: fn(i: *Qbe.Ins, a: i64) bool = false
+    || (a == 0 && is_load(i.op()))
+    || (a == 1 && is_store(i.op()))
+    || @is(i.op(), .cas0, .call_indirect, .blit0)
+;
+
+ssa_to_stack :: fn(f: *Qbe.Fn) void = {
     // We want to help the compiler on the other end:
     // we know that we don't care about any changes to this global inside our callees (because they'll always reset it),
     // so use a local that doesn't escape so it doesn't have to reload it on every single stack access. 
@@ -55,8 +123,6 @@ fn wasm_isel(f: *Qbe.Fn) void = {
     SP := f.env_par;
     
     for_blocks f { b | 
-        f.reset_scratch();
-        
         // Last thing before we jump to another block: push phi values to the stack. 
         @match(b.jmp.type) {
             fn ret0() => {
@@ -73,7 +139,7 @@ fn wasm_isel(f: *Qbe.Fn) void = {
                 };
             }
             fn jnz() => {
-                @debug_assert(b.s1.phi.is_null() && b.s2.phi.is_null());
+                @debug_assert(b.s1.phi.is_null() && b.s2.phi.is_null(), "insert_blocks_for_conditional_phis");
                 f.wasm_push(.Kw, b.jmp.arg);
                 b.jmp.arg = QbeNull;
             }
@@ -122,11 +188,8 @@ fn wasm_isel(f: *Qbe.Fn) void = {
     
     f.retr = QbeNull;
     f.env_par = QbeNull;
-    wasm_flow(f);
     @debug_assert_eq(f.slot, fslot, "can't make new slots after incrementing SP");
-
-    when_debug_printfn(f, .InstSelect, "\n## After instruction selection:\n");
-}
+};
 
 // :SLOW
 fn for_phi_rev_TODOSLOW(b: *Qbe.Blk, $body: @Fn(p: *Qbe.Phi) void) void = {
@@ -137,18 +200,6 @@ fn for_phi_rev_TODOSLOW(b: *Qbe.Blk, $body: @Fn(p: *Qbe.Phi) void) void = {
     for_rev phis { p |
         body(p);
     };
-}
-
-// returns the number that when encoded in sleb128 will encode this type. 
-fn wasm_type_preleb(t: Wasm.ValType) i32 = {
-    mask :: bit_and(-1, bit_not(1.shift_left(6) - 1));
-    x :i64= bit_or(t.raw().zext(), mask);
-    @if(::safety_check_enabled(.DebugAssertions)) {
-        buf := u8.list(temp());
-        leb128_signed(buf&, x);
-        @debug_assert_eq(t.raw(), buf[0]);
-    };
-    x.intcast()
 }
 
 fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
@@ -166,53 +217,20 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     };
     
     @match(o) {
-        // TODO
-        //fn nop() => return();
         fn push() => {
             @debug_assert(i.to == QbeNull);
             f.wasm_push(i.cls(), i.arg&[0]);  // fixarg
             return();
         }
         fn call() => {
-            @debug_assert(i.to == QbeNull);
-            need_indirect := rtype(i.arg&[0]) != .RCon || {
-                c := f.get_constant(i.arg&[0]);
-                // the way i do jit you don't get any imports. TODO: maybe that's bad and slow, idk. 
-                // but now i want to be able to intercept my own imports anyway 
-                // for redo_relocations_static_linux equivilent so imports just always have to be indirect
-                no_direct := /* f.globals.goal.type == .JitOnly) && */ could_be_import(f, c);
-                // calling a literal function pointer is fine when jitting but needs indirect to load from table. 
-                // TODO: warn on that if not jitting?
-                no_direct || c.type() == .CBits
-            };
-            if need_indirect {
-                f.emit(.call_indirect, .Kw, QbeNull, QbeNull, i.arg&[1]);
-                wasm_push_addr(f, i.arg&[0]);
-                return();
-            };
             f.emit(i);
             return();
         }
-        fn loadsw() => if k == .Kw {
-            o = .load;
-        };
-        fn loaduw() => if k == .Kw {
-            o = .load;
-        };
-        fn cod()  => { sel_nan_cmp(f, i, .ceqd, .and, .Kd); return(); };
-        fn cuod() => { sel_nan_cmp(f, i, .cned, .or, .Kd); return(); };
-        fn cos()  => { sel_nan_cmp(f, i, .ceqs, .and, .Ks); return(); };
-        fn cuos() => { sel_nan_cmp(f, i, .cnes, .or, .Ks); return(); };
-        fn byteswap() => {
-            f.sel_byteswap(i);
+        fn call_indirect() => {
+            f.emit(.call_indirect, .Kw, QbeNull, QbeNull, i.arg&[1]);
+            wasm_push_addr(f, i.arg&[0]);
             return();
         }
-        fn neg() => if k.is_int() {
-            o = .sub;
-            i.set_op(.sub);
-            i.arg&[1] = Qbe.ConZero;
-            i.arg&.items().swap(0, 1);
-        };
         fn blit1() => {
             f.emit(.blit1, .Kw, Qbe.Null, Qbe.Null, Qbe.Null);
             n := f.getcon(i.arg&[0].rsval().abs().intcast());
@@ -234,24 +252,6 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     
     if i.to != QbeNull {
         f.wasm_pop(i.cls(), i.to);
-    };
-    
-    // TODO: this is kinda wrong for the ext, it's only if k=kl && k(arg)=kw, but this way works just with two casts instead of one. 
-    //       (problem is argcls is Kw but wasm wants i64 input if the output is i64)
-    // our cmp can return Kw or Kl, but wasm always returns I32
-    needs_ext := iscmp(o) || @is(o, .extsh, .extsb);
-    if needs_ext && i.cls() == .Kl {
-        i.set_cls(.Kw); k = .Kw;
-        f.emit_ext_trunc(.extuw, .Kl);
-    };
-    
-    // wasm doesn't have zero extend from 8/16 so it becomes a mask
-    if @is(o, .extub, .extuh) {
-        mask: i64 = @if(o == .extub, 0x00FF, 0xFFFF);
-        f.emit(.and, k, QbeNull, QbeNull, QbeNull);
-        f.emit(.push, k, QbeNull, f.getcon(mask), QbeNull);
-        f.wasm_push(k, i.arg&[0]);
-        return()
     };
     
     if @is(o, .global_get, .global_set) {
@@ -633,7 +633,7 @@ fn wasm_flow(f: *Qbe.Fn) void = {
 
 // use rotations to swap groups of 4 and then swap groups of 2.
 // same constants work for both widths because i truncate on emit.
-fn sel_byteswap(f: *Qbe.Fn, i: *Qbe.Ins) void = @emit_instructions((f = f, emit = emitter_for_wasm), (i.cls(), i.arg&[0], i.to), """
+sel_byteswap :: fn(f: *Qbe.Fn, i: *Qbe.Ins) void = @emit_instructions((f = f, emit = emit_inc_use), (i.cls(), i.arg&[0], i.to), """
 @start
     %mask     =0 copy 0xFFFF0000FFFF0000
     %mask_odd =0 xor %mask, -1
@@ -652,21 +652,29 @@ fn sel_byteswap(f: *Qbe.Fn, i: *Qbe.Ins) void = @emit_instructions((f = f, emit 
     %2        =0 or %Even_l, %Odd_r
 """);
 
+maybe_extend_output :: fn(f: *Qbe.Fn, i: *Qbe.Ins) void = 
+    if i.cls() == .Kl {
+        r := f.newtmp("isel", .Kw);
+        f.emit(.extuw, .Kl, i.to, r, Qbe.Null);
+        i.to = r;
+        i.set_cls(.Kw);
+    };
+
 // o: !(nan|nan), uo: (nan|nan)
 fn sel_nan_cmp(f: *Qbe.Fn, i: *Qbe.Ins, cmp: Qbe.O, join: Qbe.O, k: Qbe.Cls) void = {
-    f.emit(.pop, i.cls(), i.to, QbeNull, QbeNull);
-    if i.cls() == .Kl {
-        f.emit_ext_trunc(.extuw, .Kl);
-    };
-    
-    f.emit(join, .Kw, QbeNull, QbeNull, QbeNull);
-    f.emit(cmp, .Kw, QbeNull, QbeNull, QbeNull);
-    f.wasm_push(k, i.arg&[1]);
-    f.wasm_push(k, i.arg&[1]);
-    f.emit(cmp, .Kw, QbeNull, QbeNull, QbeNull);
-    f.wasm_push(k, i.arg&[0]);
-    f.wasm_push(k, i.arg&[0]);
+    maybe_extend_output(f, i);
+    r0, r1 := (f.newtmp("isel", .Kw), f.newtmp("isel", .Kw));
+    f.emit(join, i.cls(), i.to, r0, r1);
+    f.emit(cmp, .Kw, r1, i.arg&[1], i.arg&[1]);
+    f.emit(cmp, .Kw, r0, i.arg&[0], i.arg&[0]);
 }
+
+emit_inc_use :: fn(f: *Qbe.Fn, o: Qbe.O, k: Qbe.Cls, r: Qbe.Ref, a0: Qbe.Ref, a1: Qbe.Ref) void = {
+    i := make_ins(o, k, r, a0, a1);
+    chuse(a0, 1, f);
+    chuse(a1, 1, f);
+    f.emit(i);
+};
 
 emitter_for_wasm :: fn(f: *Qbe.Fn, o: Qbe.O, k: Qbe.Cls, r: Qbe.Ref, a0: Qbe.Ref, a1: Qbe.Ref) void = {
     i := make_ins(o, k, r, a0, a1);

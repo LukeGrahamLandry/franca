@@ -53,6 +53,7 @@ process.chdir("target/web");
 const worker_path = "./node_worker.js";
 const worker_src = readFileSync("./worker.js");
 writeFileSync(worker_path, prelude + worker_src);
+let epoch = -1;
 
 // TODO: test more and stop duplicating this list everywhere. 
 const tests = [
@@ -76,6 +77,7 @@ const wasm_module = await WebAssembly.compile(readFileSync("target/demo.wasm"));
 
 const handle = (resolve) => async (msg) => {
     msg = msg.data;
+    if (msg.epoch !== epoch) return;
     switch (msg.tag) {
         case "show": { out_innerText += msg.text; break;  }
         case "log": break;
@@ -101,7 +103,7 @@ const handle = (resolve) => async (msg) => {
                 handle(() => {})(msg);
             };
             running_threads.push(w);
-            w.postMessage({ tag: "start", args: [], child: msg.child, memory: msg.memory });
+            w.postMessage({ tag: "start", args: [], child: msg.child, memory: msg.memory, epoch });
             break;
         }
         default: assert(false, msg);
@@ -125,7 +127,8 @@ const start_worker = (args, resolve) => {
     worker = get_worker();
     worker.onmessage = handle(resolve);
     const memory = new WebAssembly.Memory({ initial: 300, maximum: 1 << (32 - 16), shared: true, });
-    worker.postMessage({ tag: "start", args: ["demo.wasm", "-rootfs_hash", rootfs_hash, ...args], memory }, []);
+    epoch += 1;
+    worker.postMessage({ tag: "start", args: ["demo.wasm", "-rootfs_hash", rootfs_hash, ...args], memory, epoch }, []);
 };
 
 async function run_tests() {

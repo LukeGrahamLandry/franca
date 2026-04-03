@@ -7,8 +7,10 @@ if (typeof Worker === "undefined")
 let thread_pool = []
 let running_threads = []
 let doing_test = false;
+let epoch = 0;
 const handle = (resolve, handle_app_request) => (_msg) => {
     const msg = _msg.data;
+    if (msg.epoch !== epoch) return;
     switch (msg.tag) {
         case "show": {
             show(msg.text);
@@ -67,7 +69,7 @@ const handle = (resolve, handle_app_request) => (_msg) => {
                 handle(() => {}, handle_app_request)(msg);
             };
             running_threads.push(w);
-            w.postMessage({ tag: "start", args: [], child: msg.child, memory: msg.memory });
+            w.postMessage({ tag: "start", args: [], child: msg.child, memory: msg.memory, epoch });
             break
         }
         default:
@@ -172,7 +174,7 @@ const toggle_worker = (resolve) => {
         
         let surface = canvas.transferControlToOffscreen();
         const send = (handler, ...args) => 
-            worker.postMessage({ tag: "event", handler, args });
+            worker.postMessage({ tag: "event", handler, args, epoch });
         
         let handle_app_request = () => console.error("app_request from non-graphics program");
         if (need_canvas) {
@@ -192,7 +194,8 @@ const toggle_worker = (resolve) => {
         surface.height = canvas.clientHeight * window.devicePixelRatio;
         if (!need_canvas) surface = undefined;
         let transfer = need_canvas ? [surface] : [];
-        worker.postMessage({ tag: "start", args: args, canvas: surface, memory: new_memory(), devicePixelRatio: window.devicePixelRatio }, transfer);
+        epoch += 1;
+        worker.postMessage({ tag: "start", args: args, canvas: surface, memory: new_memory(), devicePixelRatio: window.devicePixelRatio, epoch }, transfer);
         document.getElementById("btn").innerText = "Kill";
     } else {
         // don't just reset because if they pressed kill maybe its because it hung
@@ -331,7 +334,7 @@ if (path !== null) {
     }
     await load_example(path);
 } else {
-    await load_example(manifest.compilers[0].examples[navigator.gpu === undefined ? 1 : 0]);
+    await load_example(manifest.compilers[0].examples[navigator.gpu === undefined ? 2 : 0]);
 }
 
 {
