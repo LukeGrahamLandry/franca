@@ -1,4 +1,8 @@
 
+## (Apr 3)
+
+- wasm: i've made it worse (more code and redundant ext/trunc) but i think this is the path to it being better
+
 ## (Apr 2)
 
 - viewer: support P6 (rgb) ppm so `gui.fr -show` works without FEAT_PNG. 

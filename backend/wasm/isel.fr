@@ -18,14 +18,22 @@
 // TODO: address offset fold into load/store (rn i only do it for stack slots)
 // TODO: more tests for dynalloc
 // TODO: make it work with elide_abi_slots and simplify_jump_chains
-//       - delay lowering RSlot like the other targets 
-//       - split legalization part of isel from the stackification part so it's still ssa going into opt/slots.fr
 // TODO: some dead code elimination is done by liveness+spill+rega on native targets. make sure to do that for wasm as well. 
 // TODO: might be better to not always convert phis to stack block arguments. 
 //       instead, assign multiple tmps to the same local and try to map them so you don't need copies. 
 //       same idea as rega just you can have infinite registers. see if that makes smaller code. 
 // TODO: make sure `pushd(-1);stored;` doesn't become `pushl(-4616189618054758400);storel;`, that takes more bytes to encode. 
 //
+
+// TODO: convert addresses to .Kw earlier so don't have to insert as many .truncl
+// TODO: fold imm offset / slots
+/*
+// TODO: make sure this isn't so trash
+// choose_syscall__6696
+%v.134 =w loadub S8
+%v.135 =w and %v.134, 1
+%.264 =l and %v.135, 255         # from extub probably
+*/
 
 k_mem :: Qbe.Cls.Kw;
 
@@ -37,16 +45,42 @@ fn wasm_isel(f: *Qbe.Fn) void = {
     fillrpo(f);
     collapse_addr(f);
     legalize(f);
+    when_debug_printfn(f, .InstSelect, "\n## After instruction selection:\n");
     ssa_to_stack(f);
     wasm_flow(f);
-    when_debug_printfn(f, .InstSelect, "\n## After instruction selection:\n");
+    when_debug_printfn(f, .RegAlloc, "\n## After ssa to stack:\n");
 }
 
 legalize :: fn(f: *Qbe.Fn) void = {
     f.reset_scratch();
     for_blocks f { b | 
+        @match(b.jmp.type) {
+            fn jmp() => for_phi b.s1 { p |
+                arg := p.arg.index(index_in_phi(b, p));
+                f.fixref(p.cls, arg);
+            };
+            fn jnz() => f.fixref(.Kw, b.jmp.arg&);
+            @default => ();
+        };
+    
         for_insts_rev b { i |
+            i0 := f.globals.curi;   // :LookAtLastInst
+            p := i[].offset(-1);
+            pair := @is(i[].op(), .blit1, .cas1, .sel1);
             f.sel_wasm_legal(i[]);
+            if pair {
+                xx := p;
+                f.sel_wasm_legal(p);
+                xx.set_nop();
+            };
+            i1 := f.globals.curi;
+            
+            while => i0.in_memory_after(i1) {
+                i0 = i0.offset(-1);
+                range(0, 2) { a |
+                    f.fixarg(i0, a);
+                };
+            };
         };
         f.copy_instructions_from_scratch(b);
     };
@@ -85,9 +119,8 @@ sel_wasm_legal :: fn(f: *Qbe.Fn, i: *Qbe.Ins) void = {
         fn neg() => if k.is_int() {
             i[] = make_ins(.sub, k, i.to, Qbe.ConZero, i.arg&[0]);
         };
-        // wasm doesn't have zero extend from 8/16 so it becomes a mask
-        fn extub() => { i[] = make_ins(.and, k, i.to, i.arg&[0], f.getcon(0x00FF)); }
-        fn extuh() => { i[] = make_ins(.and, k, i.to, i.arg&[0], f.getcon(0xFFFF)); }
+        fn extub() => return(f.sel_ext(i, 0x00FF));
+        fn extuh() => return(f.sel_ext(i, 0xFFFF));
         @default => {
             // TODO: this is kinda wrong for the ext, it's only if k=kl && k(arg)=kw, but this way works just with two casts instead of one. 
             //       (problem is argcls is Kw but wasm wants i64 input if the output is i64)
@@ -97,7 +130,46 @@ sel_wasm_legal :: fn(f: *Qbe.Fn, i: *Qbe.Ins) void = {
             };
         };
     };
-    i := f.emit(i);
+    f.emit(i);
+};
+
+fixarg :: fn(f: *Qbe.Fn, i: *Qbe.Ins, a: i64) void = {
+    f.fixref(wasm_argcls(i, a), i.arg&.index(a));
+};
+
+fixref :: fn(f: *Qbe.Fn, k: Qbe.Cls, r: *Qbe.Ref) void = {
+    if f.get_slot(r[]) { slot | 
+        r[] = SLOT(slot);
+        if k == .Kl {
+            r0 := f.newtmp("isel", .Kl);
+            f.emit(.extuw, .Kl, r0, r[], Qbe.Null);
+            r[] = r0;
+        };
+    };
+    // wasm cares about types. no free truncation. 
+    if rtype(r[]) == .RTmp && k == .Kw && f.get_temporary(r[])[].cls == .Kl {
+        r0 := f.newtmp("isel", .Kw);
+        f.emit(.truncl, .Kw, r0, r[], Qbe.Null);
+        r[] = r0;
+    };
+    
+    // todo: i shouldn't be allowing this in the ir anyway?
+    if rtype(r[]) == .RTmp && k == .Kl && f.get_temporary(r[])[].cls == .Kw {
+        r0 := f.newtmp("isel", .Kl);
+        f.emit(.extuw, .Kl, r0, r[], Qbe.Null);
+        r[] = r0;
+    };
+};
+
+wasm_argcls :: fn(i: *Qbe.Ins, a: i64) Qbe.Cls = {
+    if want_addr(i, a) {
+        return(.Kw);
+    };
+    kk := argcls(i, a);
+    if a == 1 && { (@is(i.op(), .shl, .shr, .sar, .rotl, .rotr)) }  {
+        kk = i.cls();
+    };
+    kk
 };
 
 want_addr :: fn(i: *Qbe.Ins, a: i64) bool = false
@@ -126,7 +198,7 @@ ssa_to_stack :: fn(f: *Qbe.Fn) void = {
         // Last thing before we jump to another block: push phi values to the stack. 
         @match(b.jmp.type) {
             fn ret0() => {
-                if !f.leaf {
+                if !(f.leaf || (f.slot == 0 && !f.dynalloc)) {
                     f.emitter_for_wasm(.global_set, k_mem, QbeNull, stackbase, BP);
                     f.emitter_for_wasm(.add, k_mem, BP, BP, f.getcon(f.slot.intcast()));
                 };
@@ -148,7 +220,7 @@ ssa_to_stack :: fn(f: *Qbe.Fn) void = {
         @debug_assert(b.jmp.arg == QbeNull);
         
         maybe_sp_load :: fn() => if !did_sp_load {
-            if !f.leaf {
+            if !(f.leaf || f.slot == 0) {
                 f.emitter_for_wasm(.global_set, k_mem, Qbe.Null, stackbase, f.retr);
             };
             r := f.newtmp("isel", k_mem);
@@ -268,10 +340,15 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
         SP := f.env_par;
         @debug_assert_ne(SP, QbeNull, "ICE: alloca without loading stack");
         stackbase := f.symcon(f.globals.wasm_symbol_stackbase);
-        
-        f.wasm_push(i.cls(), SP);
+        r := i.arg&[0];
+        i.arg&[0] = f.newtmp("isel", .Kw);
+        if i.cls() == .Kl {
+            f.emit(.extuw, .Kl, QbeNull, QbeNull, QbeNull);
+        };
+        f.wasm_push(k_mem, SP);
         f.emitter_for_wasm(.global_set, k_mem, Qbe.Null, stackbase, SP);  // save for callees
         f.emitter_for_wasm(.sub, k_mem, SP, SP, i.arg&[0]);
+        f.emitter_for_wasm(.truncl, .Kw, i.arg&[0], r, Qbe.Null);
         f.dynalloc = true;
         return();
     };
@@ -308,35 +385,15 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
         };
     };
     
-    BP := f.retr;
     if is_store(o) {
-        // TODO: fold all addressing, not just stack
-        off := 0;
-        if f.get_slot(i.arg&[1]) { slot | 
-            if slot >= 0 && fits_in_i32(slot) {
-                off = slot;
-                i.arg&[1] = BP;
-            };
-        };
-        emitted.arg&[0] = INT(off);
-    
         k := argcls(i, 0);
         f.wasm_push(k, i.arg&[0]);
-        wasm_push_addr(f, i.arg&[1]);
+        emitted.arg&[0] = f.fold_addr(i.arg&[1]);
         return();
     };
     
     if is_load(o) {
-        // TODO: fold all addressing, not just stack
-        off := 0;
-        if f.get_slot(i.arg&[0]) { slot | 
-            if slot >= 0 && fits_in_i32(slot) {
-                off = slot;
-                i.arg&[0] = BP;
-            };
-        };
-        emitted.arg&[0] = INT(off);
-        wasm_push_addr(f, i.arg&[0]);
+        emitted.arg&[0] = f.fold_addr(i.arg&[0]);
         return();
     };
     
@@ -351,66 +408,38 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     
     enumerate_rev i.arg&.items() { idx, a |
         if a[] != QbeNull {
-            kk := argcls(i, idx);
-            if idx == 1 && { (@is(o, .shl, .shr, .sar, .rotl, .rotr)) }  {
-                kk = k;
-            };
+            kk := wasm_argcls(i, idx);
             f.wasm_push(kk, a[]);
         };
     };
 }
 
-fn wasm_push(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) void = {
-    @match(rtype(r)) {
-        fn RTmp() => {
-            t := f.get_temporary(r);
-            slot_offset := t.slot;
-            if slot_offset != -1 {
-                return(push_slot_addr(f, k, slot_offset));
-            };
-            
-            if k != t.cls {
-                @debug_assert(k.is_int() && t.cls.is_int(), "non-int push wrong cls % %", r, => printfn(f, f.globals.debug_out));
-                o: Qbe.O = @if(k == .Kw, .truncl, .extuw);
-                f.emit_ext_trunc(o, k);
-                k = t.cls;
-            };
-        }
-        fn RSlot() => return(push_slot_addr(f, k, r.rsval()));
-        @default => ();
+fold_addr :: fn(f: *Qbe.Fn, r: Qbe.Ref) Qbe.Ref = {
+    // TODO: fold all addressing, not just stack. 
+    //       it's hard because can't just do like arm/isel/fuse_addr because inserted truncl breaks use-def chain
+    off := 0;
+    if f.get_slot(r) { slot | 
+        if slot >= 0 && fits_in_i32(slot) {
+            off = slot;
+            r = f.retr;  // BP
+        };
     };
+    wasm_push_addr(f, r);
+    INT(off)
+};
+
+fn wasm_push(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) void = {
+    @if(rtype(r) == .RSlot) return(push_slot_addr(f, r.rsval().intcast()));
     f.emit(.push, k, QbeNull, r, QbeNull);
 }
 
-fn push_slot_addr(f: *Qbe.Fn, k: Qbe.Cls, slot_offset: i32) void = {
-    if k == .Kl {
-        f.emit_ext_trunc(.extuw, k);
-        k = Qbe.Cls.Kw;
-    };
+fn push_slot_addr(f: *Qbe.Fn, slot_offset: i64) void = {
     // Stack grows downwards and SP points to the bottom of our frame. 
-    SP := f.retr;
-    @debug_assert(SP != QbeNull, "missing SP %", { printfn(f, f.globals.debug_out); "" });
     if slot_offset != 0 {
-        ins := make_ins(.add, .Kw, QbeNull, SP, f.getcon(slot_offset.intcast()));
-        f.sel_wasm(ins&);
-    } else {
-        f.wasm_push(.Kw, SP);
+        f.emit(.add, .Kw, Qbe.Null, Qbe.Null, Qbe.Null);
+        f.wasm_push(.Kw, f.getcon(slot_offset));
     };
-}
-
-fn emit_ext_trunc(f: *Qbe.Fn, o: Qbe.O, k: Qbe.Cls) void = {
-    i := f.emit(o, k, QbeNull, QbeNull, QbeNull);
-    @if(f.len_scratch() <= 1) return();
-    i0 := i.offset(1);
-    if o == .extuw && i0.op() == .truncl {
-        f.unemit(i);
-        f.unemit(i0);
-    };
-    // note: the other way is not true. it clears the high bits. 
-}
-
-fn need_trunc(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) bool = {
-    k == .Kw && rtype(r) == .RTmp && f.get_temporary(r)[].cls == .Kl
+    f.wasm_push(.Kw, f.retr);  // BP
 }
 
 fn wasm_pop(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) void = {
@@ -430,15 +459,8 @@ fn wasm_pop(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) void = {
     };
 }
 
-// TODO: convert addresses to .Kw earlier so don't have to insert as many .truncl
-// TODO: fold imm offset / slots
 fn wasm_push_addr(f: *Qbe.Fn, r: Qbe.Ref) void = {
-    k := Qbe.Cls.Kw;
-    if rtype(r) == .RTmp && f.get_temporary(r)[].slot == -1 {
-        f.emit_ext_trunc(.truncl, k);
-        k = .Kl;
-    };
-    f.wasm_push(k, r);
+    f.wasm_push(.Kw, r);
 }
 
 // J.jmp: phi nodes can trivially be converted to block arguments. 
@@ -668,6 +690,12 @@ fn sel_nan_cmp(f: *Qbe.Fn, i: *Qbe.Ins, cmp: Qbe.O, join: Qbe.O, k: Qbe.Cls) voi
     f.emit(cmp, .Kw, r1, i.arg&[1], i.arg&[1]);
     f.emit(cmp, .Kw, r0, i.arg&[0], i.arg&[0]);
 }
+
+// wasm doesn't have zero extend from 8/16 so it becomes a mask
+sel_ext :: fn(f: *Qbe.Fn, i: *Qbe.Ins, mask: i64) void = {
+    f.maybe_extend_output(i);
+    f.emit(.and, i.cls(), i.to, i.arg&[0], f.getcon(mask));
+};
 
 emit_inc_use :: fn(f: *Qbe.Fn, o: Qbe.O, k: Qbe.Cls, r: Qbe.Ref, a0: Qbe.Ref, a1: Qbe.Ref) void = {
     i := make_ins(o, k, r, a0, a1);
