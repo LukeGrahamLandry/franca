@@ -3,6 +3,13 @@
 
 - wasm_flow: early exit when searching for existing Flow.block. use shorter encoding for eqz when flipping condition.
 - emit: (arbitrary aesthetics) i don't like set_link_from_rpo, iter the array and compare b.id instead. 
+- lox: test aot. way too slow if exec a new franca each time. 
+  - good opportunity to demo using compiler as a library. 
+  - spent a while on it seeming to lose the lox_main.fr import and try to do it multiple times. 
+    fixed by add_file src memory not being in tmp. 
+    see that's extra stupid because i wrote a comment about it right there to fix once it worked, i just figured it wasn't going to immediately be a big deal.
+    it's a problem that i find the `@format("", ...) a` syntax more annoying than `@tfmt("", ...)`
+  - doing it all in one CompCtx: 19000ms -> 620ms.
 
 ## (Apr 4)
 

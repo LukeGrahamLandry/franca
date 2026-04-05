@@ -7,13 +7,19 @@
 // that i can compile with my c compiler (examples/import_c) and run on the same tests. 
 
 #use("@/examples/testing.fr");
-main :: fn() void = {
+driver :: fn(vtable: *ImportVTable) void = main2(Some = vtable);
+main :: fn() void = main2(.None);
+main2 :: fn(vtable: ?*ImportVTable) void = {
     args := cli_args();
     
     root := Foreign'craftinginterpreters();
     
     go := false;
-    total, pass := (0, 0);
+    hush, do_skips, aot := (false, false, false);
+    clox: ?Str = .None;
+    test_paths := @ref Test.list(temp());
+    collect_tests :: fn(s) => 
+        test_paths.run_test_at_path(@if(do_skips, skip_, empty()), "", s);
     for args { s |
         continue :: local_return;
         s := s.str();
@@ -22,40 +28,72 @@ main :: fn() void = {
                 go = true;
             };
             if s == "-pass" {
-                do_skips[] = true;
+                do_skips = true;
+                collect_tests(@tfmt("%/test", root));
             };
             if s == "-hush" {
-                HUSH[] = true;
+                hush = true;
             }
             if s == "-clox" {
                 path := compile_c_lox(root);
-                CLOX[] = (Some = path);
+                clox = (Some = path);
             };
+            if s == "-all" {
+                collect_tests(@tfmt("%/test", root));
+            };
+            if s == "-aot" {
+                aot = true;
+            }
             continue();
         };
-        @assert(!do_skips[], "only skip failing tests when running all");
-        mark := mark_temporary_storage();
-        yes, no := run_test_at_path("", @tfmt("%/test/%", root, s));
-        reset_temporary_storage(mark);
-        total += yes + no;
-        pass += yes;
+        @assert(!do_skips, "only skip failing tests when running all");
+        collect_tests(@tfmt("%/test/%", root, s));
     };
-    if total == 0 {
-        yes, no := run_test_at_path("", @tfmt("%/test", root));
-        total += yes + no;
-        pass += yes;
+    
+    c := zeroed(CompCtx);
+    if aot {
+        vtable := vtable.expect("run as driver to test lox/aot.fr (-aot)");
+        opts := vtable.default_build_options();
+        cc := vtable'init_compiler(opts);
+        c = vtable.with(cc);
+        make_and_resolve_and_compile_top_level(cc, vtable, "#include_std(\"lib/core.fr\");\n", "prelude");
+    };
+    
+    @assert(!(clox.is_some() && aot), "choose -clox XOR -aot");
+    total, pass := (0, 0);
+    enumerate test_paths { i, it |
+        continue :: local_return;
+        if !it.is_file {
+            @if(!hush) @println("=== % ===", it.s);
+            continue();
+        };
+        
+        ::FmtPad(Str);
+        mark := temp().mark();
+        @if(!hush) @print("%", f_pad(it.s.rest(it.prefix_len), 40, .After));
+        lox_filename := it.s;
+        src := temp().read_to_string_or_crash(lox_filename);
+        want := expected_output(src.items());
+        r := @if_else {
+            @if(aot) => run_aot(c, src.items(), i);
+            @if(clox.is_some()) => run_clox(clox.Some, lox_filename); 
+            @else => run_interp(src.items());
+        };
+        ok := check_test(want, r);
+        @if(!hush) @println("[%]", @if(ok, "ok", "fail"));
+        total += 1;
+        pass += int(ok);
+        temp().reset(mark);
     };
     
     @println("\npassed %/% tests.", pass, total);
+    @if(aot) c'vtable'destroy_compiler(c.data);
     if pass != total {
         panic("tests failed");
     }
+    @assert(total != 0, "didn't run any tests");
     Syscall'exit(@if(pass == total, 0, 1));
 }
-
-do_skips :: @static_mut false;
-HUSH :: @static_mut false;
-CLOX :: @static_mut @as(?Str) (.None);
 
 skip_ :: @const_slice(
     "string/multiline.lox",   // TODO: my test runner is dumb about multiline prints
@@ -75,73 +113,115 @@ skip_ :: @const_slice(
     "expressions", "scanning",
 );
 
-::if(Ty(i64, i64));
-fn run_test_at_path(prefix: Str, s: Str) Ty(i64, i64) = {
-    if do_skips[] && skip_.contains(fn(check) => s.ends_with(@tfmt("/%", check[]))) {
-        return(0, 0);
+Test :: @struct(s: Str, prefix_len: i64, is_file: bool);
+fn run_test_at_path(out: *List(Test), skip_: []Str, prefix: Str, s: Str) void = {
+    if skip_.contains(fn(check) => s.ends_with(@tfmt("/%", check[]))) {
+        return();
     };
     if s.ends_with(".lox") {
-        src := temp().read_to_string_or_crash(s);
-        ::FmtPad(Str);
-        @if(!HUSH[]) @print("%", f_pad(s.rest(prefix.len), 40, .After));
-        ok := run_test(src, s);
-        @if(!HUSH[]) @println("[%]", @if(ok, "ok", "fail"));
-        (int(ok), int(!ok))
+        out.push(s = s, prefix_len = prefix.len, is_file = true);
     } else {
         children := collect_directory_ordered(s, temp(), temp()) 
             || @panic("failed to collect test files from %", s);
-        @if(!HUSH[]) @println("=== % ===", s.rest(prefix.len));
-        a, b := (0, 0);
+        out.push(s = s.rest(prefix.len), prefix_len = 0, is_file = false);
         for children { e |
             if e.name.ends_with(".lox") || e.is(.Directory) {
                 path := @tfmt("%/%", s, e.name);
-                c, d := run_test_at_path(s, path);
-                a += c; b += d;
+                out.run_test_at_path(skip_, s, path);
             }
         };
-        @if(!HUSH[]) @println("===");
-        (a, b)
     }
 }
 
-#use(Lox)
-fn run_test(src: List(u8), lox_filename: Str) bool = {
-    want := expected_output(src.items());
-    
+TestOutput :: @struct(found: []Str, result: Lox.InterpretResult, errors: Str);
+fn run_interp(src: Str) TestOutput = 
+    with_vm(fn(vm) => vm.interpret(src, true));
+
+fn with_vm($run: @Fn(vm: *Lox.Vm) Lox.InterpretResult) TestOutput = {
+    #use(Lox);
     found: List(Str) = list(temp());
-    result := InterpretResult.CompileError;
     errors := u8.list(temp());
-    if CLOX[] { path |
-        cargs := make_args_for_exec(path, @slice(lox_filename), temp());
-        out := u8.list(temp());
-        it := sys_capture_exec(cargs).unwrap();
-        status := it&.poll_until_exit(out&, errors&, "");
-        // TODO: do the WEXITSTATUS shift in poll_until_exit
-        result = @switch(status.shift_right_logical(8)) {
-            @case(0) => .Ok;
-            @case(70) => .RuntimeError;
-            @case(65) => .CompileError;
-            @default => @panic("bad status %\n%", status.shift_right_logical(8), errors.items());
-        };
-        lines := out.items().split("\n", temp()).items();
-        lines.len -= 1;
-        found&.push_all(lines);
-    } else {
-        vm := zeroed Vm;
-        init(vm&);
-        vm.user_data = List(Str).raw_from_ptr(found&);
-        vm.print_callback = fn(_, user_data, value) = {
-            found := List(Str).ptr_from_raw(user_data);
-            found.push(@tfmt("%", value));
-        }
-        result = vm&.interpret(src.items(), true);
-        errors = vm.errors.items().clone(temp());
-        vm&.drop();  // test a forced full collection
+    vm := zeroed Vm;
+    init(vm&);
+    vm.user_data = List(Str).raw_from_ptr(found&);
+    vm.print_callback = fn(_, user_data, value) = {
+        found := List(Str).ptr_from_raw(user_data);
+        found.push(@tfmt("%", value));
+    }
+    result := run(vm&);
+    errors := vm.errors.items().shallow_copy(temp());
+    vm&.drop();  // test a forced full collection
+    (found = found.items(), result = result, errors = errors)
+}
+
+fn run_clox(clox_path: Str, lox_filename: Str) TestOutput = {
+    cargs := make_args_for_exec(clox_path, @slice(lox_filename), temp());
+    out, errors := (u8.list(temp()), u8.list(temp()));
+    it := sys_capture_exec(cargs).unwrap();
+    status := it&.poll_until_exit(out&, errors&, "");
+    // TODO: do the WEXITSTATUS shift in poll_until_exit
+    result: Lox.InterpretResult = @switch(status.shift_right_logical(8)) {
+        @case(0) => .Ok;
+        @case(70) => .RuntimeError;
+        @case(65) => .CompileError;
+        @default => @panic("bad status %\n%", status.shift_right_logical(8), errors.items());
     };
+    lines := out.items().split("\n", temp()).items();
+    lines.len -= 1;
+    (found = lines, result = result, errors = errors.items())
+}
+
+// run all the tests in the same compiler instance so some work can be reused (ie. compiling comptime/vm helper functions, etc.) 
+// TODO: this is crazy verbose/fragile :(
+// worth it for ~30x speedup over writing to a file and exec-ing franca on it. 
+fn run_aot(c: CompCtx, lox_src: Str, i: i64) TestOutput = {
+    franca_src := @match(import("@/examples/lox/aot.fr")'translate_src(lox_src)) {
+        fn Ok(it) => it;
+        fn Err(it) => return(found = empty(), result = .CompileError, errors = it);
+    };
+
+    src := @tfmt("(fn() = { % \n(script_index, const_count, ::@as(rawptr)init_lox_constants)\n });", franca_src);
+    src := src.shallow_copy(c.get_alloc());  // :SLOW just fmt into it in the first place
+    name := (@tfmt("lox%.g.fr", i)).shallow_copy(c.get_alloc());
+    file := {c.vtable.add_file}(c.data, name, src).shrink();
+
+    stmts := {c.vtable.parse_stmts}(c.data, file&);
+    stmts := stmts.or(fn(err) => c.report_error(err));
+    @assert(stmts.len == 2 && stmts[0].stmt&.is(.Eval) && stmts[1].stmt&.is(.Noop), "ast shape changed");
+    expr: *FatExpr = stmts[0].stmt.Eval&;
     
+    c'vtable'compile_ast(c.data, expr, FuncId);
+    @assert(expr.expr&.is(.Value) && expr.ty == FuncId, "didn't compile all the way?");
+    
+    fid := FuncId.assume_cast(expr.expr.Value.bytes&)[];
+    #use("@/compiler/ast_external.fr");
+    func := c.get_function(fid);
+    func.resolve_scope = TOP_LEVEL_SCOPE;  // needed because it didn't go through the normal parser->resolve pass that would save its parent scope
+    
+    p := c.get_jitted(fid);
+    p := bit_cast_unchecked(rawptr, @FnPtr() Ty(i64, i64, F), p);
+    script_index, const_count, init_lox_constants := p();
+    
+    F :: @FnPtr(vm: *Lox.Vm, o: []*Lox.Obj) void;
+    
+    // mirrors examples/lox/aot.fr/prelude
+    with_vm { vm |
+        o := vm.gc.alloc_zeroed(*Lox.Obj, const_count);
+        vm.aot_roots = o;
+        init_lox_constants(vm, o);
+        script := o[script_index].to(.Function);
+        result := vm.interpret(script, true);
+        vm.aot_roots = empty();
+        vm.gc.dealloc(*Lox.Obj, o);
+        result
+    }
+}
+
+fn check_test(want: TestResult, r: TestOutput) bool = {
+    result, found, errors := (r.result, r.found, r.errors);
     pass := @match(want) {
         fn Ok(want) => {
-            print(errors.items());
+            print(errors);
             if(result != .Ok || errors.len != 0, => return(false));
             if want.len != found.len {
                 @println("Expected % outputs but found %", want.len, found.len);
@@ -155,7 +235,6 @@ fn run_test(src: List(u8), lox_filename: Str) bool = {
                 };
             };
             
-            
             true
         }
         fn RuntimeError() => result == .RuntimeError;
@@ -168,7 +247,7 @@ fn run_test(src: List(u8), lox_filename: Str) bool = {
     }
 
     if !want&.is(.Ok) && !pass {
-        print(errors.items());
+        print(errors);
         print("(expected an error)");
     };
     

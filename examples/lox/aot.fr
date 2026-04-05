@@ -23,7 +23,10 @@ impl :: fn(franca_path: Str) void = {
     };
     #use("@/lib/sys/fs.fr");
     src := read_entire_file_or_crash(temp(), args.i);
-    fr := translate_src(src);
+    fr := @match(translate_src(src)) {
+        fn Ok(it) => it;
+        fn Err(it) => panic(it);
+    };
     write_entire_file_or_crash(args.o, fr);
     if jit { 
         #use("@/lib/sys/subprocess.fr");
@@ -33,11 +36,11 @@ impl :: fn(franca_path: Str) void = {
     };
 }
 
-translate_src :: fn(src: Str) Str = {
+translate_src :: fn(src: Str) Result(Str, Str) = {
     vm := zeroed Lox'Vm;
     init(vm&);
     script := vm&.compile(src) 
-        || panic(vm.errors.items());
+        || return(Err = vm.errors.items());  // :LEAK vm
     out := @ref u8.list(temp());
     ctx: Ctx = (
         vm = vm&, 
@@ -50,7 +53,7 @@ translate_src :: fn(src: Str) Str = {
     @fmt(out, "const_count :: %;\n", ctx.constants.raw.len_including_tombstones);
     @fmt(out, "script_index :: %;\n", ctx&.get_runtime_index(script.obj&));
     vm&.drop();
-    out.items()
+    (Ok = out.items())
 }
 
 Ctx :: @struct {
@@ -85,8 +88,22 @@ fn translate(ctx: *Ctx) void = {
                 @fmt(ctx.out, "\to[%] = F(\"%\", %, %, %_L%);\n", 
                     n, it.name, it.arity, it.upvalue_count, name, n);
             }
-            // lox strings don't have escape sequences so this isn't actually a problem
-            fn String() => @fmt(ctx.out, "\to[%] = S(\"%\");\n", n, o.to(.String)[].data);
+            // lox strings don't have escape sequences 
+            // ...but they do have multiline strings
+            // TODO: actually i think it can be any random bytes in there other than a quote. 
+            // TODO: should be unify all the places i do safe_print, this is getting a bit annoying
+            fn String() => {
+                s := o.to(.String)[].data;
+                @fmt(ctx.out, "\to[%] = S(\"%\");\n", n, => {
+                    for s { c |
+                        if c == "\n".ascii() {
+                            ctx.out.push_all("\\n");
+                        } else {
+                            ctx.out.push(c);
+                        };
+                    };
+                });
+            }
             fn Native() => @fmt(ctx.out, "\to[%] = N(\"%\");\n", n, o.to(.Native)[].name);
             @default => @panic("% is a runtime only type % %", o.type, n, o.to_value());
         };
@@ -141,7 +158,8 @@ fn translate_fn(ctx: *Ctx, it: *Lox.ObjFunction) void = {
             @fmt(ctx.out, "OP'%(vm, ", op);
             if val.is_obj() {
                 n := ctx.get_runtime_index(val.to_obj());
-                @fmt(ctx.out, "O[%].to_value()); // %", n, val);
+                // "... // %", val) is more readable but then need to be safe about multiline strings (and if avoid that with /* then */ is a problem)
+                @fmt(ctx.out, "O[%].to_value());", n);  
             } else {
                 @fmt(ctx.out, "(bits = %)); // %", val.bits, val);
             };
