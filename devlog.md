@@ -1,4 +1,25 @@
 
+## (Apr 4)
+
+trying to support nix
+- non-static binaries can't use the normal loader path but it doesn't like mine. 
+  `patchelf: cannot find section '.interp'. The input file is most likely statically linked`
+  whatever, static works so i can just change the bootstrap one to that. 
+- backend/elf: env var to allow changing the default interp path
+- got it to work with building in shellHook but i feel like i want that to happen earlier so it doesn't rerun every time you enter the shell
+- mkdirivation src="." doesn't work, i can make it redundantly fetch my thing from github tho.
+- i have a make file that it tries to use so have to make sure buildPhase and installPhase are replaced
+- skip a few tests for now
+- x86_64?
+  - magically uses qemu which is nice but 10x slower so a bit unusable. 
+  - sadly virtualisation.rosetta.enable = true; in /etc/nixos/configuration.nix doesn't work. 
+    (sequoia), internet says it works on tahoe tho
+  - static says `rosetta error: unhandled auxillary vector type 29`, and dynamic is annoying to test 
+      because idk how to get the magic environment variable that tells me the ld path without already running on that arch. 
+  - also removing that line and then `sudo nixos-rebuild switch` is insufficient to put it back to the old state. 
+    it worked before and now it's still rosetta error, rebooting fixed it tho. 
+    so that kinda shakes my faith in this whole operation. 
+
 ## (Apr 3)
 
 - wasm: i've made it worse (more code and redundant ext/trunc) but i think this is the path to it being better

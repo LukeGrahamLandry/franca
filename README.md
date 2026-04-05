@@ -90,6 +90,8 @@ prebuilt binaries from <https://fr.lukegrahamlandry.ca>
 (only the latest so if you're automating it, prefer to bootstrap 
 and pin to a specific commit to avoid breaking changes). 
 
+> or if it's more your style: `nix develop ./tests` (TODO: linux-aarch64 only rn)
+
 To run the tests, remove the `-no-test` argument or (once you have the compiler) run 
 ```
 ./target/franca.out ./tests/run_tests.fr core

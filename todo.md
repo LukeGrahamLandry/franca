@@ -1,4 +1,6 @@
 
+- nix doesn't like my binaries for ./boot/strap.sh
+ `patchelf: cannot find section '.interp'. The input file is most likely statically linked`
 - should i allow @run in @struct blocks? have to be careful of when it's ok to suspend tho. 
   make sure the rules about cycles are consistant with how import() works. 
 - tests/gpu.fr on (github actions macos intel) is all black
