@@ -523,9 +523,14 @@ Flow :: @enum(i64) (end, loop, block, if, else, br, br_if);
 // this is the only architecture of which the news has come to harvard.
 // there may be many others but they havent been discovered.
 fn wasm_flow(f: *Qbe.Fn) void = {
+    // fillloop sets b.loop based on nesting depth.
+    // which is then used to break ties when recomputing rpo. 
+    // deeper loops are pushed later in rpo so inserting Flow.loop instructions 
+    // in that order will end up well nested (if control flow is reducible). 
+    // TODO: probably not needed here now that gcm does fillloop so earlier fillrpo will be in right order, 
+    //       but relying on that feels a bit more confusing than documenting it here. 
     fillloop(f);
     fillrpo(f);
-    set_link_from_rpo(f);
     
     // dot a.dot -Tsvg > a.svg && open a.svg
     //@println("digraph{");
@@ -585,9 +590,8 @@ fn wasm_flow(f: *Qbe.Fn) void = {
         invert_cond := b.jmp.type == .jnz && b.s1.id == b.id + 1;
         if invert_cond {
             // we want to fall through as the true branch so will br_if to jump away when the condition is false
-            push(b, make_ins(.push, .Kw, QbeNull, QbeConZero, QbeNull));
-            push(b, make_ins(.ceqw, .Kw, QbeNull, QbeNull, QbeNull));
-            s := b.s1; b.s1 = b.s2; b.s2 = s;
+            push(b, make_ins(.reqz, .Kw, QbeNull, QbeNull, QbeNull));
+            b.swap_jmp_targets();
         };
         
         x := -1;
@@ -624,8 +628,12 @@ fn wasm_flow(f: *Qbe.Fn) void = {
             
             block := INT(Flow.block);
             exists := false;
-            for_insts_forward start { i |  // TODO: don't iterate the whole thing since we know its at the beginning or not at all :SLOW
-                exists = exists || (i.op() == .flow && i.arg&[0] == block && i.arg&[1] == dest);
+            i, last := (start.ins.index(0), start.ins.items().end_pointer());
+            dowhile {
+                exists = i.op() == .flow && i.arg&[0] == block && i.arg&[1] == dest;
+                i = i.offset(1);
+                // Flow.block instructions are always prepended, so can stop looking when get to the actual code
+                !exists && !identical(i, last) && @is(i.op(), .flow, .nop)
             };
             if !exists {
                 // this is the first time we've branched to dest in this scope

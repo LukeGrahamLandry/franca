@@ -171,8 +171,7 @@ fn emit_the_code(self: *ArmState) void #once = {
     local_labels := temp().alloc_zeroed(i64, self.f.nblk.zext()); // TODO: use u32 and offset from start of function 
     
     branch :: b;
-    // :LinkIsNowRpo TODO: why are we iterating to set links instead of just iterating the rpo array. (don't forget to update the comparisons to .link below). 
-    for_blocks self.f { b |
+    for_blocks_rpo_forward self.f { b |
         @debug_assert_ult(b.id, self.f.nblk, "invalid block id!");
         @debug_assert(local_labels[b.id.zext()] == 0, "block ids must be unique");
         local_labels[b.id.zext()] = self.next_inst_offset();
@@ -205,7 +204,7 @@ fn emit_the_code(self: *ArmState) void #once = {
                 };
                 self.inst(ret());
             }
-            fn jmp() => if !b.s1.identical(b.link) {
+            fn jmp() => if b.s1.id != b.id + 1 {
                 self.jmp(b.s1, -1);
             };  // else fall through; we're about to emit the target block
             fn switch() => unreachable();
@@ -215,10 +214,8 @@ fn emit_the_code(self: *ArmState) void #once = {
                 c: i32 = b.jmp.type.raw() - Jjf.raw();
                 @debug_assert(!(c < 0 || c > Qbe.NCmp), "unhandled jump");
                 
-                if b.link.identical(b.s2) {
-                    t := b.s1;
-                    b.s1 = b.s2;
-                    b.s2 = t;
+                if b.id + 1 == b.s2.id {
+                    b.swap_jmp_targets();
                 } else {
                     // TODO: i don't have a test where this matters but i feel in my heart that it's true. 
                     if c >= Qbe.CmpICount {  // :InverseIsUnsoundForNanCmp
@@ -230,7 +227,7 @@ fn emit_the_code(self: *ArmState) void #once = {
                     c = cmpneg(c);
                 };
                 self.jmp(b.s2, c);
-                if !b.s1.identical(b.link) {
+                if b.s1.id != b.id + 1 {
                     self.jmp(b.s1, -1);
                 }; // else fall through; we're about to emit the target block
             };

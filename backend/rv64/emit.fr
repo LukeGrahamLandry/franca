@@ -61,7 +61,7 @@ emit_the_code :: fn(e: *EmitRv) void = {
     };
     
     local_labels := temp().alloc_zeroed(i64, e.f.nblk.zext());
-    for_blocks f { b | 
+    for_blocks_rpo_forward f { b | 
         local_labels[b.id.zext()] = e.next_inst_offset();
         for_insts_forward b { i |
             e.emit(i);
@@ -91,15 +91,13 @@ emit_the_code :: fn(e: *EmitRv) void = {
                 e.emit_load_off(TMP(RvReg.FP), TMP(RvReg.FP), 0);
                 e.inst(jalr(.RA, 0, .Zero)); // ret
             }
-            fn jmp() => if !b.s1.identical(b.link) {
+            fn jmp() => if b.s1.id != b.id + 1 {
                 e.jmp(b.s1.id, -1, Qbe.Null);
             };
             fn jnz() => {
-                swap := b.link.identical(b.s2);
+                swap := b.id + 1 == b.s2.id;
                 if swap {
-                    s := b.s1;
-                    b.s1 = b.s2;
-                    b.s2 = s;
+                    b.swap_jmp_targets();
                 };
                 @debug_assert(isreg(b.jmp.arg));
                 
@@ -118,7 +116,7 @@ emit_the_code :: fn(e: *EmitRv) void = {
                     e.jmp(bid, cond.raw(), b.jmp.arg);
                 }
                 
-                if !b.s1.identical(b.link) {
+                if b.s1.id != b.id + 1 {
                     e.jmp(b.s1.id, -1, Qbe.Null);
                 };
             };

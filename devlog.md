@@ -1,4 +1,9 @@
 
+## (Apr 5)
+
+- wasm_flow: early exit when searching for existing Flow.block. use shorter encoding for eqz when flipping condition.
+- emit: (arbitrary aesthetics) i don't like set_link_from_rpo, iter the array and compare b.id instead. 
+
 ## (Apr 4)
 
 trying to support nix

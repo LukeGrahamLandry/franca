@@ -199,7 +199,7 @@ fn emit_the_code(e: *AmdState) void = {
     };
 
     local_labels := temp().alloc_zeroed(i64, e.f.nblk.zext());
-    for_blocks f { b | 
+    for_blocks_rpo_forward f { b | 
         local_labels[b.id.zext()] = e.next_inst_offset();
         for_insts_forward b { i |
             emitins(i[], e);
@@ -226,22 +226,20 @@ fn emit_the_code(e: *AmdState) void = {
                 e.a&.push(@as(u8) PrimaryOp.Ret);
             }
             fn switch() => unreachable();
-            fn jmp() => if !b.s1.identical(b.link) {
+            fn jmp() => if b.s1.id != b.id + 1 {
                 e.jmp(b.s1, -1);
             };
             @default => {
                 c := b.jmp.type.raw() - Qbe.J.jfieq.raw();
                 @debug_assert(0 <= c && c < Qbe.NCmp, "unhandled jump.");
-                if b.link.identical(b.s2) {
-                    s := b.s1;
-                    b.s1 = b.s2;
-                    b.s2 = s;
+                if b.id + 1 == b.s2.id {
+                    b.swap_jmp_targets();
                 } else {
                     c = cmpneg(c);
                 };
                 
                 e.jmp(b.s2, c);
-                if !b.s1.identical(b.link) {
+                if b.s1.id != b.id + 1 {
                     e.jmp(b.s1, -1);
                 };
             };
