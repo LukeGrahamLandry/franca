@@ -36,10 +36,24 @@
 */
 
 k_mem :: Qbe.Cls.Kw;
+DEBUG_FLOW :: false;
 
 fn wasm_isel(f: *Qbe.Fn) void = {
     f.requires(.UseCounts);  // for try_kill_inst
     assign_alloc_slots(f);
+    
+    fillrpo(f);
+    if f.is_irreducible() {
+        fix_multientry_loops(f);
+        fillrpo(f);
+        fillpreds(f);
+        @if(DEBUG_FLOW) fill_scc(f);
+        
+        when_debug_printfn(f, .InstSelect, "\n## After fix_multientry_loops:\n");
+        f.globals.flush_debug();
+        @debug_assert(!f.is_irreducible(), "$% is STILL irreducible", f.name());
+    };
+    
     insert_blocks_for_conditional_phis(f);
     fillpreds(f);
     fillrpo(f);
@@ -466,7 +480,7 @@ fn wasm_push_addr(f: *Qbe.Fn, r: Qbe.Ref) void = {
 // J.jmp: phi nodes can trivially be converted to block arguments. 
 // J.jnz: we need to insert extra blocks to express `if cond then goto s1(x, y) else goto s2(z);`
 fn insert_blocks_for_conditional_phis(f: *Qbe.Fn) void = {
-    new_blocks_list := Qbe.Blk.ptr_from_int(0);
+    new_blocks_list := Qbe.Blk.ptr_from_int(0);  // build up a chain to add at the end
     last_block := f.start;
     for_blocks f { b | 
         continue :: local_return;
@@ -478,7 +492,7 @@ fn insert_blocks_for_conditional_phis(f: *Qbe.Fn) void = {
             continue :: local_return;
             if(s.phi.is_null(), => continue());
             
-            b1 := newblk();
+            b1 := f.create_block(new_blocks_list&);
             name_phi_block(f, b, s[], b1);
             b1.jmp.type = .jmp;
             b1.s1 = s[];
@@ -487,11 +501,6 @@ fn insert_blocks_for_conditional_phis(f: *Qbe.Fn) void = {
                 p.blk[n] = b1;
             };
             s[] = b1;
-            
-            // build up a chain to add at the end
-            b1.link = new_blocks_list;
-            new_blocks_list = b1;
-            f.nblk += 1;
         };
     };
     @debug_assert(last_block.link.is_null());
@@ -514,8 +523,6 @@ fn insert_blocks_for_conditional_phis(f: *Qbe.Fn) void = {
 // when sorting, after adding a block to the ordering, visit successors with that block as only forward predecessor first.  
 // if a block has only once forward predecessor it can go directly inside a branching statement in that predecessor. 
 //
-// TODO: deal with irreducible control flow. I think franca code can't produce that but the c compiler will. 
-//
 
 // TODO: either actually use if/else or remove them
 Flow :: @enum(i64) (end, loop, block, if, else, br, br_if);
@@ -528,25 +535,18 @@ fn wasm_flow(f: *Qbe.Fn) void = {
     // deeper loops are pushed later in rpo so inserting Flow.loop instructions 
     // in that order will end up well nested (if control flow is reducible). 
     // TODO: probably not needed here now that gcm does fillloop so earlier fillrpo will be in right order, 
-    //       but relying on that feels a bit more confusing than documenting it here. 
+    //       but relying on that feels a bit more confusing than documenting it here.
     fillloop(f);
     fillrpo(f);
     
-    // dot a.dot -Tsvg > a.svg && open a.svg
-    //@println("digraph{");
-    //for_blocks f { b |
-    //    for_jump_targets b { s |
-    //        @println("\"%  #%  L%\" -> \"%  #%  L%\"", b.name, b.id, b.loop, s.name, s.id, s.loop);
-    //    };
-    //}
-    //@println("}");
+    @if(DEBUG_FLOW) f.dump_graph_vis();
     
     // TODO: push to the previous block instead so you don't have to shift all the instructions 
     fn prepend(b: *Qbe.Blk, i: Qbe.Ins) void = {  // :SLOW
         b.ins&.reserve(1, temp());
         j := 0;
         cond :: fn(i1) => is_par(i1.op()) || (i1.op() == .flow && {
-            if i1.arg&[0] == INT(Flow.loop.raw()) {
+            if i1.arg&[0] == INT(Flow.loop.raw()) || i1.arg&[0] == INT(Flow.end.raw()) {
                 true
             } else {
                 i1.arg&[1].rsval() > i.arg&[1].rsval()
@@ -653,7 +653,163 @@ fn wasm_flow(f: *Qbe.Fn) void = {
     };
     @debug_assert_eq(loop_stack.len, 0, "unfinished loops!");
     
+    f.set_link_from_rpo();  // makes debug print sane (but doesn't matter for emit because it uses the array)
     when_debug(f, .InstSelect, fn(out) => dump_flow_cfg(f, out));
+}
+
+// TODO: there are still a bunch of cases this can't deal with: 
+// - entry points that is a jnz both into the loop so need fake block for phi
+// - i need to recursively do scc inside each component? 
+//   ie. tests/c/irreducible.c/B() this makes no changes currently, 
+//   because the part where it's multientry is inside another loop. 
+//   detect when b.loop isn't equal for all of a component? 
+//   (but that also happens for the inserted block in A() which seems strange)
+// - :TodoSketchyWasmFlow
+//   doesn't work if replace_switches does s1,s2 in the other order (ie. with ceql instead of cnel)
+//   and doesn't work if it doesn't special case case_count=1
+//   (and i don't have tests where there's >2 entries so it actually needs to insert blocks for this switch)
+//
+fix_multientry_loops :: fn(f: *Qbe.Fn) void = {
+    fill_scc(f);
+    
+    new_blocks_list := Qbe.Blk.ptr_from_int(0);
+    scc := @ref list(*Qbe.Blk, temp());
+    preds := @ref list(*Qbe.Blk, temp());
+    rpo := f.rpo();
+    end := Qbe.Blk.ptr_from_int(0);
+    for rpo { b |
+        continue :: local_return;
+        if b.link.is_null() {
+            end = b;
+        };
+        if b.id != b.visit {
+            continue();
+        };
+        // collect all the blocks in this component. 
+        scc.clear();
+        preds.clear();
+        scc.push(b);
+        i := 0;
+        while => i < scc.len {
+            b := scc[i]; 
+            i += 1;
+            
+            for_pred b { p |
+                if b.visit != p.visit {
+                    preds.push(p);
+                }
+            };
+            
+            for_jump_targets b { s |
+                if b.visit == s.visit && !scc.contains(fn(it) => it.id == s.id) {
+                    scc.push(s);
+                };
+            };
+        };
+        if scc.len == 1 || preds.len == 1 {
+            continue();  // not a loop || not multientry
+        };
+        
+        new := f.create_block(new_blocks_list&);
+        // TODO: need to inc use counts for this and vars made in replace_switches?
+        label := f.newtmp("LABEL", .Kl);
+        phi := new.new_phi(.Kl, 0, label);
+        targets := list(*Qbe.Blk, temp());
+        for preds { p |
+            n := 0;
+            for_jump_targets_mut p { s |
+                if s.visit == b.visit {
+                    n += 1;
+                    
+                    phi.push(p, f.getcon(s.id.intcast()));
+                    targets&.push(s[]);
+                    replacepreds(s[], new, p);
+                    s[] = new;
+                };
+            };
+            
+            @debug_assert_eq(n, 1, "TODO: need to select for label if its a jnz to different blocks in the loop?");
+        };
+        
+        for scc { p |
+            for_jump_targets_mut p { s |
+                if targets.items().find(fn(it) => it.id == s.id) { _ |
+                    phi.push(p, f.getcon(s.id.intcast()));
+                    replacepreds(s[], new, p);
+                    s[] = new;
+                };
+            };
+        };
+        
+        // :TodoSketchyWasmFlow
+        s := f.new_switch(targets.len, new, label, targets[0]);
+        for targets.items().rest(1) { b |
+            s := f.switches&[s]&;
+            push(s.cases&, s.case_count&, (b, b.id.intcast()));
+        };
+    };
+    
+    end.link = new_blocks_list;
+    f.replace_switches();
+    f.breaks(.Pred);
+    f.breaks(.Rpo);
+};
+
+create_block :: fn(f: *Qbe.Fn, link: **Qbe.Blk) *Qbe.Blk = {
+    new := temp().box_zeroed(Qbe.Blk);
+    new.id = f.nblk;
+    new.link = link[];
+    link[] = new;
+    f.nblk += 1;
+    new
+};
+
+// check for multientry loops
+fn is_irreducible(f: *Qbe.Fn) bool = {
+    f.filldom();
+    for f.rpo() { b |
+        for_jump_targets b { s |
+            if s.id < b.id && !dom(s, b) {
+                when_debug(f, .InstSelect, fn(out) => 
+                    @fmt(out, "\n\n## $% has irreducible edge: % <- %\n#", f.name(), s.id, b.id));
+                return true;
+            }
+        }
+    };
+    false
+}
+
+// each b in a strongly connected component will have the same b.visit. 
+// when one scc contains multiple blocks, that's a loop with rpo[b.visit] as the loop header.
+// if there are multiple jumps into that loop (ie. where b.visit != b.sN.visit), the cfg is irreducible. 
+// "kosaraju"
+fn fill_scc(f: *Qbe.Fn) void = {
+    f.requires(.Rpo); f.requires(.Pred);
+    for f.rpo() { b | b.visit = -1; };
+    for f.rpo() { u |
+        assign(u, u);
+    };
+    assign :: fn(u: *Qbe.Blk, root: *Qbe.Blk) void = {
+        @if(u.visit != -1) return();
+        u.visit = root.id;
+        for_pred u { v |
+            assign(v, root);
+        };
+    };
+    @if(DEBUG_FLOW) f.dump_graph_vis();
+}
+
+// dot a.dot -Tsvg > a.svg && open a.svg
+fn dump_graph_vis(f: *Qbe.Fn) void = {
+    out := f.globals.debug_out;
+    @fmt(out, "digraph{\n");
+    for_blocks f { b |
+        for_jump_targets b { s |
+            @fmt(out, "\"%  #%  L% C%\" -> \"%  #%  L% C%\"\n", b.name, b.id, b.loop, b.visit, s.name, s.id, s.loop, s.visit);
+        };
+    }
+    @fmt(out, "}\n");
+    f.globals.flush_debug();
 }
 
 // several operations that all interesting cpus have but we have to pretend don't exist 

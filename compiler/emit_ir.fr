@@ -727,6 +727,19 @@ fn compile_stmt(self: *EmitIr, stmt: *FatStmt) CRes(void) = {
             // it feels a bit sketchy to be looking at the value's type not the dest type,
             // but there's always a Cast node that changes the type if needed. 
             size: i64 = self.program.get_info(f.value.ty)[].stride_bytes.zext();
+            compile_set :: fn(self: *EmitIr, value: *FatExpr, size: i64, $place: @Fn() Qbe.Ref #duplicated) CRes(void) = {
+                // TODO: be more general about detecting when rhs can't have side effects that alias lhs? 
+                //       or would i rather not even do this much and declare it the backend's job to fix? 
+                if @is(value.expr&, .Value, .GetVar) {
+                    dest := place();
+                    @try(self.compile_expr(value, (Blit = dest))) return;
+                    return(.Ok);
+                };
+                src := @try(self.compile_expr(value, .NewMemory)) return;
+                dest := place();
+                self.blit(dest, src, size);
+                .Ok
+            };
             @match(f.place.expr&) {
                 fn GetVar(it) => {
                     info := self.var_lookup&.get_ptr(it.id) 
@@ -735,9 +748,7 @@ fn compile_stmt(self: *EmitIr, stmt: *FatStmt) CRes(void) = {
                         @try(self.compile_expr(f.value&, (Assign = dest[]))) return;
                         return(.Ok);
                     };
-                    src := @try(self.compile_expr(f.value&, .NewMemory)) return;
-                    dest := @try(self.addr_macro(f.place&, .Scalar)) return;
-                    self.blit(dest, src, size);
+                    @try(self.compile_set(f.value&, size, => @try(self.addr_macro(f.place&, .Scalar)) return)) return;
                 }
                 fn Deref(arg) => {
                     o := self.store_op(f.value.ty);
@@ -748,11 +759,8 @@ fn compile_stmt(self: *EmitIr, stmt: *FatStmt) CRes(void) = {
                         self.emit(o, .Kw, Qbe.Null, src, dest);
                         return(.Ok)
                     };
-                    
-                    src := @try(self.compile_expr(f.value&, .NewMemory)) return;
-                    dest := @try(self.compile_expr(arg[], .Scalar)) return;
                     @debug_assert(size == self.program.get_info(f.place.ty)[].stride_bytes.zext() || { size == 0 && self.blk.jmp.type == .hlt });
-                    self.blit(dest, src, size);
+                    @try(self.compile_set(f.value&, size, => @try(self.compile_expr(arg[], .Scalar)) return)) return;
                 }
                 @default => return(@err("TODO: other `place=e;` :("));
             };

@@ -1,4 +1,8 @@
 
+- annoying that web and native scroll at different speeds. should i just scale it globally before sending the event?
+- weird that mac is 820ms and orb is 870ms. if it's just orbstack being slow that's fine i guess. 
+  but should make sure it's not me being bad at linux somehow. (different page size? something about futexes?) 
+- import_c: `if (x) { label:; }` gcc accepts that without the `;` after the label but i don't
 - nix doesn't like my binaries for ./boot/strap.sh
  `patchelf: cannot find section '.interp'. The input file is most likely statically linked`
 - should i allow @run in @struct blocks? have to be careful of when it's ok to suspend tho. 
@@ -736,8 +740,6 @@ amd
 - kinda lame that web/demo.fr has to special case the graphics programs instead of drivers working properly
 - examples/terminal.fr stbtt__run_charstring panic! missing br_if target @120 -> @122
   - ugly=false
-- examples/gpu/viewer.fr doesn't work in wasm 
-  - FEAT_PNG "stbi__hdr_load panic! missing br target @64 -> @62"
 - make @source_file_name work in web demo 
   - ex. rn examples/terminal's repl import is hardcoded to that path so it won't get your changes to BuiltinCommands. 
   - need to write it to a file anyway when i want to 

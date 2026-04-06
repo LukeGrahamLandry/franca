@@ -83,6 +83,7 @@ fn rporec(b: *Qbe.Blk, x: i32) i32 = {
     x - 1
 }
 
+// for b: (visit jump targets; prepend b;)
 fn fillrpo(f: *Qbe.Fn) void = {
     for_blocks f { b | 
         b.id = -1;
@@ -460,21 +461,28 @@ fn index_in_phi(src: *Qbe.Blk, p: *Qbe.Phi) i64 = {
 fn replace_switches(f: *Qbe.Fn) void = {
     @if(f.switch_count == 0) return();
     new_blocks_list := Qbe.Blk.ptr_from_int(0);
-    last_block := f.start;
     switches := f.switches.slice(0, f.switch_count.zext());
     
-    for_blocks f { b | 
+    each switches { payload |
         continue :: local_return;
-        last_block = b;
-        if b.jmp.type != .switch {
-            continue();
-        };
+        b := payload.src;
+        @debug_assert_eq(b.jmp.type, .switch);
         @debug_assert_eq(rtype(b.jmp.arg), .RInt, "J.switch expected RInt index into Fn.switches");
-        payload := switches.index(b.jmp.arg.val());
         @debug_assert(@is(rtype(payload.inspect), .RCon, .RTmp), "invalid inspect value for switch");
         
         if payload.case_count == 0 {
             b.jmp = (type = .jmp, arg = QbeNull);
+            b.s1 = payload.default;
+            continue();
+        };
+        
+        if payload.case_count == 1 {
+            r := f.newtmp("switch", .Kw);
+            dest, value := payload.cases[0];
+            // :TodoSketchyWasmFlow
+            b.push(.cnel, .Kw, r, payload.inspect, f.getcon(value));
+            b.jmp = (type = .jnz, arg = r);
+            b.s2 = dest;
             b.s1 = payload.default;
             continue();
         };
@@ -525,7 +533,12 @@ fn replace_switches(f: *Qbe.Fn) void = {
     };
     
     f.switch_count = 0;
-    @debug_assert(last_block.link.is_null());
+    @if(new_blocks_list.is_null()) return();
+    // :SLOW 
+    last_block := f.start; 
+    for_blocks f { b | 
+        last_block = b; 
+    };
     last_block.link = new_blocks_list;
 }
 

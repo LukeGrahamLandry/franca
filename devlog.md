@@ -1,4 +1,33 @@
 
+## (Apr 6)
+
+wasm: try to support irreducible control flow
+- it feels like you can do better than turning the whole function into a giant `loop(switch(label))`,
+  which the cheerp article i was reading when i did wasm_flow the first time agrees with. 
+- checking if irreducible and collecting strongly connected components 
+  are both easy with the help of dear wikipedia. 
+- i think i've achieved making it not irriducible for a trivial example program, 
+  but it's still a shape that my wasm_flow can't deal with. 
+  oddities: (a block that's the header of two loops) / (needs both a Block and a Loop)? 
+  fix prepend(cond::). was trying to start loop(3) before ending block(3). 
+- fix_multientry_loops still doesn't work in general but it's good enough that stbi__hdr_load gets farther.
+  - so maybe i can put off fixing it properly and just get the few programs i actually have to work. 
+    it's surprsing that the previous fix_flow worked for all the shapes i've been 
+    generating from structured control flow but not for the artificial ones being done here. 
+  - manually reduced the shape of that function to something that still breaks but is easier to look at. 
+    just wasn't fillpreds before fillloop at the end so the new rpo was wrong. 
+  - it's also a problem that it messes up the phis 
+    even tho it's after ssa_to_stack because they're used for block argument types. 
+    so maybe its easier to do it before that and deal with needing to insert extra fake blocks to hold the phis. 
+    because at least then it's a data structure with clear rules and the confusing mapping onto the type checking is seperate. 
+  - now stbi__hdr_load works but not stbtt__run_charstring
+
+emit_ir: sepecial case Stmt.Set evaluation order.  
+- without that you compile `stmt.stmt = .Noop;` as two copies:
+  `R1 =l addr S904; R2 =l copy $g1876; R3 =l copy 200; call $__franca_builtin_static_memmove, C97;`
+  `R1 =l copy R22; R2 =l addr S904; R3 =l copy 200; call $__franca_builtin_static_memmove, C97;`
+- it's not really worth the trouble (saves 2kb) but seeing 6 samples of that for hoist_constants is too insane to just let slide. 
+
 ## (Apr 5)
 
 - wasm_flow: early exit when searching for existing Flow.block. use shorter encoding for eqz when flipping condition.
