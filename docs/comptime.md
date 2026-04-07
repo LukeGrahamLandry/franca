@@ -21,6 +21,9 @@ There are some limitations:
 You can do all those things from jitted code just fine, but not 
 from the more malleable state of jitted code running inside the compiler. 
 
+> This file has examples to show that it's useful. 
+> See [docs/codegen.md](./codegen.md) for info on how to do it in your own programs. 
+
 ## Alternative Frontends
 
 The best example by far is `examples/import_c/ffi.fr`, which is a C11 compiler that outputs binary ir + type info 
@@ -56,10 +59,10 @@ In the previous example we were generating ir that would go directly in the prog
 Here we're genenerating code that when run will generate ir to include in a different program. 
 
 You could probably do this in Zig but you'd have to write your code carefully to not dynamiclly allocate memory, etc. 
-Here it's just regular code i already had . 
-
-In rust, macros are done at the token level so you can have things that don't parse and then pass that 
-as input to a seperate program to generate some new tokens. 
+(ie. you cannot in fact "Call any function at compile-time."). 
+Here the parsing part is just regular code O already had lying around for running qbe's .ssa test files. 
+See backend/meta/template.fr for the convoluted macro that converts ir into emit() calls 
+and splices in placeholders so it can interact with surrounding expressions. 
 
 ## Reflection to Generate Shaders    
 

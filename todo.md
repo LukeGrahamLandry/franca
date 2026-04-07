@@ -1,5 +1,8 @@
 
 - examples/gpu/terminal: there's some situation where the child crashes and it doesn't notice so it thinks something is already running forever? 
+  - for kill/int, on linux it's -pid to send to whole thread group. 
+    that seems to not be the case on macos or im doing something dumb?
+    `killpg` instead? do i need `getpgid` or is it always the first guy's pid?
 - i want the rule to be everything still works if you delete the tests folder. so need to remove remaining cross references. 
 ```
 os/build; rootfs_hash := import("@/tests/run_tests.fr")'build_web_and_get_hash(franca);

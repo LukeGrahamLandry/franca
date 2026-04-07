@@ -66,11 +66,11 @@ These are not polished yet but hopefully better than nothing.
 - [introduction](./docs/introduction.md): just enough syntax to be dangerous 
 - [aggregates](./docs/aggregates.md): more complicated types like structs, enums, slices, etc. 
 - [generics](./docs/generics.md): how to write functions that work for arbitrary types
-- [compilation](./docs/compilation.md): high level overview of the franca compilation model
 - [aot_bake](./docs/aot_bake.md): how to make ahead-of-time executables and control what data is included 
 - [imports](./docs/imports.md): how to load new code
+- [codegen](./docs/codegen.md): how to create new code (macros, asm, ir, import_c, etc.)
 - [annotations](./docs/annotations.md): how to attach metadata to franca programs and query it from comptime code
-- [comptime](./docs/comptime.md): example usecases for full compile time execution
+- [comptime](./docs/comptime.md): example usecases for compile time execution
 - [higher_level](./docs/higher_level.md): a nonexhaustive list of features i don't have
 - [debugging](./docs/debugging.md)
 - [caching](./docs/caching.md): details about `.frc` files

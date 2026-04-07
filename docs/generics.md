@@ -187,6 +187,7 @@ Once it matches, the code in the body can't cause it to be rejected and try othe
 (it can cause a complile error that halts compilation tho). 
 
 TODO: example
+> you can find some tho: grep for `#where(`
 
 TODO: `#where` is not fully implemented yet! there are many expressions 
 that you can try to pass as an argument that the compiler will 
@@ -234,8 +235,8 @@ Beware the road to simplicity may lead instead to confusion.
 If you want a less structured option without drinking the dynamic coolaid, 
 you could try generating code. Franca gives you ways to write macros that 
 work on AST nodes, generate source code as strings that can be imported, 
-or generate IR that skips the frontend all together. These will have thier 
-own documentation eventually. Just keep in mind it's a very big hammer. 
+or generate IR that skips the frontend all together. 
+See [docs/codegen](./codegen.md). Just keep in mind it's a very big hammer. 
 
 ## :Polymorphise
 

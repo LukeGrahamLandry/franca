@@ -8,6 +8,15 @@
 - can't access the implict compiler at runtime. 
   - but it's just franca code so you can use it as a library if you want. see examples/repl.fr
 
+## The Incantation
+
+Instead of `franca foo.fr` (jit) you can use `franca examples/default_driver.fr build foo.fr -o foo.out && ./foo.out` (aot).
+- You can cross compile with `-arch [aarch64, x86_64, rv64, wasm32] -os [linux, macos]`
+- When targetting linux you can make a static binary (no libc) with `-syscalls`
+- Instead of an executable you can make an object file with `-c` or a dynamic library with `-dynamiclib` or a franca ir cache file with `-frc`/`-frc_inlinable`
+- You can include a symbol table for debuggers/profilers with `-keep-names`
+- See examples/default_driver.fr for more cli args for controlling safety checks, compiler debug logging, etc. 
+
 ## Comptime Initialized Data
 
 Since you're allowed to execute arbitrary code during comptime,
@@ -106,6 +115,16 @@ More complex initialization must be done manually at the beginning of your progr
   It's useful for running (potentially expensive) init code in a thread safe way 
   even when you don't control the entry point (ie. a library like examples/chess's initTables). 
 
+## Api
+
+- `fn lookup_baked_vbytes(addr: []u8]) ?Ty(BakedVarId, i32)`
+  - check if a pointer in the comptime address space already has already been baked as a relocatable value for AOT compilation
+- `fn cache_baked_vbytes(addr: []u8], id: BakedVarId) void`
+  - like lookup_baked but creates the mapping if one didn't exist already
+- `fn dyn_bake_relocatable_value(raw_bytes: Slice(u8), ty: Type, force_default_handling: bool) Slice(BakedEntry)`
+  - dynamically invoke the right version of bake_relocatable_value (without a $Type)
+  - this is useful (to call on your fields) when writting your own bake_relocatable_value implementation
+
 ## Jitted Code
 
 > May cause dizziness. Use with care until you become familier with its effects. 
@@ -131,3 +150,5 @@ but it's just normal code, you could do whatever you want there.
 Currently there's no easy way to do relocations (like accessing symbols). 
 There's a painful workaround in examples/os/build.fr/emit_entry 
 (but hopefull i'll fix it properly eventually). 
+
+> See also: [docs/codegen.md](./codegen.md)

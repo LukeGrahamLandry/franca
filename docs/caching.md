@@ -42,6 +42,7 @@ for the compiler to check if they would have changed, it would have to recompile
 to rerun all the comptime code which defeats the whole point of the caching. The same applies 
 to things that interact with compiler apis like `@macros` and import_c. If your c code `#include`s 
 something, that file is not part of the cache validation. 
+> import_c is extra confusing because it has its own level of caching that does look at `#include`s
 
 Files read with include_bytes ARE part of cache validation. 
 
