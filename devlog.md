@@ -1,4 +1,10 @@
 
+## (Apr 7)
+
+- tests/external/janet.fr runs
+- shrink some c build scripts
+- split lib/well_known.fr out of tests/deps.fr
+
 ## (Apr 6)
 
 wasm: try to support irreducible control flow
@@ -27,6 +33,12 @@ emit_ir: sepecial case Stmt.Set evaluation order.
   `R1 =l addr S904; R2 =l copy $g1876; R3 =l copy 200; call $__franca_builtin_static_memmove, C97;`
   `R1 =l copy R22; R2 =l addr S904; R3 =l copy 200; call $__franca_builtin_static_memmove, C97;`
 - it's not really worth the trouble (saves 2kb) but seeing 6 samples of that for hoist_constants is too insane to just let slide. 
+
+test import_c on janet
+- i kinda judged them for being parser obsessed but i respect that src/core/ffi.c doesn't just use libffi or whatever, and they're not slop which is increasingly rare. 
+- continue after skipping attribute in declspec in case it's the last thing
+- cast to long for `__builtin_alloca(int)`
+- src/boot/main.c to generate janet.c works
 
 ## (Apr 5)
 

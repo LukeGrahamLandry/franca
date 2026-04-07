@@ -75,6 +75,12 @@ fn catch_call(c: *Compile.Ctx, $T: Type, $body: @Fn() T) Result(T, Str) #generic
     });
 }
 
+fn compile_file_or_crash(c: *Compile.Ctx, path: Str) void = {
+    @if_let(c.compile_file(path)) fn Err(msg) => {
+        @panic("failed to compile %\n%", path, msg);
+    };
+}
+
 fn compile_file(c: *Compile.Ctx, path: Str) Result(void, Str) = {
     catch_call(c, void) {
         c.macro_base_file = path;
@@ -84,6 +90,39 @@ fn compile_file(c: *Compile.Ctx, path: Str) Result(void, Str) = {
         tok  = c.Preprocess'preprocess(tok);
         c.parse(tok);
     }
+}
+
+// This consumes (c, c.m, c.emitter)
+fn finish_aot_module(c: *Compile.Ctx, path: Str) void = {
+    m, ctx := (c.m, c.emitter);
+    @assert_ne(m.goal.type, .JitOnly, "finish_aot_module(%) writes to a file (jit doesn't make sense)", path);
+    ctx.join_codegen_thread();
+    chunks := {m.target.finish_module}(m);
+    write_chunks_or_crash(path, chunks);
+    drop(m);
+    c.arena_storage&.deinit();
+}
+
+new_module_and_compiler :: fn(goal: ?Qbe.Goal) *Compile.Ctx #inline/*semantic*/ = {
+    // TODO: threaded codegen needs to work in @run :FUCKED
+    //       codegen_thread_main dies on arm (mac crashes, orb hangs in futex) but not amd. 
+    //       extra sad that compiler/error_reporting.fr/find_function_aa is sketchy with threads so it also breaks FRANCA_BACKTRACE. 
+    //       (note also that this HACK also detects if linking the compiler as a library as being at comptime which is over conservative)
+    threaded := tls(.comptime)[].is_null();
+    
+    goal := goal || (
+        arch = query_current_arch(),
+        os = query_current_os(),
+        type = .Exe,
+        wrap_entry_for_linux_libc = true,
+        exe_debug_symbol_table = true,
+    );
+    c := @ref zeroed(Compile.Ctx);
+    m := @ref zeroed(Qbe.Module);
+    Qbe'backend'init_module(m, goal);
+    ctx := init_codegen_worker(m, threaded);
+    init_ctx(c, m, ctx);
+    c
 }
 
 fn yield(c: *Compile.Ctx, obj: *Compile.Obj) void = {

@@ -1,4 +1,11 @@
 
+- i want the rule to be everything still works if you delete the tests folder. so need to remove remaining cross references. 
+```
+os/build; rootfs_hash := import("@/tests/run_tests.fr")'build_web_and_get_hash(franca);
+web/build; import("@/tests/run_tests.fr")'git_rev_parse()
+import_wuffs/test; root := import("@/tests/external/wuffs.fr")'root();
+core; #reexport("@/tests/deps.fr");  // might just keep this one. idk. 
+```
 - annoying that web and native scroll at different speeds. should i just scale it globally before sending the event?
 - weird that mac is 820ms and orb is 870ms. if it's just orbstack being slow that's fine i guess. 
   but should make sure it's not me being bad at linux somehow. (different page size? something about futexes?) 
@@ -189,6 +196,7 @@ export function w $main() {
 - #reexport something with main doesn't get picked up by find_unique_func. 
   because find_in_scope doesn't recurse. idk if i want that to work. 
   need to decide how get_constants should work because they should stay consistant. 
+  get_constants really should follow #reexport because the main reason i want it is being able to rearrange files without breaking change to namespaces if imported properly. 
 - nightmare hour: don't hardcode "./target" everywhere
 - i'm not sure what to do with open_temp_file. is it better to use the TMPDIR (/tmp or whatever) 
   so the os knows it can discard them at some point 

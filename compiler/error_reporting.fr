@@ -857,11 +857,11 @@ fn show_error_line(self: *CodeMap, span: Span, color: bool) void = {
 
 // :SLOW but only called when panicking so it's fine. 
 find_function_aa :: fn(self: *SelfHosted, addr: rawptr) ?Str = {
-    callee := self.stack_trace_last_callee&;
     addr := int_from_rawptr(addr);
     if(addr == 0, => return(.None));
     
     for self.other_module { m |
+        callee := @ref(@as(?FuncId) (.None));
         if find_function(self, addr, callee, m) { s |
             return(Some = s);
         };
@@ -969,6 +969,7 @@ fn find_function(self: *SelfHosted, addr: i64, callee: *?FuncId, m: *QbeModule) 
     .None
 }
 
+// for opts.frontend_logging
 FrDebugKey :: @enum(i64) (
     Shim = "S".char(),
     Bake = "B".char(),
@@ -979,16 +980,20 @@ ConstArgs= "C".char(),
    Macro = "M".char(),
   SemaFn = "F".char(),
    Yield = "Y".char(),
+    Slow = "^".char(),  // disables buffering (so you get output even if hard crash but much more io overhead)
 );
 
 fn when_debug(m: *SelfHosted, category: FrDebugKey, $body: @Fn(out: *List(u8)) void) void = {  
-    if m.debug.bit_and(1.shift_left(category.raw() - "A".ascii())) != 0 {
+    has :: fn(m: *SelfHosted, category: FrDebugKey) bool =
+        m.debug.bit_and(1.shift_left(category.raw() - "A".ascii())) != 0;
+    if m.has(category) {
         with m.comptime_codegen.m.forever.mutex& {
             i := m.log.len;
             body(m.log&);
             @if(i != m.log.len) m.log&.push_all("\n");
-            // when debugging a crash, can uncomment this to disable buffering. 
-            // println(m.log.items()); m.log&.clear();
+            if m.has(.Slow) {
+                println(m.log.items()); m.log&.clear();
+            };
         };
     };
 }

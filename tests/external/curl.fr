@@ -13,17 +13,7 @@ main :: fn() void = {
     tfpsa := @if(enable_tls, Foreign'tfpsa(), "");
     root := Foreign'curl();
     
-    c := @ref zeroed(C.Compile.Ctx);
-    m := @ref zeroed(Qbe.Module);
-    Qbe'backend'init_module(m, (
-        arch = query_current_arch(),
-        os = .linux,
-        type = .Exe,
-        wrap_entry_for_linux_libc = true,
-        exe_debug_symbol_table = true,
-    ));
-    ctx := init_codegen_worker(m, true);
-    C'init_ctx(c, m, ctx);
+    c := C'new_module_and_compiler(.None);
     c.allow_builtin_headers = false;
     
     if enable_tls {
@@ -145,12 +135,7 @@ main :: fn() void = {
         @panic("failed to compile curl\n%", msg);
     };
     
-    ctx.join_codegen_thread();
-    chunks := {m.target.finish_module}(m);
-    data := concat(chunks, temp());
-    write_entire_file_or_crash(out_path, data);
-    c.arena_storage&.deinit();
-    drop(m);
+    c.finish_aot_module(out_path);
     
     @println("curl: %ms", timestamp() - start);
     @println("enable_tls = %, bin = %", enable_tls, out_path);

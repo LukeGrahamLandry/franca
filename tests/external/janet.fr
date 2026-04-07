@@ -1,0 +1,128 @@
+
+// TODO: !JANET_SINGLE_THREADED needs _Thread_local
+// TODO: !JANET_REDUCED_OS, !JANET_NO_*:
+//       for the rest of these, could type out more signetures or just use the system headers. idc about it rn tho. 
+// TODO: the tests all need `(var is-verbose (os/getenv "VERBOSE"))` which needs !JANET_REDUCED_OS 
+//       (or can i manually poke it in from c api?)
+// TODO: run their tests
+//       for f in test/suite*.janet; do $(RUN) ./$(JANET_TARGET) "$$f" || exit; done
+//       for f in examples/*.janet; do $(RUN) ./$(JANET_TARGET) -k "$$f"; done
+// TODO: get spork as well and use my c compiler for it. 
+//       making a self contained way of running the cjanet examples would be cool. 
+// TODO: will it work on wasm with my weird big pointers? 
+//       more immediate problem is that examples/os/user/group.fr/posix_spawn doesn't 
+//       support aot wasm binary (+ that will need to deal with importing non-function: stderr)
+// TODO: do i need to set `JANET_PATH '$(JANET_PATH)'` to something?
+
+root :: Foreign'janet().shallow_copy(ast_alloc());
+main :: fn() void = {
+    println(root);
+    @run bootstrap(root, "target/janet.c");
+    
+    a := cli_args();
+    if a.contains(fn(it) => it[] == "-test") {
+        return run_tests();
+    };
+    i := a.index_of(fn(it) => it[].str().ends_with(".janet")) || 2;
+    a := a.rest(i - 1);
+    Janet'main(a.len.intcast(), bit_cast_unchecked(@type a.ptr, **i8, a.ptr));
+}
+
+run_tests :: fn() void = {
+    S :: fn(s: CStr) *i8 = bit_cast_unchecked(CStr, *i8, s);  // ... should really do something about that
+    Janet'janet_init();
+    env := Janet'janet_core_env(zeroed(*Janet'JanetTable));
+    Janet'janet_dostring(env, S("(print `hello, world!`)"), S("main"), zeroed(*Janet.Janet));
+    Janet'janet_deinit();
+}
+
+Janet :: {
+    Ffi  :: import("@/examples/import_c/ffi.fr");
+    c_source := @tfmt("""
+        #add_include_path "%/src/include"
+        #include "target/janet.c"
+        #include "%/src/mainclient/shell.c"
+    """, root, root);
+    Ffi'include(current_compiler_context(), c_source)
+}
+
+bootstrap :: fn(root: Str, c_out_path: Str) void = {
+    start := timestamp();
+    boot_path := @tfmt("%/src/boot", root);
+    boot_src := collect_with_extension(boot_path, ".c").unwrap();
+    core_path := @tfmt("%/src/core", root);
+    core_src := collect_with_extension(core_path, ".c").unwrap();
+    
+    // TODO: use it through import_module
+    // TODO: also using import_c this way is so VERBOSE, 
+    //       at least dedulicate it with tests/external/lox/compile_c_lox. 
+    Qbe :: import("@/backend/ir.fr");
+    C :: import("@/examples/import_c/lib.fr");
+
+    c := C'new_module_and_compiler(.None);
+    @assert_ne(c.m.goal.os, .macos, "TODO: #ifdef JANET_APPLE #include <AvailabilityMacros.h> :(");
+    c.do_warnings = false;  // hush "non-scalar variadic argument"
+    
+    write_entire_file_or_crash(@tfmt("%/src/include/janetconf.h", root), config_h);
+    write_entire_file_or_crash(@tfmt("%/src/include/spawn.h", root), "#ifndef JANET_NO_SPAWN\n#error\n#endif");
+    c.include_paths&.push(@tfmt("%/src/include", root));
+    files := Str.list(temp());
+    for core_src { it |
+        files&.push(@tfmt("%/%", core_path, it));
+    };
+    for boot_src { it |
+        files&.push(@tfmt("%/%", boot_path, it));
+    };
+    
+    for files { it |
+        // :discard_static_scope
+        c.macros&.clear();
+        c.scope.vars&.clear();
+        C'Preprocess'init_macros(c);
+        c.define_macro("JANET_BOOTSTRAP", "1");
+    
+        c.compile_file_or_crash(it);
+    };
+    
+    path := "target/janet_boot.out";
+    c.finish_aot_module(path);
+    end_compile := timestamp();
+    
+    ok, out, err := exec_and_catch(path, @slice(root), temp());
+    @assert(ok, "failed janet bootstrap\n%\n%", out.items(), err.items());
+    
+    write_entire_file_or_crash(c_out_path, out.items());
+    end_run := timestamp();
+    // this is meaningless if in an @run because it will hit a shim and need to compile the c compiler itself in the middle. 
+    // @println("compile boot: %ms; run bootstrap: %ms;", end_compile - start, end_run - end_compile);
+}
+
+config_h :: """
+#ifndef JANETCONF_H
+#define JANETCONF_H
+
+int strerror_r(int a, char *b, long c);
+
+#define JANET_VERSION_MAJOR 1
+#define JANET_VERSION_MINOR 41
+#define JANET_VERSION_PATCH 3
+#define JANET_VERSION_EXTRA "-c6b802b_FRANCA"
+#define JANET_VERSION "1.41.3" JANET_VERSION_EXTRA
+
+#define JANET_USE_STDATOMIC
+// realpath(_, NULL) is actually a primitive provided by the linker -- bane of my fucking existance
+#define JANET_NO_REALPATH  
+
+#define JANET_SINGLE_THREADED
+
+#define JANET_REDUCED_OS
+#define JANET_NO_EV
+#define JANET_NO_FILEWATCH
+#define JANET_NO_NET
+#define JANET_NO_SPAWN
+#define JANET_SIMPLE_GETLINE
+
+#endif
+""";
+
+#use("@/examples/testing.fr");
