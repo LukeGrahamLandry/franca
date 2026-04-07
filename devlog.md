@@ -4,6 +4,8 @@
 - tests/external/janet.fr runs
 - shrink some c build scripts
 - split lib/well_known.fr out of tests/deps.fr
+- @anon_literal: shorthand for a struct type you only use once. 
+  not a LOC win but much less garbage spam of repetitive names. 
 
 ## (Apr 6)
 

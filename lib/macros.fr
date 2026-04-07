@@ -1148,3 +1148,29 @@ fn no_trace(e: FatExpr) FatExpr = {
     };
     e
 }
+
+// a bit of sugar to avoid field name spam (often nice when passing context to a closure)
+fn anon_literal(e: FatExpr) FatExpr #macro = {
+    USAGE :: "@anon_literal(a = b, _ = c); => { S :: @struct(a: @type b, c: @type c); @as(S) (a = b, c = c) };";
+    X :: fn() FatExpr => (expr = (StructLiteralP = (bindings = empty(), loc = e.loc)), loc = e.loc, ty = UnknownType, done = false);
+    append :: fn(it, b: Binding) => it.expr.StructLiteralP.bindings&.push(b, ast_alloc());
+    
+    def, use := (X(), X());
+    @ct_assert(e.expr&.is(.StructLiteralP), e.loc, USAGE);
+    it := e.expr.StructLiteralP&;
+    for it.bindings& { it |
+        if it&.ident().unwrap() == (@symbol _) {
+            e := it.default&;
+            @if_let(e.expr&) fn Deref(it) => { e = it[]; };
+            @if_let(e.expr&) fn Addr(it) => { e = it[]; };
+            @if_let(e.expr&) fn GetVar(jt) => { it.name = (Ident = jt.name); };
+        };
+        @ct_assert(it.ty&.is(.Infer), it.default.loc, "@anon_literal will discard type annotation");
+        it.default = compile_ast(it.default);
+        it.ty = (Finished = it.default.ty);
+        use&.append(it);
+        it.default.expr = (Poison = .EmptyBindingValue);
+        def&.append(it);
+    };
+    @{ S :: @struct @[def]; @as(S) @[use] }
+}

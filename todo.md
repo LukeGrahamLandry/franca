@@ -1,4 +1,5 @@
 
+- examples/gpu/terminal: there's some situation where the child crashes and it doesn't notice so it thinks something is already running forever? 
 - i want the rule to be everything still works if you delete the tests folder. so need to remove remaining cross references. 
 ```
 os/build; rootfs_hash := import("@/tests/run_tests.fr")'build_web_and_get_hash(franca);
