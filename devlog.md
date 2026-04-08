@@ -1,4 +1,14 @@
 
+
+## (Apr 8)
+
+- import_wasm prospero SLOW_DEBUG_ALLOC+FEAT_JIT+FEAT_THREADS: "wasm guest called a null function pointer". 
+  - in mmap when it init_default_module_dyn on the second thread. 
+    can't be JitEvent.Sync after filling a jitshim because it's not the first time mmap is called on that thread. and that would happen in browser too anyway. 
+  - aaa, my memory_grow is sign extending the number of bytes before shifting down to pages. 
+    the jit+threads+debug just makes it use >2gb of memory (because debug never frees). 
+- few more leaks
+
 ## (Apr 7)
 
 - tests/external/janet.fr runs
@@ -6,6 +16,12 @@
 - split lib/well_known.fr out of tests/deps.fr
 - @anon_literal: shorthand for a struct type you only use once. 
   not a LOC win but much less garbage spam of repetitive names. 
+- write_cache set header.entry_source so it's more clear when the reading side compares to that instead of the empty string. 
+- compile wasm_spec w/SLOW_MEMORY_DEBUGGING: "ICE: zero_padding() didn't work on a @tagged constant"
+  - fixed by zero_padding in emit_relocatable_constant_body (for dyn_bake_value)
+- leak police: 
+  - missing drop in (import_wasm/run.fr main, exec_wasm_file, build_user, build_kernel), join in (tests/exe/errors)
+  - host/web.fr/main2/libc_exports was freeing static memory into gpa
 
 ## (Apr 6)
 

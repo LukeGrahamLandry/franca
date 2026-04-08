@@ -108,6 +108,11 @@ If you need to reevaluate the constants for some reason (ie. if they have side e
 the hack is to string format a random number into a comment in the string. 
 You should strive to have reproducible builds so prefer using some surrounding context to make the string unique rather than an actual random number. 
 
+The top level caching system (ie. when you jit with `franca file.fr`) 
+assumes that generated import strings like that are deterministic based on the other source files. 
+If you're generating code by reading other files you should pass the paths to include_bytes as well to add it as a cache input. 
+(the same applies to all comptime code). 
+
 ## Assembly
 
 > See [@/lib/meta.fr](../lib/meta.fr) for various overloads of `fn AsmFunction();`
@@ -173,6 +178,11 @@ Obviously that's a trivial example but, as is the trend, that string literal can
 So you can run code that downloads a c libary, saves it somewhere, 
 formats that path into a string with `#add_include_path` and builds that into your program.
 Indeed most of `tests/external/*.fr` does just that. 
+
+Unfortunately compiling the c compiler itself to run at comptime is an extra ~500ms tax. 
+You only pay tax when the c code changes as it's cached seperately from the rest of the program. 
+If you run with FRANCA_MORE_CACHE=1 you only pay tax when the c compiler's code changes. 
+If you run with FRANCA_NO_CACHE=1 you pay tax every time. 
 
 ## TODO: document me!
 

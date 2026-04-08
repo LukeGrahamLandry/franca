@@ -192,16 +192,16 @@ fn run_franca_file(path: Str, no_cache: bool) CRes(void) = {
             // (just chopping out non _azAZ09 chars. i.e. `a b` and `a.b` become the same). 
             // TODO: it's unfortunate to have `a.out` not match `./a.out`,
             //       but that was a problem with the old way too (hash of file name). 
-            if(header.entry_dep.off == Qbe.no_symbol, => break());
-            entry_dep := header.get(header.entry_dep);
-            if(header.get(entry_dep.filename) != @tfmt("@/%", path), => break());
+            // :TodoMangleCacheHarder?
             // don't try to use it if it's from import_module (ie. repl.fr has main and exports in the same file)
             // TODO: should go in seperate .frc files when that happens. 
             //       because right now repl.fr's cache file (the exe) will depend on 
             //       itself (!/examples_repl_fr.frc, the lib) and always (correctly) fail 
             //       when recursing in files_unchanged because the hash won't match 
             //       because it was overwritten by the exe. 
-            @if(header.get(header.entry_source) != "") break();
+            @if(header.get(header.entry_source) != Incr'entry_source_for_jit_cache(path)) break();
+            entry_dep := header.get(header.entry_dep);
+            @debug_assert_eq(header.get(entry_dep.filename), @tfmt("@/%", path), "entry_source but not entry_dep");
             
             if(!files_unchanged(header, get_library_file_text, Incr.self_hash), => break());
             middle := timestamp();
@@ -209,7 +209,7 @@ fn run_franca_file(path: Str, no_cache: bool) CRes(void) = {
             end := timestamp();
             if(show_backend_stats(), => @eprintln(">>> hit: %\n>>> check: %ms, compile: %ms", cachepath, middle-start, end-middle));
         };
-        @if(callee.is_none()) if to_free_h { it |
+        @if(callee.is_none()) if to_free_h&.take() { it |
             a.dealloc(u8, it.as_bytes());
         };
         zone_end(z);

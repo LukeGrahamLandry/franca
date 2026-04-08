@@ -61,7 +61,8 @@ fn add(a: Array(u32, 8), b: Array(u32, 8)) Array(u32, 8) = {
 //       tho maybe thats the behaviour you want, hard to think about. 
 // TODO: hella redundant work. should only load+hash each file once (including across multiple CompCtx in the same process). 
 fn files_unchanged(header: *Header, read: @FnPtr(a: Alloc, name: Str) ?Str, self_hash: *Array(u32, 8)) bool = {
-    if(header.dep.count <= 1, => return(false));
+    if(header.dep.count == 0, => return(false));
+    // dep.count==1 still counts as having dep info because the whole program could be in the entry_source
     
     it: *Dep = header.get(0);
     if(header.get(it.filename) != self_filename, => return(false));
@@ -131,6 +132,7 @@ fn compile_cached(header: *Header, to_free: *?Ty(*QbeModule, *Crash'LocationReso
 }
 
 fn write_deps(writer: *Writer, codemap: *import("@/compiler/codemap.fr")'CodeMap, start_path: Str, self_hash: *Array(u32, 8)) Ty(u32, Sha256.Digest) = {
+    @debug_assert_eq(writer.dep.len, 0, "self_hash must be first");
     writer.dep&.reserve(codemap.files.len+1);
     writer.dep&.push(
         file_len = 0,
@@ -172,6 +174,7 @@ fn write_cache(m: *QbeModule, self: *SelfHosted, fid: FuncId, outpath2: Str, sta
         entry_sym = (off = writer.map_sym(m, m.intern(name)).trunc()),
         entry_dep = (off = entry_dep),
         all_deps = all_deps,
+        entry_source = writer.push(entry_source_for_jit_cache(start_path)),
     );
     chunks := writer.to_bytes(meta, m);
     bytes := concat(chunks, general_allocator());  // not c.get_alloc because we're going to drop the compiler at the end
@@ -183,9 +186,12 @@ fn write_cache(m: *QbeModule, self: *SelfHosted, fid: FuncId, outpath2: Str, sta
     check(bytes).or(fn(e) => @panic("ICE: generated an invalid frc file: %", e))
 }
 
+// this isn't code that runs, it just distiguishes it from a cache file created for import_module of the same source file. 
+entry_source_for_jit_cache :: fn(path: Str) Str = 
+    @tfmt("main :: import(\"@/%\").main;", path);
+
 fn is_cachable(name: Str) bool = !(false 
-    // the fill_export_ffi string that has virtual addresses in it.
-    // can't just ignore in files_unchanged() because this would break repro. 
+    // the fill_export_ffi string. 
     || name == "compiler" 
     // the generated src string in load_file_in_compiler. 
     // redundant with entry_dep anyway. 
@@ -807,6 +813,7 @@ cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CR
     @assert(path.starts_with("@/"), "cached_compile_module path must start with @");
     path_unprefixed := path.rest(2);
     
+    src := @tfmt("""#include_std("lib/core.fr"); MODULE_EXPORTS :: import("%").exports;""", path);
     cachepath := choose_cache_filename(path_unprefixed);
     @if(enable_incremental())
     if read_cached(out_alloc, cachepath) { header |
@@ -818,10 +825,14 @@ cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CR
         
         t := Incremental'pack_current_target();
         if(header.arch_os.bit_and(t) != t, => break());
-        if(header.entry_dep.off == Qbe.no_symbol, => break());
+        // :TodoMangleCacheHarder?
+        // even tho cachepath is chosen based on path, the same path can write a cache file for multiple reasons
+        // (ie. import_module and direct run) and rn those aren't mangled to different places. 
+        entry_src := header.get(header.entry_source);
+        if(src != entry_src, => break());
         entry_dep := header.get(header.entry_dep);
-        if(header.get(entry_dep.filename) != path, => break());
-        if(header.entry_sym.off != Qbe.no_symbol, => break());
+        @debug_assert_eq(header.get(entry_dep.filename), path, "path is in entry_source so how entry_dep wrong?");
+        @debug_assert_eq(header.entry_sym.off, Qbe.no_symbol, "cached_compile_module won't have a single entry point");
         
         if(!files_unchanged(header, get_library_file_text, self_hash), => break());
         if(show_backend_stats(), => @eprintln(">>> hit: %", cachepath));
@@ -836,7 +847,6 @@ cached_compile_module :: fn(path: Str, opts: *BuildOptions, out_alloc: Alloc) CR
         mark := mark_temporary_storage();
         start := timestamp();
         vtable := init_driver_vtable();
-        src := @tfmt("""#include_std("lib/core.fr"); MODULE_EXPORTS :: import("%").exports;""", path);
         compiler := new_with_src(vtable, src, opts);
         self := compiler.cast()[][];
         

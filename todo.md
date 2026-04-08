@@ -150,7 +150,6 @@ reproducibility
 - error message while baking should show the tree of values to that point. 
   ie. "we can't even find it if we scan all jitted functions."
   on a field of a vtable should tell you which field not just source location that referenced the whole vtable. a
-- files_unchanged: if dep.len==1, that should be allowed? now that the whole program could be in entry_source. 
 - would be great if a zeroed ?T was None. 
 - finish :AsmNotYetImplemented rn it only works at the beginning of the program if there are relocations 
 - elifdef, elifndef

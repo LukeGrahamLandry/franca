@@ -41,6 +41,7 @@ main :: fn() void = {
     rt: Wasm.Engine = init_for_jit(a, logging);
     mod := rt&.compile(bytes);
     exec_wasm_file(AugmentedExports, rt&, mod, args, standard_log);
+    drop(rt&)
 }
 
 standard_log: Log : (ctx = zeroed(rawptr), f = fn(_, err, msg) = if err {
@@ -111,6 +112,7 @@ fn exec_wasm_file($Exports: Type, rt: *Rt.Engine, mod: *Wasm.Module, args: []CSt
     a := general_allocator();
     
     buf := page_allocator.alloc_uninit(u8, 1.shift_left(32));  // page allocator always gives zeros
+    rt.memories&.push(buf, rt.gpa);
     memory := a.boxed(SaneRawList(u8), (ptr = buf.ptr, cap = buf.len, len = 0));
     globals := a.box_zeroed(Globals);
     globals.exit_status = -1;
@@ -159,10 +161,8 @@ fn exec_wasm_file($Exports: Type, rt: *Rt.Engine, mod: *Wasm.Module, args: []CSt
         fn Catch() => globals.exit_status;
     };
     
-    // TODO
-    //drop(m);
-    //page_allocator.dealloc(u8, buf);
-    //arena&.deinit();
+    a.dealloc_one(@type memory[], memory);
+    a.dealloc_one(@type globals[], globals);
     result
 }
 
@@ -337,6 +337,7 @@ Exports :: @struct {
             // HACK: you want to be able to give stack trace but only if it's actually crashing. 
             //       maybe someone should try to call shutdown(false) so we know?
             //@if(msg.contains("Assertion Failed")) panic("trace");
+            //@if(msg.starts_with("panic!")) panic("trace");
             ctx.log(fd != 1, msg);
             len.zext()
         };

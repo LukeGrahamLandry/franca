@@ -54,6 +54,9 @@ driver :: fn(vtable: *ImportVTable) void = {
     write_entire_file_or_crash(output, bytes);
     hush := cli_args().contains(fn(it) => it[] == "-hush");
     @if(!hush) @eprintln(">>> compiled in %ms;", timestamp() - start);
+    general_allocator().dealloc(u8, kernel_elf);
+    general_allocator().dealloc(u8, user_elf);
+    bytes := (); kernel_elf := (); user_elf := ();
     
     if cli_args().contains(fn(it) => it[] == "-fetch-doom") {
         _ := import("@/examples/os/bin/doom.fr")'fetch();
@@ -171,9 +174,11 @@ compile_kernel :: fn(vtable: *ImportVTable) []u8 = {
     // TODO: i don't have a way to ask for sane names without franca_runtime_init or making a dynamic library
     emit_entry(m&, @tfmt("main__%", @as(u32) fid));
     chunks := {fr.vtable.emit_qbe_included}(Qbe.Module.raw_from_ptr(m&), fr&, fns, entry);
-    concat(chunks&, general_allocator())
+    result := concat(chunks&, general_allocator());
+    drop(m&);
+    fr'vtable'destroy_compiler(fr.data);
+    result
 }
-
 // TODO: should make an api for this that isn't so painful
 emit_entry :: fn(m: *Qbe.Module, main: Str) void = {
     #use("@/backend/arm64/bits.fr");
@@ -384,7 +389,10 @@ compile_user :: fn(vtable: *ImportVTable) []u8 = {
     ));
     // TODO: don't wrapmain here, inherit tls from elf_loader instead. then need option in InitArgs to change args abi. 
     chunks := {fr.vtable.emit_qbe_included}(Qbe.Module.raw_from_ptr(m&), fr&, fns, .WrapMain);
-    concat(chunks&, general_allocator())
+    result := concat(chunks&, general_allocator());
+    drop(m&);
+    fr'vtable'destroy_compiler(fr.data);
+    result
 }
 
 // TODO: the constant R_AARCH64_ABS64 are wrong now because don't know where it will be loaded in ram.

@@ -220,8 +220,8 @@ fn bake_relocatable_body(c: *SelfHosted, value: []u8, type: Type, out: *BakeResu
             @try(c.bake_relocatable_body(payload, inner, out, false)) return;
             
             padding := value.rest(tag_size + payload_size);
-            @debug_assert(is_all_zeroes(padding), "ICE: zero_padding() didn't work on a @tagged constant. This is required for reproducibility.\n%\n%", 
-                c.log_type(type), fmt_loc(c, c.last_loc));
+            @debug_assert(is_all_zeroes(padding), "ICE: zero_padding() didn't work on a @tagged constant. This is required for reproducibility.\n%\n%\n%", 
+                c.log_type(type), fmt_loc(c, c.last_loc), @ref value.to_value());
             out.off += padding.len;
         }
         fn Enum(f)  => return(c.bake_relocatable_body(value, f.raw, out, false));
@@ -295,13 +295,14 @@ fn put_baked(c: *SelfHosted, v: BakedValue, jit_ptr: ?[]u8) BakedVarId #inline =
 // 
 // TODO: change the api we expose so you don't need this anymore
 fn emit_relocatable_constant_body(c: *SelfHosted, bytes: Slice(u8), ty: Type, force_default_handling: bool) Res(Slice(BakedEntry)) = {
+    to_zero: ReadBytes = (bytes = bytes, i = 0);
+    c.zero_padding(ty, to_zero&);  // Needed for reproducible builds!    
     out := BakedReloc.list(temp());  
     out: BakeResult = (  // doesn't escape!
         rel = BakedReloc.list(temp()),
         off = 0,
         bytes = bytes.shallow_copy(temp()),
     );
-    // TODO: zero here? 
     @try(c.bake_relocatable_body(bytes, ty, out&, force_default_handling)) return;
     @debug_assert_eq(out.off, c.get_info(ty)[].stride_bytes.zext());
     
