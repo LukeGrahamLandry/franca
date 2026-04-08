@@ -11,7 +11,6 @@ However, there are many apis provided for that code to generate new code and add
 > See lib/macros.fr for examples. 
 
 Franca macros are functions that interact with the compiler during semantic analysis. 
-They're similar to swift's macros except that they live in the same compilation unit as the rest of your program.  
 
 When a function call expression is prefixed by a `@`, it becomes a macro expansion, 
 which causes the following changes: 
@@ -37,6 +36,11 @@ The body of the macro can be arbitrarily complex franca code or a simple templat
 inc :: fn(a: FatExpr) FatExpr #macro = @{ @[a] + 1 }; 
 // (y := @inc(x);) => (y := { x + 1 };)
 ```
+
+Macros can participate in overload resolution, but barely.
+The types are always ast nodes (not the types of the expressions themselves). 
+So you can have the same function name be (a 1 param macro, a 2 param macro, and a non-macro), 
+but it can't be more macros that expect specific types. 
 
 ### Ast Apis
 
@@ -94,7 +98,7 @@ x := 1;
 
 ## Import String
 
-> `import("@/path.fr")` is similar to `import(@tfmt("@{ % }", read_entire_file_or_crash("path.fr")))`
+> `import("@/path.fr")` is similar to `import(@tfmt("{ % };", read_entire_file_or_crash("path.fr")))`
 
 A very blunt alternative to macros is calling `import("{ name :: value; };")`. 
 When the string starts with a `{` it's treated as source code instead of as a file path. 
@@ -184,12 +188,61 @@ You only pay tax when the c code changes as it's cached seperately from the rest
 If you run with FRANCA_MORE_CACHE=1 you only pay tax when the c compiler's code changes. 
 If you run with FRANCA_NO_CACHE=1 you pay tax every time. 
 
+Currently cross compilation will break if you have c code that observes `__arch__`/`__os__` 
+and you try to call it at both comptime and runtime. 
+The c frontend only runs once and the resulting ir is compiled for each target 
+so only one version of the preprocessor constants are baked in. 
+Many useful c libraries are well behaved and don't suffer from this problem. 
+
 ## TODO: document me!
 
 - import_frc
 - add_to_scope, intern_type, intern_func
 - using the backend library to insert ir directly
 - Talk about doing stuff from within comptime vs through a CompCtx. 
+
+## Compared to Other Languages
+
+**Rust**:  
+
+- Rust's procedural macros live in a seperate compilation unit. 
+- Their input is a stream of tokens so it doesn't have to parse into a valid ast. 
+  If you want that flexibililty in franca you can wrap the argument in a string literal. 
+  The downside is that often you actually do want the ast and in rust that probably means downloading an external dependency to parse it for you. 
+  Since rust macros are expanded before semantic analysis, you can't ask the compiler for reflection information 
+  and often have to do error checking by outputting code that will fail to compile later instead of just detecting the problem immediately. 
+  Franca lets you trigger compilation of individual arguments while in the macro so you can get their types as first class values. 
+- Rust's `const fn` evaluation is very limited and runs in an interpeter 
+  (but macros don't use it; they're compiled to native code like franca's)
+
+**Zig**:  
+
+- Franca's @run (jit) is much faster than Zig's comptime (tree walking interpreter). 
+- Franca's macros let you write functions that are not referentially transparent, 
+  Zig's comptime does not (the latter is better for readability). 
+- Zig's comptime can't use thier normal allocator interface, @intFromPtr, do ffi, or make syscalls. Franca's can. 
+- Zig's @cImport is built into the compiler (they've been working on moving it to the build system for 3 years) 
+  You can't call a @cImport function from comptime code. 
+  Franca's import_c is user level code and works at comptime. 
+
+**Swift**:  
+
+- Swift's `freestanding(expression)` macros live in a seperate compilation unit. 
+- Franca macro implementations are not sandboxed. 
+- Swift doesn't have powerful non-macro comptime evaluation
+
+**D**:  
+
+- D's template mixins are similar to franca's macros. 
+- Franca's `import("{};")` discussed below is similar to D's string mixins 
+  (D's is more flexible because it inherits the callers scope).
+- D's importC is built into the compiler, Franca's import_c is user level code. 
+  dmd relies on exec-ing an external preprocessor, Franca has its own. 
+
+**Nim**:  
+
+- Franca macro parameters are always `untyped` and can be converted to `typed` by explicitly calling `compile_ast(expr)`.
+- Franca's comptime code is jit compiled, Nim's runs in a bytecode interpreter. 
 
 <!--
 ### reflection

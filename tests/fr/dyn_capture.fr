@@ -1,0 +1,147 @@
+// macros with more convoluted scope manipulation that reveal some pain points of my system
+
+fn real_closures() #test = {
+    x := 1;
+    @outline(x) fn() = @assert(x == 1);
+    f0, d0 := @capturing(x) fn(y: i64) void = @assert(x == 1 && y == 2);
+    f0(d0, 2);
+    f1, d1 := @capturing(x&) fn() void = { x[] = 3; };
+    f1(d1);
+    assert_eq(x, 3);
+}
+
+fn interpolate() #test = {
+    x := 123;
+    s := @iformat(@{}, "x = {x}.");
+    @assert_eq(s, "x = 123.");
+}
+
+fn capturing(captured_args: FatExpr, body: FatExpr) FatExpr #macro = {
+    captures := captured_args&.items();
+    bindings := @ref Binding.list(captures.len, ast_alloc());
+    each captures { it |
+        it[] = compile_ast(it[]);
+        e := it;
+        @if_let(e.expr&) fn Addr(it) => { e = it[]; }; 
+        @ct_assert(e.expr&.is(.GetVar), it.loc, "expected a variable in capture list");
+        bindings.push(new_binding(e.expr.GetVar.name, it.ty, it.loc));
+    };
+    captured_args = compile_ast(captured_args);
+
+    fid := FuncId.const_eval(body);
+    fr := current_compiler_context();
+    func := fr.get_function(fid);
+    @ct_assert(!func.get_flag(.ResolvedBody) && !func.get_flag(.ResolvedSign), func.loc, "need to rebind to captured args so can't have resolved yet");
+    @ct_assert(func.body&.is(.Normal), func.loc, "@capturing expected a body");
+    loc := captured_args.loc;
+    here := @source_location();
+    captures_symbol := fr.intern_string(@tfmt("gensym$%$%$", here.low, loc.low));
+    if func.arg.bindings.len == 1 && func.arg.bindings[0].name&.is(.None) {
+        func.arg.bindings.len -= 1;
+    };
+    func.arg.bindings&.insert(0, new_binding(captures_symbol, rawptr, loc), ast_alloc());
+   
+    // HACK: @{ _ } makes a block and it will remember that it was already resolved so won't recheck when expanded to resolve the new variable.   
+    captures_param: FatExpr = (expr = (GetNamed = captures_symbol), ty = UnknownType, done = false, loc = loc);
+    captures_cast := @{ @[@literal captured_args.ty].ptr_from_raw(@[captures_param])[] };
+    @debug_assert(captures_cast.expr&.is(.Block) && captures_cast.expr.Block.body.len == 0);
+    captures_cast = captures_cast.expr.Block.result[];
+    
+    declare: FatStmt = (stmt = (DeclVarPattern = (
+        binding = (bindings = bindings.as_raw(), loc = loc),
+        value = captures_cast,
+    )), loc = loc);
+    
+    body := func.body.Normal&;
+    body.expr = (Block = (
+        body = ast_alloc().alloc_init(FatStmt, 1, fn(_) => declare).as_raw_list(), 
+        result = ast_alloc().boxed(FatExpr, body[]),
+        ret_label = .None, flags = 0, scope = NOSCOPE, 
+    ));
+    
+    @{ 
+        captures := @[captured_args];
+        f: AsFnPtr(@[@literal fid]) = @[@literal fid];
+        d := raw_from_ptr(@type captures, captures&);
+        (f, d)
+    }
+}
+
+fn outline(captured_args: FatExpr, body: FatExpr) FatExpr #macro = {
+    HELP :: "(@outline(a, b) fn() = { a + b }) -> ((fn(a: @type a, b: @type b) = { a + b })(a, b))";
+    captures := captured_args&.items();
+    bindings := @ref Binding.list(captures.len, ast_alloc());
+    each captures { it |
+        it[] = compile_ast(it[]);
+        @ct_assert(it.expr&.is(.GetVar), it.loc, "expected a variable in capture list");
+        #use("@/compiler/ast_external.fr");
+        bindings.push(new_binding(it.expr.GetVar.name, it.ty, it.loc));
+    };
+    
+    fid := FuncId.const_eval(body);
+    fr := current_compiler_context();
+    func := fr.get_function(fid);
+    @ct_assert(!func.get_flag(.ResolvedBody), func.loc, "need to rebind to captured args so can't have resolved yet");
+    @ct_assert(func.arg.bindings.len == 1 && func.arg.bindings[0].name&.is(.None), body.loc, 
+        "@outline() body args are inserted automatically. declare captures instead");
+    func.arg.bindings = bindings.as_raw();
+    @{ @[@literal fid](@[captured_args]) }
+}
+
+// limited version of string interpolation (only supports identifiers)
+fn iformat(arg: FatExpr) FatExpr #macro = {
+    HELP :: """(@iformat(@{}, "a{var}b")) -> (@tfmt("a%b", var))""";
+    loc := arg.loc;
+    
+    // macros are hygenic so normally they can't access identifiers that weren't passed in, 
+    // but if we try hard enough we can cheat by changing the suspended resolve scope of a block. 
+    // but this means the caller has to give us access to that scope somehow so we need a Block ast node.
+    scope_block, s := Ty(FatExpr, Str).const_eval(arg);
+    @ct_assert(scope_block.expr&.is(.Block), scope_block.loc, "@iformat first param must be @{} to let me access the parent scope");
+    scope := scope_block.expr.Block.scope;
+    
+    @{ 
+        out := @ref u8.list(@[@literal s.len], temp());
+        @[{
+            i := 0;
+            start_text := 0;
+            actions := FatExpr.list(ast_alloc());
+            while => i < s.len {
+                continue :: local_return;
+                if s[i] != "{".ascii() {
+                    i += 1;
+                    continue();
+                };
+                text := s.slice(start_text, i);
+                actions&.push(@{ out.push_all(@[@literal text]) });
+                i += 1;
+                start := i;
+                while => i < s.len && s[i] != "}".ascii() {
+                    i += 1;
+                };
+                name := s.slice(start, i);
+                i += int(i < s.len);
+                start_text = i;
+                e: FatExpr = (expr = (GetNamed = name.sym()), loc = loc, ty = UnknownType, done = false);
+                e := @{ display(@[e], out) };
+                @debug_assert(e.expr&.is(.Block) && e.expr.Block.body.len == 0);
+                b := e.expr.Block&;
+                b.scope = scope;
+                b.flags = 0;  // forget resolved
+                actions&.push(e);
+            };
+            text := s.slice(start_text, i);
+            actions&.push(@{ out.push_all(@[@literal text]) });
+            (expr = (Tuple = actions.as_raw()), loc = loc, ty = UnknownType, done = false)
+        }];
+        out.items()
+    }
+}
+
+fn new_binding(name: Symbol, type: Type, loc: Span) Binding = (
+    name = (Ident = name), 
+    ty = (Finished = type),
+    nullable_tag = zeroed(*Annotations),
+    default = import("@/compiler/ast_external.fr")'binding_missing_default(loc),
+    kind = .Var,
+);
