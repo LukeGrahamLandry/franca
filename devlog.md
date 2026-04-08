@@ -8,6 +8,8 @@
   - aaa, my memory_grow is sign extending the number of bytes before shifting down to pages. 
     the jit+threads+debug just makes it use >2gb of memory (because debug never frees). 
 - few more leaks
+- less spam of type annotations on AsmFunction usages. 
+- allow passing non-capturing trailing lambda to FnPtr
 
 ## (Apr 7)
 

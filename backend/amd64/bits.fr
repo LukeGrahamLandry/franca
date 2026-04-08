@@ -437,31 +437,29 @@ fn encode_binf(code: *List(u8), prefix: u8, w: bool, op: FloatOp, dest: u4, src:
     code.push(pack_modrm(ModrmMode.Direct, @as(X86Reg) src, @as(X86Reg) dest)); // flipped?
 }
 
-// See tests/x86_64_jit.fr for how to use this. 
+// See tests/fr/inline_asm_jit.fr for how to use this. 
 fn asm_x64(arg: FatExpr, out: FatExpr) FatExpr #macro = {
-    @ct_assert(arg.expr&.is(.Tuple), arg.loc, "Expected @asm_x64(Tuple...)");
-    parts := arg.expr.Tuple;
-
-    actions: List(FatExpr) = list(parts.len() * 3, ast_alloc());
     @{
         out := @[out];
         @[{
-            each parts { part |
+            each arg&.items() { part |
+                continue :: local_return;
+                // :UpdateBoot @if_let(part.expr&) fn Call(it) => {
                 if part.expr&.is(.Call) {
-                    part.expr.Call.arg[] = prepend_tuple(@{ out }, part.expr.Call.arg[]);
-                    actions&.push(part[]);
-                } else {
-                    part[] = compile_ast(part[]);
-                    @switch(part.ty) {
-                        @case(u8) => actions&.push(@{ out.push(@[part[]]) });
-                        @case(PrimaryOp) => actions&.push(@{ out.push(@as(u8) @[part[]]) });
-                        @case(TwoByteOp) => actions&.push(@{ out.push(@as(u8) @[part[]]) });
-                        @case(u32) => actions&.push(@{ out.push_u32(@[part[]]) });
-                        @default => compile_error("unhandled type in @asm_x64.", part.loc);
-                    };
+                    it := part.expr.Call&;
+                    it.arg[] = prepend_tuple(@{ out }, it.arg[]);
+                    continue();
+                };
+                part[] = compile_ast(part[]);
+                part[] = @switch(part.ty) {
+                    @case(u8) => @{ out.push(@[part[]]) };
+                    @case(PrimaryOp) => @{ out.push(@as(u8) @[part[]]) };
+                    @case(TwoByteOp) => @{ out.push(@as(u8) @[part[]]) };
+                    @case(u32) => @{ out.push_u32(@[part[]]) };
+                    @default => compile_error("unhandled type in @asm_x64.", part.loc);
                 };
             };
-            arg.expr.Tuple = actions.as_raw();
+            arg.done = false;
             arg
         }];
     }

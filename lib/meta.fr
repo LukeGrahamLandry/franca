@@ -468,9 +468,7 @@ fn DoNotClearOnAotBake($T: Type) Type = {
 }
 
 fn AsmFunction(template: FuncId, arm64: []u32, amd64: @FnPtr(out: *List(u8)) void) FuncId = {
-    crash :: fn(out: *List(u8)) void = 
-        out.push_all(@const_slice(0x00, 0x00, 0x0B));  // 0 locals. unreachable. end. 
-    AsmFunction(template, arm64, amd64, crash)
+    AsmFunction(template, arm64, amd64, CrashAsm.wasm)
 }
 
 fn AsmFunction(template: FuncId, arm64: []u32, amd64: @FnPtr(out: *List(u8)) void, wasm32: @FnPtr(out: *List(u8)) void, rv64: []u32) FuncId = {
@@ -488,9 +486,7 @@ fn AsmFunction(template: FuncId, arm64: []u32, amd64: @FnPtr(out: *List(u8)) voi
 }
 
 fn AsmFunction(template: FuncId, arm64: []u32, amd64: @FnPtr(out: *List(u8)) void, wasm32: @FnPtr(out: *List(u8)) void) FuncId = {
-    #use("@/backend/rv64/bits.fr");
-    crash :: @const_slice(ebreak, ebreak);
-    AsmFunction(template, arm64, amd64, wasm32, crash)
+    AsmFunction(template, arm64, amd64, wasm32, CrashAsm.rv)
 }
 
 fn create_asm_func(template: FuncId, arm64: RawList(u32), amd64: RawList(u8), wasm32: RawList(u8), rv64: RawList(u32)) FuncId = {
@@ -518,20 +514,19 @@ fn create_asm_func(template: FuncId, arm64: RawList(u32), amd64: RawList(u8), wa
 }
 
 fn AsmFunctionWasmOnly(template: FuncId, wasm32: @FnPtr(out: *List(u8)) void) FuncId #fold = {
-    ::import("@/backend/arm64/bits.fr");
-    ::import("@/backend/amd64/bits.fr");
-    arm :: @const_slice(brk(0));
-    amd :: fn(out: *List(u8)) = @asm_x64(0xCC, 0xCC) out;
-    AsmFunction(template, arm, amd, wasm32)
+    AsmFunction(template, CrashAsm.arm, CrashAsm.amd, wasm32)
 }
 
 fn AsmFunctionArmOnly(signeture: FuncId, code: []u32) FuncId #fold = {
-    crash :: fn(out: *List(u8)) void = 
-        out.push_all(@const_slice(0x00, 0x00, 0x0B));  // 0 locals. unreachable. end. 
-    fid := AsmFunction(signeture, code, fn(out: *List(u8)) => (), crash, empty());
-    _ := get_function_ast(fid, true, true, true, false);
-    fid
+    AsmFunction(signeture, code, CrashAsm.amd, CrashAsm.wasm, CrashAsm.rv)
 }
+
+CrashAsm :: @struct {
+     arm :: @const_slice(import("@/backend/arm64/bits.fr")'brk(0));
+     amd :: fn(out) #use("@/backend/amd64/bits.fr") = @asm_x64(PrimaryOp.Int3) out;
+      rv :: @const_slice(import("@/backend/rv64/bits.fr")'ebreak);
+    wasm :: fn(out) = out.push_all(@const_slice(0x00, 0x00, 0x0B));  // 0 locals. unreachable. end. 
+};
 
 // 
 // `path` is a string like you would pass to import(), the scope it resolves to must have a variable called `exports` 

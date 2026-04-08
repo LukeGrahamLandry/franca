@@ -140,8 +140,6 @@ fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(Ty(bool, bool)) #on
         };
     };
     
-    // TODO: :mark_stmt_done 
-
     (Ok = (value.done, false))
 }
 
@@ -396,7 +394,6 @@ fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(
         self.finish_layout_deep(expected_ty);
         self.finish_layout_deep(final_ty);
         @check(self.can_assign(expected_ty, final_ty)) return;
-        // TODO: panic("TODO: self.type_check_arg(value, ty, \"var decl\")?;");
     };
 
     prev := self.scopes.get_var_type(name); 
@@ -406,9 +403,6 @@ fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(
     @debug_assert(prev.is_none() || { t := prev.unwrap(); t.get_type() == final_ty });
     @err_assert(name.name != Flag.return.ident(), "naming a variable 'return' is not the best idea") return;
     @err_assert(name.name != Flag.local_return.ident(), "naming a variable 'local_return' is not the best idea") return;
-    // TODO: :mark_stmt_done
-    //       this function is called multiple times (if the containing block needs to yield). need to have a done flag on the fatstmt
-    //       but thats easier to change once all the stuff is written in one language -- Jul 25
     .Ok
 }
 
@@ -879,24 +873,21 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             self.set(expr, FuncId, fid);
             func := self.get_function(fid);
             @try(self.update_function_metadata(func, .None)) return;
-            //if func.ret&.is(.Infer) {
-            //    @if_let(func.body&) fn Normal(body) => {
-            //        guessed := self.type_of(body);
-            //        @if_let(guessed) fn Ok(type) => {
-            //            @println("guessed! %", self.log_type(type));
-            //            func.ret = (Finished = type);
-            //            func.finished_ret = (Some = type);
-            //        };
-            //    };
-            //};
+            
+            @if_let(requested) fn Specific(ty) => {
+                ty := self.get_type(ty);
+                
+                // I want to allow `f() {| }` for passing @FnPtr as well. 
+                // but now this also does it for => which makes the whole thing a bit dumb (tho not usless because there won't always be a hint). 
+                // so maybe i should add another flag to remember which syntax you used. 
+                @if_let(ty) fn FnPtr(_) => func.unset_flag(.AllowRtCapture);
             
             // this avoids `function arguments must have type annotation (cannot be inferred)` on `=` functions with hint. 
             // you want it so you don't have to type `: *List(u8)` on every #x86_bytes inline asm
             // TODO: unify with inference for '=>' functions?
-            if !func.get_flag(.AllowRtCapture) {
-                unhelpful :: local_return;
-                @if_let(requested) fn Specific(ty) => {
-                    f_ty := @match(self.get_type(ty)) {
+                if !func.get_flag(.AllowRtCapture) {
+                    unhelpful :: local_return;
+                    f_ty := @match(ty) {
                         fn Fn(f_ty) => f_ty[];
                         fn FnPtr(f) => f.ty;
                         @default => unhelpful();
@@ -1277,9 +1268,7 @@ fn compile_fn_ptr(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     
     @err_assert(!func.get_flag(.AnyConstArgs), "cannot take pointer to function with const args") return;
     @err_assert(!func.get_flag(.Inline), "cannot take pointer to function marked #inline") return;
-    // TODO: this should be the rule but i've been lazy about using it as a way to ask for more type inference. 
-    //       it certainly won't work if it actually does try to capture something
-    // @err_assert(!(func.get_flag(.AllowRtCapture) || func.get_flag(.MayHaveAquiredCaptures)), "cannot take pointer to capturing '=>' function") return;
+    @err_assert(!(func.get_flag(.AllowRtCapture) || func.get_flag(.MayHaveAquiredCaptures)), "cannot take pointer to capturing '=>' function") return;
     
     self.took_pointer_value(fid);
     expr.done = true;
