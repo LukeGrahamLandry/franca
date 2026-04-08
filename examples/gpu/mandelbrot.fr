@@ -2,7 +2,9 @@
 // - fragment shader to draw mandelbrot set
 // - controls: scroll to zoom, click and drag to pan
 //             up/down arrow to change max steps
+//             space: toggle mandelbrot<->julia
 // - switches to f32 pairs to get more precision when you zoom deep enough
+// predecessor of this code: https://github.com/LukeGrahamLandry/FractalViewer (had more ui)
 
 // TODO: adaptive resolution. scale down while you're moving around
 
@@ -14,34 +16,31 @@ driver :: fn(vtable: *ImportVTable) void =
 Shaders :: @struct {
     OutV :: @struct(pos: Vec4 #position);
     vs   :: fn(i: u32 #vertex_id) OutV = {
-        xy := @if(i == 0, @vec(-1.0, 1.0),
-              @if(i == 1, @vec(-1.0, -1.0),
-              @if(i == 2, @vec(1.0, -1.0),
-              @if(i == 3, @vec(1.0, 1.0),
-              @if(i == 4, @vec(1.0, -1.0),
-              @if(i == 5, @vec(-1.0, 1.0),
-              @vec(0.0, 0.0)))))));
-        (pos = @vec(xy, 0.0, 1.0))
+        (pos = @vec(Easy'six_vertex_full_square(i), 0.0, 1.0))
     }
     OutF :: @struct(frag_color: Vec4 #colour);
     UniF :: @struct {
         scale: F64;
-        offset: V64; 
+        c_offset: V64;
+        z_offset: V64;
         limit: i32;   // how many iterations before defaulting to black
         wrap: i32;   // how many colours in the pattern
         high_prec: i32;  // bool :ShaderLimitation
+        julia: i32;      // "
     };
     fs   :: fn(in: OutV #input, uni: UniF #uniform(0)) Shaders.OutF = {
-        c := @swizzle in.pos.xy;
-        c := vec2D(c.x, c.y);
-        c = c * vec2(uni.scale);
-        c += uni.offset;
+        C := @swizzle in.pos.xy;
+        C := vec2D(C.x, C.y);
+        C = C * vec2(uni.scale);
+        julia := uni.julia == 1;
+        c := uni.c_offset + @if(julia, vec2D(0, 0), C);
+        z := uni.z_offset + @if(julia, C, vec2D(0, 0));
         
         i := if uni.high_prec == 1 {
             // much slower so only do it once zoomed in too far
-            mandel(F64, c.x, c.y, new(0), new(4), uni.limit.intcast())
+            mandel(F64, c.x, c.y, z.x, z.y, new(4), uni.limit.intcast())
         } else {
-            mandel(f32, c.x.float(), c.y.float(), 0, 4, uni.limit.intcast())
+            mandel(f32, c.x.float(), c.y.float(), z.x.float(), z.y.float(), 4, uni.limit.intcast())
         };
         if i >= uni.limit.intcast() {
             return(frag_color = splat(0));
@@ -53,10 +52,10 @@ Shaders :: @struct {
     }
 };
 
-mandel :: fn($F: Type, cx: F, cy: F, zero: F, four: F, limit: i64) i64 #generic = {
+mandel :: fn($F: Type, cx: F, cy: F, zx: F, zy: F, four: F, limit: i64) i64 #generic = {
     i := 0;
-    z, zSq := (vec2(zero), vec2(zero));
-    
+    z := vec2(zx, zy);
+    zSq := z * z;
     while => i < limit && zSq.x + zSq.y < four {
         z.y = (z.x + z.x) * z.y;
         z.x = zSq.x - zSq.y;
@@ -83,6 +82,11 @@ State :: @struct {
     HIGH_DPI :: true;
     pipe: Sg.Pipeline;
     params: Shaders.UniF;
+    // if you move z in the mandelbrot set you just get weird distortion, 
+    // but moving z in julia is how you move spatially so save before messing with it. 
+    // don't save c for the other direction because moving c in mandelbrot is hoiw you choose a nice julia set. 
+    saved_z: V64;
+    saved_scale: F64;
     dirty: bool;
     did_fastmath_warning: bool;
 };
@@ -90,11 +94,14 @@ State :: @struct {
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.params = (
         scale = new(@as(f32) (1.0 / 300.0 / sapp.dpi_scale)), 
-        offset = vec2D(@as(f32)-3.0, -1.0), 
+        c_offset = vec2D(@as(f32)-3.0, -1.0), 
+        z_offset = vec2D(0, 0),
         limit = 500,
         wrap = 30,
         high_prec = 0,
+        julia = 0,
     );
+    state.saved_scale = state.params.scale;
     shd_desc := choose_shader_impl(SOKOL_BACKEND, Shaders);
     shd_desc.fragment_func.metal_disable_fast_math = true;
     state.pipe = sg.make(
@@ -104,6 +111,8 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 }
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    offset := @if(state.params.julia == 0, state.params.c_offset&, state.params.z_offset&);
+
     // the scale/offset computations here use F64 instead of f64 
     // because that's the form that needs to be given to the gpu. 
     // could do real f64 here but that seems like more hassle
@@ -127,7 +136,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             pos := vec2D(event.mouse_x, event.mouse_y);
             pos0 := pos * vec2(state.params.scale);
             pos1 := pos * vec2(state.params.scale + delta);
-            state.params.offset -= (pos1 - pos0);
+            offset[] -= (pos1 - pos0);
             state.params.scale += delta;
             state.params.high_prec = int((1.0 / state.params.scale.double()) > 1.shift_left(23).float()).intcast();
             if state.params.high_prec == 1 && !state.did_fastmath_warning && SOKOL_BACKEND == .WGPU {
@@ -139,13 +148,20 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             @if(event.modifiers.get(.left_mouse) == 0) return();
             speed := -state.params.scale;
             delta: V64 = vec2D(event.mouse_dx, event.mouse_dy);
-            state.params.offset += delta * vec2(speed);
+            offset[] += delta * vec2(speed);
         }
         fn RESIZED() => ()
         fn KEY_DOWN() => {
             delta: i32 = @match(event.key_code) {
                 fn UP() => 1;
                 fn DOWN() => -1;
+                fn SPACE() => {
+                    state.params.julia = state.params.julia.bit_xor(1);
+                    t := state.saved_z; state.saved_z = state.params.z_offset; state.params.z_offset = t;
+                    t := state.saved_scale; state.saved_scale = state.params.scale; state.params.scale = t;
+                    state.dirty = true;
+                    return()
+                }
                 @default => return();
             }
             state.params.limit = clamp(state.params.limit + delta, 1, 1000);

@@ -98,8 +98,6 @@ x := 1;
 
 ## Import String
 
-> `import("@/path.fr")` is similar to `import(@tfmt("{ % };", read_entire_file_or_crash("path.fr")))`
-
 A very blunt alternative to macros is calling `import("{ name :: value; };")`. 
 When the string starts with a `{` it's treated as source code instead of as a file path. 
 As with importing from a file path, it returns a ScopeId with which you can access the constants declared in the string. 
@@ -116,6 +114,9 @@ The top level caching system (ie. when you jit with `franca file.fr`)
 assumes that generated import strings like that are deterministic based on the other source files. 
 If you're generating code by reading other files you should pass the paths to include_bytes as well to add it as a cache input. 
 (the same applies to all comptime code). 
+
+- `import("@/path.fr")` is similar to `import(@tfmt("{ % };", read_entire_file_or_crash("path.fr")))`
+- `import(@tfmt("{ % };", s))` is similar to `p := @tfmt("/tmp/%.fr", Sha256'hex(s)); write_entire_file_or_crash(p, s.slice(1, s.len - 2)); import(@tfmt("@/%", p))`
 
 ## Assembly
 
