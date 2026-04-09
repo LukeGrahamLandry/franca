@@ -1,0 +1,308 @@
+//
+// this is a wrapper for luajit's (arm/amd) disassemblers. 
+// those disassemblers need raw machine code as input. 
+// this program reads a mach-o or elf executable, finds the code segment and disassembles that. 
+//
+// it's also a more serious example of using libraries written in other languages. 
+// import_c to embed the lua interpreter and then the lua c api to call the disassemblers. 
+//
+// TODO:
+// - let it plug into backend's `-d D` replacing llvm-mc. 
+// - show symbol names interspersed with the code
+// - look at sections instead of segments so don't include text_padding. 
+//   macho: truncate the align zeros at the end of: segments[0].file_size = chunks[1].len - m.text_padding();
+// - add this to autotest, need to fix the va_list thing first tho. 
+//
+// things to improve: 
+// - :compilerbug/import_c,caching luaopen_package->setpath->luaO_pushvfstring 
+//   has va_list by value which is ifdef-ed by arch which means if you compile first on arm 
+//   and then on amd without clearing cache it won't work. ditto cross compiling. :FUCKED
+// - char* vs CStr
+// - lots of lua.h is macros which can't be used from franca so have wrapped_c_macros which is verbose
+// - my type errors are super unreadable because big structs don't get their typedef-ed names
+// - returning multiple values from a :: constant sucks, can't destructure and can't access fields on a non-pointer struct Value
+// - doesn't work in wasm because it wants to longjmp (luaD_rawrunprotected). 
+//   it only goes up tho (not back and forth) so could do it with exceptions. 
+// - :SLOW should use luajit but i don't have an assembler for amd64 yet so that depends on clang to build. 
+//   so for i'm just adding their "bit" library to the other lua.
+//   but would have to keep that codepath anyway because luajit doesn't support riscv. 
+//
+
+// without it all i can do is dump the bytes as hex. 
+FEAT_LUA :: true;      
+// compile to lua bytecode at comptime instead of including source. 
+// smaller binary and get parse errors at comptime instead of runtime. 
+FEAT_COMPILE :: true;  
+
+main :: fn() void = {
+    input := import("@/lib/sys/fs.fr")'read_file_from_last_arg();
+    out := u8.list(temp());
+    dump(out&, input);
+    print(out.items());
+}
+
+dump :: fn(out: *List(u8), input: []u8) void = {
+    arch, code := @switch(input.peek_type(u32)[]) {
+        @case(MachO.macho_magic) => find_code_in_macho(input);
+        @case(Elf.MAGIC) => find_code_in_elf(input);
+        @case(import("@/backend/wasm/bits.fr").MAGIC4) => panic("use examples/dump_wasm.fr instead");
+        @default => panic("unknown object file format (expected mach-o or elf)");
+    };
+    
+    if !FEAT_LUA || arch == .rv64 {
+        hex_dump(out, code);
+        return();
+    };
+    
+    @if(!FEAT_LUA) unreachable();
+    L := new_state_with_bit();
+    dis := load_disassemblers(L);
+    dis.run(arch, code, out).or(fn(msg) => panic(msg));
+    Lua'lua_close(L);
+}
+
+// the function created from disassemble_source needs to be pinned for the gc so keep it in a lua global. 
+Disassemble :: @struct(L: *Lua.lua_State, dis_global_name: *i8);
+dis_global_name :: { here := @source_location; S(c_str(sym(@tfmt("gensym$%$disassemble$", here.low)))) };
+
+fn load_disassemblers(L: *Lua.lua_State) Disassemble #use(Lua) = {
+    in := @if(FEAT_COMPILE, @run precompile(ast_alloc()), precompile(temp()));
+    ok := read_chunk(L, in, "disassemble");
+    @assert(ok, "failed load chunk %", lua_dump_stack(L));
+    lua_pcallk(L, 0, 1, 0, 0, zeroed(lua_KFunction));
+    lua_setglobal(L, dis_global_name);
+    (L = L, dis_global_name = dis_global_name)
+}
+
+fn run(self: Disassemble, arch: Arch, code: []u8, out: *List(u8)) Result(void, Str) #use(Lua) = {
+    L := self.L;
+    lua_getglobal(L, self.dis_global_name);
+    lua_pushnumber(L, @match(arch) {
+        fn aarch64() => 0;
+        fn x86_64() => 1;
+        @default => return(Err = "unsupported arch");
+    });
+    lua_pushlstring(L, S(code.as_cstr()), code.len.bitcast());
+    r := lua_pcallk(L, 2, 1, 0, 0, zeroed(lua_KFunction));
+    if r != 0 {
+        out := @ref u8.list(temp());
+        out.push_all("(call disassemble failed)");
+        lua_tostring(L, 1, out);
+        lua_popN(L, 1);
+        return(Err = out.items());
+    };
+    lua_tostring(L, 1, out);
+    lua_popN(L, 1);
+    .Ok
+}
+
+disassemble_source :: """
+    local dis_arm64 = (function() % end)();
+    local dis_x86 = (function() % end)();
+    local dis_amd64 = {
+      create = dis_x86.create64,
+      disass = dis_x86.disass64,
+      regname = dis_x86.regname64
+    };
+    local dis = { [0] = dis_arm64, [1] = dis_amd64 };
+    return function(arch, input) 
+        local r = {};
+        dis[arch].disass(input, 0, function(s)
+            r[#r + 1] = s;
+        end);
+        return table.concat(r);
+    end;
+""";
+
+S :: fn(s: CStr) *i8 = bit_cast_unchecked(CStr, *i8, s);
+
+new_state_with_bit :: fn() *Lua.lua_State #use(Lua) = {
+    @assert_ne(import("@/lib/sys/process.fr")'query_current_arch(), .wasm32, "TODO: longjmp");
+    L := luaL_newstate();
+    luaL_openlibs(L);
+    open_bit :: fn(L) i32 = {
+        lua_createtable(L, 0, 0);
+        luaL_setfuncs(L, bitlib_pub[], 0);
+        1
+    };
+    luaL_requiref(L, S"bit", open_bit, 1);
+    lua_popN(L, 1);
+    L
+}
+
+// pushes chunk or error string
+fn read_chunk(L: *Lua.lua_State, in: Str, debug_name: CStr) bool = {
+    s := bit_cast_unchecked(*u8, *i8, in.ptr);
+    r := Lua'luaL_loadbufferx(L, s, in.len.bitcast(), S(debug_name), zeroed(*i8));
+    r == 0
+}
+
+fn write_chunk(L: *Lua.lua_State, out: *List(u8), strip: bool) void = {
+    writer :: fn(L, p, l, data) i32 = {
+        out := ptr_from_raw(@type out[], data);
+        out.push_all(u8.ptr_from_raw(p).slice(l.bitcast()));
+        0
+    };
+    r := Lua'lua_dump(L, writer, raw_from_ptr(@type out[], out), int(strip).intcast());
+    @debug_assert_eq(r, 0);
+}
+
+fn compile_chunk(L: *Lua.lua_State, src: Str, a: Alloc, strip: bool) Result(Str, Str) = {
+    ok := read_chunk(L, src, "");
+    if !ok {
+        msg := u8.list(temp());
+        lua_tostring(L, 1, msg&);
+        Lua'lua_popN(L, 1);
+        return(Err = msg.items());
+    };
+    out := u8.list(a);
+    write_chunk(L, out&, strip);
+    Lua'lua_popN(L, 1);
+    (Ok = out.items())
+}
+
+precompile :: fn(a: Alloc) Str = {
+    src := @run { dis := Dis; (@format(disassemble_source, dis.arm, dis.amd) ast_alloc()).items() };
+    L := new_state_with_bit();
+    out := @match(compile_chunk(L, src, a, FEAT_COMPILE)) {
+        fn Ok(it) => it;
+        fn Err(msg) => panic(msg);
+    };
+    Lua'lua_close(L);
+    if false {
+        @eprintln("source:% -> dumped:%", src.len, out.len);
+    };
+    out
+}
+
+lua_tostring :: fn(L: *Lua.lua_State, i: i64, out: *List(u8)) void = {
+    size: u64 = 0;
+    s := Lua'lua_tolstring(L, intcast(i), size&);
+    size: i64 = size.bitcast();
+    s := bit_cast_unchecked(@type s, *u8, s).slice(size);
+    out.push_all(s);
+};
+
+Lua :: { x := Dis; x.lua };
+Dis :: {
+    Ffi :: import("@/examples/import_c/ffi.fr");
+    src := import("@/tests/external/lua.fr")'lua_source(Foreign'lua());
+
+    luajit := Foreign'luajit();
+    bit := read_entire_file_or_crash(temp(), @tfmt("%/src/host/minilua.c", luajit));
+    bit := find_bit_library(bit);
+    src&.push_all("typedef unsigned long U64;\n#define luaL_typerror luaL_typeerror\n");
+    src&.push_all(bit);
+    src&.push_all(wrapped_c_macros);
+
+    // i want this program to not depend on any files at runtime
+    arm := read_entire_file_or_crash(ast_alloc(), @tfmt("%/src/jit/dis_arm64.lua", luajit));
+    amd := read_entire_file_or_crash(ast_alloc(), @tfmt("%/src/jit/dis_x86.lua", luajit));
+    
+    lua := Ffi'include(src.items());
+    @anon_literal(_ = amd, _ = arm, _ = lua)
+};
+
+wrapped_c_macros :: """
+    const struct luaL_Reg* bitlib_pub = bitlib;  // un-static
+    const int lua_tstring = LUA_TSTRING;
+    const int lua_tnumber = LUA_TNUMBER;
+    const int lua_tboolean = LUA_TBOOLEAN;
+    void lua_popN(lua_State *L, long n) { lua_pop(L, n); }
+""";
+
+find_bit_library :: fn(bit: Str) Str = {
+    while => !bit.starts_with("typedef unsigned int UB;") {
+        bit = bit.rest(1);
+    };
+    i := 0;
+    end := "{NULL,NULL}\n};\n";
+    while => !bit.rest(i).starts_with(end) {
+        i += 1;
+    };
+    i += end.len;
+    (bit.slice(0, i))
+}
+
+lua_dump_stack :: fn(L: *Lua.lua_State) void #use(Lua) = {
+    out := @ref u8.list(temp());
+    range_rev(1, lua_gettop(L).intcast() + 1) { i |
+        i := i.intcast();
+        type := lua_type(L, i);
+        name := lua_typename(L, type);
+        @fmt(out, "[%]: % = ", i, bit_cast_unchecked(*i8, CStr, name));
+        @switch(type) {
+            @case(lua_tstring[]) => @fmt(out, "|%|\n", lua_tostring(L, i.intcast(), out));
+            @case(lua_tnumber[]) => @fmt(out, "%\n", lua_tonumberx(L, i, @ref @as(i32) 0));
+            @case(lua_tboolean[]) => @fmt(out, "%\n", lua_toboolean(L, i) != 0);
+            @default => @fmt(out, "%\n", { xx := lua_topointer(L, i); fmt_hex(xx) });
+        };
+    };
+    print(out.items());
+}
+
+MachO :: import("@/backend/macho/bits.fr");
+find_code_in_macho :: fn(bytes: []u8) Ty(Arch, []u8) #use(MachO) = {
+    full_bytes := bytes;
+    h := bytes&.pop_type(MachoHeader);
+    @assert_eq(h.magic, macho_magic, "macho bad magic");
+    arch: Arch = @switch(h.cpu_type) {
+        @case(0x0100000C) => .aarch64;
+        @case(0x01000007) => .x86_64;
+        @default => @panic("unknown cpu_type: %", h.cpu_type);
+    };
+    
+    range(0, h.commands_count.zext()) { i |
+        h := bytes&.pop_type(LoadCommandHeader);
+        @switch(h.type) {
+            @case(LoadCommand.SegmentLoad.raw()) => {
+                h := bytes&.pop_type(SegmentLoad);
+                range(0, h.section_count.zext()) { i |
+                    h := bytes&.pop_type(SegmentSection);
+                    data := full_bytes.subslice(h.file_offset.zext(), h.size.bitcast());
+                    if h.flag.bit_and(ATTR_PURE_INSTRUCTIONS) != 0 {
+                        // TODO: allow multiple
+                        return(arch, data);
+                    }
+                };
+            };
+            @default => {
+                bytes = bytes.rest(h.size.zext() - 8);
+            };
+        };
+    };
+    (arch, "")
+}
+
+Elf :: import("@/backend/elf/bits.fr");
+find_code_in_elf :: fn(input: []u8) Ty(Arch, []u8) = {
+    h := input.peek_type(Elf.Header);
+    arch := Arch.aarch64;
+    @assert_eq(h.magic, Elf.MAGIC, "macho elf magic");
+    arch: Arch = @match(h.machine) {
+        fn arm64() => .aarch64;
+        fn amd64() => .x86_64;
+        fn rv64() => .rv64;
+        @default => @panic("unknown machine: %", h.machine);
+    };
+    @assert(h.program_header_num != 0 && (@as(i64) h.program_header_entsize.zext()) == size_of(Elf.ProgramHeader), "missing or bad size program headers");
+    mem := input.rest(h.program_header_off);
+    range(0, h.program_header_num.zext()) { i |
+        h := mem&.pop_type(Elf.ProgramHeader);
+        if h.type == .Load && h.prot == 5 {
+            data := input.subslice(h.offset, h.file_size);
+            return(arch, data);
+        };
+    };
+    (arch, "")
+}
+
+hex_dump :: fn(out: *List(u8), code: []u8) void = {
+    i: u32 = 0; 
+    out.reserve(code.len / 4 * 22);
+    while => code.len >= 4 {
+        op := code&.pop_type(u32)[];
+        @fmt(out, "% %\n", fmt_hex(i), fmt_hex(op));
+        i += 4;
+    };
+}

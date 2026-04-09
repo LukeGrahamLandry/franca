@@ -1,4 +1,5 @@
 
+- see "things to improve" comment in examples/disassemble.fr
 - examples/gpu/terminal: there's some situation where the child crashes and it doesn't notice so it thinks something is already running forever? 
   - for kill/int, on linux it's -pid to send to whole thread group. 
     that seems to not be the case on macos or im doing something dumb?
@@ -464,6 +465,7 @@ cset	w0, eq
   - examples/os/host/vzf
   - examples/aoc/2024
 - some i don't even compile in ci
+  - examples/disassemble
   - examples/aoc/2025
   - examples/os/bin (i.e. doom)
   - examples/toy
