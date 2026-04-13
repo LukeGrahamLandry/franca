@@ -1,4 +1,12 @@
 
+## (Apr 13)
+
+- lox: print(-0), print(native) don't show name, error on redeclare var. 
+
+## (Apr 9)
+
+- (disassembler) example: calling a lua library. more serious usage of import_c. 
+  built up a nice list of things to improve in that process. 
 
 ## (Apr 8)
 
@@ -10,6 +18,8 @@
 - few more leaks
 - less spam of type annotations on AsmFunction usages. 
 - allow passing non-capturing trailing lambda to FnPtr
+- macro scope tests. trying to do more compilated things that don't fit just rearranging with quote/unquote. 
+- ex/gpu/mandel: toggle julia set
 
 ## (Apr 7)
 
@@ -804,124 +814,26 @@ import_c
 - very satisfying to do little things to have fewer intermidiate variables and reduce the bytes output dramatically. 
   like 12 -> 8 (MB, safe). 6 unsafe. 
 
-## (Feb 3) rcg
-
-- squashing bugs: missing vtable fn, bool repr for not, abi_field.
-- unsizing of structs where you have to be able to offset field but keep metadata. 
-- discovered it can pull in generics instantiations from already compiled crates, 
-  so that's a source of functions you can call but shouldn't emit. 
-
-## (Feb 2) rcg
-
-- comments in the ir so don't have to scroll back and forth. 
-- unsizing to `Box<[T]>`: load data from struct. drop. 
-
-## (Feb 1) rcg
-
-- intrinsics: black_box, write_bytes
-- tricky part of lang_start is that it has to pass a &dyn closure to precompiled std code so have to match llvm abi. 
-  can't put it off. big thing i was missing was mir.spread_arg, that's why unpacking for dyncall didn't work.
-- trying to jump to an address that ends with d503245f is funny because that's bti. 
-  so its giving me a function pointer when i expect a pointer to a function pointer. 
-  i think its for the captured main in lang_start. the thing that implements the fn trait is &Closure
-  and the data pointer of the pair is always &T so need to add another level of indirection it seems. 
-  and then now i can undo it in terminatorkind::call which looks more reasonable. 
-
----
+## (Feb 1)
 
 - import_wasm: fix run.fr heap_base so it can run standalone modules made by default_driver that want to memory.grow. 
   - test: assert on helloworld output. bubble up status after calling exit(). 
-
-## (Jan 31) rcg
-
-- failed attempt at indexing. Val -> Placement. was enough of a break that i figured out indexing. 
-  main confusion was wide vs narrow pointer when you had a Slice after a deref instead of a ref Slice. 
-- for dyn calls, have to get a vtable. calling convention confusion, don't have to unpack the tuple?
-- be more consistant about skipping zst
-- can now make an object file without `#![no_std]` but it's linker hell. 
-  need to make wrappers for allocator functions and lang_start.
-
-## (Jan 29) rcg
-
-- my real problem was being afraid of multiple derefs. 
-  since its only allowed first, it just acts on the type and everything works out. 
-- now that i have for loops, can almost do mandelbrot, which is always my favourite. 
-- fcmp, arrays, fnptr
-- can pass opt 0/3 but not 1. so run them all. 
-- do the right tag size. (0..1).next() is an Option(u32) which is (i32, i32) not (i64, i32).
-
-## (Jan 28) rcg
-
-- varargs, track cls
-- writing to a static needs assert because it checks alignment of the raw pointer 
-- idk how to monomorphise the whole mir, it seems like every time i look at a type i have to explicitly monomorphise it
-- slow progress towards for loops. references, tuples. 
-- i have trouble with Place. i feel like they're represented backwards where you "load" the whole struct before computing a specific field you want. 
-  - rn the problem is the reborrow to convert `&mut` -> `&` is `&*_N` which im treating as refernece to scalar 
-    so giving it a slot and then the result is address of the slot instead.
-
-## (Jan 27) rcg
-
-- if,while,switch are easy. for is hard because it desugars so something crazy so that will have to wait. 
-- got very basic structs working. for enums without niches they're basically the same with one field being magic. 
-  - i have lots of trouble with getting fields out of types and stuff. 
-    probably just a skill issue of not knowing the code. 
 
 ## (Jan 26)
 
 - jinja: parse+eval. can run very simple templates. 
   don't actually need it for tf-psa-crypto, just stripping the tags is enough to compile for curl,
   but i still like it as an example program. 
-- rustc cg
-  - it seems like it doesn't finish the mir before getting to codegen, 
-    its demand driven or whatever so you keep having to call monomorphise on stuff. 
-  - sometimes they store values in types which i don't quite understand,
-    like sure i guess a type is a set of values and if there's only one in the set
-    that's the same as a value again but why?
-  - can call puts, but only if explicitly bind the argument to a const. 
-    - do they really have all this infastucture and not use it to inline `"".as_ptr()`?
-    - maybe i have to manually turn on more passes somehow? 
-      oh duh i need --release so -C opt-level=3 since im calling rustc directly. 
-  - frc needs a way to ask for the common opt passes.
-    previously i always saved ir after running part of the backend. 
-    add FncFlags.run_early_passes so the writer can decide. 
-  - cope with wide pointers
 - if im going to complain about rust being bad at reproducible builds i should fix a few things in mine i've been putting off
   - fix repro with `-debug-info` (no aslr bytes for `__baked_compctx`)
   - be explicit about zeroing the padding in incremental.Sym.P union. the one that mattered was Imp. 
     - fixes web/build.fr repro because import_c's builtin string.h is a .frc file. 
 
----
-
-```
-# this prevents bloating target folder by an extra ~250MB **each time** you run 
-# `touch franca-sys/exports.fr && ./test.sh` (only costs ~10MB now...)
-# it also makes a clean build twice as fast (6600ms -> 2800ms). 
-# it also makes incremental builds slightly faster. 
-# `touch rustc_codegen_ferb/src/emit.rs && ./test.sh` (750ms -> 670ms).
-# idk what pathological case im doing but here we are. 
-[profile.dev]
-codegen-units=1  
-```
-turning off debug info in `[profile.dev.package."*"]` fixes time but only halves the space bloat. 
-might be macos specific?? running in orb the ".rcgu.o" files seem to disappear when you're done compiling. 
-turning off debug for all fixes it but breaks locations in backtraces. 
-debug="line-tables-only" is similar to codegen-units=1 in that its mostly fine but not as good as on linux. 
-
 ## (Jan 25)
 
-- spent far too long doing trial and error to do ar on macos-arm and linux-amd. 
-  macos has different symbol table format as well. 
-  everyone has slightly different rules about alignment and contents of padding.
-- none of it matters tho because if i just name the file .a but just have it be 
-  a .o file without the wrapper, the linker still takes it, it's just cargo that 
-  only wants an archive but it never looks in the file. ugh, wasted so much time :(
 - external/curl: for mbedtls (use one Ctx+Module and just reset macros+vars each compilation unit)
   instead of (each c file in its own Module + .o file, then ar them together, then link that with curl.o)
   - (4.015 s ±  0.036 s) -> (3.486 s ±  0.047 s)
-- the rustc_codegen thing might actually be doable. 
-  - i can compile the trivial `fn main() { return 42; }` from rust's MIR to my IR to .o file that it links. 
-  - reminded me that language servers are great for learning someone else's program, should probably have one of those for my language. 
 - started doing my own jinja thing for tf-psa-crypto. perhaps overkill. 
 
 ## (Jan 24)
@@ -929,25 +841,10 @@ debug="line-tables-only" is similar to codegen-units=1 in that its mostly fine b
 - miscompilation elide_abi_slots. only on arm. 
   coalesce created the situation in the original program but can reproduce without.
   made_addr_escape_mistake wasn't doing the whole range that could overlap a store. 
-- linker wants .a file. write my own instead of exec-ing ar.
-- now also need to do whatever ranlib does to make a symbol table. 
-- ugh, linux and macos deal with long file names differently. 
-  the sane thing to do would just declare i don't care because i get to pick the file names and they don't matter. 
-  really i should only ever be putting one object file in an archive because its faster to not drop and recreate a modules many times. 
 
- ## (Jan 22/23)
+## (Jan 22 - Feb 3) rcg 
 
-maybe i'll try making a rustc codegen backend 
-- there's a bunch of stuff that's going to be a pain 
-  but i think some i can fake, and some most programs don't need, and some are good incentive to implement and will benifit my other stuff. 
-  - thread locals, atomics, i128/f16/f128, inline assembly, unwinding, rust abi, simd, llvm intrinsics
-- rustc isn't like a normal crate? its a wizard you just import and it's there?
-- got to the point of rustc calling my dylib and then using my object file 
-  (which i made from a different program unrelated to what it asked for... baby steps)
-- build script to get it to link against franca code so i can call the backend
-- for now it seems easier to just pass a blob of .frc instead of having bindings for
-  all the builder functions that need to be kept in sync. 
-  did structs for the writing format and some rust api for emitting it. 
+- see [rust_codegen_ferb/devlog](https://git.sr.ht/~lukegrahamlandry/rustc_codegen_ferb/tree/main/item/devlog.md)
 
 ## (Jan 21)
 

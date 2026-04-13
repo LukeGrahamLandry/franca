@@ -43,6 +43,9 @@ main2 :: fn(vtable: ?*ImportVTable) void = {
             if s == "-aot" {
                 aot = true;
             }
+            if s == "-builtin" {
+                return(lox_stmts());
+            }
             continue();
         };
         @assert(!do_skips, "only skip failing tests when running all");
@@ -96,15 +99,14 @@ main2 :: fn(vtable: ?*ImportVTable) void = {
 
 skip_ :: @const_slice(
     "string/multiline.lox",   // TODO: my test runner is dumb about multiline prints
-    "number/literals.lox",  // i don't print -0
-    "variable/duplicate_local.lox", 
+    // TODO: i don't do the split declaration/initialization tracking
     "variable/use_local_in_initializer.lox", 
-    "function/print.lox",
-    "return/at_top_level.lox",  // currently i allow this since it makes the test in lox_main easier
-    "variable/duplicate_parameter.lox",
-    "variable/collide_with_parameter.lox",
-    "benchmark", "limit/stack_overflow.lox", 
+    // currently i allow this since it makes the test in lox_stmts easier
+    // (so they can test things even when functions are broken)
+    "return/at_top_level.lox",
     
+    "benchmark",  // slow and not commented with expected outputs (and can't be since prints the time) 
+    "limit/stack_overflow.lox", // i make this a debug_assert
     "limit/no_reuse_constants.lox", // expects error but i reuse constant pool slots
     "limit/too_many_constants.lox", // loxlox needs more than 255 constants
     
@@ -318,3 +320,44 @@ compile_c_lox :: fn(root: Str) Str = {
 #use("@/lib/sys/fs.fr");
 
 Lox :: import("@/examples/lox/lox_main.fr").Lox;
+
+// also run by tests/fr/examples.fr
+fn lox_stmts() = {
+    vm := zeroed(Lox.Vm);
+    init(vm&);
+    for extra_tests { src, expect |
+        vm&.interpret(src);
+        expect := @match(expect) {
+            fn N(it) => it.to_value();
+            fn B(it) => it.to_value();
+            fn S(it) => vm&.copy_string(it).to_value();
+        }
+        @assert_eq(vm.last_return, expect, "%", src);
+    };
+    vm&.drop();
+}
+
+V :: @tagged(N: f64, B: bool, S: Str);
+extra_tests :: @const_slice(@as(Ty(Str, V))
+    ("return -(1 + 2);", (N = -3)),
+    ("return 3 - 1;", (N = 2)),
+    ("return !true;", (B = false)),
+    ("return !(3 > 5) == 3 <= 5;", (B = true)),
+    ("return \"hello\" == \"world\";", (B = false)),
+    ("return \"hello world\" == \"hello\" + \" world\";", (B = true)),
+    ("var a = 123; // comment!\n return a;", (N = 123)),
+    ("var a = 123; a = 456; return a;", (N = 456)),
+    ("{ var b = 123; b = 456; return b; }", (N = 456)),
+    ("{ var b = 1; if (b == 1) { b = 2.5; } return b; }", (N = 2.5)),
+    ("{ var b = 1; if (b == 1) { b = 5; } else { b = 4; } return b; }", (N = 5)),
+    ("{ var b = 2; if (b == 1) { b = 4; } else { b = 3; } return b; }", (N = 3)),
+    ("{ var c = 0; var a = 0; while (c < 3) a = a + (c = c + 1.0); return a; }", (N = 6)),
+    ("{ var a = 0; for (var c = 0; c < 3; c = c + 1) a = a + c + 1.0; return a; }", (N = 6)),
+    ("fun fib(n) { if (n < 2) return n; return fib(n - 2) + fib(n - 1); } return fib(6);", (N = 8)),
+    ("{ fun fib2(n) { if (n < 2) return n; return fib2(n - 2) + fib2(n - 1); } return fib2(6); }", (N = 8)),
+    // if without else needs pop so new locals aren't offset. 
+    ("{ var a = 1; if (a == 0) return 111; var b = a; return b; }", (N = 1)),
+    // close upvalues forward in stack not backward in stack when returning. 
+    ("""{ var s = ""; fun f(s2) { s = s + s2; } f("a"); f("b"); return s; }""", (S = "ab")),
+);
+

@@ -139,7 +139,9 @@ fn statement(self: *Parser, may_declare: bool) void = {
         }
         fn LeftBrace() => {
             self.advance();
+            self.scope_depth += 1;
             self.parse_block();
+            self.end_scope();
             return(); // no semicolon required after a block. 
         }
         fn If() => {
@@ -271,6 +273,7 @@ fn statement(self: *Parser, may_declare: bool) void = {
             self.consume(TokenType.Ident, "expected function name after 'fun'");
             name := self.previous;
             
+            // hacky thing to make local recursion work: make sure the body of the function can see its declaration. 
             if self.scope_depth > 0 {| self.locals&.push(name = name.lexeme, depth = self.scope_depth); };
             self.function(.Function);
             if self.scope_depth > 0 {| self.locals.len -= 1; };
@@ -309,13 +312,10 @@ fn method(self: *Parser) void = {
 }
 
 fn parse_block(self: *Parser) void = {
-    self.scope_depth += 1;
     while => self.current.type != .Eof && self.current.type != .RightBrace {
         self.statement(true);
         if(self.panic_mode, => self.syncronize());
     };
-    // TODO: this will emit extra pops if the block ended with a return. (don't just check last op becuase of jumps)
-    self.end_scope();
     self.consume(.RightBrace, "Expected '}' to close block");
 }
 
@@ -351,7 +351,9 @@ fn start_function_body(self: *Parser, function: *ObjFunction, t: FunctionType) [
 }
 
 fn parse_function_body(self: *Parser) void = {
-    self.scope_depth += 1;
+    // in `inner: Parser` so it's fine that this is never popped by end_scope, 
+    // and at runtime op.return resets stack_top so don't need to manually pop everything. 
+    self.scope_depth += 1;  
     
     self.consume(.LeftParen, "before arguments");
     if self.current.type != .RightParen {
@@ -367,6 +369,7 @@ fn parse_function_body(self: *Parser) void = {
     
     self.consume(.RightParen, "after arguments");
     self.consume(.LeftBrace, "before body");
+    // note: no scope_depth+=1 here. parameters are in the same scope as body (can't shadow)
     self.parse_block();
     self.empty_return();
 }
@@ -623,6 +626,13 @@ fn declare_var(self: *Parser) void = {
 
 fn define_var_from_stack(self: *Parser, name: Token) void = {
     if self.scope_depth > 0 {
+        i := self.locals.len - 1;
+        while => i >= 0 && self.locals[i].depth == self.scope_depth {
+            if self.locals[i].name == name.lexeme {
+                self.error_at(name, "redeclared variable");
+            };
+            i -= 1;
+        };
         // TODO: make it an error to shadow in the same scope. "Already a variable with this name in this scope." :lazy
         // TODO: deny the initilizer accessing something in an upper scope that its shadowing. Can't read local variable in its own initializer."
         //       currently i just declare later so the error message would be that its undeclared. 
