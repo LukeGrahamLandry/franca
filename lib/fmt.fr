@@ -43,8 +43,7 @@ fn print_impl(fd: Fd, msg: Str, $new_line: bool) bool = {
     true
 };
 
-fn write(self: *List(u8), bytes: Str) void = self.push_all(bytes);
-fn display(self: Str, writer: *List(u8)) void = writer.write(self);
+fn display(self: Str, writer: *List(u8)) void = writer.push_all(self);
 
 /// @fmt(Writer, fmt_spec_str, ...Args)
 /// Currently display is only implemented with 'Writer' being *List$u8 (TODO: need better generics). 
@@ -103,20 +102,6 @@ fn format_into(writer: FatExpr, args: Slice(FatExpr), loc: Span) FatExpr = {
         emit(@literal s);
     };
     
-    hack_percent_escapes :: fn(s: Str) Str = {
-        copied := false;
-        range(0, s.len) { i |
-            if s[i] == this_is_dumb_but_im_actually_going_to_lose_my_mind.trunc() {
-                if !copied {
-                    copied = true;
-                    s = s.shallow_copy(temp());
-                };
-                s[i] = "%".ascii();
-            }
-        };
-        s.sym().str()  // deduplicate in the compiler's string pool
-    };
-    
     enumerate params { i, param |
         emit(param[]);
         
@@ -127,6 +112,20 @@ fn format_into(writer: FatExpr, args: Slice(FatExpr), loc: Span) FatExpr = {
     };
     actions.exprs_as_void(loc)
 }
+
+hack_percent_escapes :: fn(s: Str) Str = {
+    copied := false;
+    range(0, s.len) { i |
+        if s[i] == this_is_dumb_but_im_actually_going_to_lose_my_mind.trunc() {
+            if !copied {
+                copied = true;
+                s = s.shallow_copy(temp());
+            };
+            s[i] = "%".ascii();
+        }
+    };
+    s.sym().str()  // deduplicate in the compiler's string pool
+};
 
 #macro 
 fn prepend_tuple(arg: FatExpr, target: FatExpr) FatExpr = {
@@ -152,34 +151,20 @@ fn prepend_tuple(arg: FatExpr, target: FatExpr) FatExpr = {
 }
 
 #macro 
-fn println(arg: FatExpr) FatExpr = @{
-    out: List(u8) = list(0, temp());
-    @fmt(@prepend_tuple(out&) @[arg]);
-    out&.push_all("\n");
-    print(out&.items());
-};
+fn println(arg: FatExpr) FatExpr = 
+    print_impl_macro(STD_OUT, arg, true);
 
 #macro 
-fn eprintln(arg: FatExpr) FatExpr = @{
-    out: List(u8) = list(0, temp());
-    @fmt(@prepend_tuple(out&) @[arg]);
-    out&.push_all("\n");
-    eprint(out&.items());
-};
+fn eprintln(arg: FatExpr) FatExpr = 
+    print_impl_macro(STD_ERR, arg, true);
 
 #macro 
-fn print(arg: FatExpr) FatExpr = @{
-    out: List(u8) = list(0, temp());
-    @fmt(@prepend_tuple(out&) @[arg]);
-    print(out&.items());
-};
+fn print(arg: FatExpr) FatExpr = 
+    print_impl_macro(STD_OUT, arg, false);
 
 #macro 
-fn eprint(arg: FatExpr) FatExpr = @{
-    out: List(u8) = list(0, temp());
-    @fmt(@prepend_tuple(out&) @[arg]);
-    eprint(out&.items());
-};
+fn eprint(arg: FatExpr) FatExpr = 
+    print_impl_macro(STD_ERR, arg, false);
 
 #macro 
 fn format(arg: FatExpr, alloc: FatExpr) FatExpr = @{
@@ -188,19 +173,54 @@ fn format(arg: FatExpr, alloc: FatExpr) FatExpr = @{
     out
 };
 
+print_impl_macro :: fn(fd: Fd, arg: FatExpr, new_line: bool) FatExpr = {
+    args := arg&.items();
+    msg := Str.const_eval(args[0]);
+    if new_line {  
+        // do a copy at comptime to avoid extra syscall for the terminator at runtime
+        m := ast_alloc().alloc_uninit(u8, msg.len + 1);
+        m.slice(0, msg.len).copy_from(msg);
+        m[msg.len] = "\n".ascii();
+        msg = m.sym().str();
+    };
+    args[0] = @literal msg;
+    args[0].loc = arg.loc;
+    @{
+        msg := @[format_literal_or_temp(args, arg.loc)];
+        print_impl(@[@literal fd], msg, false);
+    }
+};
+
+format_literal_or_alloc :: fn(args: []FatExpr, loc: Span, a: FatExpr) FatExpr = {
+    msg := Str.const_eval(args[0]);
+    if args.len == 1 { 
+        // no placeholders so no need to copy into a list(temp())
+        percent := "%".ascii();
+        @if(msg.contains(percent&)) compile_error("Found placeholders in fmt string but no args.", loc);
+        msg = msg.hack_percent_escapes();
+    };
+    args[0] = @literal msg;
+    args[0].loc = loc;
+    @if(args.len == 1) return args[0];
+    (@{
+        out: List(u8) = list(0, @[a]);
+        @[format_into(@{ out& }, args, loc)];
+        out&.items()
+    }).with_loc(loc)
+};
+
+format_literal_or_temp :: fn(args: []FatExpr, loc: Span) FatExpr = 
+    format_literal_or_alloc(args, loc, @{ temp() });
+
 #macro 
 fn panic(arg: FatExpr) FatExpr = {
     loc := arg.loc;
     if !safety_check_enabled(.KeepPanicMessages) {
         arg = @{ "panicked" };
     };
-    if arg&.items().len() == 1 {
-        return(@{ panic(@[arg]) }.with_loc(loc));
-    };
+    
     @{
-        out: List(u8) = list(0, temp()); 
-        @fmt(@prepend_tuple(out&) @[arg]);
-        panic(out&.items())
+        panic(@[format_literal_or_temp(arg&.items(), loc)])
     }.with_loc(loc)
 }
 

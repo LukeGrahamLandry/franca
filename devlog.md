@@ -1,4 +1,13 @@
 
+## (Apr 14)
+
+- modernizing some of lib/macros.fr
+  - put a case in the default slot in unsafe build. 
+  - prefer compile_error over assert, be less nested
+  - factor out the different formatted prints. 
+    more consistant about checking for `%` with no args. caught a mistake. 
+  - before: (820ms, 862k bytes of code). after: (805ms, 850k bytes of code),
+
 ## (Apr 13)
 
 - lox: print(-0), print(native) don't show name, error on redeclare var. 

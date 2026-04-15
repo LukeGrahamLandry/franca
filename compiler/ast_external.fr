@@ -170,75 +170,42 @@ fn get_tuple_field_name(self: CompCtx, i: i64) Symbol #inline = {
 FIELD_LAYOUT_NOT_DONE :: 99999999999;
 
 ///////////////////////////
-// TODO: should try to clean these up.
 
 // @err_assert(cond, "msg %", 123) return;
 fn err_assert(arg: FatExpr, ret: FatExpr) FatExpr #macro = {
-    loc := arg.loc;
-    arg := compile_ast(arg);
-    arg_err :: "@err_assert expected '(cond, fmt_string, args)'";
-    if arg.ty == bool {
-        arg = compile_ast(@{ (@[arg], "Assertion Failed") });
-    };
-    @ct_assert(arg.expr&.is(.Tuple), loc, arg_err);
-    parts := arg.expr.Tuple.items();
-    @ct_assert(parts.len >= 2, loc, arg_err);
-    @ct_assert(parts[1].ty == Str, loc, arg_err);
-    
-    if parts.len == 2 {
-        @{ 
-            if !@[parts[0]] {
-                @[ret](@err(@[parts[1]]));
-            };
-        }
-    } else {
-        @{
-            if !@[parts[0]] {
-                out: List(u8) = list(temp());
-                @[format_into(@{ out& }, parts.rest(1), arg.loc)];
-                @[ret](@err(out.items()));
-            };
-        }
-    }
+    parts, loc := check_cond_fmt_macro(arg&, "@err_assert expected '(cond, fmt_string, args)'");
+    @{ @if(!@[parts[0]]) @[ret](Err = make_error(@[format_literal_or_tls_ast_alloc(parts.rest(1), arg.loc)])); }
 }
 
 fn unwrap(arg: FatExpr, ret: FatExpr) FatExpr #macro = {
-    loc := arg.loc;
-    arg := compile_ast(arg);
-    if arg.ty == bool {
-        arg = compile_ast(@{ (@[arg], "Assertion Failed") });
-    };
-    arg_err :: "@assert expected '(nullable, fmt_string, args)'";
-    @ct_assert(arg.expr&.is(.Tuple), loc, arg_err);
-    parts := arg.expr.Tuple.items();
-    @ct_assert(parts.len >= 2, loc, arg_err);
-    @ct_assert(parts[1].ty == Str, loc, arg_err);
+    parts, loc := check_cond_fmt_macro(arg&, "@unwrap expected '(nullable, fmt_string, args)'");
     @{
         cond := @[parts[0]];
         if cond&.is_none() {
-            msg := @[@if(parts.len == 2, {
-                parts[1]
-            }, @{
-                out: List(u8) = list(current_comptime().get_alloc());
-                out&.push_all("Missing Value: ");
-                @[format_into(@{ out& }, parts.rest(1), arg.loc)];
-                out.items()
-            })];
+            msg := @[format_literal_or_tls_ast_alloc(parts.rest(1), loc)];
             @[ret](Err = make_error(msg));
         };
-        cond.unwrap()
+        cond.Some
     }
 }
+
+format_literal_or_tls_ast_alloc :: fn(args: []FatExpr, loc: Span) FatExpr = 
+    format_literal_or_alloc(args, loc, @{ current_comptime().get_alloc() });
+
+check_cond_fmt_macro :: fn(arg: *FatExpr, arg_err: Str) Ty([]FatExpr, Span) = {
+    loc := arg.loc;
+    arg[] = compile_ast(arg[]);
+    arg_err :: "@unwrap expected '(nullable, fmt_string, args)'";
+    parts := arg.items();
+    @ct_assert(parts.len >= 2 && parts[1].ty == Str, loc, arg_err);
+    (parts, loc)
+};
 
 fn err(arg: FatExpr) FatExpr #macro = {
     if !arg.expr&.is(.Tuple) {
         return(@{ (Err = make_error(@[arg])) });
     };
-    @{
-        out: List(u8) = list(current_comptime().get_alloc());
-        @[ format_into(@{ out& }, arg.expr.Tuple.items(), arg.loc) ];
-        (Err = make_error(out.items()))
-    }
+    @{ (Err = make_error(@[format_literal_or_tls_ast_alloc(arg&.items(), arg.loc)])) }
 }
 
 fn make_error(msg: Str) *CompileError = {

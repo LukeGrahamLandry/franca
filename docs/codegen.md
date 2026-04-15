@@ -222,9 +222,12 @@ Many useful c libraries are well behaved and don't suffer from this problem.
 - Franca's macros let you write functions that are not referentially transparent, 
   Zig's comptime does not (the latter is better for readability). 
 - Zig's comptime can't use thier normal allocator interface, @intFromPtr, do ffi, or make syscalls. Franca's can. 
-- Zig's @cImport is built into the compiler (they've been working on moving it to the build system for 3 years) 
-  You can't call a @cImport function from comptime code. 
-  Franca's import_c is user level code and works at comptime. 
+- Zig has TranslateC in the build system (seperate exe that outputs zig code that is then compiled with your program).
+  Franca's import_c frontend runs at comptime (in the same compilation unit as your program) 
+  and outputs ssa-ish ir to be compiled. Franca's import_c string can be any constant 
+  so comptime code can generate it based on reflection info if you really want to. 
+  Zig's translates some c macros to be usable. 
+  Franca code can't call c macros, you have to add extra c code that exposes them as functions/constants. 
 
 **Swift**:  
 

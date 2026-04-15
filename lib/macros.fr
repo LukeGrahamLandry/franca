@@ -20,7 +20,6 @@ fn literal(arg: FatExpr) FatExpr = @{
 fn as(T: Type, expr: FatExpr) FatExpr = as(@literal T, expr);
 
 // TODO: this has a referential transparency problem
-// TODO: maybe @inline_match shouldn't be a thing and this should just notice and do the right thing. 
 #macro 
 fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     loc := arg.loc;
@@ -31,7 +30,6 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     info := get_type_info_ref(enum_type);
     
     if info.is(.Enum) {
-        // TODO: use new switch expression -- Jul 26
         return(match_on_enum(arg, info, stmts));
     };
     
@@ -66,33 +64,23 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     
     cases: List(Ty(i64, FatExpr)) = list(ast_alloc());
     ::if(FatExpr);
-    crash :: fn(tag: i64, max: i64) Never = {
-        @if(::safety_check_enabled(.InvalidTag), { 
-            // TODO: make this a build option / safety check. all could have None/Abort/Panic/Verbose
-            // (printing here is dumb because then you can't make a wasm module that doesn't import 'write')
-            // @println("tag=%, expected 0..<%", tag, max);
+    crash :: fn() Never = {
             panic("matched on invalid tag! Uninitialized memory?") 
-        }, unreachable())
     };
     @{
         arg_val := @[if(want_pointer, => @{}, => arg)];
         arg_ptr := @[if(want_pointer, =>arg, => @{ arg_val& })];
         tag_val := arg_ptr.tag().raw();
-        // TODO: when safety checks are on don't do the default branch even for garbage tag.
-        //       in fast mode tho make that UB.  -- Jul 9
         @[{
             
             // If there's no @default, this is hit by invalid tags. 
-            // TODO: when enabled just used @safety? so the message isn't different when you have a @default branch. 
-            default: FatExpr = @{ crash(tag_val, @[@literal varients.len]) };
-            count := 0;
+            default := @{ crash() };
             i := stmts.len.sub(1);
             first := true;
             had_default := false;
             
             while(=> i.ge(0)) {
-                continue :: local_return;
-                stmt: *FatStmt = stmts.index(i); 
+                stmt := stmts.index(i); 
                 i -= 1;
                 
                 expand_case_body :: fn(closure: *Func) void => {
@@ -112,20 +100,17 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
                     // If they don't put an argument, just ignore the value. Have to set the type because it defaults to void. 
                     bindings := closure.arg.bindings.items();
                     if bindings.len == 1 {
-                        first := bindings[0]&;
-                        infer := first.ty&.is(.Infer);
-                        no_name := first.name&.is(.None); 
-                        if infer.or(no_name) {
+                        first := bindings[0]&; 
+                        if first.ty&.is(.Infer) || first.name&.is(.None) {
                             first.ty = (Finished = ty);
                         };
                     };
                     loc := closure.loc;
                     case_access := make_field_access(@{ arg_ptr }, name, loc, want_pointer);
-                    count = count + 1;
-                    callable: FatExpr = (expr = (Closure = closure), loc = closure.loc, ty = UnknownType, done = false); 
+                    callable: FatExpr = (expr = (Closure = closure), loc = loc); 
                     case := (case_value, @{ @[callable](@[case_access]) } );
                     @debug_assert(case._1.expr&.is(.Block));
-                    case._1.expr.Block.result.loc = closure.loc;
+                    case._1.expr.Block.result.loc = loc;
                     cases&.push(case);
                 };
                 
@@ -142,46 +127,45 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
                     if handler_body.expr&.is(.Closure) {
                         expand_case_body(handler_body.expr.Closure);
                     } else {
-                        // TODO: better error message if its a call because they forgot a semi-colon. 
-                        
-                        branch := handler_body.expr.PrefixMacro&;
-                        name := macro_at_default_helper(handler_body);
-                        arg := branch.arg;
-                        action := branch.target[];
-                        if !name.eq(@symbol default) {
-                            debug_log_ast(handler_body[]);
-                            println(name.str()); // TODO
-                            compile_error("unhandled prefix in @match", branch.handler.loc);
-                        };
-                        assert(first, "@default must be the last handler in @match");
-                        // Note: we throw away the starting body
-                        if safety_check_enabled(.InvalidTag) {
-                            default = @{ 
-                                @safety(.InvalidTag) tag_val.ult(@[@literal varients.len]);
-                                @[action]() 
-                            };
-                        } else {
-                            default = @{ @[action]() };
-                        };
+                        create_default_case(default&, handler_body, varients.len, first, @{ tag_val });
                         had_default = true;
                     };
                     stmt.stmt = .Noop;
                 };
             };
             // TODO: check that the handlers are unique! this just checks that its the right number of them. 
+            count := cases.len;
             @ct_assert(!count.ne(varients.len).and(not(had_default)), loc, "wrong number of @match cases",);
             @ct_assert(not(had_default).or(count.lt(varients.len)), loc, "@default but too many @match cases");
             
-            // TODO: could do this in release mode. same speed but saves 10k. 
-            //if cases.len > 0 && !had_default {
-            //    default = cases[cases.len - 1]._1;
-            //    cases.len -= 1;
-            //};
-            
+            swap_default_case(cases&, default&, had_default);
             make_switch(@{ tag_val }, default, cases)
         }]
     }.no_trace()
 }
+
+create_default_case :: fn(default: *FatExpr, handler_body: *FatExpr, varients_len: i64, first: bool, tag_val: FatExpr) void = {
+    branch := handler_body.expr.PrefixMacro&;
+    name := macro_at_default_helper(handler_body);
+    arg := branch.arg;
+    action := branch.target[];
+    if !name.eq(@symbol default) {
+        debug_log_ast(handler_body[]);
+        debug_log_str(name.str()); // TODO
+        compile_error("unhandled prefix in @match", branch.handler.loc);
+    };
+    if !first {
+        compile_error("@default must be the last handler in @match", branch.handler.loc);
+    };
+    if safety_check_enabled(.InvalidTag) && varients_len > 0 {
+        default[] = @{ 
+            @safety(.InvalidTag) @[tag_val].ult(@[@literal varients_len]);
+            @[action]() 
+        };
+    } else {
+        default[] = make_unit_call_expr(action);
+    };
+};
 
 fn find_used_tagged(type: Type, count: *i64, s: *Symbol, out: *Type) void = {
     info := get_type_info_ref(type);
@@ -225,7 +209,7 @@ fn macro_at_default_helper(handler_body: *FatExpr) Symbol = {
 fn make_switch(value: FatExpr, default: FatExpr, cases: List(Ty(i64, FatExpr))) FatExpr = {
     default_box := ast_alloc().boxed(FatExpr, default);
     value_box := ast_alloc().boxed(FatExpr, value);
-    switch: FatExpr = (expr = (Switch = (value = value_box, default = default_box, cases = cases.as_raw())), loc = value.loc, ty = UnknownType, done = false); 
+    switch: FatExpr = (expr = (Switch = (value = value_box, default = default_box, cases = cases.as_raw())), loc = value.loc); 
     switch
 }
 
@@ -240,7 +224,6 @@ fn match_on_enum(arg: FatExpr, info: *TypeInfo, stmts: [] FatStmt) FatExpr = {
     @{
         @[{
             default: FatExpr = @{ crash() }; 
-            count := 0;
             i := stmts.len.sub(1);
             first := true;
             had_default := false;
@@ -251,8 +234,7 @@ fn match_on_enum(arg: FatExpr, info: *TypeInfo, stmts: [] FatStmt) FatExpr = {
                 
                 expand_case_body :: fn(closure: *Func) void => {
                     index := tag_value(arg.ty, closure.name);  // just make sure the name exists
-                    count = count.add(1);
-                    callable: FatExpr = (expr = (Closure = closure), loc = closure.loc, ty = UnknownType, done = false); 
+                    callable: FatExpr = (expr = (Closure = closure), loc = closure.loc); 
                     case := (index, @{ @[callable]() } );
                     @debug_assert(case._1.expr&.is(.Block));
                     case._1.expr.Block.result.loc = closure.loc;
@@ -272,60 +254,53 @@ fn match_on_enum(arg: FatExpr, info: *TypeInfo, stmts: [] FatStmt) FatExpr = {
                     if handler_body.expr&.is(.Closure) {
                         expand_case_body(handler_body.expr.Closure);
                     } else {
-                        // TODO: better error message if its a call because they forgot a semi-colon. 
-                        name := macro_at_default_helper(handler_body);
-                        branch := handler_body.expr.PrefixMacro&;
-                        arg := branch.arg;
-                        action := branch.target[];
-                        assert(name.eq(@symbol default), "unhandled prefix in @match");
-                        assert(first, "@default must be the last handler in @match");
-                        // Note: we throw away the starting body
-                        if safety_check_enabled(.InvalidTag) {
-                            default = @{ 
-                                // TODO: to do this you need a var for it but then you can't get free fold away in sema because it never
-                                //       knows the arg is constant. 
-                                //@safety(.InvalidTag) tag_val < @[@literal varients.len];
-                                @[action]() 
-                            };
-                        } else {
-                            default = @{ @[action]() };
-                        };
+                        // TODO: to do the invalidtag check you need a var for it but then you can't get free fold away in sema because it never
+                        //       knows the arg is constant. (also then this wouldn't work for non-sequential enum)
+                        create_default_case(default&, handler_body, -1, first, @{});
                         had_default = true;
                     };
                     stmt.stmt = .Noop;
                 };
             };
             // TODO: check that the handlers are unique! this just checks that its the right number of them. 
+            count := cases.len;
             @ct_assert(!count.ne(varients.len).and(not(had_default)), arg.loc, "wrong number of @match cases.",);
             @ct_assert(not(had_default).or(count.lt(varients.len)), arg.loc, "@default but too many @match cases");
+            
+            swap_default_case(cases&, default&, had_default);
             make_switch(@{ @[arg].raw() }, default, cases)
         }]
     }
 }
 
+swap_default_case :: fn(cases: *List(Ty(i64, FatExpr)), default: *FatExpr, had_default: bool) void = {
+    if !safety_check_enabled(.InvalidTag) && cases.len > 0 && !had_default {
+        // sema does default first, don't change compilation order.
+        default[] = cases[0]._1;
+        // this is a Disrespectful version of ordered_remove(0), only works because ast_alloc is an arena. 
+        // (also can't call ordered_remove().unwrap() this early)
+        cases.maybe_uninit = cases.maybe_uninit.rest(1);
+        cases.len -= 1;
+    };
+};
+
 // @ct_assert(cond, Span, "error message %", args);
 fn ct_assert(arg: FatExpr) FatExpr #macro = {
-    assert(arg.expr&.is(.Tuple), "@assert___ expected multiple args");
-    parts := arg.expr.Tuple.items();
-    assert(parts.len >= 3, "not enough arguments");
+    parts := arg&.items();
+    @if(parts.len < 3) compile_error("not enough arguments", arg.loc);
+    @if(IS_BOOTSTRAPPING) assert(true, "");  // :UpdateBoot
+    
     cond := parts[0];
     span := compile_ast(parts[1]);
     if !(span.ty == Span) {
         compile_error("Expected type 'Span' for error location", span.loc);
     };
-    
-    @{
-        @if(!@[cond]) {
-            out: List(u8) = list(temp());
-            @[if(parts.len == 3, => @{
-                out&.push_all(@[parts[2]]);
-            }, => @{()} )];
-            @[if(parts.len > 3, => {
-                format_into(@{ out& }, parts.rest(2), arg.loc)
-            }, => @{()} )];
-            compile_error(out.items(), @[span]);
-        };
-    }
+    msg := @if(parts.len == 3, parts[2], @{
+        out := u8.list(temp());
+        @[format_into(@{ out& }, parts.rest(2), arg.loc)];
+        out.items()
+    });
+    @{ @if(!@[cond]) compile_error(@[msg], @[span]); }
 }
 
 fn if_let(arg: FatExpr, handler: FatExpr) FatExpr #macro = @{
@@ -342,10 +317,10 @@ fn if_let(arg: FatExpr, handler: FatExpr) FatExpr #macro = @{
 fn switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
     handlers := handlers.expr.Block.body.items();
     arg = compile_ast(arg);
-    inspected_ty: Type = arg.ty; // TODO: if you dont have the type hint you get confusing error message trying to call fn as(Type, Ast) becuase its the unique ffi TypeId type. -- Apr 21 
+    inspected_ty := arg.ty;
     body := @{};
     first := true;
-    i := handlers.len().sub(1);
+    i := handlers.len() - 1;
     had_default := false;
     
     // Declaring variables is weird because name resolution has already run. 
@@ -353,66 +328,71 @@ fn switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
     @{
         arg_var := @[arg];
         @[{
-            while(=> i.ge(0)) {
-                stmt: *FatStmt = handlers.index(i); 
-                // TODO: typecheck err message (forgot to deref !tag) points at the wrong location in the expression. 
-                if stmt.stmt&.is(.Eval) {
-                    handler_body := stmt.stmt.Eval&;
-                    branch := handler_body.expr.PrefixMacro&;
-                    macro := branch.handler;
-                    name := macro_at_default_helper(handler_body);
-                    arg := branch.arg;
-                    action := branch.target[];
-                    
-                    // Sadly this can't use @switch (unless I do a weird bootstrapping thing on a much more granular level). 
-                    if(name.eq(@symbol case)) {
-                        // TODO: probably want to require arg to be constant so it could eventually become a jump table. 
-                        // TODO: improve error message if you try to pass the ast of a type instead of the type. alas I chose the same name as the as macro so it still tpyechecks. -- Apr 21
-                        cond := @{ eq(arg_var, @[as(inspected_ty, arg[])]) };
-                        body = @{ @if(@[cond], @[action](), @[body]) };
-                    } {
-                        if(name.eq(@symbol default)) {
-                            if(first) {
-                                // TODO: dont pass it if the function wants void arg.
-                                // If expansion err here: forgot argument for default branch handler?  // TODO: give error message
-                                assert(action.expr&.is(.Closure), "@switch @default: expected closure");
-                                
-                                assert(action.expr.Closure.arg.bindings.len == 1, "@switch @default: expected single arg. (parser treats (fn name() ..) as having unnamed arg automatically)");
-                                arg := action.expr.Closure.arg.bindings[0]&;
-                                if arg.name&.is(.None) {
-                                    body = @{ @[action]() };
-                                } else {
-                                    body = @{ @[action](arg_var) };
-                                };
-                                had_default = true;
-                                
-                            } else {
-                                compile_error("@default must be the last handler in @switch", stmt.loc);
-                            };
-                        }{
-                            if name == @symbol inclusive {
-                                cond := @{
-                                    min, max := @[as(Ty(inspected_ty, inspected_ty), arg[])];
-                                    arg_var.ge(min).and(arg_var.le(max))
-                                };
-                                body = @{ @if(@[cond], @[action](), @[body]) };
-                            } else {
-                                // TODO: try expanding the macro, maybe its a user added one and would create valid branches. 
-                                compile_error("unhandled prefix in @switch", stmt.loc);
-                            };
-                        };
-                    };
-                    first = false;
+            while => i >= 0 {
+                continue :: local_return;
+                stmt := handlers.index(i); 
+                i = i - 1;
+                if !stmt.stmt&.is(.Eval) {
+                    @if(!stmt.stmt&.is(.Noop)) compile_error("expected eval stmt in @switch", stmt.loc);
+                    continue();
                 };
-                i = i.sub(1);
+                handler_body := stmt.stmt.Eval&;
+                branch := handler_body.expr.PrefixMacro&;
+                macro := branch.handler;
+                name := macro_at_default_helper(handler_body);
+                arg := branch.arg;
+                action := branch.target[];
+                
+                // Sadly this can't use @switch (unless I do a weird bootstrapping thing on a much more granular level). 
+                ok := false;
+                if name == (@symbol case) {
+                    ok = true;
+                    cond := @{ arg_var == @[as(inspected_ty, arg[])] };
+                    body = @{ @if(@[cond], @[action](), @[body]) };
+                };
+                if name == (@symbol default) {
+                    ok = true;
+                    @if(!first) compile_error("@default must be the last handler in @switch", stmt.loc);
+                    @if(!action.expr&.is(.Closure)) compile_error("@switch @default: expected closure", stmt.loc);
+                    b := action.expr.Closure.arg.bindings&;
+                    @if(b.len != 1) compile_error("@switch @default: expected single arg. (parser treats (fn name() ..) as having unnamed arg automatically)", stmt.loc);
+                    arg := b[0]&;
+                    if arg.name&.is(.None) {
+                        body = make_unit_call_expr(action);
+                    } else {
+                        body = make_call_expr(action, @{ arg_var });
+                    };
+                    had_default = true;
+                };
+                if name == @symbol inclusive {
+                    ok = true;
+                    cond := @{
+                        min, max := @[as(Ty(inspected_ty, inspected_ty), arg[])];
+                        arg_var >= min && arg_var <= max
+                    };
+                    body = @{ @if(@[cond], @[action](), @[body]) };
+                };
+                if !ok {
+                    // TODO: try expanding the macro, maybe its a user added one and would create valid branches. 
+                    compile_error("unhandled prefix in @switch", stmt.loc);
+                };
+                first = false;
             };
             if !had_default {
-                compile_error("@switch requires a @default branch", arg.loc);
+                compile_error("@switch requires a @default branch (use @match for exhaustive enum)", arg.loc);
             };
             body
         }]
     }
 }
+
+make_call_expr :: fn(f: FatExpr, arg: FatExpr) FatExpr = (expr = (Call = (
+    f = ast_alloc().boxed(FatExpr, f), 
+    arg = ast_alloc().boxed(FatExpr, arg)),
+), loc = f.loc);
+
+make_unit_call_expr :: fn(f: FatExpr) FatExpr = 
+    make_call_expr(f, @literal ());
 
 #macro fn inline_switch(arg: FatExpr, target: FatExpr) FatExpr = {
     @ct_assert(target.expr&.is(.Block), target.loc, "@inline_switch expected Block of handlers");
@@ -433,7 +413,7 @@ fn switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
             @default => compile_error(@tfmt("expected @case / @default but found %", name.str()), stmt.loc); 
         }
         if matches {
-            return @{ @[branch.target[]]() };
+            return make_unit_call_expr(branch.target[]);
         }
     };
     compile_error("@inline_switch no match and no @default branch", target.loc)
@@ -470,14 +450,15 @@ fn enum(names: FatExpr) FatExpr = {
     cases: List(Binding) = list(ast_alloc());
     parts := names&.items();
     enumerate(parts) {i, part|
-        name := part.ident() || compile_error("Expected symbol in @enum", names.loc); // TODO: this should work as not a closure
+        name := part.ident() || compile_error("Expected symbol in @enum", names.loc);
         cases&.push(binding(name, i));
     };
-
-    varients := @{ (a = 1) };
-    varients := varients.expr.Block.result[];
-    cases := cases.items();
-    varients.expr.StructLiteralP.bindings = (cap = cases.len, ptr = cases.ptr, len = cases.len);
+    varients: FatExpr = (
+        expr = (StructLiteralP = (
+            bindings = cases.as_raw(),
+            loc = names.loc,
+        )), loc = names.loc,
+    );
     
     @{ @enum(i64) @[varients] }
 }
@@ -670,7 +651,7 @@ fn late(e: FatExpr) FatExpr #macro = e;
 // TODO: define the syntax as a call to this function. maybe get rid of the syntax. cause its a pain.
 fn run(e: FatExpr) FatExpr #macro = {
     e := ast_alloc().boxed(FatExpr, e);
-    (expr = (ConstEval = e), loc = e.loc, ty = UnknownType, done = false)
+    (expr = (ConstEval = e), loc = e.loc)
 };
 
 // This lets you use comptime code to construct an expression and embed it without making a #macro function. 
@@ -681,9 +662,7 @@ fn expand(e: FatExpr) FatExpr #macro =
 fn inline_for(container: FatExpr, body: FatExpr) FatExpr #macro = {
     container := compile_ast(@{ :: @[container] });
     len := (const_eval(i64)(@{ @[container].len() }));
-    if len == 0 {
-        return(@{});
-    };
+    @if(len == 0) return(@{});
     
     ::if(FatExpr);
     // Yikes this is ugly. but's sadly index() has hella overloads 
@@ -698,33 +677,21 @@ fn inline_for(container: FatExpr, body: FatExpr) FatExpr #macro = {
     actions: List(FatExpr) = list(len, ast_alloc());
     range(0, len) { i | 
         // the no_inline means it only needs a lit_fn the first time indexer is compiled, then it can use a dyncall. 
-        actions&.push(@{ @[body](@run @no_inline @[indexer](@[container], @[@literal i])) });
+        arg := @{ @run @no_inline @[indexer](@[container], @[@literal i]) };
+        actions&.push(make_call_expr(body, arg));
     };
-    // TODO: dumpster fire garbage error message if you try to make a single length tuple
-    //       "Expr::Tuple should have struct type"
-    container.expr = @if(actions.len == 1, actions[0].expr, (Tuple = actions.as_raw()));
-    container.ty = UnknownType; 
-    container.done = false;
-    container
+    (expr = (Tuple = actions.as_raw()), loc = body.loc)
 }
 
 fn inline_range(min_max: FatExpr, body: FatExpr) FatExpr #macro = {
     min, max := const_eval(Ty(i64, i64))(min_max);
-    
-    actions: List(FatExpr) = list(ast_alloc());
+    @ct_assert(max >= max, min_max.loc, "negative sized @inline_range");
+    @if(max == min) return(@{});
+    actions: List(FatExpr) = list(max - min, ast_alloc());
     range(min, max) { i | 
-        actions&.push(@{ @[body](@[@literal i]) });
+        actions&.push(make_call_expr(body, @literal i));
     };
-    // TODO: dumpster fire garbage error message if you try to make a single length tuple
-    //       "Expr::Tuple should have struct type"
-    if actions.len == 1 {
-        min_max.expr = actions[0].expr;
-    } else {
-        min_max.expr = (Tuple = actions.as_raw());
-    };
-    min_max.ty = UnknownType; 
-    min_max.done = false;
-    min_max
+    (expr = (Tuple = actions.as_raw()), loc = body.loc)
 }
 
 fn inline_match(container: FatExpr, target: FatExpr) FatExpr #macro = {
@@ -738,7 +705,7 @@ fn inline_match(container: FatExpr, target: FatExpr) FatExpr #macro = {
     is_ptr := false;
     tag_expr := @literal ();
     if info.is(.Ptr) {
-        enum_type = (@as(*Type) info.Ptr&)[];
+        enum_type = info.Ptr;
         info = get_type_info_ref(enum_type);
         is_ptr = true;
         tag_expr = @{ :: { a := @[container]; a.tag().raw() } };
@@ -777,9 +744,13 @@ fn inline_match(container: FatExpr, target: FatExpr) FatExpr #macro = {
                     first.ty = (Finished = ty);
                 };
             };
-            // TODO: allow non-ptr
-            case_access := make_field_access(@{ @[container][] }, name, loc, is_ptr);
-            callable: FatExpr = (expr = (Closure = closure), loc = closure.loc, ty = UnknownType, done = false); 
+            if is_ptr {
+                container = @{ @[container][] };
+            } else {
+                container = @{ @static @[container] };
+            };
+            case_access := make_field_access(container, name, loc, is_ptr);
+            callable: FatExpr = (expr = (Closure = closure), loc = closure.loc); 
             @{ @[callable](@[case_access]) }
         };
         
@@ -788,13 +759,14 @@ fn inline_match(container: FatExpr, target: FatExpr) FatExpr #macro = {
             fn Eval(handler_body) => {
                 @match(handler_body.expr&) {
                     fn Closure(closure) => return(expand_case_body(closure[]));
+                    // TODO: assert default is last
                     fn PrefixMacro(branch) => {
                         macro := branch.handler;
                         name := macro.ident() || compile_error("expected @default.", handler_body.loc);
                         arg := branch.arg;
                         action := branch.target[];
                         @ct_assert(name == @symbol default, macro.loc, "unhandled prefix in @inline_match");
-                        return(@{ @[action]() });
+                        return make_unit_call_expr(action);
                     }
                     @default => {
                         debug_log_ast(handler_body[]);
@@ -847,7 +819,7 @@ fn if_else(handlers: FatExpr) FatExpr #macro = {
     else := else.expr.PrefixMacro&;
     ::AutoEq(?Symbol); ::RefEq(?Symbol);
     @ct_assert(else.handler.ident() == (Some = @symbol else), else.handler.loc, no_else);
-    body := @{ @[else.target[]]() }; // TODO: this will get confusing if compiler swaps unit target with arg sooner. 
+    body := make_unit_call_expr(else.target[]);
     handlers.len -= 1;
     
     i := handlers.len - 1;
@@ -982,26 +954,21 @@ fn items(e: *FatExpr) []FatExpr = {
     (ptr = e, len = 1)
 }
 
-fn make_block(owned_stmts: List(FatStmt), result: FatExpr) FatExpr = {
+fn make_block(owned_stmts: RawList(FatStmt), result: FatExpr) FatExpr = {
     body := @{};
-    @debug_assert(body.expr&.is(.Block));
-    body.expr.Block.body = owned_stmts.as_raw();
-    body.expr.Block.result[] = result;
+    @if(::(__driver_abi_version > 1512)) @debug_assert(body.expr&.is(.Block));
+    body.expr.Block.body = owned_stmts;
+    body.expr.Block.result = ast_alloc().boxed(FatExpr, result);
     body.loc = result.loc;
     body
 }
 
 fn exprs_as_void(exprs: List(FatExpr), loc: Span) FatExpr = {
-    e: FatExpr = (expr = (Tuple = exprs.as_raw()), loc = loc, ty = UnknownType, done = false);
-
+    e: FatExpr = (expr = (Tuple = exprs.as_raw()), loc = loc);
     owned_stmts := ast_alloc().alloc_init(FatStmt, 1, fn(_) => (stmt = (Eval = e), loc = loc));
     result := @literal ();
-    
-    body := @{};
-    body.expr.Block.body = owned_stmts.as_raw_list();
-    body.expr.Block.result[] = result;
-    body.loc = loc;
-    body
+    result.loc = loc;
+    make_block(owned_stmts.as_raw_list(), result)
 }
 
 fn get_from_pattern(e: *FatExpr, name: Symbol) ?*FatExpr = {
@@ -1152,7 +1119,7 @@ fn no_trace(e: FatExpr) FatExpr = {
 // a bit of sugar to avoid field name spam (often nice when passing context to a closure)
 fn anon_literal(e: FatExpr) FatExpr #macro = {
     USAGE :: "@anon_literal(a = b, _ = c); => { S :: @struct(a: @type b, c: @type c); @as(S) (a = b, c = c) };";
-    X :: fn() FatExpr => (expr = (StructLiteralP = (bindings = empty(), loc = e.loc)), loc = e.loc, ty = UnknownType, done = false);
+    X :: fn() FatExpr => (expr = (StructLiteralP = (bindings = empty(), loc = e.loc)), loc = e.loc);
     append :: fn(it, b: Binding) => it.expr.StructLiteralP.bindings&.push(b, ast_alloc());
     
     def, use := (X(), X());
