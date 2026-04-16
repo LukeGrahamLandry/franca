@@ -254,7 +254,7 @@ init_root_task :: fn(tt: *TranslationTable, elf_bytes: []u8, device_tree_bytes: 
         mem.slice(0, device_tree_bytes.len).copy_from(device_tree_bytes);
         u8.int_from_ptr(mem.ptr)
     };
-    gpr[31] = {
+    stack_end, stack_start := {
         // see threads/allocate_stack
         padded_stack_size := 1.shift_left(franca_required_stack_bits + 1);
         s := vmap_reserve(task.mem&, padded_stack_size / kernel.page_size);
@@ -264,9 +264,10 @@ init_root_task :: fn(tt: *TranslationTable, elf_bytes: []u8, device_tree_bytes: 
         s := @if(a > s, a, b);
         
         // stack grows left, so start at the right of the allocation. 
-        s += stack_size;
-        s
+        (s, s + stack_size)
     };
+    gpr[3] = stack_end;
+    gpr[31] = stack_start;
     task.mcontext.elr = launder_to_user_pointer(user_exec);
     task.state = .Runnable;
 }
@@ -551,8 +552,8 @@ barrier :: AsmFunctionArmOnly(fn() void = (), @const_slice(
     ret(),
 ));
 
-user_exec :: fn(elf_bytes: []u8, devicetree: *u8) void = {
-    c := get_current_thread()[].first_environment&;
+user_exec :: fn(elf_bytes: []u8, devicetree: *u8, thread: *import("@/lib/sys/threads.fr").Thread) void = {
+    c := thread.first_environment&;
     c.panic_hook = print_and_exit1;
     c.prefer_syscalls = true;
     c.current_os = 1;

@@ -1,4 +1,13 @@
 
+## (Apr 15)
+
+- experimented with making get_stack_base_for_tls an intrinsic. 
+  idea was to let backend reuse the value instead of masking off a new slot everytime,
+  but didn't work well because then need to mark the whole chain tls->temp, etc. as #inline 
+  because the backend does it too late. with those saved ~5k but not faster. not worth it rn. 
+  might bring it back because could let you change stack size that way if compiled differently for comptime vs runtime. 
+- since im looking at asm anyway: a bit of inline fairy dust for things that offend me. 
+
 ## (Apr 14)
 
 - modernizing some of lib/macros.fr

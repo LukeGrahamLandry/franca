@@ -1,4 +1,5 @@
 
+- should at least have an option to put more work into sorting the call graph before sending to the backend so inlining works better.  
 - see "things to improve" comment in examples/disassemble.fr
 - examples/gpu/terminal: there's some situation where the child crashes and it doesn't notice so it thinks something is already running forever? 
   - for kill/int, on linux it's -pid to send to whole thread group. 
@@ -628,6 +629,14 @@ TODO: tests that @import_symbol give you null for a missing weak symbol (instead
 TODO: fallback to the syscall version automatically if a weak symbol is unavailable
 TODO: @import_symbol of non-existant throws TraceTrap at comptime
 TODO: be consistant about spelling: zeros or zeroes
+
+## random failures
+
+``` // linux-arm. maybe just caching something i shouldn't when running tests on multiple targets? rm target/franca/cache seems to be what fixes it
+[tests/exe/c_ffi.fr]
+panic! 
+Assertion Failed. Expected (-43 == 6
+```
 
 ## COMPILER BUG 
 
