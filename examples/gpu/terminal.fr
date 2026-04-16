@@ -10,8 +10,17 @@
 // demos that want to let you interact with the compiler the same as when it's a native program. 
 // 
 
-// TODO: fix stbtruetype import_c wasm cfg
-UGLY :: false || query_current_arch() == .wasm32;
+// run commands that end with a semicolon as franca code. 
+FEAT_REPL :: true;  
+// use import_c+stb_truetype+jetbrainsmono instead of the retro sokol_debugtext/cpc one. 
+FEAT_FONT :: true   
+    && query_current_arch() != .wasm32;  // TODO: fix stbtruetype import_c wasm cfg; note: wrong when cross compiling
+// when running a program to dump a binary format:
+// - false: exec franca and jit them as needed (runtime dependency on franca+source). 
+// -  true: statically compile them into the terminal binary and re-exec itself. 
+FEAT_BUNDLE_OPENERS :: false 
+    && !IS_JITTED;  // if jitted, you must have a franca so it doesn't matter
+IS_JITTED :: cli_args().contains(fn(it) => it[] == "-jit");
 
 #use("@/graphics/lib.fr");
 ReplFns :: import_module("@/examples/repl.fr");
@@ -72,6 +81,7 @@ on_init :: fn(userdata: rawptr) void = {
         environment = Easy'glue_environment(sapp),
         allocator = allocator,
     );
+    @if(FEAT_REPL) {
         // TODO: this can't use @source_file_name() because of the web demo
         prelude := "#include_std(\"lib/core.fr\");#include_std(\"examples/gpu/terminal.fr\");\n";
         prelude := @tfmt("%\nSOKOL_BACKEND :: RenderBackend.%;\n", prelude, SOKOL_BACKEND);
@@ -84,6 +94,7 @@ on_init :: fn(userdata: rawptr) void = {
             fr'vtable'fmt_error(fr.data, res.Err, out&);
             panic(out.items());
         };
+    };
     state.scratch = list(u8, 4*1024*1024, allocator);  // :BigOutputBuffer
     state.lock_to_bottom = true;
     state.history_index = 0;
@@ -128,7 +139,7 @@ on_init :: fn(userdata: rawptr) void = {
     };
     
     // TODO: if ugly still make non-ascii bytes filled in cells (especially 0 because i use that to draw rectangles)
-    @if(UGLY) return();
+    @if(!FEAT_FONT) return();
     font_pixels := load_font_pixels(state.scale, general_allocator());
     font_img: Sg.Image = state.sg&.make(
         width = state.scale.int().intcast()*256,
@@ -774,10 +785,14 @@ open_link :: fn(full_link: Str) void = {
     
     dest: *TextBuffer = empty(general_allocator());
     old := push_as_current_buffer(dest);
-    if choose_opener_for(contents) { program |
-        // not using the embedded repl to execute the program because this way it doesn't crash the temrinal if the opener parser asserts. 
-        // TODO: instead of relying on `franca` being in path, have a cli arg that lets it re-exec itself to do this. 
-        cmd := @tfmt("franca % %", program, link);
+    if choose_opener_for(contents) { i |
+        program := opener_programs[i];
+        // not using the embedded repl to execute the program because this way it doesn't crash the terminal if the opener parser asserts. 
+        self_path := get_executable_path(temp());
+        franca := @if(IS_JITTED, self_path, "franca");
+        cmd := @if(FEAT_BUNDLE_OPENERS, 
+            @tfmt("\"%\" -opener % \"%\"", self_path, program, link),
+            @tfmt("\"%\" % \"%\"", franca, program, link));
         dest.append_string(cmd);
         exec(dest, cmd);
     } else {
@@ -847,22 +862,35 @@ pop_to_previous_buffer :: fn() void = {
     };
 }
 
-// TODO: option to embed these programs so the terminal binary doesn't have runtime dependencies
-choose_opener_for :: fn(contents: []u8) ?Str = {
+opener_programs :: @const_slice(
+    "examples/dump_macho.fr", "examples/dump_elf.fr", "backend/meta/dump_bin.fr", 
+    "examples/dump_wasm.fr", "examples/dump_devicetree.fr", "examples/show_tar.fr",
+);
+choose_opener_for :: fn(contents: []u8) ?i64 = {
     @if(contents.len < 8) return(.None);
     magic8 := contents.peek_type(u64)[];
     magic4: u32 = magic8.trunc();
-    @if(magic4 == import("@/backend/macho/bits.fr").macho_magic) return(Some = "examples/dump_macho.fr");
-    @if(magic4 == import("@/backend/elf/bits.fr").MAGIC) return(Some = "examples/dump_elf.fr");
-    @if(magic8 == import("@/backend/incremental.fr").MAGIC) return(Some = "backend/meta/dump_bin.fr");
-    @if(magic8 == import("@/backend/wasm/bits.fr").MAGIC) return(Some = "examples/dump_wasm.fr");
-    @if(magic4.byte_swap() == import("@/examples/os/drivers/devicetree.fr").MAGIC) return(Some = "examples/dump_devicetree.fr");
-    @if(import("@/lib/encoding/gzip.fr")'header_size(contents).is_some()) return(Some = "examples/show_tar.fr");
-    @if(contents.len > 512 && contents.peek_type(import("@/lib/encoding/tar.fr").Header)[].magic&.items().slice(0, 5) == "ustar") return(Some = "examples/show_tar.fr");
-    @if(import("@/lib/encoding/pkzip.fr")'find(contents).is_some()) return(Some = "examples/show_tar.fr");
-    
-    .None
+    (Some = @if_else {
+        @if(magic4 == import("@/backend/macho/bits.fr").macho_magic) => 0;
+        @if(magic4 == import("@/backend/elf/bits.fr").MAGIC) => 1;
+        @if(magic8 == import("@/backend/incremental.fr").MAGIC) => 2;
+        @if(magic8 == import("@/backend/wasm/bits.fr").MAGIC) => 3;
+        @if(magic4.byte_swap() == import("@/examples/os/drivers/devicetree.fr").MAGIC) => 4;
+        @if(import("@/lib/encoding/gzip.fr")'header_size(contents).is_some()) => 5;
+        @if(contents.len > 512 && contents.peek_type(import("@/lib/encoding/tar.fr").Header)[].magic&.items().slice(0, 5) == "ustar") => 5;
+        @if(import("@/lib/encoding/pkzip.fr")'find(contents).is_some()) => 5;
+        @else => return(.None);
+    })
 }
+
+run_bundled_opener :: fn(program: Str) void = {
+    inline_for opener_programs { $it |
+        // these main functions all use read_file_from_last_arg
+        S :: import(@run str(sym(@tfmt("@/%", it[]))));
+        @if(it[] == program) return(S'main());
+    };
+    @panic("unknown -opener %", program);
+};
 
 find_link_at :: fn(b: *TextBuffer, line: i64, col: i64) ?Ty(i64, i64, i64) = {
     if(line >= b.lines.len || line < 0, => return(.None));
@@ -927,6 +955,11 @@ main :: fn() void = {
             path := a[i + 1].str();
             state.save_file = (Some = path);
             // TODO: load if the file already exists?
+        };
+        if a[i] == "-opener" {
+            @assert(FEAT_BUNDLE_OPENERS, "'-opener' requires FEAT_BUNDLE_OPENERS=true");
+            @if(FEAT_BUNDLE_OPENERS) run_bundled_opener(a[i + 1].str());
+            Syscall'exit(0);
         };
         i += 1;
     };
@@ -1269,6 +1302,8 @@ push_history :: fn(raw_command: Str) void = {
 }
 
 exec_franca :: fn(buffer: *TextBuffer, raw_command: Str) void = {
+    @if(!FEAT_REPL) return(buffer.append_string("\n(error: FEAT_REPL=false)\n"));
+    
     if !raw_command.ends_with(";") {
         raw_command = buffer.lines&[buffer.lines.len - 1]&.str();
         buffer.append_string(";");
