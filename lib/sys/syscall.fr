@@ -5,8 +5,6 @@ pread :: @S("pread") fn(fd: Fd, buf: *u8, size: i64, offset: i64) i64Result #wea
 close :: @S("close") fn(fd: Fd) voidResult #libc #syscall(57, 3, 6);
 lseek :: @S("lseek") fn(fd: Fd, offset: i64, whence: Whence) i64Result #libc #syscall(62, 8, 199);
 remove :: Posix.remove;
-// TODO: mode is a bit flag of AccessMode
-access :: @S("access") fn(pathname: CStr, mode: i64) voidResult #libc #syscall(NOSYS, 21, 33); // TODO: bit flags
 // TODO: on linux the syscall version might be prefixed by "(unreachable)" which should be an error or something
 getcwd :: @S("getcwd") fn(ptr: *u8, len: i64) i64 #weak #libc #syscall(17, 79, NOSYS);
 fchmod :: @S("fchmod") fn(fd: Fd, mode: FileMode) voidResult #libc #syscall(52, 91, 124);
@@ -134,11 +132,6 @@ S :: fn(name: FatExpr, fid: FatExpr) FatExpr #macro = {
     func := get_function_ast(fid, true, true, true, false);
     func.name = name.sym();
 
-    @if(IS_BOOTSTRAPPING) {
-        // #syscall used to be a magic builtin thing
-        return(@literal fid);
-    };
-    
     // TODO: factor out and share with objective_c.fr/objc_method_import_body()
     pars := func.arg.bindings&.items();
     if func.finished_arg.Some == void {
@@ -239,24 +232,14 @@ fn syscall(arg: FatExpr) FatExpr #macro = {
     arg_expr_padded := @as(FatExpr) (expr = (Tuple = inst.as_raw()), ty = UnknownType, done = false, loc = loc);
     
     return @{
-        old :: __driver_abi_version <= 1512; // :UpdateBoot old compilers couldn't bake a DataSymbol
-    
         // TODO: the nice debloated one doesn't work on wasm. 
         //       if i keep it this way, i might as well always do the libc case here instead of also in choose_syscall? 
         @if(query_current_arch() == .wasm32, {
             @if(@[@literal no_libc]) crash();
-            callee := @if(old, 
-                @[legacy_callee],
-                bit_cast_unchecked(rawptr, @[@literal AsFnPtr(fid)], @as(rawptr) @[@literal vtable.libc]));
+            callee := @[legacy_callee];
             callee(@[arg_expr])
         }, {
-            vtable := @static {
-                vtable := @[@literal vtable];
-                @if(old) { vtable.libc = zeroed(rawptr); };
-                vtable
-            };
-            // old compiler didn't have const static anyway so don't have to use @static_mut
-            @if(old) { vtable.libc = @as(rawptr) @[legacy_callee]; };
+            vtable := @static @[@literal vtable];
             args := @array(@[arg_expr_padded]);
             result := choose_syscall(args&, vtable, @[perfer_sys], @[os], perform_syscall);
             bit_cast_unchecked(i64, @[@literal ret], result)
@@ -287,9 +270,6 @@ get_syscall_vtable_from_signeture :: fn(fid: FuncId, loc: Span) Ty(SyscallVTable
     };
     
     ::import("@/lib/sys/process.fr");
-    if IS_BOOTSTRAPPING {
-        can_syscall = false;
-    };
 
     arg, ret := (func.finished_arg.unwrap(), func.finished_ret.unwrap());
     // can't just call fid now that syscall.S is replacing the function body with ourself

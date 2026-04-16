@@ -288,7 +288,6 @@ swap_default_case :: fn(cases: *List(Ty(i64, FatExpr)), default: *FatExpr, had_d
 fn ct_assert(arg: FatExpr) FatExpr #macro = {
     parts := arg&.items();
     @if(parts.len < 3) compile_error("not enough arguments", arg.loc);
-    @if(IS_BOOTSTRAPPING) assert(true, "");  // :UpdateBoot
     
     cond := parts[0];
     span := compile_ast(parts[1]);
@@ -463,17 +462,6 @@ fn enum(names: FatExpr) FatExpr = {
     @{ @enum(i64) @[varients] }
 }
 
-::@if(IS_BOOTSTRAPPING, {
-
-#macro fn static(value: FatExpr) FatExpr = {
-    value = compile_ast(value);
-    @{ :: {
-        mem := ast_alloc().box_uninit(@[@literal value.ty]);
-        mem[] = @[value];
-        mem
-    }}
-}
-},{
 #macro fn static(value: FatExpr) FatExpr = {
     // debug_log_ast(value);
     loc := value.loc;
@@ -485,27 +473,22 @@ fn enum(names: FatExpr) FatExpr = {
     // TODO: error points here if value doesn't compile? (ex. @static_mut (?Str).None;)
     (@{ @run ptr_from_raw(@[@literal t], @[@literal p]) }).with_loc(loc)
 }
-});
 
 // TODO: the non-mut version should call into the compiler to mark it as constant in the PageMap, ditto
 // TODO: do that with string literals too. expose it for your own arrays. 
 // TODO: do that for @const_slice too
 // @static is mutable at comptime but not at runtime
+// for now this is a convention, eventually it will be enforced. 
 // TODO: backend ConstantData is only readonly for mach-o targets because elf permissions are done before relocations so it's a pain
 static_mut :: static;
 
 // @array(1, 2, 3) creates an Array(i64, 3)
-// because was a pain to make a constant one before you could coerce from tuple. 
+// this is mostly redundant now that you can coerce from tuple syntax. 
 // NOTE: this doesn't make a constant one unless you explicitly use '::'.
 #macro fn array(elements: FatExpr) FatExpr = {
-    @ct_assert(elements.expr&.is(.Tuple), elements.loc, "Expected @array(a, b, c, d)");
-    parts := elements.expr.Tuple.items();
-    len := parts.len;
-    first := compile_ast(parts[0]);
-    parts.set(0, first);
-    // :UpdateBoot Expr::Tuple coerces to array now 
-    @{ @as(Array(@[@literal parts[0].ty], @[@literal len])) 
-        @if(IS_BOOTSTRAPPING, init(@slice @[elements]), @[elements]) }
+    parts := elements&.items();
+    parts[0] = compile_ast(parts[0]);
+    @{ @as(Array(@[@literal parts[0].ty], @[@literal parts.len])) @[elements] }
 }
 
 // TODO: seperate out the parts that could work on any sequential enum. 
@@ -605,7 +588,6 @@ pack_strings :: fn(names: []Str) PackedStrings = {
         bytes.subslice(offs[i*2].zext(), offs[i*2 + 1].zext()).copy_from(n[]);
     };
     
-    if __driver_abi_version > 1263 {
         // TODO: this should be fixed in the compiler instead. can't force everyone to remember to do this. :FUCKED
         //       i don't correctly handling internal pointers in baked values if you bake the small one first. 
         //       a binary with both create_enum_name_table_outlined and enum_name_from_ordinal is compilation order dependent. 
@@ -617,7 +599,6 @@ pack_strings :: fn(names: []Str) PackedStrings = {
         // this should work instead of all that shit but somehow it breaks specifically for loading the repl in examples/terminal.fr. who fucking knows man. 
         // Type Error: expected @tagged(Some: @struct(_0: BakedVarId,_1: i32,),None: void,) but found @tagged(Some: @struct(_0: @struct(id: u32,),_1: i32,),None: void,)
         // bake_relocatable_slice_erased(u8.raw_from_ptr(bytes.ptr), bytes.len, u8);
-    };
     
     
     // TODO: should be able to .sym().str() on bytes but that breaks a test in a very confusing way.  -- Mar 12, 2025
@@ -840,7 +821,6 @@ fn if_else(handlers: FatExpr) FatExpr #macro = {
     body
 }
 
-:: @if(::has_feature("@franca/fewer_builtins")) {
     fn symbol(e: FatExpr) FatExpr #macro #outputs(Symbol) = 
         @literal e&.ident().unwrap();
     
@@ -850,7 +830,6 @@ fn if_else(handlers: FatExpr) FatExpr #macro = {
     
     fn Ty(a: Type, b: Type, c: Type, d: Type) Type #fold =
         Ty(@slice(a, b, c, d));
-};
 
 // this can't use @match because we want to use it from the implementation of @match
 fn ident(self: *FatExpr) ?Symbol = {
@@ -957,7 +936,7 @@ fn items(e: *FatExpr) []FatExpr = {
 
 fn make_block(owned_stmts: RawList(FatStmt), result: FatExpr) FatExpr = {
     body := @{};
-    @if(::(__driver_abi_version > 1512)) @debug_assert(body.expr&.is(.Block));
+    @debug_assert(body.expr&.is(.Block));
     body.expr.Block.body = owned_stmts;
     body.expr.Block.result = ast_alloc().boxed(FatExpr, result);
     body.loc = result.loc;
@@ -1108,8 +1087,6 @@ fn with_loc(e: FatExpr, loc: Span) FatExpr = {
 }
 
 fn no_trace(e: FatExpr) FatExpr = {
-    was_bootstrapping :: __driver_abi_version <= 1131;
-    @if(was_bootstrapping) return(e);
     if e.expr&.is(.Block) {
         it := e.expr.Block&;
         it.flags = it.flags.bit_or(1.shift_left(@as(i64) BlockFlags.NoTrace));

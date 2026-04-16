@@ -348,7 +348,6 @@ fn alloc_op(align_log2: i32) Qbe.O #inline = {
 
 // TODO: this is dumb. i should arrange the numbers so its just flipping a bit. 
 //       don't forget to change the order of jmps/flags/ops, iscmp ranges. :CmpOrder
-//       but have to wait until i'm not calling into qbe anymore.  -- Oct 8 
 
 
 // !cc
@@ -377,7 +376,6 @@ fn cmp_swap(cc: i32) i32 = {
 }
 
 /// Bit Sets ///
-// TODO: use unsigned division can be shifts (if negative you truncate towards 0 not -inifinity which a shift gives you)
 
 fn bsinit(bs: *Qbe.BSet, n: i64) void #inline = {
     n := (n + Qbe.NBit - 1).udiv(Qbe.NBit);
@@ -420,7 +418,6 @@ fn bscount(bs: *Qbe.BSet) u32 = {
     n
 }
 
-// TODO: make elt unsigned to the division is free
 fn bshas(bs: *Qbe.BSet, elt: i64) bool #inline = {
     ::ptr_utils(u64);
     @debug_assert(elt < bs.nt.zext() * Qbe.NBit, "bs oob");
@@ -448,8 +445,6 @@ fn bsmax(bs: *Qbe.BSet) i64 #inline =
     bs.nt.zext() * Qbe.NBit;
 
 fn init_bitset(size: i64) Qbe.BSet #inline = {
-    // this puts it in the pool thing that freeall deals with. i can just stick an arena allocator somewhere i guess and clear it at the end of the function. 
-    // is it worth resetting temp() between passes or should i just do it at the end and not deal with it? 
     s := Qbe.BSet.zeroed();
     bsinit(s&, size); 
     s
@@ -673,7 +668,7 @@ fn use_symbol(m: *QbeModule, id: Qbe.Sym, $body: @Fn(s: *SymbolInfo) void) void 
     @debug_assert(!m.is_null(), "null module???");
     @debug_assert(m.initialized, "uninit module %", QbeModule.raw_from_ptr(m));
     
-    bid: i64 = (@as(i64) id.id.zext()).bit_and(IMask);  // :UpdateBoot
+    bid: i64 = id.id.zext().bit_and(IMask);
     bucket := m.symbols[bid]&;
     old := m.lock_bucket(bucket);
     idx := id.id.shift_right_logical(IBits);
@@ -692,7 +687,7 @@ fn lock_bucket(m: *QbeModule, bucket: *SymbolBucket) u32 = {
 // :ThreadSafety you can't call this one
 fn get_symbol_info(m: *QbeModule, id: Qbe.Sym) *SymbolInfo = {
     @debug_assert(m.fixups_locked, "this is not threadsafe");
-    bid: i64 = (@as(i64) id.id.zext()).bit_and(IMask);
+    bid: i64 = id.id.zext().bit_and(IMask);
     bucket := m.symbols[bid]&;
     idx: u32 = id.id.shift_right_logical(IBits);
     bucket.data.index(idx.zext())
@@ -1154,7 +1149,6 @@ fn for_fields(t: *Qbe.Typ, i: *i64, $body: @Fn(tag: *Qbe.FieldType, len: u32) vo
 fn cls(self: Qbe.FieldType) Qbe.Cls = {
     types :: @const_slice(Qbe.Cls.Ke, .Kw, .Kw, .Kw, .Kl, .Ks, .Kd, .Ke, .Ke);
     ::@assert_eq(types.len(), Qbe.FieldType.enum_count());
-    types;  // :UpdateBoot
     types[zext self.raw()]
 }
 
@@ -1164,7 +1158,6 @@ fn cls(self: Qbe.J) Qbe.Cls =
 fn retk(k: Qbe.Cls) Qbe.J = 
     @as(Qbe.J) @as(i32) Qbe.J.retw.raw() + k.raw();
 
-// TODO: check you don't overflow 16777216 types
 fn pack(f: Qbe.Field) u32 = 
     bit_or(zext @as(u8) f.type, f.len.shift_left(8));
     

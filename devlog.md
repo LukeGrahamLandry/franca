@@ -1,4 +1,9 @@
 
+## (Apr 16)
+
+- too much stuff where there's a good reason that i haven't done it already. 
+  need to just make some progress. declare a new bootstrap version is perhaps an easy win. it's been a year, might as well. 
+
 ## (Apr 15)
 
 - experimented with making get_stack_base_for_tls an intrinsic. 

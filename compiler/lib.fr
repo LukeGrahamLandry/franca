@@ -146,6 +146,7 @@ fn run_franca_file(path: Str, no_cache: bool) CRes(void) = {
     opts.no_cache = no_cache;
     
     // TODO: creating this early is dumb on wasm once i want to run cache files there because mmap+munmap is super expensive because have to zero even if untouched. 
+    //       but get_library_file_text reads tls(.comptime). 
     self := init_self_hosted(opts);
     
     F :: @FnPtr(*ImportVTable) void;
@@ -169,7 +170,6 @@ fn run_franca_file(path: Str, no_cache: bool) CRes(void) = {
             // It's just treated as a precompiled program same as if they passed a .dylib. 
             // This is different from running it with backend/meta/qbe_frontend.fr 
             // because we pass *ImportVTable in case it's a driver. 
-            @if(enable_incremental()) 
             if read_cached(a, path) { header |
                 t := Incremental'pack_current_target();
                 @assert_eq(header.arch_os.bit_and(t), t, ".frc was compiled for a different target");
@@ -180,7 +180,7 @@ fn run_franca_file(path: Str, no_cache: bool) CRes(void) = {
         }
     } else {
         z := zone_begin(.CheckCache);
-        @if(enable_incremental()) @if(!no_cache)
+        @if(!no_cache)
         if read_cached(a, cachepath) { header |
             break :: local_return;
             start := timestamp();
@@ -227,17 +227,16 @@ fn run_franca_file(path: Str, no_cache: bool) CRes(void) = {
         @eprintln(">>> compiler configuration: threads=%, debug_assertions=%, host = (%, %), nocache=%, syscalls=%", 
             use_threads, safe, current_arch(), current_os(), no_cache, prefer_syscalls());
         
-        cache_it := !no_cache && enable_incremental();
+        cache_it := !no_cache;
         
         
-        was_bootstrapping :: __driver_abi_version <= 1119;
 
             m := general_allocator().box_uninit(QbeModule);
             backend'init_module(m, (
                 arch = query_current_arch(), 
                 os = query_current_os(), 
                 type = @if(cache_it, .Cached, .JitOnly),
-                expecting_wx = was_bootstrapping,  // :UpdateBoot
+                expecting_wx = false,
                 // note: not expecting_wx=true even when JitOnly, 
                 // still compile everything up front and then make_exec() instead of using MAP_JIT. 
                 // this means the callee program can use apple_thread_jit_write_protect if it wants. 
@@ -277,7 +276,6 @@ fn run_franca_file(path: Str, no_cache: bool) CRes(void) = {
             @eprintln(">>> compiled % in %ms", name, frontend);
         };
         
-        @if(enable_incremental())
         if cache_it {
             // TODO: seal_debug_info properly
             //
@@ -322,7 +320,6 @@ fn run_franca_file(path: Str, no_cache: bool) CRes(void) = {
     };
     // TODO: dropping at the end makes FRANCA_LOG_STATS more confusing (because its out of order when using default_driver)
     //       and wastes some memory for the whole compilation, but otherwise have to copy out of self.vtable.library_path, 
-    //       ... tho i don't use that anyway rn because it's an annoying bootstrapping thing to add new fields to vtable (the old compiler will have junk there)
     self.drop();
     reset_temporary_storage(mark);
     .Ok
@@ -366,7 +363,6 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         make_slice_t = .None,
         bake_os = .None,
         fat_expr_type = .None,
-        intrinsic_type = .None,
         build_options = BuildOptions.raw_from_ptr(opts),
         unquote_placeholders = .None,
         comptime_os = query_current_os(),
@@ -387,17 +383,16 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         jit_via_dlopen = Foreign.ENV.FRANCA_JIT_VIA_DLOPEN.get_environment_variable().is_some(),
     ));
 
-    // TODO
     // this is mostly just to chain from the host compiler when a driver does multiple so don't have to re-search. 
     // so the extra dir_exists check avoids caching the wrong thing if it's relative and changed cwd. kinda dumb, idk. 
-    //if __driver_abi_version < 1513 || opts.library_path.len == 0 || !dir_exists(opts.library_path) {
+    if opts.library_path.len == 0 || !dir_exists(opts.library_path) {
         library_path := guess_library_path(a)
             || panic("Could not find franca standard library.");
         opts.library_path = library_path.items();
         opts.library_path.len -= int(opts.library_path.ends_with("/"));
-    //} else {
-        //opts.library_path = opts.library_path.shallow_copy(a);
-    //};
+    } else {
+        opts.library_path = opts.library_path.shallow_copy(a);
+    };
 
     self := a.box_uninit(SelfHosted);
     self[] = (
@@ -536,7 +531,7 @@ fn main_thread_pump(comp: *SelfHosted, shared: *FrontendCodegen, fns: []FuncId, 
     a      := comp.get_alloc();
     env    := comp.env;
     opts   := comp.get_build_options();
-    when := @if(IS_BOOTSTRAPPING && shared.m.goal.type == .JitOnly, ExecStyle.Jit, .Aot);
+    when := ExecStyle.Aot;
     // TODO: dynamiclib is kinda broken because i rely on being called in a stack with tls setup
     wrap_export := !wrap_main && @is(shared.m.goal.type, .Dynamic, .Relocatable);
     shared.m.codemap = (Some = comp.codemap);

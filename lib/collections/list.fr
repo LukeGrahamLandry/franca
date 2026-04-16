@@ -232,18 +232,17 @@ fn reserve_expand_erased(list: rawptr, extra: i64, size_of: i64) void = {
     // TODO: use the extra space
     new := u8.raw_from_ptr(new_memory.ptr);
     copy_no_alias(new, list.ptr, list.len * size_of);
-    @if(SLOW_MEMORY_DEBUGGING && !IS_BOOTSTRAPPING) 
+    @if(SLOW_MEMORY_DEBUGGING) 
         new_memory.rest(list.len * size_of).set_bytes(SLOW_MEMORY_JUNK);
     dealloc_raw(list.gpa, list.ptr, list.cap * size_of, 8); // TODO: alignment
     list.ptr = new;
     
-    // :UpdateBoot we can't just use new.len/size because the old one didn't return a slice
-    list.cap = @if(has_feature("@franca/alloc_slice"), new_memory.len / size_of, cap);
+    list.cap = new_memory.len / size_of;
 }
 
 fn alloc_extra(a: Alloc, $T: Type, cap: i64) []T #generic = {
     mem := a.alloc_raw(cap * size_of(T), align_of(T));
-    len := @if(has_feature("@franca/alloc_slice"), mem.len / size_of(T), cap);
+    len := mem.len.udiv(size_of(T));
     (ptr = ptr_cast_unchecked(u8, T, mem.ptr), len = len)
 }
 
@@ -484,7 +483,7 @@ fn char(s: Str) i64 #fold = {
 // The intent is that you always call this with a constant argument and use it like C's '' literals.
 fn ascii(s: Str) u8 #fold = {
     // can't use the formatting version of assert because this is called from format_into() and there's no bootstrapping step
-    @if(@run(__driver_abi_version >= 1512)) @debug_assert(s.len == 1 && s[0] < 128, "expected ascii"); 
+    @debug_assert(s.len == 1 && s[0] < 128, "expected ascii"); 
     s[0]
 }
 

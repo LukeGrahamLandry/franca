@@ -13,23 +13,17 @@ StaticTls :: @struct(
     reserved: Array(i64, 2),
     environment_variables: *CStr,  // a null terminated array of null terminated strings
     cli_arguments: []CStr,
-    // :UpdateBoot remove this field in favour of temporary_allocator_i
-    temporary_allocator: *Arena.Allocator,  // each thread has its own
+    _0 := 0,
     panic_hook: @FnPtr(msg: Str) Never,
     extra := 0,
     global: *GlobalFrancaRuntime,
+    // each thread has its own
     temporary_allocator_i: Alloc,
     thread: rawptr,
     reserved3: Array(i64, 6),
 );
 
-franca_required_stack_bits :: {
-    @if(@run(__driver_abi_version < 1512), 24, {
-        opts := get_build_options();
-        n := opts.tls_stack_bits;
-        @if(n == 0, 24, n)
-    })
-};
+franca_required_stack_bits :: get_build_options()[].tls_stack_bits;
 
 // These are things that need to be inherited between compliation units. 
 // ie. if comptime code starts a thread, its next_thread_id needs to continue 
@@ -67,11 +61,7 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     #use("@/lib/sys/process.fr");
     a := query_current_arch();
     // This is very fragile. relies on compiler/worker.fr/wrap_with_runtime_init and backend/<arch>/emit.fr
-    if __driver_abi_version < 1349 {
-        kernel_sp += @if(a == .aarch64, 0x40, @if(a == .rv64, 0x50, 0x48));
-    } else {
         kernel_sp += @if(a == .aarch64, 0x30, @if(a == .rv64, 0x40, 0x38));
-    };
     // note: kernel doesn't align sp to 16 but i have to allocate a new stack for tls anyway so it doesn't matter
     
     // TODO: this is probably a stupid idea. for now it feels clever that i can guess the os by apple passing the 
@@ -96,7 +86,7 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     };
     
     OS: Os = @if(is_linux, .linux, .macos);
-    @if(query_current_arch() != .wasm32)
+    @if(a != .wasm32)
     @assert(!(is_sane_pointer(argc) || !is_sane_pointer(envp) || !is_sane_pointer(argv)), "failed to guess os");
     
     CAPTURE :: @static_mut zeroed(@FnPtr() void);
@@ -108,7 +98,6 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     impl2 :: fn() Never #no_trace = {
             thread := get_current_thread();
             c := thread.first_environment&;
-            set_legacy_dynamic_environment(StaticTls.raw_from_ptr(c));
             temporary_allocator: Arena.Allocator = init(page_allocator, 1.shift_left(20));
             set_temporary_allocator(temporary_allocator&);
             c.panic_hook = print_and_exit1;
@@ -132,7 +121,6 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
             set_new_thread_id(c);
             
             @if(query_current_arch() != .wasm32)
-            @if(!IS_BOOTSTRAPPING)  // :UpdateBoot
             if !have_libc[] && query_current_os() == .linux {
                 do_relocations_static_linux();
             };
@@ -151,24 +139,11 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
             Syscall'exit(0);
     };
     
-    @if(IS_BOOTSTRAPPING) {
-        have_libc[] = true;
-        stack := T'allocate_stack(!have_libc[], OS);
-        thread := bit_cast_unchecked(*u8, *T.Thread, stack.usable.ptr);
-        thread.stack = stack;
-        c := thread.first_environment&;
-        c.cli_arguments = (ptr = argv, len = argc);
-        c.environment_variables = envp;
-        c.current_os = (@as(i64) @as(Os) OS).trunc();
-        c.thread = u8.raw_from_ptr(stack.usable.ptr);
-        call_in_stack(thread.stack.usable.end_pointer(), impl2);
-    };
-
     // TODO: bring back the ability to ask for direct syscalls on macos, just as a fun trick as long as they don't change the abi.
     __libc_start_main :: fn(user: @FnPtr() Never, argc: i64, argv: *CStr, i: i64, f: i64, l: i64, s: i64) i64 #weak #libc;
     start := @as(rawptr) __libc_start_main;
     have_libc[] = !is_linux || !start.is_null();
-    if query_current_arch() == .wasm32 {
+    if a == .wasm32 {
         have_libc[] = false;  // ugh. null check doesn't work because weak imports aren't a thing, they're just stubs that crash. 
     };
 
@@ -183,7 +158,7 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     c.current_os = (@as(i64) @as(Os) OS).trunc();
     thread.stack_reserved_size = 1.shift_left(16);  // matters because examples/os uses after this as signal stack
     
-    @if(query_current_arch() != .wasm32)
+    @if(a != .wasm32)
     if is_linux && have_libc[] {
         impl3 :: fn() Never #no_trace = {
             thread := get_current_thread();
@@ -229,7 +204,6 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
 
 // surely we don't need to call uname... right... right...?
 fn query_current_os() Os = {
-    @if(IS_BOOTSTRAPPING) return(Os.macos);
     @as(Os) @as(i64) tls(.current_os)[].zext()
 }
 
@@ -331,20 +305,6 @@ iter :: fn(no_unpacked_skew: bool, $body: @Fn(unpacked: *Elf.DynUnpacked, value:
 };
 };
 
-__driver_abi_version :: @if(IS_BOOTSTRAPPING, 1119, __builtin_compiler_abi);
-
-// :UpdateBoot
-set_legacy_dynamic_environment :: fn(context: rawptr) void #inline/*semantic*/ = {
-    @if(__driver_abi_version < 1512) {
-        f :: fn(context: rawptr) i64 #intrinsic(INTRINSIC_SET_ENV);
-        f(context);
-    }
-};
-
-// :UpdateBoot
-INTRINSIC_GET_ENV :: 64;
-INTRINSIC_SET_ENV :: 65;
-
 // TODO: the "tls" part should be at the end of the name so you can always search for "tls(.foo" to find all the places that access foo
 fn push_tls_value($name: Fields(StaticTls), value: FieldType(StaticTls, name), $body: @Fn() void) void #generic = {
     it := tls(name);
@@ -357,13 +317,7 @@ fn push_tls_value($name: Fields(StaticTls), value: FieldType(StaticTls, name), $
 push_as_tls :: push_tls_value;
 
 fn tls($name: Fields(StaticTls)) *FieldType(StaticTls, name) #generic = {
-    c := @if(__driver_abi_version < 1512, {
-        f :: fn(_: i64) i64 #intrinsic(INTRINSIC_GET_ENV);
-        f(0)
-    }, {
-        get_stack_base_for_tls()
-    });
-
+    c := get_stack_base_for_tls();
     c := StaticTls.ptr_from_int(c);
     StaticTls.get_field(c, name)
 }
@@ -387,15 +341,10 @@ fn scary_log(s: Str) void = {
 }
 
 fn temp() Alloc = {
-    @if(__driver_abi_version < 1263) return(tls(.temporary_allocator)[].borrow());
-    a := tls(.temporary_allocator_i)[];
-    a
+    tls(.temporary_allocator_i)[]
 }
 
 fn set_temporary_allocator(a: *Arena.Allocator) void #noinline /*:UpdateBoot*/ = {
-    if __driver_abi_version < 1263 {
-        tls(.temporary_allocator)[] = a;
-    };
     tls(.temporary_allocator_i)[] = a.borrow();
 }
     
@@ -424,7 +373,6 @@ fn cli_args() []CStr = {
 // - The memory returned here is shared with other threads. So it's probably a bad plan to mutate it. 
 // - fn getenv(name: CStr) CStr #libc;
 fn get_environment_variable(name: Str) ?CStr = {
-    @if(IS_BOOTSTRAPPING) return(.None);
     envp := tls(.environment_variables)[];
     find_environment_variable(envp, name)
 }    

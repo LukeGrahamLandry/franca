@@ -1,15 +1,10 @@
 
 fn panic(msg: Str) Never = {
-    @if(::(__driver_abi_version < 1512), panic_outlined(msg), {
-        f: (@FnPtr(Str) Never) = panic_outlined;
-        f(msg);
-    });
+    f: (@FnPtr(Str) Never) = panic_outlined;
+    f(msg);
 panic_outlined :: fn(msg: Str) Never = {
     scary_log("panic! ");
-    hook := @if(::(__driver_abi_version < 1512),
-        import("@/lib/sys/threads.fr")'get_current_thread()[].first_environment.panic_hook&,
-        tls(.panic_hook),
-    );
+    hook := tls(.panic_hook);
     hook_int := ptr_cast_unchecked(*@FnPtr(msg: Str) Never, i64, hook&);
     if hook_int[] == 0 {
         // we panicked before getting to set the handler. 
@@ -138,7 +133,6 @@ fn assert_cond($overload_set: OverloadSet, op: Str, arg: FatExpr) FatExpr = {
         show(b, out&);
         panic(out.items())
     };
-    @if(__driver_abi_version == 1146) return(@{});  // :UpdateBoot
     
     assert(arg.expr&.is(.Tuple), "@assert___ expected multiple args");
     parts := arg.expr.Tuple.items();
@@ -155,24 +149,12 @@ fn assert_cond($overload_set: OverloadSet, op: Str, arg: FatExpr) FatExpr = {
         T :: @type lhs;
         rhs: T = @[parts[1]];  // If you allow two different types to pass two display() overloads to report_erased() below. 
         if !@[@literal overload_set](lhs, rhs) {
-            // :UpdateBoot
-            @[@if(::!IS_BOOTSTRAPPING, @{
+            @[@{
                 msg := @[@if(parts.len < 3, @literal "", 
                     format_literal_or_temp(parts.rest(2), arg.loc))];
                 show := display_t(T);
                 report_erased(T.raw_from_ptr(lhs&), T.raw_from_ptr(rhs&), @[@literal op], msg, show);
-            }.with_loc(arg.loc), @{
-                out: List(u8) = list(temp());
-                out&.push_all("Assertion Failed. ");
-                
-                @[if(parts.len >= 3, => {
-                    format_into(@{ out& }, parts.rest(2), arg.loc)
-                }, => @{} )];
-                
-                @fmt(out&, "\n   Expected (% % %). ", lhs, @[@literal op], rhs);
-                
-                panic(out.items());
-            })];
+            }.with_loc(arg.loc)];
         };
     }.no_trace()
 }

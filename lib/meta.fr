@@ -15,7 +15,7 @@ fn get_unique_named(c: CompCtx, name: Str) ?FuncId = {
 
 // TODO: no unwrap! return error.
 fn get_jitted(c: CompCtx, f: FuncId) rawptr = {
-    @if(__driver_abi_version < 1349) return(const_eval(rawptr)(@{ x :: @as(rawptr) @[@literal f]; x }));
+    // const_eval(rawptr)(@{ x :: @as(rawptr) @[@literal f]; x })
     
     res := {c.vtable.compile_func}(c.data, f, .Jit);
     or res { err |
@@ -36,9 +36,8 @@ fn add_comptime_library(c: CompCtx, lib_name: Symbol, handle: import("@/lib/dyna
 }
 
 fn report_error(c: CompCtx, err: *CompileError) Never = {
-    out: List(u8) = list(temp());
+    out := u8.list(temp());
     {c.vtable.fmt_error}(c.data, err, out&);
-    @if(IS_BOOTSTRAPPING) println(out.items());
     panic(out.items())
 }
 
@@ -143,10 +142,7 @@ fn TypedIndex($T: Type) void = {
     
     fn to_index(f: T) u32 = bit_cast_unchecked(T, u32, f);
     
-    fn from_index(idx: i64) T = {
-        val: u32 = idx.trunc();
-        ptr_cast_unchecked(From = u32, To = T, ptr = val&)[]
-    }
+    fn from_index(idx: i64) T = (_ = idx.trunc());
 }
 
 :: TypedIndex(FuncId);
@@ -353,8 +349,7 @@ make_enum_for_fields_uncached :: fn(S: Type) Type #fold = {
     enumerate ff { i, f |
         fields&.push(@as(T) (f.name, (Small = (i, 8))));
     };
-    type: TypeInfo = (Enum = (raw = i64, fields = fields.as_raw(), sequential = true));
-    intern_type_ref(type&)
+    intern_type(Enum = (raw = i64, fields = fields.as_raw(), sequential = true))
 };
 
 fn is_sequential_enum(E: Type) bool #fold = {
@@ -404,6 +399,7 @@ fn has_const_field(S: Type, name: Symbol) bool #fold = {
     get_constant(s, name).is_some()
 }
 
+__driver_abi_version :: __builtin_compiler_abi;
 fn has_feature($s: Str) bool #fold = 
     __builtin_compiler_has_feature(s);
 
@@ -428,17 +424,6 @@ fn get_field($S: Type, self: *S, $name: Fields(S)) *FieldType(S, name) #generic 
     p := p.offset(offset_of(S, name));
     p := FieldType(S, name).ptr_from_raw(p);
     p
-}
-
-fn scope_to_new_type($s: ScopeId) Type #fold = {
-    t: TypeInfo = (Struct = (
-        fields = empty(),
-        layout_done = true,
-        is_tuple = false,
-        is_union = false,
-        scope = s,
-    ));
-    intern_type_ref(t&)
 }
 
 // Holds a value that is zeroed when baking an AOT executable. 
@@ -492,20 +477,12 @@ fn AsmFunction(template: FuncId, arm64: []u32, amd64: @FnPtr(out: *List(u8)) voi
 fn create_asm_func(template: FuncId, arm64: RawList(u32), amd64: RawList(u8), wasm32: RawList(u8), rv64: RawList(u32)) FuncId = {
     func := get_function_ast(template, true, true, false, false);
     
-    if has_feature("@franca/no_merged_funcimpl") {
         func.body = (Asm = (
             arm64 = arm64.items().interpret_as_bytes(), 
             amd64 = amd64.items(), 
             rv64 = rv64.items().interpret_as_bytes(), 
             wasm32 = wasm32.items(),
         ));
-    } else {
-        // :UpdateBoot get rid of this case
-        impl := FuncImpl.list(2, ast_alloc());
-        impl&.push(JittedAarch64_OLD = arm64);
-        impl&.push(X86AsmBytes_OLD = amd64);
-        func.body = (Merged_OLD = impl.as_raw());
-    };
     
     func.set_flag(.BodyIsSpecial);
     func.set_flag(.EnsuredCompiled);
@@ -542,8 +519,7 @@ fn import_module(path: Str) ScopeId = {
     fr := current_compiler_context();
     opts := get_build_options();
     more_cache := Foreign.ENV.FRANCA_MORE_CACHE.get_environment_variable().is_some() ;
-    was_bootstrapping :: __driver_abi_version <= 1119;
-    no_cache := opts.no_cache || was_bootstrapping || !more_cache;
+    no_cache := opts.no_cache || !more_cache;
     exports0 := const_eval(ScopeId)(@{ @[@literal path].import().exports });
     if no_cache {
         // The reference implementation just loads the new module in the same CompCtx. 
@@ -587,46 +563,27 @@ fn import_module(path: Str) ScopeId = {
 }
 
 fn cache_baked(vbytes: []u8, v: BakedVarId) void = {
-    @if(has_feature("@franca/internal_pointers"), {
         cache_baked_vbytes(vbytes, v);
-    }, {
-        cache_baked(u8.int_from_ptr(vbytes.ptr), v);
-    })
 }
 
 fn lookup_baked(vbytes: []u8) ?Ty(BakedVarId, i32) = {
-    @if(has_feature("@franca/internal_pointers"), {
-        return(lookup_baked_vbytes(vbytes));
-    }, {
-        id := lookup_baked(u8.int_from_ptr(vbytes.ptr)) || return(.None);
-        return(Some = (id, 0));
-    })
+    lookup_baked_vbytes(vbytes)
 }
 
 fn emplace_bake(vbytes: []u8, type: Type, $body: @Fn() BakedVar) Ty(BakedVarId, i32) = {
     xx := lookup_baked(vbytes);
     or xx {
-        id := @if(has_feature("@franca/internal_pointers"), {
             require_layout_ready(type);
             fr := current_compiler_context();
             id := fr'vtable'reserve_baked(fr.data, (Some = vbytes));
             var := body();
             fr'vtable'put_baked_var(fr.data, id, var, type);
-            id
-        }, {
-            var := body();
-            bake_value(var)
-        });
-        (id, @as(i32) 0)
+            (id, @as(i32) 0)
     }
 }
 
 fn entry_with_addend(id: BakedVarId, addend: i32) BakedEntry = {
-    if has_feature("@franca/internal_pointers") {
-        return(AddrOfA = (base = id, addend = addend))
-    };
-    @assert_eq(addend, 0, ":UpdateBoot");
-    (AddrOf = id)
+    (AddrOfA = (base = id, addend = addend))
 }
 
 fn import() ScopeId #fold = import("@");

@@ -37,8 +37,7 @@ exports :: Type.scope_of(@struct {
     writer_finish_imports: (@Fn(writer: *Incremental.Writer, m: *QbeModule) void) : finish_imports;
 });
 
-   ENABLE_INLINING :: true
-    && !(__driver_abi_version < 1349);
+   ENABLE_INLINING :: true;
 ENABLE_ELIDE_SLOTS :: true;
     ENABLE_PROMOTE :: true;
  ENABLE_CONST_FOLD :: true && ENABLE_GVN && 
@@ -53,8 +52,7 @@ matching_comptime_incremental_abi :: {
 ENABLE_STATIC_MEMMOVE :: true 
     && matching_comptime_incremental_abi && ENABLE_INLINING;
 
-ENABLE_GVN :: true
-    && !(__driver_abi_version < 1349);
+ENABLE_GVN :: true;
 
 // doesn't help speed but makes the ir more readable in spill and rega. 
 LATE_COPY_ELIM :: true;
@@ -73,9 +71,9 @@ fn emit_qbe_included_dyn(m: *QbeModule, comp: *CompCtx, fns: [] FuncId, entry: P
 }
 
 QbeModule :: @rec @struct(
-    save: ?@if(enable_incremental(), *Incremental.Writer, i64),
+    save: ?*Incremental.Writer,
     types: RawList(Qbe.Typ),
-    insb: *Array(Qbe.Ins, 1.shift_left(20)), // MaxInstructions
+    insb: *Array(Qbe.Ins, Qbe.MaxInstructions),
     curi: *Qbe.Ins,
     target: Qbe.Target,
     debug: i64,  // bitset of 1.shift_left(Qbe.DebugKey - "A".char())
@@ -148,9 +146,6 @@ QbeModule :: @rec @struct(
 // TODO: clearly this has to go in @/lib somewhere
 #use("@/compiler/codemap.fr");
 
-// :UpdateBoot
-enable_incremental :: fn() bool #fold = !IS_BOOTSTRAPPING;
-
 Incremental :: import("@/backend/incremental.fr");
 #use("@/lib/collections/map.fr");
 
@@ -178,7 +173,7 @@ QbeTargetEnv :: @struct(
     // note: this setting is NOT fully respected on amd. it's more important on arm where cache coherency rules are more strict. 
     got_indirection_instead_of_patches := false,
     
-    _0 := true,  // :updateboot this used to be link_libc
+    _0 := false,
 
     // When outputting an exe directly, local symbol names are not included in the symbol table (because the os 
     // doesn't care about them and they make your binary larger). However, if you want to see readable names in 
@@ -196,8 +191,7 @@ QbeTargetEnv :: @struct(
     have_entry_point := false,  // ==Exe    
     
     segment_size        := 1.shift_left(25),
-    _2      := 1.shift_left(15),
-    _       := 1.shift_left(11),  // :UpdateBoot
+    _2 := (0, 0),
     commands_size_guess := 16384,
     chained_size_guess  := 2000000,
     
@@ -283,7 +277,6 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
     };
     
     if m.goal.arch == .wasm32 {
-        @if(IS_BOOTSTRAPPING) unreachable();
         m.goal.commands_size_guess = 0;
         if goal.type == .JitOnly {
             goal.jit_via_dlopen = true;
@@ -311,7 +304,6 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
     m.forever_storage = init(gpa, size_of(Qbe.Ins) * 1.shift_left(20) + size_of(SymbolBucket) * IMask + 1.shift_left(10));
     m.forever = (parent = m.forever_storage&.borrow());
     forever := m.forever&.borrow();
-    @if(enable_incremental())
     if @is(goal.type, .Cached, .CachedEarly) {
         writer := forever.boxed(Incremental.Writer, init(gpa));
         m.save = (Some = writer);
@@ -435,7 +427,6 @@ if need_segments {
     m.curi = m.insb.index_unchecked(Qbe.MaxInstructions);
 
     m.symbol_memmove = m.intern("__franca_builtin_static_memmove");
-    @if(!IS_BOOTSTRAPPING)
     if m.goal.type == .JitOnly {
         // when jitting it's not a big deal to add imports, so don't even bother recompiling the tiny function.
         // doing this up front instead of in emit_suspended_inlinables means it works when got_indirection_instead_of_patches. 
@@ -473,6 +464,7 @@ fn set_target_vtable(m: *QbeModule) void = {
     @match(m.goal.arch) {
         fn aarch64() => import("@/backend/arm64/abi.fr")'fill_target_arm(t);
         fn x86_64()  => import("@/backend/amd64/sysv.fr")'fill_target_amd(t);
+        fn rv64()    => import("@/backend/rv64/abi.fr")'fill_target_rv64(t);
         fn wasm32()  => {
             @assert(!@is(m.goal.type, .Cached), "TODO: cached wasm. need to save types more?");  // CachedEarly is fine tho
             t.finish_passes = finish_qbe_passes_wasm;
@@ -480,20 +472,17 @@ fn set_target_vtable(m: *QbeModule) void = {
             t.fixup = EmitWasm.fixup_wasm32;
             m.wasm_symbol_stackbase = m.intern("__stackbase");
         }
-        fn rv64() => @if(IS_BOOTSTRAPPING, @panic("riscv target is disabled"),
-            import("@/backend/rv64/abi.fr")'fill_target_rv64(t));
     };
 
     t.gpr = 1.shift_left(t.ngpr.intcast()).sub(1).shift_left(t.gpr0.intcast()).bitcast();
     t.fpr = 1.shift_left(t.nfpr.intcast()).sub(1).shift_left(t.fpr0.intcast()).bitcast();
     @debug_assert_eq(t.gpr.bit_and(t.fpr), 0);
-    t.nrsave = init(@slice(
-        @as(i32) t.caller_saved.bit_and(t.gpr).count_ones().bitcast(),
+    t.nrsave = (
+        t.caller_saved.bit_and(t.gpr).count_ones().bitcast(),
         t.caller_saved.bit_and(t.fpr).count_ones().bitcast(),
-    ));
+    );
     @debug_assert_eq(@as(i64) t.caller_saved.count_ones().zext(), zext(t.nrsave&[0] + t.nrsave&[1]));
     
-    @if(enable_incremental())
     if m.goal.type == .CachedEarly {
         t.finish_passes = (fn(f: *Qbe.Fn) void = {  
             save := f.globals.save.unwrap(); 
@@ -502,8 +491,7 @@ fn set_target_vtable(m: *QbeModule) void = {
     };
     
     t.finish_module = @if_else {
-        @if(@is(m.goal.type, .Cached, .CachedEarly))  => @if(enable_incremental(), Incremental'finish_module, 
-            panic("tried to init cached module but that feature was disabled at comptime"));
+        @if(@is(m.goal.type, .Cached, .CachedEarly))  => Incremental'finish_module;
         @if(goal.type == .JitOnly && !goal.jit_via_dlopen) => (fn(m: *QbeModule) [][]u8 = empty());
         @if(m.goal.arch == .wasm32)  => EmitWasm.output_wasm_module;
         @if(m.goal.os == .macos)     => import("@/backend/macho/emit.fr").output_macho;
@@ -563,7 +551,7 @@ fn drop(m: *QbeModule) void = {
     } else {
         page_allocator.dealloc(u8, mem); 
     };
-    @if(enable_incremental()) if m.save { save |
+    if m.save { save |
         save.drop();
     };
     for m.libraries { it |
@@ -631,7 +619,6 @@ run_qbe_passes_common :: fn(f: *Qbe.Fn) bool = {
     fillalias(f); // !
     
     ::if(Qbe.O);
-    @if(!(__driver_abi_version < 1349))  // :UpdateBoot amd
     import("@/backend/opt/load.fr")'loadopt(f); // optional
     fill_use(f);
     fillalias(f); // for coalesce
@@ -1050,8 +1037,7 @@ CodegenTask :: @tagged(
     Bounce: @struct(lnk: *Qbe.Lnk, target: Qbe.Sym),
     Shim: @struct(f: *Qbe.Fn, shim_for: Qbe.Sym),
     AotVar2: []Dat2,
-    // :UpdateBoot
-    SetLibrary: []Ty(@slice(Qbe.Sym, Str, bool)), // id, lib, weak
+    SetLibrary: []Ty(Qbe.Sym, Str, bool), // id, lib, weak
     FromCache: @struct(f: *Qbe.Fn, did_regalloc: bool),
     SaveSign: *Qbe.Fn,
     Done: void,
@@ -1067,10 +1053,7 @@ CodegenEntry :: @struct(
 
 fn init_codegen_worker(m: *QbeModule, threaded: bool) *CodegenShared = {
     a := general_allocator();
-    @if(IS_BOOTSTRAPPING, 
-        backend'worker_start(m, a, codegen_thread_main, threaded, enqueue_task, join_codegen_thread_impl),
-        backend'worker_start(m, a, backend.worker_thread, threaded, backend.worker_enqueue, backend.worker_join),
-    )
+    backend'worker_start(m, a, backend.worker_thread, threaded, backend.worker_enqueue, backend.worker_join)
 }
 
 fn init_codegen_worker(m: *QbeModule, threaded: bool, vtable: *ImportVTable) *CodegenShared = {
@@ -1155,7 +1138,7 @@ fn join_codegen_thread_impl(shared: *CodegenShared) void = {
 }
 
 fn enter_task(shared: *CodegenShared, $body: @Fn(it: *CodegenEntry) void) void = {
-    old, old_i := (tls(.temporary_allocator)[], tls(.temporary_allocator_i)[]);
+    old_i := tls(.temporary_allocator_i)[];
     marker := zeroed Alloc.Mark;
     entry := acquire(shared, true).unwrap();
     if shared.threaded {
@@ -1167,9 +1150,6 @@ fn enter_task(shared: *CodegenShared, $body: @Fn(it: *CodegenEntry) void) void =
     @must_return body(entry);
     shared'enqueue(shared, entry);
     if shared.threaded {
-        if __driver_abi_version < 1263 {
-            tls(.temporary_allocator)[] = old;
-        };
         tls(.temporary_allocator_i)[] = old_i;
     } else {
         temp().reset(marker);
@@ -1304,7 +1284,6 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
         }
         fn SaveSign(f) => {
             f.lnk.id = m.intern("xx");  // in case you want to printf debug in sel_call
-            @if(!IS_BOOTSTRAPPING)
             if m.goal.arch == .wasm32 {
                 xxx := Qbe.Ins.list(temp());
                 i := f.start.ins.items();
@@ -1316,7 +1295,6 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
             };
         }
         fn All(h) => {
-            @if(IS_BOOTSTRAPPING) unreachable();
             compile_all_symbols(h, m);
         }
     };

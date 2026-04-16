@@ -68,38 +68,24 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
             @case("--") => ();
             @case("fetch") => reach_all_deps();
             @case("strap") => {
-                if IS_BOOTSTRAPPING {
-                    run_boot(vtable);
-                    franca_path = "./target/franca2.out";
-                };
-                sh(@slice(franca_path, "tests/run_tests.fr", "boot2"));  // note: re-exec not recurse until :updateboot
+                do_it(vtable, "boot");
                 sh(@slice("./target/f.out", driver_path, "build", "compiler/main.fr", "-o", "target/franca.out", 
                     "-unsafe", "-keep-names", "-debug-info"));
             };
             @case("-hush") => {
                 HUSH[] = true;
             };
-            @case("boot") => run_boot(vtable);
-            @case("stage0_driver") => stage0_driver(vtable);
-            @case("boot2") => {
-                make_dirs_or_crash("target/release");
+            @case("boot") => {
+                make_dirs_or_crash("target");
                 // f0 - new source built by old compiler
                 // f  - new source built by new compiler
-                sh(@slice(franca_path, driver_path, "build", "compiler/main.fr", "-o", "./target/f0.out"));
-                sh(@slice("./target/f0.out", driver_path, "build", "compiler/main.fr", "-o", "./target/f1.out"));
-                // TODO: f1 is an extra layer that started being required when i did staticmemmove
-                //       should debug why and get rid of it if possible 
-                // TODO: now ./boot/temporary/macos-amd64.sh crashes if you don't -keep-names here ?? but everything else is fine. 
+                sh(@slice(franca_path, driver_path, "build", "compiler/main.fr", "-o", "./target/f0.out", "-keep-names", "-unsafe"));
+                sh(@slice("./target/f0.out", driver_path, "build", "compiler/main.fr", "-o", "./target/f1.out", "-keep-names"));
                 sh(@slice("./target/f1.out", driver_path, "build", "compiler/main.fr", "-o", "./target/f.out", "-keep-names"));
-                // one more to bump __driver_abi_version and stop emitting for old tls abi
-                sh(@slice("./target/f.out", driver_path, "build", "compiler/main.fr", "-o", "./target/f.out", "-keep-names"));
+                diff("./target/f1.out", "./target/f.out");
             };
             @case("core") => {
-                if IS_BOOTSTRAPPING {
-                    run_boot(vtable);
-                    franca_path = "./target/franca2.out";
-                };
-                sh(@slice(franca_path, "tests/run_tests.fr", "boot2"));
+                do_it(vtable, "boot");
                 println("=== re-exec ===");
                 sh(@slice("./target/f.out", "tests/run_tests.fr", "run"));
             };
@@ -303,7 +289,6 @@ build_web_and_get_hash :: fn(franca_path: Str) Str = {
 
 #use("@/backend/lib.fr")
 build_release :: fn(vtable: *ImportVTable) void = {
-    @if(IS_BOOTSTRAPPING) unreachable();
     make_dirs_or_crash("target/release");
     
     unsafe := true;
@@ -433,7 +418,6 @@ build_graphics :: fn(franca: Str) void = {
 };
 
 test_static_repro :: fn(franca_path: Str) void = {
-    @if(IS_BOOTSTRAPPING) return();
     // If running linux with libc, can still run the compiler built without libc and make sure it repros. 
     if !(query_current_os() == .linux && is_linking_libc()) {
         println("SKIP: linux_native_no_libc(): native target is not linux+libc");
@@ -495,60 +479,6 @@ reach_all_deps :: fn() void = {
     };
     println("");
 };
-
-// :UpdateBoot this can go away if i replace boot/franca-macos-arm64
-fn run_boot(vtable: *ImportVTable) void = {
-    make_dirs_or_crash("target/out");
-    make_dirs_or_crash("target/franca");
-
-    // :UpdateBoot
-    // this is stupid... the version of the compiler i committed 11 months ago had bugs 
-    // that have since been fixed in later versions but its not worth it to me to update it yet. 
-    // so for now just try it in a loop a few times. its nondeterministic so it tends to work eventually. 
-    franca := get_executable_path(temp());
-    n, limit := (0, 15);
-    dowhile {
-        ok, out, err := exec_and_catch(franca, @slice("tests/run_tests.fr", "stage0_driver"), temp());
-        n += 1;
-        !ok && n < limit
-    };
-    @if(n == limit) stage0_driver(vtable);
-    println(n);
-    
-    rename(@as(CStr) "a.out", @as(CStr) "target/franca/b.out");
-    sh(@slice("./target/franca/b.out", "examples/default_driver.fr", "build", "compiler/main.fr", "-o", "target/franca2.out"));
-    println("ok!");
-}
-
-#use("@/backend/lib.fr")
-fn stage0_driver(vtable: *ImportVTable) void = {
-    opts := vtable.default_build_options();
-    opts.safety_checks&.insert(SafetyCheck.Bounds, false);
-    opts.safety_checks&.insert(SafetyCheck.DebugAssertions, false);
-    
-    path := "compiler/main.fr";
-    src := "\n#include_std(\"lib/core.fr\");\n#include_std(\"compiler/main.fr\");";
-    c := vtable.with(vtable.new_with_src(src, path, opts));
-    fid := c.get_unique_named("main").expect("did not find exactly one function called 'main'");
-    fid := @slice(fid);
-    
-    // Allocating more than size_of(QbeModule) need so it's fine that it shrank since boot was compiled (becuase we stopped using pthread_mutex_t). 
-    m := u8.raw_from_ptr(page_allocator.alloc_zeroed(u8, 4096).as_ptr());
-    goal: QbeTargetEnv = (os = query_current_os(), arch = query_current_arch(), type = .Exe);
-    {vtable.init_default_qbe_module}(m, QbeTargetEnv.raw_from_ptr(goal&));
-    
-    #use("@/lib/collections/bucket_array.fr");
-    F :: @FnPtr(mm: rawptr, comp: *CompCtx, fns: [] FuncId, entry: ProgramEntry) OldBucketArrayShape;
-    emit_qbe_included_old := bit_cast_unchecked(rawptr, F, c.vtable.emit_qbe_included_old);
-    
-    bytes := emit_qbe_included_old(m, c&, fid, .WrapMain);
-    asm_out: CStr = "a.out"; 
-    ir_out := open_trunc(asm_out).unwrap(); 
-    for bytes.buckets& { bucket |
-        ir_out&.write(bucket.items()) || panic("write failed");
-    };
-    ir_out.Syscall'close();
-}
 
 fn sh(a: []Str) void = {
     show :: fn() => {

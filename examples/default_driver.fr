@@ -60,10 +60,6 @@ do_it :: fn(vtable: *ImportVTable, cmd: *Command) void = {
         it.insert(.DebugAssertions, false);
         it.insert(.InvalidTag, false);
     };
-    if IS_BOOTSTRAPPING {
-        build_options._target_os_bitset = build_options._target_os_bitset.bit_or(1.shift_left(cmd.os.raw()));
-        build_options._target_arch_bitset = build_options._target_arch_bitset.bit_or(1.shift_left(cmd.arch.raw()));
-    };
     build_options.always_track_ir_names = cmd.always_track_ir_names;
     
     assert(cmd.action == .build || cmd.goal != .Dynamic, "use 'build' with -dynamiclib");
@@ -121,18 +117,7 @@ do_it :: fn(vtable: *ImportVTable, cmd: *Command) void = {
     @assert(!cmd.show_asm, "TODO: fix show_asm");
     set_debug_types(m&, cmd.d, true);
 
-    // :UpdateBoot
-    bytes := {
-        #use("@/lib/collections/bucket_array.fr");
-        F :: @FnPtr(mm: rawptr, comp: *CompCtx, fns: [] FuncId, entry: ProgramEntry) OldBucketArrayShape;
-        f := bit_cast_unchecked(rawptr, F, c.vtable.emit_qbe_included_old);
-        bytes := f(QbeModule.raw_from_ptr(m&), c&, fns, entry);
-        out := list([]u8, temp());
-        for bytes.buckets& { it |
-            out&.push(it.items());
-        };
-        out.items()
-    };
+    bytes := c'vtable'emit_qbe_included(QbeModule.raw_from_ptr(m&), c&, fns, entry);
     bytes := bytes.concat(temp());
     if cmd.syscalls && cmd.os == .linux {
         import("@/backend/elf/emit.fr")'patch_out_interp_header(bytes);

@@ -58,12 +58,10 @@ openat :: fn(parent: Fd, path: CStr, flags: Mask(O), mode: Mask(S)) SysResult(Fd
         };
     };
     
-    @if(@run(__driver_abi_version >= 1512)) {
         FR_openat :: fn(dirfd: Fd, pathname: CStr, flags: i64, mode: i64) i64 #weak #libc;
         if tls(.deny_syscalls)[] {
             return Fd.sys_ret(FR_openat(parent, path, flags, mode));
         };
-    };
     errno()[] = 0/*HACK*/;
     Fd.sys_ret(Syscall'openat(parent, path, flags, mode).intcast())
 };
@@ -226,7 +224,6 @@ poll :: fn(fds: []pollfd, timeout: i32) SysResult(i64) = {
         result := @match(query_current_os()) {
             fn macos() => poll(fds.ptr, fds.len, timeout);
             fn linux() => {
-                @if(IS_BOOTSTRAPPING) unreachable();
                 time := @if(timeout >= 0, 
                     @ref from_ms(timeout.zext()),
                     zeroed(*TimeSpec));
@@ -316,7 +313,6 @@ opendir :: fn(path: CStr) SysResult(*DIR) = {
 
 readdir :: fn(dir: *DIR) SysResult(*dirent) = {
     r := @if(dir.impl.valid, {
-        @if(IS_BOOTSTRAPPING) unreachable();
         self, entry := (dir.impl&, dir.entry&);
         @if(self.done) return(Ok = zeroed(*dirent), Err = (_ = 0));
         if self.cur >= self.end {
@@ -635,15 +631,11 @@ kill :: fn(pid: i32, signum: i64) SysResult(void) = {
 
 choose_inode64_on_applex8664 :: fn($normal: FuncId, $mangled: FuncId) AsFnPtr(normal) #generic = {
     @"🤡" := current_os() == .macos && current_arch() == .x86_64;
-    @if(IS_BOOTSTRAPPING,  // :UpdateBoot
-        @as(AsFnPtr(normal)) @as(FuncId) normal,
-        if_func(@"🤡", mangled, normal),
-    )
+    if_func(@"🤡", mangled, normal)
 };
 
 errno :: fn() *i32 = {
     @if(!is_linking_libc()) return(@static_mut @as(i32) 0);
-    @if(IS_BOOTSTRAPPING) return(__error());          // :UpdateBoot
 
     // This has different names on different libc-s.
     // https://github.com/ziglang/zig/blob/52fc0469079d061c7482f5708557c35b389cd800/lib/std/c.zig#L9876

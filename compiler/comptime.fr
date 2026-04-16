@@ -13,20 +13,15 @@ fn init_driver_vtable() *ImportVTable = {
 // but that requires compiling the definition of Str before you can access the value.
 next_abi_version :: fn() i64 = {
     previous :: __driver_abi_version;
-    @if_else {
-        @if(IS_BOOTSTRAPPING) => 1119;
-        @if(previous < 1349) => 1349;
-        @if(previous < 1512) => 1512;
-        @else => 1513;
-    }
+    // ex. @if(previous < XXXX, XXXX, XXXX+1)
+    1513
 };
 
 fn fill_driver_vtable(vtable: *ImportVTable) void = {
     vtable.driver_abi_version = next_abi_version();
     vtable.self_hash = Incr.self_hash;
-    if enable_incremental() && !DISABLE_IMPORT_FRC {
-        vtable.frc_module_magic_v = Incremental.MAGIC;
-    };
+    vtable.frc_module_magic_v = @if(DISABLE_IMPORT_FRC, 0, Incremental.MAGIC);
+
         ::ptr_utils(QbeModule);
         fill_backend_vtable(vtable);
     
@@ -145,6 +140,13 @@ driver_vtable_exports :: @struct {
     };
     
     fn drop(c: *SelfHosted) void = {
+        // HACK: the string is copied into the arena but init_driver_vtable returns static memory,
+        //       so when tests/compiler.fr destroys a compiler and makes a new one with the vtable its driver got, 
+        //       it gets junk memory which can have been used by another thread. 
+        // TODO: should just have init make a copy of the vtable. 
+        //       but long term i probably want to replace the vtable with imports so you don't have to compile all the types just to get one field. 
+        c.vtable.library_path = "";
+        
         when_debug(c, .VMem, fn(o) => dump_baked_vmem(c, o));
         print(c.log.items()); c.log&.clear();
         panic_on_volatile_bake(c);
@@ -236,16 +238,6 @@ driver_vtable_exports :: @struct {
     };
     log_func :: fn(c: Compiler, e: *Func) Str = {
         log(e, c.cast()[][])
-    };
-    
-    // :UpdateBoot get rid of this
-    emit_qbe_included_old :: fn(mm: rawptr, comp: *CompCtx, fns: [] FuncId, entry: ProgramEntry) OldBucketArrayShape = {
-        chunks := emit_qbe_included(mm, comp, fns, entry);
-        aaa: OldBucketArrayShape = (buckets = list(temp()));
-        for chunks { c |
-            aaa.buckets&.push(assume_owned(c, temp()));
-        };
-        aaa
     };
     
     emit_qbe_included :: fn(mm: rawptr, comp: *CompCtx, fns: [] FuncId, entry: ProgramEntry) [][]u8 = {    
@@ -852,10 +844,6 @@ compiler_exports_s :: @struct {
     
     #export("__builtin_compiler_has_feature #fold")
     has_feature_s :: fn(s: Str, _) bool = {
-        if(s == "@franca/alloc_slice", => return(true)); 
-        if(s == "@franca/fewer_builtins", => return(true)); 
-        if(s == "@franca/no_merged_funcimpl", => return(true)); 
-        if(s == "@franca/internal_pointers", => return(true)); 
         false
     };
     
@@ -1007,7 +995,7 @@ fn show_type(it: Type) Str = {
         return(@tfmt("?%", show_type(it.cases[0]._1)));
     };
     // :TodoLostTypeName
-    //if __driver_abi_version < 1349 {  // :UpdateBoot typename used to not work
+    //{
         names :: @const_slice(
             "Span", "BakedVarId", "ScopeId", "Symbol", "Type",
             "ComptimeEnvironment", "Func", "Values", "TypeMeta",

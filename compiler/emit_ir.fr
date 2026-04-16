@@ -34,8 +34,6 @@ EmitIr :: @struct(
     label_depth: u32,
     blk: *Qbe.Blk, 
     debug: bool,
-    // for old env abi, only used when next_abi_version() < 1513
-    context := QbeNull,
     func: FuncId,
     blocks: List(*Qbe.Blk),
     when: ExecStyle,
@@ -358,13 +356,6 @@ fn compile_for_arg_impl(self: *EmitIr, parts: []FatExpr, out: *List(Qbe.Ins)) CR
     .Ok
 };
 
-fn context_par_e(self: *EmitIr) void #inline = {
-    if next_abi_version() < 1513 {
-        self.context = self.f.newtmp("context", .Kl);
-        self.emit(.pare, .Kl, self.context, QbeNull, QbeNull);
-    }
-}
-
 fn finalize_blocks(self: *EmitIr) void = {
     prev := Qbe.Blk.ptr_from_int(0);
     ok := true;
@@ -474,14 +465,6 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
 
     body: *FatExpr = @match(func.body&) {
         fn Normal(body) => body;
-        fn Intrinsic(op) => {
-            // INTRINSIC_GET_ENV :UpdateBoot
-            self.context_par_e();
-            self.f.ret_cls = .Kl;
-            self.blk.jmp = (type = .retl, arg = self.context);
-            self.finalize_blocks();
-            return(.Ok)
-        }
         fn NewIntrinsic(op) => {
             if not_stand_alone(@as(Qbe.O) op.ir_op) {
                 self.blk.jmp.type = .hlt;
@@ -535,7 +518,6 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = {
         @default => return(@err("no acceptable impl %", self.program.log(func)));
     };
     
-    self.context_par_e();
     // note: this rewrites self.blk
     @try(self.bind_parameters()) return;
     
@@ -996,6 +978,7 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
             
             @match(func.body&) {
                 fn NewIntrinsic(op) => {
+                    ::if(Qbe.Ref);
                     // i kinda want to get rid of this and let the backend handle all inlining,
                     arg := arg.items();
                     a0 := if arg[0].ty == void {
@@ -1007,15 +990,6 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
                     // the || void is for :DoFoldInvalidArity
                     a1 := if(arg.len == 1 || arg[1].ty == void, => QbeNull, => @try(self.compile_expr(arg[1]&, .ScalarTransient)) return);
                     return(self.emit_intrinsic_new(op, p, @slice(a0, a1), f_ty.ret));
-                }
-                fn Intrinsic(op) => {
-                    ::if(Qbe.Ref);
-                    @debug_assert(next_abi_version() < 1513);  // :UpdateBoot
-                    a0 := @try(self.compile_expr(arg, .Scalar)) return;
-                    a0 := @if(op[] == INTRINSIC_GET_ENV, self.context, /*INTRINSIC_SET_ENV*/ a0);
-                    self.unify_placement(p&, f_ty.ret);
-                    self.emit(.copy, .Kl, self.context, a0, QbeNull);
-                    return(Ok = self.scalar_result(p, self.context, f_ty.ret))
                 }
                 fn DynamicImport(info) => if self.when == .Aot {
                     @err_assert(info.name == func.name, "this isn't the output of linkrename on the comptime arch") return;
@@ -1172,7 +1146,7 @@ fn emit_constant(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type, loc
             if value.len() > 64 || value.len().mod(8) != 0 {  // last one unrechable because alignment?
                 self.reference_constant(id);
                 dest := self.get_memory(p, expr_ty);
-                src := self.as_ref(AddrOf = id);
+                src := self.as_ref(AddrOfA = (base = id, addend = 0));
                 self.blit(dest, src, info.stride_bytes.zext());
                 return(Ok = dest);
             };
@@ -1246,11 +1220,7 @@ fn as_ref(self: *EmitIr, part: BakedEntry) Qbe.Ref = @match(part) {
     // TODO: non-8 byte fields
     fn Num(f) => self.f.getcon(f.value);
     fn FnPtr(f) => self.func_ref(f);
-    fn AddrOf(id) => {
-        self.reference_constant(id);
-        name := self.program.mangle_name(id);
-        self.f.symcon(name)
-    }
+    fn _0() => unreachable();
     fn AddrOfA(it) => {
         self.reference_constant(it.base);
         name := self.program.mangle_name(it.base);
