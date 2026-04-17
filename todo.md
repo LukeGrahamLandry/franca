@@ -1,4 +1,6 @@
 
+- would be nice to have a thing draws a timeline and hierarchical zones. 
+  - tracy annoys me. you can't even just copy the binary to another computer (dynamically links homebrew's freetype)
 - should at least have an option to put more work into sorting the call graph before sending to the backend so inlining works better.  
 - see "things to improve" comment in examples/disassemble.fr
 - examples/gpu/terminal: there's some situation where the child crashes and it doesn't notice so it thinks something is already running forever? 
@@ -198,7 +200,7 @@ export function w $main() {
   its only 1.4 -> 1.17 -> 1.20
 - replace all the `start := getcwd(); chdir(foo); work(); chdir(start);` 
   with `push_cwd(foo) {| work(); };` = `start := open("."); chdir(foo); work(); fchdir(start);`
-- #reexport something with main doesn't get picked up by find_unique_func. 
+- #reexport something with main doesn't get picked up by get_unique_named. 
   because find_in_scope doesn't recurse. idk if i want that to work. 
   need to decide how get_constants should work because they should stay consistant. 
   get_constants really should follow #reexport because the main reason i want it is being able to rearrange files without breaking change to namespaces if imported properly. 
@@ -420,8 +422,6 @@ cset	w0, eq
 - allow trailing lambda to be passed as a function pointer but still infer types of arguments. (ie. when calling run_tests_main_threaded)
 - set a good example; don't have tests that rely on layout of codegenentry. use the functions on the vtable. i think import_c/test/test.fr does this wrong
 - always zero struct padding when baking constants (even when behind a pointer and even when the struct contains no pointers). 
-- can't boot/strap.sh with FRANCA_NO_CACHE=1
-  - :UpdateBoot
 - document `store v, [Sxxx]` vs `store v, Sxxx` on amd64
 - extend the cross repro tests to all the example programs. not just the compiler. maybe just add a file with hashes of binaries to the released artifact. 
 - I need to improve @enum for bit flags so i can use that in posix.fr so it doesn't suck as much to call mmap. 

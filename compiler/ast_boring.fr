@@ -149,25 +149,20 @@ fn int_value(value: *Values, int: IntTypeInfo) Res(i64) = {
         // TODO: cope with u64
         value.Small._0
     };
-    min, max := int.range();
-    @err_assert(i <= max && i >= min, "tried to coerce but value out of bounds for FROM type!?!?!!?") return;
+    @err_assert(int.check_range(i), "tried to coerce but value out of bounds for FROM type!?!?!!?") return;
     (Ok = i)
 }
 
-::if(Ty(i64, i64));
-fn range(int: IntTypeInfo) Ty(i64, i64) = {
+// it would be nice if i had i128 so could represent all numbers... but then i wouldn't be able to represent all numbers. 
+fn check_range(int: IntTypeInfo, i: i64) bool = {
     if int.signed {
-        // TODO: UB on i1. 
+        @debug_assert_ne(int.bit_count, 1, "signed 1 bit number? fuck off");
         max := 1.shift_left(int.bit_count - 1) - 1;
-        (-max, max) /// TODO: is this right? 
+        min := -max - 1;
+        i <= max && i >= min
     } else {
-        // TODO: this is wrong. you want max u64, it would be nice if i had i128 so could represent all numbers. 
-        max :=  1.shift_left(int.bit_count) - 1;
-        // TODO: segfault if i put 2^63 here. :fucked
-        // 4611686018427387904 is a number i can put here and not die,
-        // but it seems that im relying on this being wrong to pick the right overload somewhere. 
-        max := if(int.bit_count == 64, => 4611686018427387904, => max);
-        (0, max)
+        max := @if(int.bit_count == 64, -1, 1.shift_left(int.bit_count) - 1);
+        i.ule(max)
     }
 }
 
@@ -215,7 +210,6 @@ fn tuple_types_arr(self: *SelfHosted, requested: ResultType, len: i64) Result([]
 }
 
 fn unique_const(self: *SelfHosted, name: Symbol) Var #once = {
-    // TODO: expose a function for this!
     self.scopes.dup_var(
         kind = .Const,
         name = name,
@@ -225,8 +219,7 @@ fn unique_const(self: *SelfHosted, name: Symbol) Var #once = {
 }
 
 fn from_index(idx: i64) ScopeId = {
-    val: u32 = idx.trunc();
-    ptr_cast_unchecked(From = u32, To = ScopeId, ptr = val&)[]
+    (_ = idx.trunc())
 }
 
 :: {
@@ -254,8 +247,8 @@ fn from_index(idx: i64) ScopeId = {
     AutoClone(?FatExpr);
     AutoClone(Ty(i64, FatExpr));
     AutoClone(Pattern);
-    AutoClone(get_variant_type(Stmt, Stmt.Tag()._DeclNamed));
-    AutoClone(get_variant_type(Stmt, Stmt.Tag()._DeclVar));
+    AutoClone(get_variant_type(Stmt, Stmt.Tag()._0));
+    AutoClone(get_variant_type(Stmt, Stmt.Tag()._1));
     AutoClone(get_variant_type(Stmt, Stmt.Tag().DeclVarPattern));
     AutoClone(get_variant_type(Stmt, Stmt.Tag().Set));
     AutoClone(get_variant_type(Expr, Expr.Tag().FrcImport));
@@ -290,36 +283,15 @@ fn from_index(idx: i64) ScopeId = {
     DerefEq(OverloadSet);
 };
 
-// this currently works but probably only loosly overlaps with being correct because its nap time. 
 fn adjust_int_length(value: *Values, int: *IntTypeInfo) void = {
     @debug_assert(value.is(.Small), "ICE: big value for int");
-    byte_count := value.Small._1&;
-    value := value.Small._0&;
-    want_byte_count: u8 = ((int.bit_count + 7) / 8).trunc();
+    want_byte_count: u8 = int.bit_count.add(7).udiv(8).trunc();
     if want_byte_count * 8 != int.bit_count.trunc() {
-        // weird ints are stored dumby currently 
+        // wasteful. my non-blessed sized ints are just used for passing metadata about how many bits 
+        // were in the literal (see @bits for arm instruction encoding). they're always stored as 64 bits. 
         want_byte_count = 8;
     };
-    i := byte_count[];
-    while => byte_count[] > want_byte_count {
-        byte_count[] -= 1;
-        //if int.signed {
-        //    debug_assert_eq!(*value & (255 << i), 255);
-        //} else {
-        //    debug_assert_eq!(*value & (255 << i), 0);
-        //}
-        i -= 1;
-    };
-    i := byte_count[];
-    while => byte_count[] < want_byte_count {
-        byte_count[] += 1;
-        i += 1;
-        //if int.signed {
-        //    debug_assert_eq!(*value & (255 << i), 255);
-        //} else {
-        //    debug_assert_eq!(*value & (255 << i), 0);
-        //}
-    };
+    value.Small._1 = want_byte_count;
 }
 
 fn is_const(self: *FatExpr) bool = {
@@ -413,3 +385,9 @@ fn raw_type(c: *SelfHosted, ty: Type) Type = {
         };
     };
 }
+
+fn get_flag(it: *get_variant_type(Expr, .Call), flag: CallFlags) bool #inline = 
+    it.flags.bit_and(1.shift_left(@as(i64) flag)) != 0;
+
+fn get_flag(it: *get_variant_type(Expr, .Block), flag: BlockFlags) bool #inline = 
+    it.flags.bit_and(1.shift_left(@as(i64) flag)) != 0;

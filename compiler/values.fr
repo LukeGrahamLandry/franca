@@ -331,53 +331,40 @@ fn get_custom_bake_handler(c: *SelfHosted, ty: Type) Res(?BakeHandler) = {
 }
 
 // TODO: do this lazily and as part of the event loop. 
+// TODO: this way of doing it means #where won't work
 fn check_for_new_aot_bake_overloads(self: *SelfHosted) PRes = {
     os := self.env.bake_os.expect("cannot aot during bootstrapping.");
-    
     overloads := self.dispatch.overloads&.nested_index(os.as_index());
-    prev := overloads.ready.len();
+    // not just using overloads.ready.len() in case someone caused 
+    // new things to resolve outside this function (i.e. called bake_relocatable_value manually)
+    prev := self.aot_bake_overload_count;
     self.compute_new_overloads(overloads);
-    // TODO: this will miss them if someone caused new things to resolve outside this function.
-    //       so if you ever call bake_relocatable_value manually. :FUCKED -- Jun 19
     current := overloads.ready.len();
-    new := overloads.ready.items().slice(prev, current).clone(temp());
-    for new { f |
+    self.aot_bake_overload_count = current;
+    range(prev, current) { i |
         continue :: local_return;
-        func := self.get_function(f);
-        args := func.arg.bindings&;
-        if args.len() != 1 {
+        f := overloads.ready[i];
+        if self.get_function(f)[].arg.bindings.len != 1 {
             continue();
         };
         
-        value := self.poll_in_place(void) {()Maybe(void)|
+        arg_ty, ret_ty := @try(self.poll_in_place(Ty(Type, Type)) {
             return :: local_return;
             arg_ty := @check(self.infer_arguments(f)) return;
             ret_ty := @check(self.infer_return(f)) return;
-            .Ok
-        };
-        @try(value) return;
-        f_ty := func.finished_ty().expect("bake overload fn type");
-        info := self.get_type(f_ty.ret);
-        if !info.is(.Struct) {
-            continue();
-        };
-        fields := info.Struct.fields&;
+            (Ok = (arg_ty, ret_ty))
+        }) return;
+        info := self.get_type(ret_ty);
         // TODO: make sure its actually a Slice(BakedEntry) :FUCKED this will be so confusing someday 
-        if fields.len() != 2 {
+        if !info.is(.Struct) || info.Struct.fields.len != 2 {
             continue();
         };
 
-        first := f_ty.arg; 
-        ty := self.unptr_ty(first).or(=> continue());
+        ty := self.unptr_ty(arg_ty) || continue();
         prev := self.baked.custom_bake_constant&.insert(ty, f);
-        if !prev.is_none() {
-            // TODO: return this as a CompileError instead of printing here
-            self.codemap.show_error_line(func.loc, true /*TODO*/);
-            self.codemap.show_error_line(self.get_function(prev.Some)[].loc, true /*TODO*/);
-            @eprintln("% % %", prev.Some, f, self.log_type(ty));
+        if prev { prev |
+            return(Err = self.error(AotBakeOverloadConflict = (type = ty, a = f, b = prev)));
         };
-        
-        @err_assert(prev.is_none(), "conflicting overload for bake AOT constant") return;
     };
     .Ok
 };

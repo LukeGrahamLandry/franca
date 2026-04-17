@@ -3,16 +3,8 @@ CompilerValue :: @struct(pointer_to_pointer_to_selfhosted: rawptr);
 CompCtx :: @rec @struct(data: Compiler, vtable: *ImportVTable);
 fn CRes($T: Type) Type = Result(T, *CompileError);
 
-// TODO: some of the old build stuff uses these names in file paths
 Arch :: @enum(i64) (aarch64, x86_64, rv64, wasm32);
-ExecStyle :: @enum(i64) (Jit, Aot);
-// TODO: some of the old build stuff uses these names in file paths
 Os :: @enum(i64) (macos, linux);
-
-TargetEnv :: @struct(
-    arch: Arch,
-    os: Os,
-);
 
 // TODO: probably better to convert things to imports so you're not forced to evaluate this type if you just need one. 
 ImportVTable :: @rec @struct(
@@ -20,14 +12,14 @@ ImportVTable :: @rec @struct(
     get_string: @FnPtr(c: Compiler, s: Symbol) Str,
     // This makes a copy of *BuildOptions internally. 
     init_compiler: @FnPtr(options: *BuildOptions) Compiler,
-    find_unique_func: @FnPtr(c: Compiler, name: Symbol) ?FuncId,
+    _5: i64,
     get_fns_with_tag: @FnPtr(c: Compiler, tag: Symbol) Slice(FuncId),
     destroy_compiler: @FnPtr(c: Compiler) void, 
-    compile_func: @FnPtr(c: Compiler, f: FuncId, when: ExecStyle) CRes(void),
+    compile_func: @FnPtr(c: Compiler, f: FuncId) CRes(void),
     get_jitted_ptr: @FnPtr(c: Compiler, f: FuncId) CRes(rawptr),
     get_function: @FnPtr(c: Compiler, f: FuncId) *Func,
     add_file: @FnPtr(c: Compiler, name: Str, content: Str) AbiHackSpan, 
-    parse_stmts: @FnPtr(c: Compiler, f: *Span) Result(Slice(FatStmt), *CompileError),
+    parse_stmts: @FnPtr(c: Compiler, f: *Span) CRes(Slice(FatStmt)),
     make_and_resolve_and_compile_top_level: @FnPtr(c: Compiler, body: Slice(FatStmt)) CRes(void),
     get_baked: @FnPtr(c: Compiler, id: BakedVarId) rawptr, // *BakedValue
     get_build_options: @FnPtr(c: Compiler) *BuildOptions,
@@ -105,6 +97,7 @@ CompileError :: @tagged(
     InvalidField: @struct(span: Span, container: Type, name: Symbol),  // tried to access `name` (directly or assigned in literal)
     MissingField: @struct(span: Span, container: Type, name: Symbol),  // struct literal requires `name`
     InvalidContextualField: @struct(span: Span, type: Type, name: Symbol),  // same as InvalidField
+    AotBakeOverloadConflict: @struct(type: Type, a: FuncId, b: FuncId),
 );
 
 // important that arch/os/link_libc isn't part of (ComptimeEnvironment or BuildOptions)
@@ -152,12 +145,7 @@ BuildOptions :: @struct(
     tls_stack_bits := 0,
     frontend_logging := "",
     no_cache := false,
-    _pad5 := false, 
-    _pad3 := false,
-    _pad7 := true,
-    _pad8 := true,
-    _1 := 0,
-    _pad6 := 0,
+    _1 := (0, 0),
     // *ComptimeEnvironment
     env := rawptr_from_int(0),
     _pad9 := false,
@@ -205,7 +193,7 @@ Expr :: @tagged(
     Poison: PlaceholderValue,
     Value: @struct(bytes: Values, coerced: bool = false),
     Switch: @struct(value: *FatExpr, default: *FatExpr, cases: RawList(Ty(i64, FatExpr))),
-    Call: @struct(f: *FatExpr, arg: *FatExpr, flags: i64 = 0),
+    Call: @struct(f: *FatExpr, arg: *FatExpr, flags: u32 = 0),
     Block: @struct(
         body: RawList(FatStmt), 
         result: *FatExpr, 
@@ -256,8 +244,7 @@ Values :: @tagged(
 );
 FatStmt :: @rec @struct(
     stmt: Stmt,
-    _pad1: i64 = 0,
-    _pad2: i64 = 0,
+    _0 := (0, 0),
     loc: Span,
     done: bool = false,
 );
@@ -265,9 +252,9 @@ Stmt :: @tagged(
     Noop: void,
     Eval: FatExpr,
     DeclFunc: *Func,
-    _DeclVar: @struct(_0: FatExpr, _1: LazyType, _2: Var),
+    _0: @struct(_0: FatExpr, _1: LazyType, _2: Var),
     DeclVarPattern: @struct(binding: Pattern, value: FatExpr),
-    _DeclNamed,
+    _1,
     Set: @struct(place: FatExpr, value: FatExpr),
     ExpandParsedStmts: i64,
     Annotations: RawList(Annotation),
@@ -284,8 +271,7 @@ Func :: @struct(
     var_name: ?Var,
     finished_arg: ?Type,
     finished_ret: ?Type,
-    _1: i64 = 0, 
-    _2: i64 = 0,
+    _1 := (0, 0),
     return_var: ?Var,
     _3: i64 = 0,
     resolve_scope: ScopeId = NOSCOPE,
@@ -344,6 +330,7 @@ FnFlag :: @enum(i64) (
 CallFlags :: @enum(i64) (
     MustReturn,
     NoInline,
+    Inline,
 );
 
 BlockFlags :: @enum(i64) (

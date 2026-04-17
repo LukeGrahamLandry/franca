@@ -1510,8 +1510,8 @@ fn compile_call_overload_set(self: *SelfHosted, expr: *FatExpr, requested: Resul
 ::if(ResultType);
 fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) #once = {
     @debug_assert(expr.expr&.is(.Call));
-    f := expr.expr.Call.f;
-    arg := expr.expr.Call.arg;
+    call := expr.expr.Call&;
+    f, arg := (call.f, call.arg);
     req_fn: ResultType = @match(requested) {
         fn Specific(t) => (Returning = t);
         @default => .None;
@@ -1557,6 +1557,8 @@ fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
     
     @match(self.get_type(f.ty)) {
         fn FnPtr(it) => {
+            @err_assert(!call.get_flag(.Inline), "cannot inline function pointer call") return;
+        
             // Feels like a pretty reasonable invarient: if we have a function pointer, we need to know exactly what its types are. 
             @check(self.compile_expr(arg, (Specific = it.ty.arg))) return;
             @check(self.can_assign(arg.ty, it.ty.arg)) return; // TODO: correct varience
@@ -1579,8 +1581,8 @@ fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
 // TODO: check function ret type against requested
 // Note: when we get here, we might not know the type of the function or the argument. 
 fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) = {
-    f_expr := expr.expr.Call.f;
-    arg_expr := expr.expr.Call.arg;
+    call := expr.expr.Call&;
+    f_expr, arg_expr := (call.f, call.arg);
     @debug_assert(!f_expr.ty.is_unknown(), "call_direct expected fn expr to be compiled");
 
     fid := @check(self.immediate_eval_expr(f_expr, f_expr.ty)) return;
@@ -1637,8 +1639,8 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     };
     
     capturing   := func.get_flag(.AllowRtCapture).or(func.get_flag(.MayHaveAquiredCaptures));
-    once_deny_inline := expr.expr.Call.flags.bit_and(1.shift_left(@as(i64) CallFlags.NoInline)) != 0;
-    will_inline := capturing || (func.get_flag(.Inline) && !once_deny_inline);
+    want_inline := call.get_flag(.Inline) || func.get_flag(.Inline);
+    will_inline := capturing || (want_inline && !call.get_flag(.NoInline));
     deny_inline := func.get_flag(.NoInline);
     if(will_inline && deny_inline, => return(@err("must inline a function marked #noinline")));
     
@@ -3669,16 +3671,14 @@ fn ask_coerce_const_expr(self: *SelfHosted, expr: *FatExpr, want: Type, query: b
         fn Int(have_int) => {
             @match(want_info) {
                 fn Int(want_int) => {
-                    min, max := want_int[].range();
                     @err_assert(expr.expr&.is(.Value), "TODO: imm_eval const int cast") return;
                     value := expr.expr.Value.bytes&;
                     v := @try(value.int_value(have_int[])) return;
-                    if v <= max && v >= min {
+                    @if(!want_int[].check_range(v)) return(Ok = false);
                         if(query, => return(Ok = true));
                         value.adjust_int_length(want_int);
                         expr.ty = want;
                         return(Ok = true);
-                    };
                 }
                 fn F64() => {
                     max := 1.shift_left(MANTISSA_DIGITS_f64) - 1;
@@ -3686,11 +3686,10 @@ fn ask_coerce_const_expr(self: *SelfHosted, expr: *FatExpr, want: Type, query: b
                     @err_assert(expr.expr&.is(.Value), "TODO: imm_eval const int cast") return;
                     value := expr.expr.Value.bytes&;
                     i := @try(value.int_value(have_int[])) return;
-                    if i <= max && i >= min {
+                    @if(!(i <= max && i >= min)) return(Ok = false);
                         if(query, => return(Ok = true));
                         self.set(expr, f64, i.float());
                         return(Ok = true);
-                    };
                 }
                 fn F32() => { // TODO: copy paste
                     max := 1.shift_left(MANTISSA_DIGITS_f32) - 1;
@@ -3698,12 +3697,11 @@ fn ask_coerce_const_expr(self: *SelfHosted, expr: *FatExpr, want: Type, query: b
                     @err_assert(expr.expr&.is(.Value), "TODO: imm_eval const int cast") return;
                     value := expr.expr.Value.bytes&;
                     i := @try(value.int_value(have_int[])) return;
-                    if i <= max && i >= min {
+                    @if(!(i <= max && i >= min)) return(Ok = false);
                         if(query, => return(Ok = true));
                         f: f32 = i.float().cast();
                         self.set(expr, f32, f);
                         return(Ok = true);
-                    };
                 }
                 @default => ();
             };
@@ -3715,16 +3713,13 @@ fn ask_coerce_const_expr(self: *SelfHosted, expr: *FatExpr, want: Type, query: b
             @match(want_info) {
                 fn Int(want_int) => {
                     v := vf.int();
-                    if v.float() == vf {
-                        min, max := want_int[].range();
-                        if v <= max && v >= min {
+                    @if(v.float() != vf) return(Ok = false);
+                    @if(!want_int[].check_range(v)) return(Ok = false);
                             if(query, => return(Ok = true));
                             value[] = self.to_values(i64, v);
                             value.adjust_int_length(want_int);
                             expr.ty = want;
                             return(Ok = true);
-                        };
-                    };
                 }
                 fn F32() => {
                     v: f32 = vf.cast();
@@ -3746,8 +3741,7 @@ fn make_fn_ptr_expr(self: *SelfHosted, expr: *FatExpr, fid: FuncId, want: Type) 
     self.took_pointer_value(fid);
     self.set(expr, FuncId, fid);
     expr.done = false;
-    e := self.box(expr[]);  // :fucked segfault if you inline this!!!!!! -- Aug 6
-    expr.expr = (FnPtr = e);
+    expr.expr = (FnPtr = self.box(expr[]));
     expr.ty = want;
     expr.done = false;
 }
@@ -3771,7 +3765,6 @@ fn can_assign(self: *SelfHosted, want: Type, found: Type) Maybe(void) = {
     if self.ask_can_assign(want, found) {
         .Ok
     } else {
-        // TODO: dont allocate + fmt here beacause overload resolution spams this. 
         (Err = self.error(TypeMismatch = (span = Span.zeroed(), wanted = want, found = found)))
     }
 }
@@ -4054,7 +4047,7 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
             .None
         }
         fn Block(it) => {
-            if it.flags.bit_and(1.shift_left(@as(i64) BlockFlags.Resolved)) != 0 && it.body.is_empty() {
+            if it.get_flag(.Resolved) && it.body.is_empty() {
                 return(self.check_quick_eval(it.result, ret_ty));
             };
             .None
@@ -4410,7 +4403,7 @@ fn struct_macro(self: *SelfHosted, expr: *FatExpr) Maybe(FatExpr) = {
             fields := Field.list(self.get_alloc());
             
             // TODO: don't iterate twice 
-            if it.flags.bit_and(1.shift_left(@as(i64) BlockFlags.HoistedConstants)) == 0 {
+            if !it.get_flag(.HoistedConstants) {
                 @check(self.hoist_constants(it.body.items())) return;
             };
             
@@ -4564,7 +4557,7 @@ fn handle_type(self: *Unquote, ty: *LazyType)  Result(DoMore, *CompileError) #on
 fn handle_pattern(self: *Unquote, p: *Pattern) Result(DoMore, *CompileError) #once = (Ok = .Continue);
 
 fn ensure_resolved(self: *SelfHosted, block: *get_variant_type(Expr, .Block)) Maybe(void) = {
-    if(block.flags.bit_and(1.shift_left(@as(i64) BlockFlags.Resolved)) != 0, => return(.Ok));
+    if(block.get_flag(.Resolved), => return(.Ok));
     
     r: ResolveScope = new(self, block.scope, self.last_loc);
     zone := zone_begin(.Scope); // TODO: defer

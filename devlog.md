@@ -1,8 +1,15 @@
 
+## (Apr 17)
+
+- fr: remove vtable.find_unique_func. require `main :: fn` instead of `fn main`
+
 ## (Apr 16)
 
 - too much stuff where there's a good reason that i haven't done it already. 
   need to just make some progress. declare a new bootstrap version is perhaps an easy win. it's been a year, might as well. 
+- if im going to complain about people dynamically linking stuff i should fix my programs. 
+  term: be able to statically link the binary opener programs so don't need the source at runtime. 
+- fr: make sure check_for_new_aot_bake_overloads can't lose any
 
 ## (Apr 15)
 

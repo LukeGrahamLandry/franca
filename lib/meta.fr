@@ -7,25 +7,28 @@ fn get_tagged(comp: CompCtx, tag: Str) Slice(FuncId) = {
     {comp.vtable.get_fns_with_tag}(comp.data, tag)
 }
 
-// TODO: overloading
-fn get_unique_named(c: CompCtx, name: Str) ?FuncId = {
-    f := {c.vtable.intern_string}(c.data, name);
-    {c.vtable.find_unique_func}(c.data, f)
+fn get_unique_named(c: CompCtx, name_s: Str) ?FuncId = {
+    S :: import("@/compiler/ast_external.fr").TOP_LEVEL_SCOPE;
+    name := c.intern_string(name_s);
+    // TODO: this doesn't use #use and im relying on that sometimes which isn't great
+    v, type := c'vtable'get_constant(c.data, S, name)
+        || return(.None);
+    if type == FuncId || c'vtable'get_type_info(c.data, type).is(.Fn) {
+        return(Some = FuncId.ptr_from_raw(v)[]);
+    };
+    // printing here makes this function less useful but i only use it for getting main/driver 
+    @if(type == OverloadSet,
+        @eprintln("% should be a constant function not an overload set", name_s),
+        @eprintln("% should be a function", name_s));
+    .None
 }
 
-// TODO: no unwrap! return error.
 fn get_jitted(c: CompCtx, f: FuncId) rawptr = {
+    // like this but can be called from outside the compctx (like from a driver). 
     // const_eval(rawptr)(@{ x :: @as(rawptr) @[@literal f]; x })
     
-    res := {c.vtable.compile_func}(c.data, f, .Jit);
-    or res { err |
-        c.report_error(err)
-    };
-    ptr := {c.vtable.get_jitted_ptr}(c.data, f);
-    ptr := or ptr { err |
-        c.report_error(err)
-    };
-    ptr
+    c'vtable'get_jitted_ptr(c.data, f)
+        .or(fn(err) => c.report_error(err))
 }
 
 fn default_build_options(vtable: *ImportVTable) *BuildOptions = 
