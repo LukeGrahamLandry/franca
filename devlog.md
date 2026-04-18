@@ -1,4 +1,14 @@
 
+## (Apr 18)
+
+disassemble
+- read symbol tables and give it a ctx.symtab. that only does it for calls, 
+  so have to insert titles for definitions myself. it gives me the offset so easy 
+  but the amd one is offset by two instructions in a confusing way, there's start and pos. 
+- their adrp must be wrong, missing a bit? parse_immpc(adrp) is treating it the same as adr. 
+  i wonder if they take patches for things that don't matter like that. 
+  https://github.com/LuaJIT/LuaJIT/blob/18b087cd2cd4ddc4a79782bf155383a689d5093d/src/jit/dis_arm64.lua#L824
+
 ## (Apr 17)
 
 - fr: remove vtable.find_unique_func. require `main :: fn` instead of `fn main`

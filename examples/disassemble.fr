@@ -2,17 +2,27 @@
 // this is a wrapper for luajit's (arm/amd) disassemblers. 
 // those disassemblers need raw machine code as input. 
 // this program reads a mach-o or elf executable, finds the code segment and disassembles that. 
+// it also reads the symbol table to display function names. 
 //
 // it's also a more serious example of using libraries written in other languages. 
 // import_c to embed the lua interpreter and then the lua c api to call the disassemblers. 
 //
 // TODO:
 // - let it plug into backend's `-d D` replacing llvm-mc. 
-// - show symbol names interspersed with the code
 // - look at sections instead of segments so don't include text_padding. 
 //   macho: truncate the align zeros at the end of: segments[0].file_size = chunks[1].len - m.text_padding();
 // - allow multiple code sections
 // - add this to autotest, need to fix the va_list thing first tho. 
+// - more sane abstraction over different exe types? this and bloat2 are getting kinda annoying. 
+// TODO: (limitations in the disassembler itself):
+// - there's something wrong with the addresses shown for adrp. 
+//   parse_immpc treats adr and adrp the same?
+//   1000042d8  9001ffe0  adrp  x0, 0x1000082d4	->_luaO_pushfstring__18593
+//   1000042dc  91024000  add   x0, x0, #144.0
+//   vs
+//   1000042d8: 9001ffe0    	adrp	x0, 0x104000000 <_g1>
+//   1000042dc: 91024000    	add	x0, x0, #0x90
+// - lea [rip+xxx] doesn't show symbol name? 
 //
 // things to improve: 
 // - :compilerbug/import_c,caching luaopen_package->setpath->luaO_pushvfstring 
@@ -43,39 +53,47 @@ main :: fn() void = {
 }
 
 dump :: fn(out: *List(u8), input: []u8) void = {
-    arch, code := @switch(input.peek_type(u32)[]) {
+    it := @switch(input.peek_type(u32)[]) {
         @case(MachO.macho_magic) => find_code_in_macho(input);
         @case(Elf.MAGIC) => find_code_in_elf(input);
         @case(import("@/backend/wasm/bits.fr").MAGIC4) => panic("use examples/dump_wasm.fr instead");
         @default => panic("unknown object file format (expected mach-o or elf)");
     };
+    it := it || panic("didn't find any code to disassemble");
     
-    if !FEAT_LUA || arch == .rv64 {
-        hex_dump(out, code);
+    if !FEAT_LUA || it.arch == .rv64 {
+        hex_dump(out, it.code, it.base_address);
         return();
     };
     
     @if(!FEAT_LUA) unreachable();
-    L := new_state_with_bit();
+    L := new_state_for_dis();
     dis := load_disassemblers(L);
-    dis.run(arch, code, out).or(fn(msg) => panic(msg));
+    dis.run(it.arch, it.code, out, it.base_address, it.symtab&)
+        .or(fn(msg) => panic(msg));
     Lua'lua_close(L);
 }
 
 // the function created from disassemble_source needs to be pinned for the gc so keep it in a lua global. 
 Disassemble :: @struct(L: *Lua.lua_State, dis_global_name: *i8);
+// TODO: use https://www.lua.org/pil/27.3.2.html instead
 dis_global_name :: { here := @source_location; S(c_str(sym(@tfmt("gensym$%$disassemble$", here.low)))) };
 
 fn load_disassemblers(L: *Lua.lua_State) Disassemble #use(Lua) = {
     in := @if(FEAT_COMPILE, @run precompile(ast_alloc()), precompile(temp()));
     ok := read_chunk(L, in, "disassemble");
     @assert(ok, "failed load chunk %", lua_dump_stack(L));
-    lua_pcallk(L, 0, 1, 0, 0, zeroed(lua_KFunction));
+    r := lua_pcallk(L, 0, 1, 0, 0, zeroed(lua_KFunction));
+    @assert_eq(r, 0, "failed to load chunk %", lua_dump_stack(L));
     lua_setglobal(L, dis_global_name);
     (L = L, dis_global_name = dis_global_name)
 }
 
-fn run(self: Disassemble, arch: Arch, code: []u8, out: *List(u8)) Result(void, Str) #use(Lua) = {
+// when symbol addresses are shown in disassembly or looked up in `symtab`, 
+// `code `is treated as being loaded starting at `base_address`.
+// (so if jitted, base_address = u8.int_from_ptr(code.ptr);).
+fn run(self: Disassemble, arch: Arch, code: []u8, out: *List(u8), base_address: i64, symtab: *RawHashMap(i64, Str)) Result(void, Str) #use(Lua) = {
+    userdata := raw_from_ptr(@type symtab[], symtab);
     L := self.L;
     lua_getglobal(L, self.dis_global_name);
     lua_pushnumber(L, @match(arch) {
@@ -83,8 +101,11 @@ fn run(self: Disassemble, arch: Arch, code: []u8, out: *List(u8)) Result(void, S
         fn x86_64() => 1;
         @default => return(Err = "unsupported arch");
     });
-    lua_pushlstring(L, S(code.as_cstr()), code.len.bitcast());
-    r := lua_pcallk(L, 2, 1, 0, 0, zeroed(lua_KFunction));
+    push_string(L, code);
+    lua_pushnumber(L, base_address.float());
+    lua_pushlightuserdata(L, userdata);
+    lua_pushcclosure(L, symtab_fn, /*#upvalues*/ 1);
+    r := lua_pcallk(L, 4, 1, 0, 0, zeroed(lua_KFunction));
     if r != 0 {
         out := @ref u8.list(temp());
         out.push_all("(call disassemble failed)");
@@ -97,6 +118,18 @@ fn run(self: Disassemble, arch: Arch, code: []u8, out: *List(u8)) Result(void, S
     .Ok
 }
 
+symtab_fn :: fn(L: *Lua.lua_State) i32 #use(Lua) = {
+    userdata := lua_topointer(L, lua_upvalueindexN(1));
+    symtab := RawHashMap(i64, Str).ptr_from_raw(userdata);
+    key := lua_tonumberx(L, 2, @ref @as(i32) 0);
+    if symtab.get(key.int()) { name |
+        push_string(L, name);
+    } else {
+        lua_pushnil(L);
+    };
+    1
+}
+
 disassemble_source :: """
     local dis_arm64 = (function() % end)();
     local dis_x86 = (function() % end)();
@@ -106,29 +139,60 @@ disassemble_source :: """
       regname = dis_x86.regname64
     };
     local dis = { [0] = dis_arm64, [1] = dis_amd64 };
-    return function(arch, input) 
+    -- symtab_fn: (_, number) -> string|nil
+    return function(arch, input, addr, symtab_fn) 
         local r = {};
-        dis[arch].disass(input, 0, function(s)
+        -- they use ctx.symtab for jump targets but not to show the start of the function
+        local check_name = function(pos) 
+            local name = symtab_fn(nil, pos + addr);
+            if name then
+                r[#r + 1] = "\n" .. name .. ":\n"
+            end
+        end
+        local ctx;
+        ctx = dis[arch].create(input, addr, function(s)
             r[#r + 1] = s;
+            -- the (amd / arm) disassemblers (output the instructions / update ctx.pos) at different times...
+            check_name(ctx.start or ctx.pos - (arch - 1)*4)
         end);
+        if symtab_fn then
+            setmetatable(ctx.symtab, { __index = symtab_fn });
+        else 
+            symtab_fn = function(a, b) return nil end
+        end
+        check_name(0);
+        ctx:disass();
         return table.concat(r);
     end;
 """;
 
 S :: fn(s: CStr) *i8 = bit_cast_unchecked(CStr, *i8, s);
 
-new_state_with_bit :: fn() *Lua.lua_State #use(Lua) = {
+new_state_for_dis :: fn() *Lua.lua_State #use(Lua) = {
     @assert_ne(import("@/lib/sys/process.fr")'query_current_arch(), .wasm32, "TODO: longjmp");
     L := luaL_newstate();
-    luaL_openlibs(L);
-    open_bit :: fn(L) i32 = {
-        lua_createtable(L, 0, 0);
-        luaL_setfuncs(L, bitlib_pub[], 0);
-        1
-    };
-    luaL_requiref(L, S"bit", open_bit, 1);
-    lua_popN(L, 1);
+    // luaL_openlibs(L);  // could do this to get everything but might as well only get what's needed. allows dce, symbols: 2065->1601
+    L.open_and_pop("_G", luaopen_base);          // for assert
+    L.open_and_pop("string", luaopen_string);
+    L.open_and_pop("table", luaopen_table);      // for table.concat
+    L.open_and_pop("package", luaopen_package);  // for require("bit")
+    L.open_and_pop("bit", open_bit);
     L
+}
+
+fn open_and_pop(L: *Lua.lua_State, name: Str, open: @FnPtr(L: *Lua.lua_State) i32) void #use(Lua) = {
+    luaL_requiref(L, S(name.as_cstr()), open, 1);
+    lua_popN(L, 1);
+}
+
+open_bit :: fn(L: *Lua.lua_State) i32 #use(Lua) = {
+    lua_createtable(L, 0, 0);
+    luaL_setfuncs(L, bitlib_pub[], 0);
+    1
+};
+
+fn push_string(L: *Lua.lua_State, s: Str) void = {
+    Lua'lua_pushlstring(L, bit_cast_unchecked(*u8, *i8, s.ptr), s.len.bitcast());
 }
 
 // pushes chunk or error string
@@ -164,7 +228,7 @@ fn compile_chunk(L: *Lua.lua_State, src: Str, a: Alloc, strip: bool) Result(Str,
 
 precompile :: fn(a: Alloc) Str = {
     src := @run { dis := Dis; (@format(disassemble_source, dis.arm, dis.amd) ast_alloc()).items() };
-    L := new_state_with_bit();
+    L := new_state_for_dis();
     out := @match(compile_chunk(L, src, a, FEAT_COMPILE)) {
         fn Ok(it) => it;
         fn Err(msg) => panic(msg);
@@ -210,6 +274,7 @@ wrapped_c_macros :: """
     const int lua_tnumber = LUA_TNUMBER;
     const int lua_tboolean = LUA_TBOOLEAN;
     void lua_popN(lua_State *L, long n) { lua_pop(L, n); }
+    int lua_upvalueindexN(int i) { return lua_upvalueindex(i); }
 """;
 
 find_bit_library :: fn(bit: Str) Str = {
@@ -242,8 +307,16 @@ lua_dump_stack :: fn(L: *Lua.lua_State) void #use(Lua) = {
     print(out.items());
 }
 
+#use("@/lib/collections/map.fr");
+CodeSegment :: @struct {
+    arch: Arch;
+    code: []u8;
+    base_address: i64;
+    symtab := zeroed RawHashMap(i64, Str);
+};
+
 MachO :: import("@/backend/macho/bits.fr");
-find_code_in_macho :: fn(bytes: []u8) Ty(Arch, []u8) #use(MachO) = {
+find_code_in_macho :: fn(bytes: []u8) ?CodeSegment #use(MachO) = {
     full_bytes := bytes;
     h := bytes&.pop_type(MachoHeader);
     @assert_eq(h.magic, macho_magic, "macho bad magic");
@@ -252,6 +325,8 @@ find_code_in_macho :: fn(bytes: []u8) Ty(Arch, []u8) #use(MachO) = {
         @case(0x01000007) => .x86_64;
         @default => @panic("unknown cpu_type: %", h.cpu_type);
     };
+    symtab: HashMap(i64, Str) = init(temp());
+    result: ?CodeSegment = .None;
     
     range(0, h.commands_count.zext()) { i |
         h := bytes&.pop_type(LoadCommandHeader);
@@ -262,8 +337,20 @@ find_code_in_macho :: fn(bytes: []u8) Ty(Arch, []u8) #use(MachO) = {
                     h := bytes&.pop_type(SegmentSection);
                     data := full_bytes.subslice(h.file_offset.zext(), h.size.bitcast());
                     if h.flag.bit_and(ATTR_PURE_INSTRUCTIONS) != 0 {
-                        return(arch, data);
+                        result = (Some = (arch = arch, code = data, base_address = h.address.bitcast()));
                     }
+                };
+            };
+            @case(LoadCommand.LinkEditSymbolTable.raw()) => {
+                @assert_eq(24, h.size.zext());
+                h := bytes&.pop_type(LinkEditSymbolTable);
+                symbols := full_bytes.rest(h.symbols_offset.zext()).peek_slice(SymbolEntry, h.symbol_count.zext());
+                strings_bytes := full_bytes.slice(h.strings_offset.zext(), full_bytes.len);
+                each symbols { it |
+                    if it.symbol_address != 0 {
+                        name := strings_bytes.rest(it.name_offset.zext()).peek_cstr();
+                        symtab&.insert(it.symbol_address.bitcast(), name);
+                    };
                 };
             };
             @default => {
@@ -271,14 +358,18 @@ find_code_in_macho :: fn(bytes: []u8) Ty(Arch, []u8) #use(MachO) = {
             };
         };
     };
-    (arch, "")
+    if result& { it |
+        it.symtab = symtab.raw;
+    };
+    result
 }
 
 Elf :: import("@/backend/elf/bits.fr");
-find_code_in_elf :: fn(input: []u8) Ty(Arch, []u8) = {
+find_code_in_elf :: fn(input: []u8) ?CodeSegment = {
     h := input.peek_type(Elf.Header);
-    arch := Arch.aarch64;
     @assert_eq(h.magic, Elf.MAGIC, "macho elf magic");
+    symtab: HashMap(i64, Str) = init(temp());
+    result: ?CodeSegment = .None;
     arch: Arch = @match(h.machine) {
         fn arm64() => .aarch64;
         fn amd64() => .x86_64;
@@ -291,14 +382,35 @@ find_code_in_elf :: fn(input: []u8) Ty(Arch, []u8) = {
         h := mem&.pop_type(Elf.ProgramHeader);
         if h.type == .Load && h.prot == 5 {
             data := input.subslice(h.offset, h.file_size);
-            return(arch, data);
+            result = (Some = (arch = arch, code = data, base_address = h.vaddr));
         };
     };
-    (arch, "")
+    
+    sh := input.rest(h.section_header_off).peek_type(Elf.SectionHeader);
+    sh: []Elf.SectionHeader = sh.slice(h.section_header_num.zext());
+    enumerate sh { i, it |
+        if @is(it.type, .DynSymbolTable, .SymbolTable) {
+            @assert_eq(it.ent_size, size_of(Elf.Symbol));
+            section_bytes :: fn(i) => input.subslice(sh[i].offset, sh[i].size);
+            symbols := Elf.Symbol.reinterpret_bytes(section_bytes(i));
+            strings_bytes := section_bytes(it.link.int());
+            each symbols { it |
+                if it.value != 0 {
+                    name := strings_bytes.rest(it.name.zext()).peek_cstr();
+                    symtab&.insert(it.value, name);
+                };
+            };
+        };
+    };
+    
+    if result& { it |
+        it.symtab = symtab.raw;
+    };
+    result
 }
 
-hex_dump :: fn(out: *List(u8), code: []u8) void = {
-    i: u32 = 0; 
+hex_dump :: fn(out: *List(u8), code: []u8, base_address: i64) void = {
+    i: u32 = base_address.trunc(); 
     out.reserve(code.len / 4 * 22);
     while => code.len >= 4 {
         op := code&.pop_type(u32)[];
