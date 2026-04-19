@@ -69,29 +69,24 @@ test_lua :: fn() void = {
     println("[ok] finished lua tests");
 }
 
-test_luajit :: fn() void = {
-    arch, os := (query_current_arch(), query_current_os());
-    have_assembler := arch == .aarch64;
-    
-    if !@is(arch, .aarch64, .x86_64) {
-        @eprintln("SKIP: luajit does not support %", arch);
-        return();
-    };
-    if arch == .x86_64 && os == .linux {
-        @eprintln("SKIP: TODO: broken on amd-linux");
-        return();
-    };
-    
-    luajit := Foreign'luajit();
-    tests := Foreign'luajit_tests();
-    build_start := timestamp();
-    buildvm(luajit, arch, os);
+// TODO: don't want this to die if you run two compilations concurently so don't be stomping files like this. 
+//       ex: lj_vm.s, lj_bc_ofs.h, buildvm_arch.h
+// TODO: i don't have a nice way for more compilated source generation (like buildvm)
+//       to hook into the caching system like how import_c/ffi/include does. 
+//       rn it always has to redo that before it has the source to be compared to the cache file. 
+//       im perhaps reaching the limit of what's sane to do without a more structured build system / dependency graph. 
+luajit_source :: fn(luajit: Str, arch: Arch, os: Os) List(u8) = {
+    @debug_assert(@is(arch, .aarch64, .x86_64), "luajit unsupported arch");
+    asm_name := "lj_vm.S";
+    asm_path := @tfmt("%/src/%", luajit, asm_name);
+    buildvm(luajit, asm_path, arch, os);
     
     src := u8.list(100, temp());
     prelude(src&, arch, os, luajit);
     
+    have_assembler := arch == .aarch64;
     if have_assembler {
-        @fmt(src&, "asm(__include_as_string_literal(\"lj_vm.S\"))\n");
+        @fmt(src&, "asm(__include_as_string_literal(\"%\"))\n", asm_name);
     };
     
     // so you can -j dump
@@ -108,8 +103,31 @@ test_luajit :: fn() void = {
     @fmt(src&, "#define __clear_cache __builtin___clear_cache\n");
     @fmt(src&, "#include \"luajit.c\"\n");
     @fmt(src&, "#include \"ljamalg.c\"\n");
-    // TODO: don't use the generated minilua, but need CUSTOM_MAIN from genminilua.lua
+
+    absolute_makeasmfunc(luajit);
     
+    // TODO: don't use the generated minilua, but need CUSTOM_MAIN from genminilua.lua
+    src
+};
+
+test_luajit :: fn() void = {
+    arch, os := (query_current_arch(), query_current_os());
+    have_assembler := arch == .aarch64;
+    
+    if !@is(arch, .aarch64, .x86_64) {
+        @eprintln("SKIP: luajit does not support %", arch);
+        return();
+    };
+    if arch == .x86_64 && os == .linux {
+        @eprintln("SKIP: TODO: broken on amd-linux");
+        return();
+    };
+    
+    luajit := Foreign'luajit();
+    tests := Foreign'luajit_tests();
+    build_start := timestamp();
+    
+    src := luajit_source(luajit, arch, os);
     strip_failing_tests(tests);
     host_end := timestamp();
     obj := "target/luajit.o";
@@ -123,8 +141,10 @@ test_luajit :: fn() void = {
         prelude = src.items(),
     ).or(fn(msg) => @panic("failed compile luajit %", msg));
     if !have_assembler {
+        asm_name := "lj_vm.S";
+        asm_path := @tfmt("%/src/%", luajit, asm_name);
         hack := @if(query_current_os() == .macos, Foreign.EXE.cc, Foreign.EXE.clang);
-        sh(@slice(hack, obj, "-lm", "-ldl", "-o", luajit_exe, @tfmt("%/src/lj_vm.S", luajit)));
+        sh(@slice(hack, obj, "-lm", "-ldl", "-o", luajit_exe, asm_path));
     }
     println(luajit_exe);
 
@@ -150,7 +170,7 @@ test_luajit :: fn() void = {
 }
 
 // compile & run (minilua, dynasm, buildvm) to generate code. 
-buildvm :: fn(luajit: Str, target_arch: Arch, target_os: Os) void = {
+buildvm :: fn(luajit: Str, asm_path: Str, target_arch: Arch, target_os: Os) void = {
     host_arch, host_os := (query_current_arch(), query_current_os());
     sh :: hush;
     
@@ -198,12 +218,14 @@ buildvm :: fn(luajit: Str, target_arch: Arch, target_os: Os) void = {
     for files { it |
         @fmt(src&, "#include \"%/src/host/%\"\n", luajit, it);
     };
+    src&.push_all(emit_bcdefXXX);
     buildvm := "target/buildvm.out";
     CCC'compile(
         output_path = buildvm,
         input_path = empty(),
         target = (type = .Exe, os = host_os, arch = host_arch, wrap_entry_for_linux_libc = true),
         prelude = src.items(),
+        inject = (Some = transform_emit_bcdef),
     ).or(fn(msg) => @panic("failed compile luajit/buildvm %", msg));
     
     args := @ref Str.list(temp());
@@ -221,7 +243,6 @@ buildvm :: fn(luajit: Str, target_arch: Arch, target_os: Os) void = {
         fn linux() => "elfasm";
     };
     modes := @slice("bcdef", "ffdef", "libdef", "recdef", "vmdef", LJVM_MODE, "folddef");
-    asm_path := @tfmt("%/src/lj_vm.S", luajit);
     for modes { it |
         if it == "folddef" {  // must be last
             args.len -= luajit_lib_files.len();
@@ -324,3 +345,101 @@ for it in answers:gmatch"[^\n]+" do
     ::continue::
 end
 """;
+
+// see devlog/Apr 18,2026
+// this is far too much code and far too heavy a hammer, but it's pretty cool that it works. 
+// all it does is implement makeasmfunc(lj_bc_ofs[XXX]) with a relocatable absolute pointer 
+// instead of an offset from lj_vm_asm_begin (needed because import_frc wants to compile 
+// MachineCode blobs out of order). either way works with standalone cc.fr. 
+FEAT_ABS_OFS :: true;  
+
+// TODO: i want to not mutate the dependency source dirs but i do it elsewhere too
+absolute_makeasmfunc :: fn(luajit: Str) void = {
+    @if(!FEAT_ABS_OFS) return();
+    path := @tfmt("%/src/lj_vm.h", luajit);
+    out := @ref read_to_string_or_crash(temp(), path);
+    while => !out.items().ends_with("/* Start of the ASM code. */") {
+        out.len -= 1;
+    };
+    out.push_all("""
+        // @generated by franca/tests/external/lua.fr/luajit_source
+        // removed: lj_vm_asm_begin;
+        #define makeasmfunc(ofs) ofs
+        _Static_assert(LJ_FR2, "way more places where it doesn't use absolute pointers");
+        #endif  // _LJ_VM_H
+    """);
+    
+    replace(out, "LJ_ASMF char lj_vm_exit_handler[];", "void lj_vm_exit_handler(void);    ");
+    replace(out, "LJ_ASMF char lj_vm_exit_interp[];", "void lj_vm_exit_interp(void);    ");
+    
+    write_entire_file_or_crash(path, out.items());
+}
+
+// checking str(id) with starts_with because i mangle for static
+transform_emit_bcdef :: fn(c, obj, task) void = {
+    @if(!FEAT_ABS_OFS) return();
+    @if_let(task[]) fn Func(f) => if c.m.str(f.lnk.id) == "main" {
+        for_blocks f { b |
+            each b.ins { i |
+                continue :: local_return;
+                @if(i.op() != .call) continue();
+                @if(rtype(i.arg&[0]) != .RCon) continue();
+                callee := f.get_constant(i.arg&[0]);
+                @if(callee.type() != .CAddr) continue();
+                name := f.globals.str(callee.sym);
+                if name.starts_with("emit_bcdef") {
+                    i.arg&[0] = f.symcon("emit_bcdefXXX");
+                };
+            };
+        };
+    };
+    
+    @if_let(task[]) fn AotVar2(it) => for it { it |
+        if c.m.str(it.id).starts_with("libdef_handlers") {
+            each it.relocations { it |
+                if c.m.str(it.id).starts_with("libdef_func") {
+                    it.id = c.m.intern("libdef_funcXXX");
+                }
+            };
+        }
+    };
+}
+
+// not using 'static' because i intern(foo_XXX) above without mangling
+// TODO: now lj_bc_ofs is forward declared as the wrong type in lj_bc.h which is a bit sketchy (perhaps should be an error)
+emit_bcdefXXX :: """
+/*static*/ void emit_bcdefXXX(BuildCtx *ctx) {
+    fprintf(ctx->fp, "// @generated by franca/tests/external/lua.fr/luajit_source\n\n");
+    for (int i = 0; i < ctx->npc; i++) {
+        fprintf(ctx->fp, "extern void lj_BC_%s(void);\n", bc_names[i]);
+    }
+    for (int i = 0; i < ctx->nglob; i++) {
+      char *gl = ctx->globnames[i];
+      if (gl[0] == 'f' && gl[1] == 'f' && gl[2] == '_')
+        fprintf(ctx->fp, "extern void lj_%s(void);\n", gl);
+    }
+    
+    fprintf(ctx->fp, "const ASMFunction lj_bc_ofs[] = {\n");
+    for (int i = 0; i < ctx->npc; i++) {
+        if (i != 0) fprintf(ctx->fp, ",\n");
+        fprintf(ctx->fp, "lj_BC_%s", bc_names[i]);
+    }
+}
+
+/*static*/ void libdef_funcXXX(BuildCtx *ctx, char *p, int arg) {
+    if (!(ctx->mode == BUILD_bcdef && arg != LIBINIT_CF)) return libdef_func(ctx, p, arg);
+    ffasmfunc++;
+    ffid++;
+    regfunc = REGFUNC_OK;
+    
+    fprintf(ctx->fp, ",\nlj_ff_%s", p);
+}
+""";
+
+fn replace(out: *List(u8), old: Str, new: Str) void = {
+    @assert_eq(old.len, new.len);
+    range(0, max(0, out.len - old.len)) { i |
+        s := out.items().slice(i, i + old.len);
+        @if(s == old) s.copy_from(new);
+    };
+}

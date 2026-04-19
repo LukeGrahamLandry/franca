@@ -1,4 +1,13 @@
 
+## (Apr 19)
+
+disassemble
+- fixing makeasmfunc was progress but doesn't help with the internal jumps needing relocations, 
+  the module can cope with that but i don't have a way to remember them through the frc ir 
+  because im trying not to be a linker. might have to change that but so far the only programs 
+  that it's been at all a problem for are this one and the os (where i driver(importvtable) anyway). 
+  before i commit to that, i want to prove i can produce the program without changing the compiler. 
+
 ## (Apr 18)
 
 disassemble
@@ -8,6 +17,18 @@ disassemble
 - their adrp must be wrong, missing a bit? parse_immpc(adrp) is treating it the same as adr. 
   i wonder if they take patches for things that don't matter like that. 
   https://github.com/LuaJIT/LuaJIT/blob/18b087cd2cd4ddc4a79782bf155383a689d5093d/src/jit/dis_arm64.lua#L824
+- trying to use luajit through import_frc... non-trivial. 
+  - get_fid(tag != .Func) 
+    it would be great if i could just disallow MachineCode here, 
+    but for example luajit's lj_vm_asm_begin needs to work, 
+    and that specific situation is extra bad for the jit-shim quest because of lj_bc_ofs,
+    they're precomputed, not expressed as relocations so i guess the whole thing has to go
+    in one MachineCode symbol, not seperate functions like im doing now. 
+    it's fine when just using import_c/cc.fr as a stand alone c compiler because it has no reason to reorder things. 
+    but also there are multiple entry points so putting them all together isn't trivial either. 
+    need Seg.Alias to have an addend i guess... which sure is an invasive change, that's unfortunate. 
+    maybe im overthinking this. the more sane option might be to declare this too niche and rewrite `makeasmfunc(lj_bc_ofs[BC_XXXX])` 
+    to something that involves an array of symbol pointers instead of an array of offsets. 
 
 ## (Apr 17)
 

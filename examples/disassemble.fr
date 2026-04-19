@@ -14,6 +14,9 @@
 // - allow multiple code sections
 // - add this to autotest, need to fix the va_list thing first tho. 
 // - more sane abstraction over different exe types? this and bloat2 are getting kinda annoying. 
+// - could seperate out the generic stuff that makes calling lua from franca easier 
+//   from the disassembler part. i don't really see the point in (self-declared) "scripting" languages
+//   but if there are other fun lua libraries it could be worth it. 
 // TODO: (limitations in the disassembler itself):
 // - there's something wrong with the addresses shown for adrp. 
 //   parse_immpc treats adr and adrp the same?
@@ -38,12 +41,26 @@
 //   so for i'm just adding their "bit" library to the other lua.
 //   but would have to keep that codepath anyway because luajit doesn't support riscv. 
 //
+// TODO: (for FEAT_JIT)
+// - not going to work at all because i don't do relocations for jumps in MachineCode blocks. 
+//   i don't want to be in the linker business so i guess i have to go back to a system where you can poke things into the module directly. 
+// - examples/import_c/assemble.fr can't do amd
+// - cross compiling without re-sema is going to be even more broken 
+// - also because of the multi-target-sema thing i don't have a way to say 
+//   "use luajit on arm/amd and puclua on riscv/wasm" without super bloating the binary. 
+// - probably can't even FEAT_COMPILE cross from a target luajit doesn't support. 
+//   will they let me dump bytecode on a target that doesn't have an interpreter? 
+// 
 
 // without it all i can do is dump the bytes as hex. 
 FEAT_LUA :: true;      
 // compile to lua bytecode at comptime instead of including source. 
 // smaller binary and get parse errors at comptime instead of runtime. 
 FEAT_COMPILE :: true;  
+// use luajit (fast) instead of puclua (portable). 
+// THIS IS UNFINISHED
+// it's a clear outline of something that should be easy but isn't, so that's better than nothing i guess... :(
+FEAT_JIT :: false;
 
 main :: fn() void = {
     input := import("@/lib/sys/fs.fr")'read_file_from_last_arg();
@@ -80,10 +97,11 @@ Disassemble :: @struct(L: *Lua.lua_State, dis_global_name: *i8);
 dis_global_name :: { here := @source_location; S(c_str(sym(@tfmt("gensym$%$disassemble$", here.low)))) };
 
 fn load_disassemblers(L: *Lua.lua_State) Disassemble #use(Lua) = {
+    @if(FEAT_JIT) @assert(query_current_arch() == (@run query_current_arch()) && query_current_os() == (@run query_current_os()), "TODO: cross compiling with FEAT_JIT needs more thought :(");
     in := @if(FEAT_COMPILE, @run precompile(ast_alloc()), precompile(temp()));
     ok := read_chunk(L, in, "disassemble");
     @assert(ok, "failed load chunk %", lua_dump_stack(L));
-    r := lua_pcallk(L, 0, 1, 0, 0, zeroed(lua_KFunction));
+    r := lua_pcall(L, 0, 1, 0);
     @assert_eq(r, 0, "failed to load chunk %", lua_dump_stack(L));
     lua_setglobal(L, dis_global_name);
     (L = L, dis_global_name = dis_global_name)
@@ -105,7 +123,7 @@ fn run(self: Disassemble, arch: Arch, code: []u8, out: *List(u8), base_address: 
     lua_pushnumber(L, base_address.float());
     lua_pushlightuserdata(L, userdata);
     lua_pushcclosure(L, symtab_fn, /*#upvalues*/ 1);
-    r := lua_pcallk(L, 4, 1, 0, 0, zeroed(lua_KFunction));
+    r := lua_pcall(L, 4, 1, 0);
     if r != 0 {
         out := @ref u8.list(temp());
         out.push_all("(call disassemble failed)");
@@ -146,7 +164,7 @@ disassemble_source :: """
         local check_name = function(pos) 
             local name = symtab_fn(nil, pos + addr);
             if name then
-                r[#r + 1] = "\n" .. name .. ":\n"
+                r[#r + 1] = "\n->" .. name .. ":\n"
             end
         end
         local ctx;
@@ -208,7 +226,9 @@ fn write_chunk(L: *Lua.lua_State, out: *List(u8), strip: bool) void = {
         out.push_all(u8.ptr_from_raw(p).slice(l.bitcast()));
         0
     };
-    r := Lua'lua_dump(L, writer, raw_from_ptr(@type out[], out), int(strip).intcast());
+    r := @if(FEAT_JIT, 
+        Lua'lua_dump(L, writer, raw_from_ptr(@type out[], out)),
+        Lua'lua_dump(L, writer, raw_from_ptr(@type out[], out), int(strip).intcast()));
     @debug_assert_eq(r, 0);
 }
 
@@ -251,12 +271,21 @@ lua_tostring :: fn(L: *Lua.lua_State, i: i64, out: *List(u8)) void = {
 Lua :: { x := Dis; x.lua };
 Dis :: {
     Ffi :: import("@/examples/import_c/ffi.fr");
-    src := import("@/tests/external/lua.fr")'lua_source(Foreign'lua());
-
     luajit := Foreign'luajit();
-    bit := read_entire_file_or_crash(temp(), @tfmt("%/src/host/minilua.c", luajit));
+    S :: import("@/tests/external/lua.fr");
+    src := @if(FEAT_JIT, 
+        S'luajit_source(luajit, query_current_arch(), query_current_os()),  // TODO: cross compiling requires more thought
+        S'lua_source(Foreign'lua()));
+
+    bit := read_entire_file_or_crash(temp(), @tfmt("%/src/host/genminilua.lua", luajit));
     bit := find_bit_library(bit);
-    src&.push_all("typedef unsigned long U64;\n#define luaL_typerror luaL_typeerror\n");
+    src&.push_all("typedef unsigned long U64;\n");
+    if FEAT_JIT {
+        @assert(query_current_arch() == .aarch64, "TODO: FEAT_JIT requires more thought :(");
+        eprint("THIS IS NOT GOING TO WORK\n");
+    } else {
+        src&.push_all("#define luaL_typerror luaL_typeerror\n");
+    };
     src&.push_all(bit);
     src&.push_all(wrapped_c_macros);
 
@@ -275,6 +304,24 @@ wrapped_c_macros :: """
     const int lua_tboolean = LUA_TBOOLEAN;
     void lua_popN(lua_State *L, long n) { lua_pop(L, n); }
     int lua_upvalueindexN(int i) { return lua_upvalueindex(i); }
+    
+#ifdef ljamalg_c
+    void lua_setglobalX(lua_State *L, char *s) asm("lua_setglobal") { lua_setglobal(L, s); }
+    void lua_getglobalX(lua_State *L, char *s) asm("lua_getglobal") { lua_getglobal(L, s); }
+    
+    void luaL_requiref(lua_State *L, const char *name, lua_CFunction openf, int glb) {
+        lua_pushcfunction(L, openf);
+        lua_pushstring(L, name);
+        lua_call(L, 1, 0);
+        // TODO: 
+        // mod = require(name);
+        // if (glb) _G[name] = mod;
+        // push(mod);
+        lua_pushnil(L);
+    }
+#else
+    int lua_pcallX(lua_State* L, int a, int r, int e) asm("lua_pcall") { return lua_pcall(L, a, r, e); }
+#endif
 """;
 
 find_bit_library :: fn(bit: Str) Str = {
