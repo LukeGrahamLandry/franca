@@ -4,6 +4,15 @@
 disassemble
 - do the keep_alive thing by poking at scopes from the driver instead of from an @run that needs to smuggle in the module.
 
+zones
+- coordinate system hell. some day i'll have to figure it out properly / make debugtext work nicely with sgl... but today is not that day. 
+- the end goal is a viewer for compiler/profile.fr/zone_begin, but to start with i just need some 
+  nontrivial hierarchical data to render, so using stack samples from samply. 
+- read profile.json.gz's struct of arrays situation. the one from tracy doesn't contain the symbol info
+  but if you redownload from the profile.firefox.com it opens, the field layout changes (they move from `threads` to `shared`). 
+  for now just did some manual surgary to get something nice to look at. 
+- json: reflect ?T allow null for .None, allow negative numbers. 
+
 ## (Apr 19)
 
 disassemble

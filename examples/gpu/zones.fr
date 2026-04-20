@@ -1,0 +1,289 @@
+
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
+    app_w, app_h := (sapp.width().float().cast(), sapp.height().float().cast());
+    
+    sgl := state.draw&;
+    sgl.defaults();
+    sgl.viewport(0.intcast(), 0.intcast(), sapp.width().intcast(), sapp.height().intcast(), true);
+    sgl.load_pipeline(state.pipe);
+    
+    sdtx := state.text.default_context&;
+
+    sgl.begin(.QUADS);
+    sgl.load_identity();
+    sgl.translate(state.pos.x, state.pos.y, 0.0);
+    sgl.scale(state.scale, state.scale, 0.0);
+    screen_aspect := app_w / app_h;
+    sgl.scale(1, screen_aspect, 0.0);
+    
+    p := (state.mouse_pos - state.pos) / state.scale;
+    p.y /= screen_aspect;
+    
+    //y: f32 = 0;
+    height: f32 = 20;
+    
+    sdtx.desc.char_height = height*3 * state.scale*50;
+    sdtx.desc.char_width = sdtx.desc.char_height / 2;
+    
+    text_scale :f32= 1.0 / sapp.dpi_scale;
+    text_w, text_h := (app_w * text_scale, app_h * text_scale);
+    sdtx.canvas(text_w, text_h);
+    
+    // TODO: clip by what would be visible on screen. if ordered by time can binary search
+    //waiting := @ref f32.list(temp());
+    title_text := "";
+    for state.events { it |
+        start, end := (it.start, it.end);
+
+        y := it.depth.float().cast() * height;
+        //while => waiting.len > 0 && start >= waiting[waiting.len - 1] {
+            //waiting.len -= 1;
+            //y -= height;
+        //};
+        //waiting.push(end);
+        
+        sgl.color = pack_rgba(150, 150, 150, 255);
+        hovered := p.x > start && p.x < end && p.y > y && p.y < y + height;
+        if hovered {
+            sgl.color = pack_rgba(150, 150, 200, 255);
+            title_text = @tfmt("% %-%", it.name, start, end);
+        };
+        
+        sgl.square(start, end, y, y + height);
+        
+        y += height;
+        name_size := it.name.len.float().cast() * sdtx.desc.char_width / state.scale / 500;
+        box_size := (end - start);
+        if hovered || box_size > name_size {
+            sdtx.color = pack_rgba(0, 255, 0, 255);
+            pos := vec2(start, y);
+            sdtx.pos = ((pos*state.scale*vec2(1, screen_aspect) + state.pos)*vec2(1, -1) + vec2(1)) / sdtx.glyph_size / 2;
+            sdtx.put(it.name);
+        }
+    };
+    
+    if title_text != "" {
+        sdtx.desc.char_height = 16;
+        sdtx.desc.char_width = 8;
+        sdtx.canvas(text_w, text_h);
+        sdtx.color = pack_rgba(50, 200, 50, 255);
+        sdtx.pos = vec2(0, 0);
+        sdtx.put(title_text);
+    };
+    
+    sdtx.pos = vec2(0, -2) + (vec2(1) + state.mouse_pos * vec2(1, -1)) / sdtx.glyph_size / 2;
+    sdtx.put("M");
+    
+    sgl.color = pack_rgba(255, 0, 0, 255);
+    size := 0.03 / state.scale;
+    sgl.square(p.x-size/2, p.x+size/2, p.y-size/2, p.y + size/2);
+    
+    sgl.end();
+    
+    Easy'glue_begin_pass(sapp, sg, (colors = ((
+        load_action = .CLEAR,
+        clear_value = (r = 0.15, g = 0.15, b = 0.15, a = 1),
+    ), ..)));
+    sgl.draw_layer(sg, 0);
+    sdtx.draw_layer(0);
+    sg.end_pass();
+    sg.commit();
+};
+
+fn square(sgl: *Sgl.Self, x1: f32, x2: f32, y1: f32, y2: f32) void = {
+    sgl.v2f_t2f(x1, y1, 0, 0);
+    sgl.v2f_t2f(x2, y1, 1, 0);
+    sgl.v2f_t2f(x2, y2, 1, 1);
+    sgl.v2f_t2f(x1, y2, 0, 1);
+}
+
+State :: @struct {
+    HIGH_DPI :: true;
+    pipe: Sgl.Pipeline;
+    draw: Sgl.Self;
+    text: Sdtx.Self;
+    pos: Vec2;
+    scale: f32;
+    sg: *Sg.Self;
+    sapp: *Sapp.Self;
+    dirty: bool;
+    mouse_pos: Vec2;
+    event_arena: Arena.Allocator;
+    events: []Event;
+};
+
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    state.sg = sg; state.sapp = sapp;
+    state.draw&.setup(
+        allocator = general_allocator(),
+        sg = sg,
+    );
+    
+    init_pipeline(state.draw&, state.pipe&, sg, ());
+    
+    state.text&.setup(
+        sg = sg,
+        allocator = general_allocator(),
+        fonts = @slice(Sdtx.font.cpc),
+    );
+
+    state.event_arena = init(general_allocator(), page_size());
+    state.events = try_load_profile_json(state.event_arena&.borrow());
+    if state.events.len == 0 {
+        state.events = test_events;
+    };
+    state.scale = 1 / (state.events[state.events.len - 1].start - state.events[0].start);
+    state.pos.x = -0.9 + -state.events[0].start * state.scale;
+    state.pos.y = -0.9;
+    
+    state.dirty = true;
+}
+
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    screen := vec2(sapp.framebuffer_width.float().cast(), sapp.framebuffer_height.float().cast()) 
+        / 2;
+    mouse := vec2(event.mouse_x, -event.mouse_y) / screen + vec2(-1.0, 1.0);
+    delta_mouse := vec2(event.mouse_dx, -event.mouse_dy) / screen;
+    @match(event.type) {
+        fn RESIZED() => ();
+        fn MOUSE_MOVE() => {
+            state.mouse_pos = mouse;
+            if event.modifiers.get(.left_mouse) != 0 {
+                state.pos += delta_mouse;
+            }
+        }
+        fn MOUSE_SCROLL() => {
+            (lo: f32, hi: f32) := (0.0001, 10000);
+            delta := event.scroll_y * state.scale * 3 / screen.x;
+            delta := clamp(state.scale + delta, lo, hi) - state.scale;
+            
+            pos := (mouse - state.pos) / state.scale;
+            pos0 := pos * vec2(state.scale);
+            pos1 := pos * vec2(state.scale + delta);
+            state.pos -= pos1 - pos0;
+            state.scale += delta;
+        }
+        @default => return();
+    };
+    state.dirty = true;
+}
+
+driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
+main :: fn() void = Easy'start(State);
+#use("@/graphics/lib.fr");
+
+Event :: @struct(name: Str, start: f32, end: f32, depth := -1);
+test_events :: @const_slice(@as(Event)
+    (name = "Z", start = 0, end = 1, depth = 0),
+    (name = "A", start = 1, end = 50, depth = 1),
+    (name = "B", start = 5, end = 40, depth = 2),
+    (name = "C", start = 20, end = 30, depth = 3),
+);
+
+try_load_profile_json :: fn(a: Alloc) []Event = {
+    S :: Type.scope_of(FFProfile);
+    ::inline_for S.get_constants() { $it |
+        T :: get_constant(Type, S, it[]).unwrap();
+        @run DeriveJson(T);
+    };
+
+    // TODO: read profile.json.gz (with lib/encoding/gzip.fr)
+    #use("@/lib/encoding/json_reflect.fr");
+    #use("@/lib/encoding/json.fr");
+    #use("@/lib/sys/fs.fr");
+    path := "target/profile.json";
+    text := read_entire_file(a, path) || {
+        @println("failed to read %", path);
+        return(empty());
+    };
+    
+    json: JsonParser = new_json(text, a);
+    it := zeroed FFProfile.Profile;
+    ok := parse_json(json&, it&);
+    if !ok {
+        line, col := find_line_col_for_error_message(json&);
+        @eprintln("failed to parse %:%:%: %", path, line, col, json.error);
+        return(empty());
+    };
+    if it.threads.len < 1 {
+        @eprintln("no threads in %", path);
+        return(empty());
+    };
+    events := @ref Event.list(a);
+    
+    t := it.threads.index(0);
+    scale: f32 = 40;
+    range(0, t.samples.length - 1) { i |
+        start, end := (t.samples.time[i].cast()*scale, t.samples.time[i+1].cast()*scale);
+        stack_i := t.samples.stack[i];
+        
+        event_start := events.len;
+        while => stack_i != 0 {
+            frame_i := t.stackTable.frame[stack_i];
+            func_i := t.frameTable.func[frame_i];
+            name_i := t.funcTable.name[func_i];
+            name := t.stringArray[name_i];
+            
+            events.push(start = start, end = end, name = name);
+            stack_i = t.stackTable.prefix[stack_i].unwrap();
+        };
+        added := events.items().rest(event_start);
+        added.reverse();
+        
+        // :SLOW
+        // merge into rows. ex. the bottom func will always be the entry point so draw it as one quad instead of one per sample. 
+        // TODO: looks a bit odd that it merges when parents are different
+        range_rev(0, added.len) { i |
+            break :: local_return;
+            added[i].depth = i;
+            range_rev(0, event_start) { j |
+                old, new := (events[j]&, added[i]&);
+                if old.end == new.start && old.depth == new.depth && old.name == new.name {
+                    old.end = new.end;
+                    events.ordered_remove(event_start + i);
+                    break();
+                };
+            };
+        };
+    };
+    Sort'default(Event, events.items(), fn(a, b) => @if(a.depth == b.depth, a.start <= b.start, a.depth <= b.depth));
+    
+    events.items()
+}
+
+// json format used by the firefox profiler and samply. 
+// TODO: when download from profiler.firefox.com, a bunch of the fields of Thread are on one Shared object instead. 
+// TODO: the prilfe.json.gz file written by samply doesn't contain the symbol information. 
+FFProfile :: @struct {
+    Profile :: @struct {
+        threads: []Thread;
+    };
+    Thread :: @struct {
+        frameTable: FrameTable;
+        funcTable: FuncTable;
+        samples: Samples;
+        stackTable: StackTable;
+        stringArray: []Str;
+        tid: Str;
+    };
+    FrameTable :: @struct {
+        length: i64;
+        address: []i64;
+        func: []i64;
+    };
+    FuncTable :: @struct {
+        length: i64;
+        name: []i64;
+    };
+    Samples :: @struct {
+        length: i64;
+        stack: []i64;
+        time: []f64;
+    };
+    StackTable :: @struct {
+        length: i64;
+        prefix: []?i64;
+        frame: []i64;
+    };
+};
