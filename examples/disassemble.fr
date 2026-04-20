@@ -42,27 +42,34 @@
 //   but would have to keep that codepath anyway because luajit doesn't support riscv. 
 //
 // TODO: (for FEAT_JIT)
-// - not going to work at all because i don't do relocations for jumps in MachineCode blocks. 
-//   i don't want to be in the linker business so i guess i have to go back to a system where you can poke things into the module directly. 
+// - i don't do relocations for jumps in MachineCode blocks so the asm 
+//   needs to be added to the module directly from a custom driver instead 
+//   of through import_frc like the c. which means it doesn't compose well,
+//   you can't just import it and you need to re-export all the config stuff 
+//   that default driver does if you want aot, cross, etc. 
+//   also defeats caching, always regenerating the buildvm stuff. 
 // - examples/import_c/assemble.fr can't do amd
 // - cross compiling without re-sema is going to be even more broken 
 // - also because of the multi-target-sema thing i don't have a way to say 
 //   "use luajit on arm/amd and puclua on riscv/wasm" without super bloating the binary. 
 // - probably can't even FEAT_COMPILE cross from a target luajit doesn't support. 
 //   will they let me dump bytecode on a target that doesn't have an interpreter? 
-// 
+// - also for FEAT_COMPILE: since now rely on adding to the module directly, it won't be there in the comptime one. 
+// - changes the output (new lua adds a .0 when printing numbers) 
+//
 
 // without it all i can do is dump the bytes as hex. 
 FEAT_LUA :: true;      
 // compile to lua bytecode at comptime instead of including source. 
 // smaller binary and get parse errors at comptime instead of runtime. 
-FEAT_COMPILE :: true;  
+FEAT_COMPILE :: true && !FEAT_JIT/*todo*/;  
 // use luajit (fast) instead of puclua (portable). 
-// THIS IS UNFINISHED
+// THIS IS UNFINISHED (only arm and no cross and no comptime and needs driver and no precompile bytecode)
 // it's a clear outline of something that should be easy but isn't, so that's better than nothing i guess... :(
 FEAT_JIT :: false;
 
 main :: fn() void = {
+    do_keep_alive();
     input := import("@/lib/sys/fs.fr")'read_file_from_last_arg();
     out := u8.list(temp());
     dump(out&, input);
@@ -97,7 +104,10 @@ Disassemble :: @struct(L: *Lua.lua_State, dis_global_name: *i8);
 dis_global_name :: { here := @source_location; S(c_str(sym(@tfmt("gensym$%$disassemble$", here.low)))) };
 
 fn load_disassemblers(L: *Lua.lua_State) Disassemble #use(Lua) = {
+    // TODO: if im committed to keeping the driver it can thread the target arch through to the part that imports the c. 
+    //       rn it does for the generated lj source but import_c doesn't set its ifdefs to something else. 
     @if(FEAT_JIT) @assert(query_current_arch() == (@run query_current_arch()) && query_current_os() == (@run query_current_os()), "TODO: cross compiling with FEAT_JIT needs more thought :(");
+    
     in := @if(FEAT_COMPILE, @run precompile(ast_alloc()), precompile(temp()));
     ok := read_chunk(L, in, "disassemble");
     @assert(ok, "failed load chunk %", lua_dump_stack(L));
@@ -128,16 +138,16 @@ fn run(self: Disassemble, arch: Arch, code: []u8, out: *List(u8), base_address: 
         out := @ref u8.list(temp());
         out.push_all("(call disassemble failed)");
         lua_tostring(L, 1, out);
-        lua_popN(L, 1);
+        lua_pop(L, 1);
         return(Err = out.items());
     };
     lua_tostring(L, 1, out);
-    lua_popN(L, 1);
+    lua_pop(L, 1);
     .Ok
 }
 
 symtab_fn :: fn(L: *Lua.lua_State) i32 #use(Lua) = {
-    userdata := lua_topointer(L, lua_upvalueindexN(1));
+    userdata := lua_topointer(L, lua_upvalueindex(1));
     symtab := RawHashMap(i64, Str).ptr_from_raw(userdata);
     key := lua_tonumberx(L, 2, @ref @as(i32) 0);
     if symtab.get(key.int()) { name |
@@ -199,11 +209,18 @@ new_state_for_dis :: fn() *Lua.lua_State #use(Lua) = {
 }
 
 fn open_and_pop(L: *Lua.lua_State, name: Str, open: @FnPtr(L: *Lua.lua_State) i32) void #use(Lua) = {
-    luaL_requiref(L, S(name.as_cstr()), open, 1);
-    lua_popN(L, 1);
+    @if(FEAT_JIT, {
+        lua_pushcclosure(L, open, 0);
+        lua_pushstring(L, S(name.as_cstr()));
+        lua_call(L, 1, 0);
+    }, {
+        luaL_requiref(L, S(name.as_cstr()), open, 1);
+        lua_pop(L, 1);
+    });
 }
 
 open_bit :: fn(L: *Lua.lua_State) i32 #use(Lua) = {
+    @if(FEAT_JIT) return(luaopen_bit(L));
     lua_createtable(L, 0, 0);
     luaL_setfuncs(L, bitlib_pub[], 0);
     1
@@ -237,12 +254,12 @@ fn compile_chunk(L: *Lua.lua_State, src: Str, a: Alloc, strip: bool) Result(Str,
     if !ok {
         msg := u8.list(temp());
         lua_tostring(L, 1, msg&);
-        Lua'lua_popN(L, 1);
+        Lua'lua_pop(L, 1);
         return(Err = msg.items());
     };
     out := u8.list(a);
     write_chunk(L, out&, strip);
-    Lua'lua_popN(L, 1);
+    Lua'lua_pop(L, 1);
     (Ok = out.items())
 }
 
@@ -274,19 +291,16 @@ Dis :: {
     luajit := Foreign'luajit();
     S :: import("@/tests/external/lua.fr");
     src := @if(FEAT_JIT, 
-        S'luajit_source(luajit, query_current_arch(), query_current_os()),  // TODO: cross compiling requires more thought
+        @as(List(u8)) assume_owned(LUA_JIT_SRC, temp()), // poked by driver to avoid calling S'luajit_source twice
         S'lua_source(Foreign'lua()));
 
-    bit := read_entire_file_or_crash(temp(), @tfmt("%/src/host/genminilua.lua", luajit));
-    bit := find_bit_library(bit);
-    src&.push_all("typedef unsigned long U64;\n");
-    if FEAT_JIT {
-        @assert(query_current_arch() == .aarch64, "TODO: FEAT_JIT requires more thought :(");
-        eprint("THIS IS NOT GOING TO WORK\n");
-    } else {
+    if !FEAT_JIT {
+        bit := read_entire_file_or_crash(temp(), @tfmt("%/src/host/genminilua.lua", luajit));
+        bit := find_bit_library(bit);
+        src&.push_all("typedef unsigned long U64;\n");
         src&.push_all("#define luaL_typerror luaL_typeerror\n");
+        src&.push_all(bit);
     };
-    src&.push_all(bit);
     src&.push_all(wrapped_c_macros);
 
     // i want this program to not depend on any files at runtime
@@ -297,45 +311,41 @@ Dis :: {
     @anon_literal(_ = amd, _ = arm, _ = lua)
 };
 
+// TODO: this trick where you can use the asm(alias) to reexport a macro as a function 
+//       without thinking of a new name is cute. should have a more succinct way of doing it.
+//       ex. ffi.reexport("lua_pop(lua_State *, long)") would be enough information to generate it. 
 wrapped_c_macros :: """
-    const struct luaL_Reg* bitlib_pub = bitlib;  // un-static
     const int lua_tstring = LUA_TSTRING;
     const int lua_tnumber = LUA_TNUMBER;
     const int lua_tboolean = LUA_TBOOLEAN;
-    void lua_popN(lua_State *L, long n) { lua_pop(L, n); }
-    int lua_upvalueindexN(int i) { return lua_upvalueindex(i); }
+    void lua_popX(lua_State *L, long n) asm("lua_pop") { lua_pop(L, n); }
+    int lua_upvalueindexX(int i) asm("lua_upvalueindex") { return lua_upvalueindex(i); }
     
 #ifdef ljamalg_c
     void lua_setglobalX(lua_State *L, char *s) asm("lua_setglobal") { lua_setglobal(L, s); }
     void lua_getglobalX(lua_State *L, char *s) asm("lua_getglobal") { lua_getglobal(L, s); }
-    
-    void luaL_requiref(lua_State *L, const char *name, lua_CFunction openf, int glb) {
-        lua_pushcfunction(L, openf);
-        lua_pushstring(L, name);
-        lua_call(L, 1, 0);
-        // TODO: 
-        // mod = require(name);
-        // if (glb) _G[name] = mod;
-        // push(mod);
-        lua_pushnil(L);
-    }
 #else
+    const struct luaL_Reg* bitlib_pub = bitlib;  // un-static
     int lua_pcallX(lua_State* L, int a, int r, int e) asm("lua_pcall") { return lua_pcall(L, a, r, e); }
 #endif
 """;
 
 find_bit_library :: fn(bit: Str) Str = {
-    while => !bit.starts_with("typedef unsigned int UB;") {
-        bit = bit.rest(1);
+    find_between(bit, "typedef unsigned int UB;", true, "{NULL,NULL}\n};\n", true)
+}
+
+find_between :: fn(in: Str, start: Str, include_start: bool, end: Str, include_end: bool) Str = {
+    while => !in.starts_with(start) {
+        in = in.rest(1);
     };
+    in = in.rest(start.len * int(!include_start));
     i := 0;
-    end := "{NULL,NULL}\n};\n";
-    while => !bit.rest(i).starts_with(end) {
+    while => !in.rest(i).starts_with(end) {
         i += 1;
     };
-    i += end.len;
-    (bit.slice(0, i))
-}
+    i += end.len * int(include_end);
+    (in.slice(0, i))
+};
 
 lua_dump_stack :: fn(L: *Lua.lua_State) void #use(Lua) = {
     out := @ref u8.list(temp());
@@ -465,3 +475,119 @@ hex_dump :: fn(out: *List(u8), code: []u8, base_address: i64) void = {
         i += 4;
     };
 }
+
+// TODO: this shouldn't be so hard! see the TODO:FEAT_JIT comment at the top. 
+driver :: fn(vtable: *ImportVTable) void = {
+    @if(@run(!FEAT_JIT || !FEAT_LUA)) return(main());
+    jit := true;
+    // TODO: this defeats the caching (both of the top level program and the import_frc of the c code)
+    
+    m := @ref @uninitialized Qbe.Module;
+    init_default_module_dyn(m, vtable, (
+        os = query_current_os(), 
+        arch = query_current_arch(), 
+        type = @if(jit, .JitOnly, .Exe),
+        wrap_entry_for_linux_libc = true,
+        exe_debug_symbol_table = true,
+    ));
+    
+    luajit := Foreign'luajit();
+    S :: import("@/tests/external/lua.fr");
+    lj_src := S'luajit_source(luajit, m.goal.arch, m.goal.os, false);
+    _1, asm_path := S'lj_asm_name(luajit);
+    asm := read_entire_file_or_crash(temp(), asm_path);
+    Asm :: import("@/examples/import_c/assemble.fr");
+    Asm'parse_and_emit(m, asm);
+    LUA_JIT_SRC := lj_src.items();
+    
+    opts := vtable.default_build_options();
+    src := @tfmt("""#include_std("lib/core.fr"); #include_std("%"); LUA_JIT_SRC :: Str.ptr_from_int(%)[];""", @source_file_name(), fmt_hex(LUA_JIT_SRC&));
+    opts.retain_function_names = true;
+    comp := vtable.new_with_src(src, "(import literal)", opts);
+    fr := vtable.with(comp);
+    
+    extnames := find_extnames(luajit);
+    gen_keep_alive(fr, m, extnames);
+    
+    main_f := fr.get_unique_named("main")
+        || panic("expected main function"); 
+    bytes := emit_qbe_included_dyn(m, fr&, @slice(main_f), @if(jit, .ExportWithNames, .WrapMain));
+    if jit {
+        name := fr'vtable'mangle_name(fr.data, main_f);
+        m.make_exec();
+        f := m.get_addr(name).unwrap();
+        push_as_tls(.comptime, zeroed(rawptr)) { 
+            f := assume_types_fn(Arg = void, Ret = void, ptr = f);
+            f();
+        };
+    } else {
+        // note: WrapMain uses fns[0] not intern("main") or goal.entry_point
+        write_entire_file_or_crash("a.out", bytes.concat(temp()));
+        @println("wrote a.out");
+    };
+    fr'vtable'drop_qbe_module(Qbe.Module.raw_from_ptr(m));
+    fr'vtable'destroy_compiler(fr.data);
+}
+
+
+do_keep_alive :: fn() void = {
+    is_declared :: fn(target: FatExpr) FatExpr #macro = @literal @is(target.expr&, .GetVar);
+    @run @ct_assert(!FEAT_JIT || @is_declared(KEEP_ALIVE), @source_location, "FEAT_JIT doesn't work with default_driver");
+    @if(FEAT_JIT) (fn(_: []rawptr) #noinline = ())(@run/*:ThisOne*/ ptr_from_raw([]rawptr, KEEP_ALIVE)[]);
+};
+
+// TODO: give a sane error message if you forget to do this instead of just put_jit_addr(0) and crashing 
+gen_keep_alive :: fn(fr: CompCtx, m: *Qbe.Module, extnames: []Str) void = {
+    #use("@/compiler/ast_external.fr");
+    keep_alive := rawptr.list(extnames.len(), fr.get_alloc());
+    Lua, _ := fr'vtable'get_constant(fr.data, TOP_LEVEL_SCOPE, fr.intern_string("Lua")).unwrap();
+    Lua := ScopeId.ptr_from_raw(Lua)[];
+    for extnames { name |
+        // if it's from math.h, aliasing it to itself is not good for business
+        // TODO: report a sane error for that (circular alias when move this continue() to the panic missing below),
+        //       don't just stack overflow trying to push the relocs to itself. 
+        continue :: local_return;
+        @if(!name.starts_with("lj_")) continue();
+        
+        fid, _ := fr'vtable'get_constant(fr.data, Lua, fr.intern_string(name)) 
+            || @panic("missing lj extern: %", name);
+        fid := FuncId.ptr_from_raw(fid)[];
+        
+        // the asm is put directly in the module without mangling 
+        // but the c goes through import_frc which mangles by FuncId. 
+        mangled_symbol_name := fr'vtable'mangle_name(fr.data, fid);
+        lnk := zeroed(Qbe.Lnk);
+        lnk.id = m.intern(name);
+        lnk.export = true;
+        declare_alias(m, m.intern(mangled_symbol_name), lnk&);  // only thread safe before calling main_thread_pump
+        
+        // in addition to the mangling problem, the things added by import_frc are lazy 
+        // but will never be added to the list in main_thread_pump because they might only 
+        // be referenced by the asm that it doesn't know about. ex: lj_meta_call
+        keep_alive&.push(fr.get_jitted(fid));
+    };
+    
+    // can't just @fmt this address into the original src string because need  
+    // the compctx to access the import_c-ed Lua scope to generate it. 
+    // TODO: accessing types in the child compctx is painful so it's easier 
+    //       to just erase like this and have the use site cast it back, 
+    //       which is error prone because it won't work if they forget the @run/*:ThisOne*/
+    it := fr.get_alloc().boxed([]rawptr, keep_alive.items());
+    fr.add_to_scope(TOP_LEVEL_SCOPE, fr.intern_string("KEEP_ALIVE"), rawptr, it);
+}
+
+find_extnames :: fn(luajit: Str) []Str = {
+    it := read_entire_file_or_crash(temp(), @tfmt("%/src/host/buildvm_arch.h", luajit));
+    it := find_between(it, "static const char *const extnames[] = {", false, "(const char *)0", false);
+    it := it.split("\"", temp());
+    extnames := Str.list(it.len/2, temp());
+    i := 0;
+    while => i + 1 < it.len {
+        i += 1;
+        extnames&.push(it[i]);
+        i += 1;
+    };
+    extnames.items()
+}
+
+Qbe :: import("@/backend/lib.fr").Qbe;

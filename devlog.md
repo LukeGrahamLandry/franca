@@ -1,4 +1,9 @@
 
+## (Apr 20)
+
+disassemble
+- do the keep_alive thing by poking at scopes from the driver instead of from an @run that needs to smuggle in the module.
+
 ## (Apr 19)
 
 disassemble
@@ -7,6 +12,13 @@ disassemble
   because im trying not to be a linker. might have to change that but so far the only programs 
   that it's been at all a problem for are this one and the os (where i driver(importvtable) anyway). 
   before i commit to that, i want to prove i can produce the program without changing the compiler. 
+- use a driver and poke stuff in the module directly. 
+  - unmangle extnames since the asm doesn't go through import_frc
+  - main_thread_pump doesn't see c fns only referenced by the asm so need to manually escape the extnames too. 
+- luajit's c api doesn't match lua's (i guess it's mimicing an older version). 
+  confusion with replacing lua_requiref. seems the luajit open_foo things don't return a value, just put it in the magic table. 
+- time ./a.out target/release/franca-macos-amd64: (puc:1743ms -> jit:0947ms)
+- scrape extnames out of the source instead of pasting it
 
 ## (Apr 18)
 
