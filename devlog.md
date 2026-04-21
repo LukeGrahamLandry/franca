@@ -1,4 +1,10 @@
 
+## (Apr 21)
+
+zones
+- keep track of the number of zones stacked above each one so can skip them all if clipped
+- pop_cstr was half the load time, store the length. 
+
 ## (Apr 20)
 
 disassemble

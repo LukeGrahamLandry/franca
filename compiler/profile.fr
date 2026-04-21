@@ -52,6 +52,7 @@ TracyZoneContext :: @struct(
 
 init_zone_tracing :: @if(USE_MY_ZONE_VIEWER, fn() void #inline = {
     self := zone_information;
+    @debug_assert_eq(self.start, 0, "called init_zone_tracing twice");
     self.arena = init(general_allocator(), page_size());
     self.zones = init(10, self.arena&.borrow());
     self.start = timestamp_s();
@@ -60,20 +61,26 @@ ZoneInfo :: @struct {
     loc: TracySourceLocation;
     start: f32;
     end: f32;
-    tid: u32;
+    tid: u16;
+    name_length: u16 = 0;
 };
 Zones :: @struct {
     arena: Arena.Allocator;
     zones: BucketArray(ZoneInfo);
     mutex: import("@/lib/sys/sync/mutex.fr").Mutex;
-    start: f64;
-}
+    // offset before casting to f32 gets you more precision by being closer to zero. 
+    // ex. timestamp_s = 2553986 ~= 2^21 means 250ms gap between adjacent floats 
+    //     (if dear wikipedia is right about (2^n .. 2^(n+1)) -> spacing = 2^(n-23))
+    start: f64;  
+};
 zone_information :: @static_mut @zeroed Zones;
 
 fn get(self: *Zones, id: TracyZoneContext) *ZoneInfo = {
     self.zones&.nested_index(id.id.zext())
 }
 
+// TODO: mach_abosolute_time isn't super fast (~2% of compiling examples/gpu/terminal when this is enabled). 
+//       there are the magic instructions (CNTVCT_EL0 / rdtsc), but i fear you have to do something extra to keep in sync if you swapped cores? idk
 fn new(self: *Zones, it: *TracySourceLocation) TracyZoneContext = {
     self.mutex&.lock();
     // not copying name,function,file. for my usage: name lives forever and function/file are empty. 
@@ -88,7 +95,10 @@ fn ___tracy_emit_zone_begin(srcloc: *TracySourceLocation, _: i32) TracyZoneConte
 fn ___tracy_emit_zone_name(ctx: TracyZoneContext, txt: []u8) void = {
     self := zone_information;
     with self.mutex& {
-        self.get(ctx)[].loc.name = txt.alloc_cstr(self.arena&.borrow());
+        it := self.get(ctx);
+        txt.len = min(txt.len, 0xFFFF);
+        it.loc.name = txt.alloc_cstr(self.arena&.borrow());
+        it.name_length = txt.len.trunc();
     };
 }
 fn ___tracy_emit_zone_color(ctx: TracyZoneContext, color: u32) void = {
@@ -103,15 +113,25 @@ fn finish_zone_tracing() void = {  // TODO: won't be called if child program exi
     self := zone_information;
     self.mutex&.lock();
     
-    out := @ref u8.list(self.zones&.len() * 100, self.arena&.borrow());
+    out := @ref u8.list(self.zones&.len() * 50, self.arena&.borrow());
     out.reserve_type(ZoneFile)[] = (
         zone_count = self.zones&.len(),
         byte_count = -1, // patched
     );
     each self.zones& { it |
-        out.reserve_type(ZoneFile.Entry)[] = (start = it.start, end = it.end, colour = it.loc.color, tid = it.tid);
-        out.push_all(it.loc.name.str());  // TODO: super inefficient, default named zone strings duplicated many times. 
-        out.push(0);
+        // TODO: super inefficient, default named zone strings duplicated many times. 
+        if it.name_length == 0 {
+            it.name_length = it.loc.name.str().len().trunc();
+        };
+        name := it.loc.name.ptr.slice(it.name_length.zext());
+        out.reserve_type(ZoneFile.Entry)[] = (
+            start = it.start, 
+            end = it.end, 
+            colour = it.loc.color, 
+            tid = it.tid, 
+            name_length = name.len.trunc(),
+        );
+        out.push_all(name);  
         @debug_assert_ge(it.end, it.start, "unfinished zone");
     };
     bit_cast_unchecked(*u8, *ZoneFile, out.as_ptr())[].byte_count = out.len;
@@ -151,12 +171,13 @@ ZoneFile :: @struct {
     magic: i64 = MAGIC;
     byte_count: i64;  // including header and entry data
     zone_count: i64;
-    // entries: []Entry #inline;
+    // zones: []Entry #inline;
     Entry :: @struct {
         start: f32;
         end: f32;
         colour: u32;
-        tid: u32;
-        // name: CStr #inline;  // TODO: wasteful. u32 offset to string pool after would be better
+        tid: u16;
+        name_length: u16;
+        // name: []u8 #inline;  // TODO: wasteful. u32 offset to string pool after would be better
     };
 };
