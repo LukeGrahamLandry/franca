@@ -1,4 +1,13 @@
 
+HELP :: """
+drag to pan and scroll to zoom. 
+scroll+(shift/control): pan (horizontal/vertical).
+r: reload the file. 
+c: recenter the screen. 
+see compiler/profile.fr for how to generate zone data. 
+""";
+// you can also dragndrop a zone data file (including into the web version: https://franca.lukegrahamlandry.ca/?file=examples/gpu/zones.fr)
+
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
     app_w, app_h := (sapp.width().float().cast(), sapp.height().float().cast());
@@ -37,15 +46,18 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     // events are ordered by start time, which also means more nested ones are seen later (because they must have started later)
     title_text := "";
     quad_count := 0;
+    depth_offset: f32 = 0;
+    each state.zones.tracks { track |
     event_index := 0;
-    while => event_index < state.events.len {
+    events := track.events;
+    while => event_index < events.len {
         continue :: local_return;
-        it := state.events.index(event_index);
+        it := events.index(event_index);
         start, end := (it.start, it.end);
-        y := it.depth * height;
+        y := (it.depth + depth_offset) * height;
         tiny_box := (end - start) * state.scale < 0.0001;
         if start > max_bounds.x {
-            continue({ event_index = state.events.len; });  // sorted by start time so all the rest will also clip
+            continue({ event_index = events.len; });  // sorted by start time so all the rest will also clip
         };
         if tiny_box || end < min_bounds.x || y > max_bounds.y {
             continue({ event_index += 1 + it.skip.zext(); }); // all stacked above this will also clip
@@ -60,7 +72,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         hovered := p.x > start && p.x < end && p.y > y && p.y < y + height;
         if hovered {
             sgl.color = pack_rgba(150, 150, 200, 255);
-            title_text = @tfmt("% %-% i=% stacked=%", it.name, start, end, event_index, it.skip);
+            title_text = @tfmt("% %-% i=% stacked=% track=%", it.name, start, end, event_index, it.skip, track.name);
         };
         
         sgl.square(start, end, y, y + height);
@@ -76,6 +88,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             sdtx.put(it.name);
         }
     };
+    depth_offset += track.max_depth + 1;
+    };
     if sgl.error.any {
         title_text = @tfmt("draw error (vertices_full=%)", sgl.error.vertices_full);
     };
@@ -90,7 +104,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     if state.show_info {
         sdtx.pos = vec2(0, 1);
-        sdtx.put(@tfmt("% quads", quad_count));
+        sdtx.put(@tfmt("quads = %\npath = %\n", quad_count, state.zones.path));
     };
     
     sgl.end();
@@ -124,12 +138,13 @@ State :: @struct {
     dirty: bool;
     mouse_pos: Vec2;
     event_arena: Arena.Allocator;
-    events: []Event;
+    zones: ZoneData;
     show_info: bool;
 };
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.sg = sg; state.sapp = sapp;
+    sapp.desc.enable_dragndrop = true;
     state.draw&.setup(
         allocator = general_allocator(),
         sg = sg,
@@ -145,12 +160,15 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     );
 
     state.event_arena = init(general_allocator(), page_size());
-    state.events = try_load_profile_data(state.event_arena&.borrow());
-    if state.events.len == 0 {
-        state.events = try_load_profile_json(state.event_arena&.borrow());
+    @match(try_load_profile_data(state.event_arena&.borrow())) {
+        fn Ok(it) => { state.zones = it; }
+        fn Err(msg) => println(msg);
     };
-    if state.events.len == 0 {
-        state.events = test_events;
+    if state.zones.tracks.len == 0 {
+        state.zones = try_load_profile_json(state.event_arena&.borrow());
+    };
+    if state.zones.tracks.len == 0 {
+        state.zones = (path = ZoneFile.PATH, tracks = test_tracks);
     };
     state.reset_view();
     
@@ -158,12 +176,13 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 }
 
 fn reset_view(state: *State) void = {
-    span := state.events[state.events.len - 1].start - state.events[0].start;
+    events := state.zones.tracks[0].events;
+    span := events[events.len - 1].start - events[0].start;
     if abs(span) < 0.000001 {
         span = 50;
     };
     state.scale = 1 / span;
-    state.pos.x = -0.9 + -state.events[0].start * state.scale;
+    state.pos.x = -0.9 + -events[0].start * state.scale;
     state.pos.y = -0.9;
 }
 
@@ -178,12 +197,12 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             fn SPACE() => { state.show_info = !state.show_info; }
             fn C() => state.reset_view();
             fn R() => {
-                state.event_arena&.reset_retaining_capacity();
-                state.events = try_load_profile_data(state.event_arena&.borrow());
-                if state.events.len == 0 {| state.events = test_events; };
+                path := state.zones.path.shallow_copy(temp());  // not in the arena
+                open_file(state, path);
             }
             @default => return();
         };
+        fn FILES_DROPPED() => for(event.drop, fn(path) => open_file(state, path));
         fn MOUSE_MOVE() => {
             state.mouse_pos = mouse;
             if event.modifiers.get(.left_mouse) != 0 {
@@ -191,6 +210,16 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             }
         }
         fn MOUSE_SCROLL() => {
+            break :: local_return;
+            if event.modifiers.get(.control) != 0 {
+                state.pos.y += -event.scroll_y * state.scale * 3;
+                break();
+            };
+            if event.modifiers.get(.shift) != 0 {
+                state.pos.x += event.scroll_x * state.scale * 3;
+                break();
+            };
+            
             (lo: f32, hi: f32) := (0.000001, 1000000);
             delta := event.scroll_y * state.scale * 3 / screen.x;
             delta := clamp(state.scale + delta, lo, hi) - state.scale;
@@ -206,9 +235,32 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     state.dirty = true;
 }
 
+fn open_file(state: *State, path: Str) void = {
+    state.event_arena&.reset_retaining_capacity();
+    path := path.shallow_copy(state.event_arena&.borrow());
+    @match(try_load_profile_data2(state.event_arena&.borrow(), path)) {
+        fn Ok(it) => { state.zones = it; };
+        fn Err(msg) => {
+            println(msg);
+            state.zones = (path = path, tracks = test_tracks);
+        }
+    }
+}
+
 driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
 main :: fn() void = Easy'start(State);
 #use("@/graphics/lib.fr");
+
+ZoneData :: @struct {
+    tracks: []Track;
+    path: Str;
+};
+
+Track :: @struct {
+    name: Str;
+    events: []Event;
+    max_depth: f32 = 0;
+};
 
 Event :: @struct {
     name: Str;
@@ -218,6 +270,8 @@ Event :: @struct {
     colour: u32 = pack_rgba(150, 150, 150, 255);
     skip: u32 = 0;  // how many zones are stacked above this one. used for culling so if 0 and wrong it will just draw slower
 };
+
+test_tracks :: @const_slice(@as(Track) (name = "test", events = test_events));
 test_events :: @const_slice(@as(Event)
     (name = "Z", start = 0, end = 1, depth = 0),
     (name = "A", start = 1, end = 50, depth = 1),
@@ -225,32 +279,42 @@ test_events :: @const_slice(@as(Event)
     (name = "C", start = 20, end = 30, depth = 3),
 );
 
-try_load_profile_data :: fn(a: Alloc) []Event = {
+ZoneFile :: import("@/compiler/profile.fr").ZoneFile;
+try_load_profile_data :: fn(a: Alloc) Result(ZoneData, Str) = 
+    try_load_profile_data2(a, ZoneFile.PATH);
+
+try_load_profile_data2 :: fn(a: Alloc, path: Str) Result(ZoneData, Str) = {
     #use("@/lib/sys/fs.fr");
-    ZoneFile :: import("@/compiler/profile.fr").ZoneFile;
-    path := ZoneFile.PATH;
     text := read_entire_file(a, path) || {
-        @println("failed to read %", path);
-        return(empty());
+        return(Err = @tfmt("failed to read %", path));
     };
     start := timestamp();
-    @if(text.len < size_of(ZoneFile)) return(empty());
+    @if(text.len < size_of(ZoneFile)) return(Err = "too small");
     h := text.peek_type(ZoneFile);
-    @if(h.magic != ZoneFile.MAGIC || h.byte_count < text.len || h.zone_count < 1) return(empty());
-    
-    events := @ref Event.list(h.zone_count, a);
+    @if(h.magic != ZoneFile.MAGIC || h.byte_count < text.len || h.zone_count < 1) return(Err = "bad header");
+    zone_count := h.zone_count;
+    WipTrack :: @struct(events: List(Event), tid: u16, stack: List(i64), max_depth := 0);
+    tracks := @ref WipTrack.list(a);
     text = text.slice(size_of(ZoneFile), h.byte_count);
     base: f32 = text.peek_type(ZoneFile.Entry)[].start;
     scale: f32 = 10000;
-    stack := @ref i64.list(temp());
+    last_tid: u16 = 0xFFFF;
+    last_track := zeroed(*WipTrack);
     while => text.len > size_of(ZoneFile.Entry)+1 {
         continue :: local_return;
-    
         h := text&.pop_type(ZoneFile.Entry);
         name := text&.pop_slice(u8, h.name_length.zext());
-        if h.tid != 1 {
-            continue();  // TODO: multiple tracks
+        
+        if h.tid != last_tid {
+            last_tid = h.tid;
+            ::[]WipTrack;
+            ::?*WipTrack;
+            last_track = tracks.items().find(fn(it) => it.tid == h.tid) || {
+                tracks.push(events = Event.list(zone_count, a), tid = h.tid, stack = list(temp()));
+                tracks.index(tracks.len - 1)
+            };
         };
+        events, stack := (last_track.events&, last_track.stack&);
         start := (h.start - base) * scale;
         while => stack.len > 0 && events[stack[stack.len - 1]].end <= start {
             i := stack.pop().unwrap();
@@ -265,6 +329,7 @@ try_load_profile_data :: fn(a: Alloc) []Event = {
             events[it[]].skip += 1;
         };
         
+        last_track.max_depth = max(last_track.max_depth, stack.len);
         events.push(
             start = start, 
             end = (h.end - base) * scale, 
@@ -274,13 +339,21 @@ try_load_profile_data :: fn(a: Alloc) []Event = {
         );
         stack.push(events.len - 1);
     };
+    out := a.alloc_init(Track, tracks.len, fn(i) => {
+        it := tracks[i];
+        (events = it.events.items(), name = @afmt(a, "%", it.tid), max_depth = it.max_depth.float().cast())
+    });
+    
     end := timestamp();
-    @println("loaded % zones from % bytes in %ms", events.len, h.byte_count, end - start);
-    events.items()
+    @println("loaded % zones from % bytes in %ms", h.zone_count, h.byte_count, end - start);
+    (Ok = (tracks = out, path = path))
 }
 
 // TODO: if i keep this, compute Event.skip for more clipping
-try_load_profile_json :: fn(a: Alloc) []Event = {
+//       do all the threads.
+//       make reload file keybind work on this too. 
+//       return result like the other loader does. 
+try_load_profile_json :: fn(a: Alloc) ZoneData = {
     S :: Type.scope_of(FFProfile);
     ::inline_for S.get_constants() { $it |
         T :: get_constant(Type, S, it[]).unwrap();
@@ -294,7 +367,7 @@ try_load_profile_json :: fn(a: Alloc) []Event = {
     path := "target/profile.json";
     text := read_entire_file(a, path) || {
         @println("failed to read %", path);
-        return(empty());
+        return(path = "", tracks = empty());
     };
     
     json: JsonParser = new_json(text, a);
@@ -303,11 +376,11 @@ try_load_profile_json :: fn(a: Alloc) []Event = {
     if !ok {
         line, col := find_line_col_for_error_message(json&);
         @eprintln("failed to parse %:%:%: %", path, line, col, json.error);
-        return(empty());
+        return(path = "", tracks = empty());
     };
     if it.threads.len < 1 {
         @eprintln("no threads in %", path);
-        return(empty());
+        return(path = "", tracks = empty());
     };
     events := @ref Event.list(a);
     
@@ -347,7 +420,8 @@ try_load_profile_json :: fn(a: Alloc) []Event = {
         };
     };
     
-    events.items()
+    track := a.boxed(Track, (name = "", events = events.items()));
+    (tracks = track.slice(1), path = path)
 }
 
 // json format used by the firefox profiler and samply. 
