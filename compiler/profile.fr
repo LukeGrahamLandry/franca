@@ -1,5 +1,6 @@
 
 ENABLE_TRACY :: Foreign.ENV.FRANCA_TRACY.get_environment_variable().is_some();
+USE_MY_ZONE_VIEWER :: str(Foreign.ENV.FRANCA_TRACY.get_environment_variable() || "") == "z";
 
 TraceCtx :: @if(ENABLE_TRACY, TracyZoneContext, void);
 
@@ -49,9 +50,84 @@ TracyZoneContext :: @struct(
     active: i32,
 );
 
+init_zone_tracing :: @if(USE_MY_ZONE_VIEWER, fn() void #inline = {
+    self := zone_information;
+    self.arena = init(general_allocator(), page_size());
+    self.zones = init(10, self.arena&.borrow());
+    self.start = timestamp_s();
+
+ZoneInfo :: @struct {
+    loc: TracySourceLocation;
+    start: f32;
+    end: f32;
+    tid: u32;
+};
+Zones :: @struct {
+    arena: Arena.Allocator;
+    zones: BucketArray(ZoneInfo);
+    mutex: import("@/lib/sys/sync/mutex.fr").Mutex;
+    start: f64;
+}
+zone_information :: @static_mut @zeroed Zones;
+
+fn get(self: *Zones, id: TracyZoneContext) *ZoneInfo = {
+    self.zones&.nested_index(id.id.zext())
+}
+
+fn new(self: *Zones, it: *TracySourceLocation) TracyZoneContext = {
+    self.mutex&.lock();
+    // not copying name,function,file. for my usage: name lives forever and function/file are empty. 
+    self.zones&.push(loc = it[], start = timestamp_s().sub(self.start).cast(), end = -1, tid = tls(.thread_index)[].trunc());
+    id: u32 = self.zones&.len().trunc() - 1;
+    self.mutex&.unlock();
+    (id = id, active = 1)
+}
+
+fn ___tracy_emit_zone_begin(srcloc: *TracySourceLocation, _: i32) TracyZoneContext = 
+    zone_information.new(srcloc);
+fn ___tracy_emit_zone_name(ctx: TracyZoneContext, txt: []u8) void = {
+    self := zone_information;
+    with self.mutex& {
+        self.get(ctx)[].loc.name = txt.alloc_cstr(self.arena&.borrow());
+    };
+}
+fn ___tracy_emit_zone_color(ctx: TracyZoneContext, color: u32) void = {
+    zone_information.get(ctx)[].loc.color = color;
+}
+fn ___tracy_emit_zone_end(ctx: TracyZoneContext) void = {
+    self := zone_information;
+    self.get(ctx)[].end = timestamp_s().sub(self.start).cast();
+}
+fn finish_zone_tracing() void = {  // TODO: won't be called if child program exits.
+    @debug_assert(ENABLE_TRACY);
+    self := zone_information;
+    self.mutex&.lock();
+    
+    out := @ref u8.list(self.zones&.len() * 100, self.arena&.borrow());
+    out.reserve_type(ZoneFile)[] = (
+        zone_count = self.zones&.len(),
+        byte_count = -1, // patched
+    );
+    each self.zones& { it |
+        out.reserve_type(ZoneFile.Entry)[] = (start = it.start, end = it.end, colour = it.loc.color, tid = it.tid);
+        out.push_all(it.loc.name.str());  // TODO: super inefficient, default named zone strings duplicated many times. 
+        out.push(0);
+        @debug_assert_ge(it.end, it.start, "unfinished zone");
+    };
+    bit_cast_unchecked(*u8, *ZoneFile, out.as_ptr())[].byte_count = out.len;
+    
+    write_entire_file_or_crash(ZoneFile.PATH, out.items());
+    self.arena&.deinit();
+    self[] = @zeroed Zones;
+}
+
+// FRANCA_TRACY=z franca examples/default_driver.fr build compiler/main.fr -o trace.out
+// ./trace.out a.fr
+// franca examples/gpu/zones.fr -jit
+}, fn() void #inline = {
+
 fn ___tracy_emit_zone_begin(srcloc: *TracySourceLocation, active: i32) TracyZoneContext #import("tracy");
 // Note: these rely on the abi of slices being the same as seperate ptr/len arguments
-fn ___tracy_emit_zone_text(ctx: TracyZoneContext, txt: []u8) void #import("tracy");  
 fn ___tracy_emit_zone_name(ctx: TracyZoneContext, txt: []u8) void = {
     ___tracy_emit_zone_name :: fn(ctx: TracyZoneContext, txt: []u8) void #import("tracy");
     // assertion: (size < std::numeric_limits<uint16_t>::max()), file TracyProfiler.cpp
@@ -60,6 +136,27 @@ fn ___tracy_emit_zone_name(ctx: TracyZoneContext, txt: []u8) void = {
 }
 fn ___tracy_emit_zone_color(ctx: TracyZoneContext, color: u32) void #import("tracy");
 fn ___tracy_emit_zone_end(ctx: TracyZoneContext) void #import("tracy");
+fn finish_zone_tracing() void = ();
 
 // /Users/luke/Downloads/tracy-master/profiler/cmake-build-release/tracy-profiler
 // FRANCA_TRACY=true franca examples/default_driver.fr build compiler/main.fr -o trace.out
+// ./trace.out a.fr
+});
+
+// this is the format that examples/gpu/zones.fr can read. 
+// output to PATH when USE_MY_ZONE_VIEWER=true
+ZoneFile :: @struct {
+    MAGIC :: "FR\x00\x01ZONE".peek_type(i64)[];
+    PATH :: "target/zones.g.out";
+    magic: i64 = MAGIC;
+    byte_count: i64;  // including header and entry data
+    zone_count: i64;
+    // entries: []Entry #inline;
+    Entry :: @struct {
+        start: f32;
+        end: f32;
+        colour: u32;
+        tid: u32;
+        // name: CStr #inline;  // TODO: wasteful. u32 offset to string pool after would be better
+    };
+};

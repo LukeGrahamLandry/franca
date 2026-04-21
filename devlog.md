@@ -12,6 +12,10 @@ zones
   but if you redownload from the profile.firefox.com it opens, the field layout changes (they move from `threads` to `shared`). 
   for now just did some manual surgary to get something nice to look at. 
 - json: reflect ?T allow null for .None, allow negative numbers. 
+- compiler/profile.fr: output (my made up) ZoneFile binary format
+- wasted a while on casting a timestamp_s that didn't fit in an f32 
+- clip the quads early so don't run out of vertices. 
+  - i've discovered the secret hack to coordinate system hell is that you're allowed to just draw extra squares so you can tell what the fuck is going on. 
 
 ## (Apr 19)
 

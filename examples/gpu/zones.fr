@@ -20,7 +20,11 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     p := (state.mouse_pos - state.pos) / state.scale;
     p.y /= screen_aspect;
     
-    //y: f32 = 0;
+    min_bounds := (vec2(-1, -1) - state.pos) / state.scale;
+    min_bounds.y /= screen_aspect;
+    max_bounds := (vec2(1, 1) - state.pos) / state.scale;
+    max_bounds.y /= screen_aspect;
+    
     height: f32 = 20;
     
     sdtx.desc.char_height = height*3 * state.scale*50;
@@ -30,20 +34,20 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     text_w, text_h := (app_w * text_scale, app_h * text_scale);
     sdtx.canvas(text_w, text_h);
     
-    // TODO: clip by what would be visible on screen. if ordered by time can binary search
-    //waiting := @ref f32.list(temp());
     title_text := "";
+    quad_count := 0;
     for state.events { it |
+        continue :: local_return;
         start, end := (it.start, it.end);
-
         y := it.depth.float().cast() * height;
-        //while => waiting.len > 0 && start >= waiting[waiting.len - 1] {
-            //waiting.len -= 1;
-            //y -= height;
-        //};
-        //waiting.push(end);
+        tiny_box := (end - start) * state.scale < 0.00005;
+        // TODO: if ordered by time can binary search insead of iterating everything
+        if tiny_box || end < min_bounds.x || y+height < min_bounds.y || start > max_bounds.x || y > max_bounds.y {
+            continue();  // clip
+        };
+        quad_count += 1;
         
-        sgl.color = pack_rgba(150, 150, 150, 255);
+        sgl.color = it.colour;
         hovered := p.x > start && p.x < end && p.y > y && p.y < y + height;
         if hovered {
             sgl.color = pack_rgba(150, 150, 200, 255);
@@ -55,13 +59,18 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         y += height;
         name_size := it.name.len.float().cast() * sdtx.desc.char_width / state.scale / 500;
         box_size := (end - start);
-        if hovered || box_size > name_size {
-            sdtx.color = pack_rgba(0, 255, 0, 255);
+        tiny_text := height * state.scale < 0.01;
+        if hovered || (box_size > name_size && !tiny_text) {
+            sdtx.color = pack_rgba(0, 0, 0, 255);
             pos := vec2(start, y);
             sdtx.pos = ((pos*state.scale*vec2(1, screen_aspect) + state.pos)*vec2(1, -1) + vec2(1)) / sdtx.glyph_size / 2;
             sdtx.put(it.name);
         }
     };
+    if sgl.error.any {
+        title_text = @tfmt("draw error (vertices_full=%)", sgl.error.vertices_full);
+    };
+    //println(quad_count);
     
     if title_text != "" {
         sdtx.desc.char_height = 16;
@@ -78,6 +87,11 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sgl.color = pack_rgba(255, 0, 0, 255);
     size := 0.03 / state.scale;
     sgl.square(p.x-size/2, p.x+size/2, p.y-size/2, p.y + size/2);
+    
+    sgl.color = pack_rgba(0, 0, 255, 255);
+    sgl.square(min_bounds.x-size/2, min_bounds.x+size/2, min_bounds.y-size/2, min_bounds.y + size/2);
+    sgl.color = pack_rgba(255, 0, 255, 255);
+    sgl.square(max_bounds.x-size/2, max_bounds.x+size/2, max_bounds.y-size/2, max_bounds.y + size/2);
     
     sgl.end();
     
@@ -118,6 +132,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.draw&.setup(
         allocator = general_allocator(),
         sg = sg,
+        max_vertices = 1_000_000,
     );
     
     init_pipeline(state.draw&, state.pipe&, sg, ());
@@ -129,13 +144,22 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     );
 
     state.event_arena = init(general_allocator(), page_size());
-    state.events = try_load_profile_json(state.event_arena&.borrow());
+    state.events = try_load_profile_data(state.event_arena&.borrow());
+    if state.events.len == 0 {
+        state.events = try_load_profile_json(state.event_arena&.borrow());
+    };
     if state.events.len == 0 {
         state.events = test_events;
     };
-    state.scale = 1 / (state.events[state.events.len - 1].start - state.events[0].start);
+    @println("% %", state.events[state.events.len - 1].start, state.events[0].start);
+    span := state.events[state.events.len - 1].start - state.events[0].start;
+    if abs(span) < 0.000001 {
+        span = 50;
+    };
+    state.scale = 1 / span;
     state.pos.x = -0.9 + -state.events[0].start * state.scale;
     state.pos.y = -0.9;
+    @println("% %", state.scale, state.pos.x);
     
     state.dirty = true;
 }
@@ -154,7 +178,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             }
         }
         fn MOUSE_SCROLL() => {
-            (lo: f32, hi: f32) := (0.0001, 10000);
+            (lo: f32, hi: f32) := (0.000001, 1000000);
             delta := event.scroll_y * state.scale * 3 / screen.x;
             delta := clamp(state.scale + delta, lo, hi) - state.scale;
             
@@ -173,13 +197,57 @@ driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @sour
 main :: fn() void = Easy'start(State);
 #use("@/graphics/lib.fr");
 
-Event :: @struct(name: Str, start: f32, end: f32, depth := -1);
+Event :: @struct(name: Str, start: f32, end: f32, depth := -1, colour: u32 = pack_rgba(150, 150, 150, 255));
 test_events :: @const_slice(@as(Event)
     (name = "Z", start = 0, end = 1, depth = 0),
     (name = "A", start = 1, end = 50, depth = 1),
     (name = "B", start = 5, end = 40, depth = 2),
     (name = "C", start = 20, end = 30, depth = 3),
 );
+
+try_load_profile_data :: fn(a: Alloc) []Event = {
+    #use("@/lib/sys/fs.fr");
+    ZoneFile :: import("@/compiler/profile.fr").ZoneFile;
+    path := ZoneFile.PATH;
+    text := read_entire_file(a, path) || {
+        @println("failed to read %", path);
+        return(empty());
+    };
+    @if(text.len < size_of(ZoneFile)) return(empty());
+    h := text.peek_type(ZoneFile);
+    @if(h.magic != ZoneFile.MAGIC || h.byte_count < text.len || h.zone_count < 1) return(empty());
+    
+    events := @ref Event.list(h.zone_count, a);
+    text = text.slice(size_of(ZoneFile), h.byte_count);
+    base: f32 = text.peek_type(ZoneFile.Entry)[].start;
+    scale: f32 = 10000;
+    stack := @ref f32.list(temp());
+    while => text.len > size_of(ZoneFile.Entry)+1 {
+        continue :: local_return;
+    
+        h := text&.pop_type(ZoneFile.Entry);
+        name := text&.pop_cstr();
+        if h.tid != 1 {
+            continue();  // TODO: multiple tracks
+        };
+        while => stack.len > 0 && stack[stack.len - 1] <= h.start {
+            stack.pop();
+        };
+        // TODO: don't just crash for invalid input
+        @assert_le(h.start, h.end, "zone bounds out of order");
+        
+        events.push(
+            start = (h.start - base) * scale, 
+            end = (h.end - base) * scale, 
+            name = name, 
+            depth = stack.len,
+            colour = h.colour.byte_swap().shift_right_logical(8),
+        );
+        stack.push(h.end);
+    };
+    println(events.len);
+    events.items()
+}
 
 try_load_profile_json :: fn(a: Alloc) []Event = {
     S :: Type.scope_of(FFProfile);
