@@ -1711,6 +1711,8 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         return(.Ok);
     } else {
         // this fixes functions with all const args the reduce to just a value emitting useless calls to like get the number 65 or whatever if you do ascii("A"). 
+        // it would be nice if i could do this by setting TryConstFold in handle_compile_func_body instead, 
+        // but the main situation that hits this is when allow_fold=false because it's a type annotation so no parent caller. 
         if !deny_inline && arg_expr.is_raw_unit() {
             @if_let(func.body&) fn Normal(value) => {
                 if value.expr&.is(.Value) {
@@ -2074,10 +2076,6 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
     key: MemoKey = (original_f, value);
     @if(ENABLE_TRACY) ___tracy_emit_zone_name(zone, self.log(arg_expr));
     
-    // this doesn't help. remove it? 
-    //to_zero: ReadBytes = (bytes = key._1&.bytes(), i = 0);
-    //self.comp().zero_padding(type, to_zero&);
-    
     if self.dispatch.const_bound_memo&.get(key&) { new_f |
         func := self.get_function(new_f);
         if func.get_flag(.AnyConstArgs) {
@@ -2085,14 +2083,8 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
             @try(self.ensure_resolved_body(new_f)) return;
             
             original := self.get_function(original_f);
-            if func.arg.bindings.len == original.arg.bindings.len {
-                return(self.curry_const_args_inner(original_f, new_f, f_expr, arg_expr, 0));
-            } else {
-                removed_count := original.arg.bindings.len - func.arg.bindings.len;
-                @debug_assert(removed_count > 0);
-                return(self.curry_const_args_inner(original_f, new_f, f_expr, arg_expr, removed_count));
-                return(@err("TODO: unfinished const args but started replacing some so don't really know what to do anymore. "));
-            };
+            removed_count := original.arg.bindings.len - func.arg.bindings.len;
+            return(self.curry_const_args_inner(original_f, new_f, f_expr, arg_expr, removed_count));
         };
         @check(self.remove_const_args(original_f, arg_expr)) return;
         self.set(f_expr, FuncId, new_f);
@@ -2162,7 +2154,7 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
         @check(self.bind_const_arg(new_fid, name, value, arg_expr.ty, arg_expr.loc, binding)) return;
         self.stats.spec_const_fn += 1;
 
-        func.finished_arg = .None;  // TODO: we know its void because we removed the only argument.
+        func.finished_arg = (Some = void);  // there was only one argument before
         self.set(f_expr, FuncId, new_fid);
         arg_expr.set(unit_value, self.get_or_create_type(void));
         func.unset_flag(.AnyConstArgs);
@@ -2299,7 +2291,7 @@ fn bind_const_arg(self: *SelfHosted, o_f: FuncId, arg_name: Var, arg_value: Valu
         };
     };
     @try(self.save_const_values(arg_name, arg_value, arg_ty, loc)) return;
-    func.arg&.remove_named(arg_name, self.get_alloc());
+    func.arg&.remove_named(arg_name, self);
 
     // If it was fully resolved before, we can't leave the wrong answer there.
     // But you might want to call bind_const_arg as part of a resolving a generic signeture so its fine if the type isn't fully known yet.
@@ -3449,15 +3441,20 @@ fn find_const_non_blocking(self: *SelfHosted, name: Var) ?Ty(Values, Type) #once
     .None
 }
 
-fn is_rec_hack(value: *FatExpr) bool = {
-    ::AutoEq(?Symbol); ::RefEq(?Symbol);
-    value.expr&.is(.PrefixMacro) && value.expr.PrefixMacro.handler.ident() == (Some = Flag.rec.ident())
+// some values are less first class than others. 
+// it has a definition in core.fr and the only references to that var in the main scope are treated specially. 
+fn is_rec_hack(self: *SelfHosted, value: *FatExpr) bool = {
+    @if(!value.expr&.is(.PrefixMacro)) return(false);
+    h := value.expr.PrefixMacro.handler;
+    @if(!h.expr&.is(.GetVar)) return(false);
+    h := h.expr.GetVar;
+    h.name == Flag.rec.ident() && h.scope == TOP_LEVEL_SCOPE
 }
 
 fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(void) #once = {
     @debug_assert(self.dispatch.enclosing_function.is_none(), "ICE: handle_declare_constant should have no enclosing function");
     
-    is_rec := is_rec_hack(value);
+    is_rec := self.is_rec_hack(value);
     
     want := ResultType.None;
     if @check(self.infer_type(ty)) return { known |
@@ -3465,7 +3462,7 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
         if(is_rec, => @err_assert(known == Type, "@rec expected Type") return);
     };
     
-    // TODO: HACK that doesn't respect scoping!
+    // TODO: 
     //       eventually it should just notice when a type tries to reference itself and switch to this path without the explicit @rec. 
     if is_rec {
         self.last_loc = value.loc;
@@ -4280,11 +4277,11 @@ fn builtin_macro(self: *SelfHosted, builtin_name: Symbol) Result(Ty(Values, Type
         @case(Flag.CVariadic.ident())   => builtin_type(CVariadicType);
         // [repro] equivilent to just patching in the number in fill_export_ffi but avoids aslr bytes in the binary when building with -debug-info (which embeds source). 
         @case(Flag.__baked_compctx.ident()) => return(Ok = (((Small = (SelfHosted.int_from_ptr(self), 8)), self.get_or_create_type(i64))));
+        @case(Flag.rec.ident()) => return(@err("HACK: @rec still isn't really a first class value like other macros are. don't try to rebind it. see compiler/sema.fr/is_rec_hack"));
         @default => {
             return(@err("unknown @builtin '%'.", self.pool.get(builtin_name)));
         };
-    };
-    unreachable()
+    }
 }
 
 fn struct_type(self: *SelfHosted, pattern: *Pattern, is_union: bool) Maybe(Type) #once = {
@@ -4344,7 +4341,7 @@ fn make_runtime_field(self: *SelfHosted, b: *Binding) Maybe(Field) #inline = {
     ty := or @check(self.infer_type(b.ty&)) return {
         // We need to know the type before we can size the struct. 
         default := @unwrap(b.get_default(), "@struct field without type requires default value.") return;
-        @err_assert(!is_rec_hack(default), "cannot use @rec on a non-constant value.") return;
+        @err_assert(!self.is_rec_hack(default), "cannot use @rec on a non-constant value.") return;
         @check(self.compile_expr(default, .None)) return;
         b.ty = (Finished = default.ty);
         default.ty

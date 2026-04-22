@@ -1,6 +1,9 @@
 
-- would be nice to have a thing draws a timeline and hierarchical zones. 
-  - tracy annoys me. you can't even just copy the binary to another computer (dynamically links homebrew's freetype)
+- examples/gpu/zones.fr
+  - collect stack traces as well as the explicit zone markers. 
+  - make it an easier dropin to other programs. maybe the envvar should automatically init/deinit in franca_runtime_init
+  - option to automatically start the ui after running like samply does
+  - add it to tests/gpu.fr. run something to generate some data for it. 
 - should at least have an option to put more work into sorting the call graph before sending to the backend so inlining works better.  
 - see "things to improve" comment in examples/disassemble.fr
 - examples/gpu/terminal: there's some situation where the child crashes and it doesn't notice so it thinks something is already running forever? 
@@ -18,7 +21,7 @@ core; #reexport("@/tests/deps.fr");  // might just keep this one. idk.
 - weird that mac is 820ms and orb is 870ms. if it's just orbstack being slow that's fine i guess. 
   but should make sure it's not me being bad at linux somehow. (different page size? something about futexes?) 
 - import_c: `if (x) { label:; }` gcc accepts that without the `;` after the label but i don't
-- nix doesn't like my binaries for ./boot/strap.sh
+- nix's patchelf doesn't like my dynamic binaries
  `patchelf: cannot find section '.interp'. The input file is most likely statically linked`
 - should i allow @run in @struct blocks? have to be careful of when it's ok to suspend tho. 
   make sure the rules about cycles are consistant with how import() works. 

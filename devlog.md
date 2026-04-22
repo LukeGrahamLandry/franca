@@ -1,9 +1,15 @@
 
+## (Apr 22)
+
+- sema: make is_rec_hack more strict so you can name something `rec`
+
 ## (Apr 21)
 
 zones
 - keep track of the number of zones stacked above each one so can skip them all if clipped
 - pop_cstr was half the load time, store the length. 
+
+sema: clean up if_empty_add_unit a bit.
 
 ## (Apr 20)
 
