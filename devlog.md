@@ -2,6 +2,14 @@
 ## (Apr 22)
 
 - sema: make is_rec_hack more strict so you can name something `rec`
+- make the code for `-d D` (backend logging disassembly) differently dynamic. 
+  - it's annoying to make the caller choose m.goal.dis because each frontend doesn't have a useful opinion. 
+    if its self contained its a lot of code to compile for something that i rarely use 
+    and the old way of just hope exec-ing llvm-mc works is hypocritical for what i complain about.  
+  - new experiment is lazily compiling a dynamic library if you actually use that option. 
+    feels less offensive than making the core compiler have a hard dependency on import_c+lua 
+    just because i don't want to write my own disassembler right now. 
+  - still needs a lot of work to cache better & not rely on PATH for 'franca' & web but it's kinda progress
 
 ## (Apr 21)
 

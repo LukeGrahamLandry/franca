@@ -1,0 +1,92 @@
+ FEAT_DIS :: true;  // enable DebugKey.Disassemble (-d D)
+FEAT_LAZY :: true;  // instead of including statically, jit load disassemblers as dynamic libraries (requires franca compiler+source at runtime). 
+ FEAT_LUA :: true;  // (arm/amd): exec curl to download lua+luajit, import_c to compile, use luajit's disassemblers. 
+FEAT_LLVM :: true;  // exec llvm-mc to disassemble. 
+
+ // TODO: 
+dis :: fn(out: *List(u8), code: []u8, arch: Arch) void = {
+    @if(!FEAT_DIS) return();
+    @if(!FEAT_LAZY) return(main(out, code, arch));
+    @if(!(FEAT_LUA || FEAT_LLVM || arch == .wasm32)) return();
+    // TODO: dlopen on wasm and static linux
+    @if(!is_linking_libc() || query_current_arch() == .wasm32) return();
+    
+    state :: @static_mut @zeroed ClearOnAotBake(@tagged(Empty: void, Ok: DisassemblerFunc, Err: void));
+    init_once ClearOnAotBake {
+        B :: local_return; break :: fn() => B({ state.it = .Err; });
+        Dyn :: import("@/lib/dynamic_lib.fr");
+        path :: "target/backend_meta_dis.out";
+        #use("@/lib/sys/subprocess.fr");
+        // TODO: cache this across multiple runs
+        // TODO: don't require 'franca' on path. especially if inside the compiler, can exec itself. 
+        args := @slice("examples/default_driver.fr", "build", "backend/meta/dis.fr", "-o", path, "-dynamiclib");
+        ok, o, e := exec_and_catch("franca", args, temp());
+        if !ok {
+            @fmt(out, "% %", o.items(), e.items());
+            break();
+        };
+        lib := Dyn'open(path) || break();
+        f := Dyn'get(lib, "main") || break();
+        f := bit_cast_unchecked(rawptr, DisassemblerFunc, f);
+        state.it = (Ok = f);
+    };
+    @if_let(state.it) fn Ok(f) => f(out, code, arch);
+}
+
+DisassemblerFunc :: @FnPtr(out: *List(u8), code: []u8, arch: Arch) void;
+
+// TODO: it's a bit wacky that this type annotation works. :compiler
+//       getting arg types from what if it was a fnptr but it's only ever used as a funcid. 
+main: DisassemblerFunc : fn(out, code, arch) void #export = {
+    if arch == .wasm32 && code.starts_with(import("@/backend/wasm/bits.fr").version_magic) {
+        // TODO: if arch=wasm and it's just one function for aot, support that too. 
+        import("@/examples/dump_wasm.fr")'dump(out, code);
+        return();
+    };
+    // TODO: puclua needs longjmp so i need to do exceptions to make it run on wasm
+    @if(query_current_arch() == .wasm32) return();
+    
+    @if(FEAT_LUA) if @is(arch, .aarch64, .x86_64) {
+        return luajit_dis(out, code, arch);
+    };
+    
+    @if(FEAT_LLVM) return(llvm_mc_dis(out, code, arch));
+}
+
+llvm_mc_dis: DisassemblerFunc : fn(out, code, arch) void = {
+    #use("@/lib/sys/subprocess.fr");
+    #use("@/lib/sys/fs.fr");
+    
+    arch_name := @match(arch) {
+        fn x86_64()  => "--arch=x86-64";
+        fn aarch64() => "--arch=aarch64";
+        fn wasm32()  => "--arch=wasm32";
+        fn rv64()    => "--arch=riscv64";
+    };
+    hex: List(u8) = list(code.len * 5, temp());
+    enumerate code { i, byte |
+        hex&.push_prefixed_hex_byte(byte[]);
+        hex&.push_all(@if(i != 0 && i.add(1).mod(4) == 0, "\n", " "));
+    };
+    file := open_temp_file();
+    file.fd&.write(hex.items());
+    DIS := Foreign.EXE.llvm_mc;
+    // varient 1 means intel syntax. ignored when doing arm. 
+    args := @slice(arch_name, "--disassemble", "-output-asm-variant=1", "--show-encoding", file&.s_name());
+    _ok, o, e := exec_and_catch(DIS, args, temp());
+    file.remove();
+    out.push_all(o.items());
+    out.push_all(e.items());
+}
+
+luajit_dis: DisassemblerFunc : fn(out, code, arch) void = {
+    #use("@/examples/disassemble.fr");
+    L := new_state_for_dis();
+    dis := load_disassemblers(L);
+    // TODO: pass in the module and get names from it (but they'll often be wrong because unpatched forward reference so meh)
+    // TODO: show different base address if aot
+    base := u8.int_from_ptr(code.ptr);
+    dis.run(arch, code, out, base, @ref zeroed(RawHashMap(i64, Str)))
+        .or(fn(msg) => @fmt(out, "%", msg));
+    Lua'lua_close(L);
+}

@@ -1,4 +1,5 @@
 
+- comments in backend/meta/dis.fr
 - examples/gpu/zones.fr
   - collect stack traces as well as the explicit zone markers. 
   - make it an easier dropin to other programs. maybe the envvar should automatically init/deinit in franca_runtime_init
@@ -468,6 +469,7 @@ cset	w0, eq
   - tests/compiler.compile_only
   - examples/os/host/vzf
   - examples/aoc/2024
+  - backend -d logging
 - some i don't even compile in ci
   - examples/disassemble
   - examples/aoc/2025

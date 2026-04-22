@@ -389,13 +389,6 @@ fn add_code_bytes(m: *QbeModule, name_id: Qbe.Sym, code: *MultiArchAsm, want_mar
     
     bytes := code[m.goal.arch];
     
-    @if(m.goal.arch != .wasm32 || m.goal.type != .JitOnly)
-    when_debug(m, .Disassemble) { out |
-        @fmt(out, "# disassembly of '%' (% bytes)\n", m.str(name_id), bytes.len);
-        dis := m.goal.dis;
-        dis(out, bytes, m.goal.arch);
-    };
-    
     code := m.segments&[.Code]&;
     
     if m.goal.arch == .wasm32 {
@@ -508,6 +501,13 @@ fn finish_alias(m: *Qbe.Module, target: Qbe.Sym, alias: Qbe.Sym, export: bool) v
 }
 
 fn finish_function(m: *QbeModule, dest: []u8, name_id: Qbe.Sym) void #inline = {
+    @if(m.goal.arch != .wasm32 || m.goal.type != .JitOnly)
+    when_debug(m, .Disassemble) { out |
+        f :: import("@/backend/meta/dis.fr")'dis;
+        @fmt(out, "# disassembly of '%' (% bytes)\n", m.str(name_id), dest.len);
+        f(out, dest, m.goal.arch);
+    };
+
     m.last_function_end = dest.ptr.offset(dest.len);
     use_symbol(m, name_id) { s |
         s.size = dest.len.trunc();
@@ -703,13 +703,6 @@ fn emit_fn(f: *Qbe.Fn) void = {
     code_bytes := code.mmapped.subslice(start_offset, size);
     finish_function(m, code_bytes, name_id);
     
-    @if(m.goal.arch != .wasm32 || m.goal.type != .JitOnly)
-    when_debug(m, .Disassemble) { out |
-        @fmt(out, "# disassembly of '%' (% bytes)\n", m.str(f.lnk.id), code_bytes.len);
-        dis := m.goal.dis;
-        dis(out, code_bytes, m.goal.arch);
-    };
-    
     // TODO: don't clear_instruction_cache in finish_function if i have to redo it here
     @if(pending_immediate_fixup_got.len != 0)
     with_write_protect m {
@@ -749,38 +742,6 @@ fn reserve_stub(m: *Qbe.Module, symbol: *SymbolInfo, $T: Type) *T #generic = {
 
 fn debug_cas($T: Type, p: *T, old: T, new: T) void #generic = {
     @debug_assert_eq(u32.cas(p, old, new), old, "debug_cas");
-}
-
-// TODO: this sucks. should generate my own disassemblers (that can be statically linked in easily) from the cpu specs. 
-fn llvm_mc_dis(out: *List(u8), code: []u8, arch: Arch) void = {
-    #use("@/lib/sys/subprocess.fr");
-    #use("@/lib/sys/fs.fr");
-    
-    if!is_linking_libc() {
-        out.push_all("no disassembler included\n");
-        return();
-    };
-    
-    arch_name := @match(arch) {
-        fn x86_64()  => "--arch=x86-64";
-        fn aarch64() => "--arch=aarch64";
-        fn wasm32()  => "--arch=wasm32";
-        fn rv64()    => "--arch=riscv64";
-    };
-    hex: List(u8) = list(code.len * 5, temp());
-    enumerate code { i, byte |
-        hex&.push_prefixed_hex_byte(byte[]);
-        hex&.push_all(@if(i != 0 && i.add(1).mod(4) == 0, "\n", " "));
-    };
-    file := open_temp_file();
-    file.fd&.write(hex.items());
-    DIS := Foreign.EXE.llvm_mc;
-    // varient 1 means intel syntax. ignored when doing arm. 
-    args := @slice(arch_name, "--disassemble", "-output-asm-variant=1", "--show-encoding", file&.s_name());
-    _ok, o, e := exec_and_catch(DIS, args, temp());
-    file.remove();
-    out.push_all(o.items());
-    out.push_all(e.items());
 }
 
 fn push_fixup(m: *QbeModule, symbol: *SymbolInfo, fix: Fixup) void = {
