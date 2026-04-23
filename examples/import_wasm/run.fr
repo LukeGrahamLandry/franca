@@ -153,12 +153,13 @@ fn exec_wasm_file($Exports: Type, rt: *Rt.Engine, mod: *Wasm.Module, args: []CSt
     func := func.Function;
     f := assume_types_fn(Arg = Ty(rawptr, u32, u32, u32, u32), Ret = i64, ptr = func.callee);
     
-    result := @match(try(globals.exit_thread&)) {
-        fn Try() => {
-            // TODO: if return type is void, result is a junk register
-            f(func.context, argc.trunc(), argv.trunc(), 0, 0)
-        }
-        fn Catch() => globals.exit_status;
+    result := -1;
+    r := enter_jumpbufs globals {
+        // TODO: if return type is void, result is a junk register
+        result = f(func.context, argc.trunc(), argv.trunc(), 0, 0)
+    };
+    if r != 0 {
+        result = globals.exit_status;
     };
     
     a.dealloc_one(@type memory[], memory);
@@ -192,13 +193,14 @@ Globals :: @rec @struct {
     memory: *SaneRawList(u8);
     env: rawptr;
     table: *SaneRawList(Rt.Callable);
-    instance: *Rt.Instance;
+    instance: *Rt.Instance;  // this is the first one. but there can be multiple. 
     engine: *Rt.Engine;
     mod: *Rt.Module;
     create_exports: (@FnPtr(globals: *Globals) Rt.ExportsEnv);
     exit_futex: *u32;
     thread: ?*Thread;
     exit_thread: import("@/lib/sys/jump.fr").JumpBuf;
+    exceptions: *Rt.ExceptionStack;
     log: Log;
     exit_status: i64;
 };
@@ -387,6 +389,7 @@ Exports :: @struct {
             exports: Rt.ExportsEnv = (_ = init(temp()));
             exports._&.insert("main", ctx.instance.exports);
             new := instantiate(ctx.engine, mod, exports&);
+            new.exceptions = ctx.exceptions&;
             
             table := ctx.table[];
             table := table.from_sane();
@@ -474,12 +477,9 @@ handle_child_thread :: fn(child: *Child) void = {
     f, c := (wasm_init_thread.Function.callee, wasm_init_thread.Function.context);
     f := bit_cast_unchecked(rawptr, @FnPtr(c: rawptr, a: i64, b: i64) i64, f);
     
-    @match(try(child.globals.exit_thread&)) {
-        fn Try() => {
-            known_wasm_jit_event := 0;  // TODO: keep this once i do thread pool
-            known_wasm_jit_event := (f)(c, child.userdata, known_wasm_jit_event);
-        }
-        fn Catch() => ();
+    enter_jumpbufs child.globals& { 
+        known_wasm_jit_event := 0;  // TODO: keep this once i do thread pool
+        known_wasm_jit_event := (f)(c, child.userdata, known_wasm_jit_event);
     };
     
     child.globals.exit_futex[] = 0;
@@ -487,6 +487,24 @@ handle_child_thread :: fn(child: *Child) void = {
     // TODO: recycle old threads? 
     general_allocator().dealloc_one(Child, child);
 };
+
+enter_jumpbufs :: fn(globals: *Globals, $body: @Fn() void) i64 = {
+    exceptions := @zeroed Rt.ExceptionStack;
+    globals.exceptions = exceptions&;
+    globals.instance.exceptions = globals.exceptions&;
+    @match(try(globals.exceptions.buf&)) {
+        fn Try() => {
+            @match(try(globals.exit_thread&)) {
+                fn Try() => {
+                    body();
+                    0
+                }
+                fn Catch() => 1;
+            }
+        }
+        fn Catch() => 2;  // uncaught exception
+    }
+}
 
 // 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 🤡 
 // blehhhhh todo

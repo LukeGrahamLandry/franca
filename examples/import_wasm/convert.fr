@@ -171,6 +171,7 @@ LoadWasm :: @struct {
     local_memory_base: Qbe.Ref;
     return_types: []Wasm.ValType;
     link: **Qbe.Blk;
+    pair_i64_rtype: i64;
     
     loaded: *Loaded #use;
 };
@@ -201,6 +202,11 @@ fn translate_func(w: *WasmModule, m: *Qbe.Module, loaded: *Loaded, function_name
         cursor = 0,
         return_types = signature.ret.items(),
         link = f.start&,
+        pair_i64_rtype = m.new_type(
+            name = "pairi64",
+            header = (size = 16, nunion = 1, align_log2 = 3, flags = 0), 
+            fields = m.forever&.borrow().alloc_init(u32, 2, fn(_) => pack(type = .Fl, len = 8)),
+        ),
     );
     self&.translate_func(code, signature);
     Qbe'backend'compile_fn(f);
@@ -560,26 +566,7 @@ fn emit_the_code(self: *LoadWasm) void = {
             }
             fn I32_EqZero() => self.eqz(.ceqw);
             fn I64_EqZero() => self.eqz(.ceql);
-            fn Throw() => {
-                tagidx := self.read_u();
-                // TODO: implement exceptions
-                if self.get_blk()[].jmp.type == .Jxxx {
-                    self.get_blk()[].jmp.type = .hlt;
-                };
-            }
-            fn TryTable() => {
-                self.push_block(self.read_s(), false);
-                catches: i64 = self.read_u().bitcast();
-                // TODO: implement exceptions
-                range(0, catches) { _ |
-                    kind := self.read_u();
-                    if kind == 0 || kind == 1 {
-                        self.read_u();  // tag index
-                    };
-                    self.read_u();  // label
-                };
-                // followed by try body
-            }
+            fn TryTable() => self.compile_try_table();
             @default => self.choose_runtime_call(start_cursor);
         }
     });
@@ -629,16 +616,19 @@ fn choose_runtime_call(self: *LoadWasm, start: i64) void = {
                     i += 2;
                     continue()
                 }
+                fn tag() => {
+                    off := Rt'Instance'compute_offset(self.counts&, .exceptions, indices[i]);
+                    r := self.f.newtmp("TAG", .Kl);
+                    self.f.emit(.add, .Kl, r, self.local_rt_header, self.f.getcon(off));  // **ExceptionTag
+                    r
+                }
             };
             externrefs&.push(var);
             i += 1;
         }
     };
     
-    off := Rt'Instance'compute_offset(self.counts&, .runtime, rt_i);
-    callee, b := (self.f.newtmp(it.name, .Kl), self.f.newtmp("rt_slot", .Kl));
-    self.f.emit(.add, .Kl, b, self.local_rt_header, self.f.getcon(off));  // *rawptr
-    self.f.emit(.load, .Kl, callee, b, QbeNull);  // rawptr
+    callee := self.get_runtime_call(rt_i);
     
     self.f.emit(.arg, .Kl, QbeNull, self.local_rt_header, QbeNull);
     for externrefs { it |
@@ -657,12 +647,23 @@ fn choose_runtime_call(self: *LoadWasm, start: i64) void = {
     };
 }
 
+fn get_runtime_call(self: *LoadWasm, rt_i: i64) Qbe.Ref = {
+    calls := collect_runtime_calls();
+    self.rt_needed&.set(rt_i);
+    off := Rt'Instance'compute_offset(self.counts&, .runtime, rt_i);
+    callee, b := (self.f.newtmp(calls[rt_i].name, .Kl), self.f.newtmp("rt_slot", .Kl));
+    self.f.emit(.add, .Kl, b, self.local_rt_header, self.f.getcon(off));  // *rawptr
+    self.f.emit(.load, .Kl, callee, b, QbeNull);  // rawptr
+    callee
+}
+
 fn match_runtime_call(self: *LoadWasm, start: i64) ?Ty(*InstSeq, i64, []i64) = {
     indices := i64.list(temp());
     enumerate collect_runtime_calls() { i, it |
         continue :: local_return;
         self.cursor = start;
         indices&.clear();
+        @if(it.match.len == 0) continue();
         for it.match { it |
             @match(it) {
                 fn byte(it) => {
@@ -674,14 +675,22 @@ fn match_runtime_call(self: *LoadWasm, start: i64) ?Ty(*InstSeq, i64, []i64) = {
                 };
             };
         };
-        self.rt_needed&.set(i);
         return(Some = (it, i, indices.items()));
     };
     .None
 }
+
+fn find_runtime_call(self: *LoadWasm, $name: Str) Qbe.Ref = {
+    calls :: collect_runtime_calls();
+    i := @run calls.index_of(fn(it) => it.name == name)
+        || @panic("invalid runtime call name: %", name);
+    self.get_runtime_call(i)
+}
         
 InstSeq :: @struct {
-    Arg :: @enum(u8) (memory, table, data, memarg);
+    // memarg is a literal (align, offset) pair which get added when computing the address for the first runtime arg. 
+    // the rest are a single index into one of the section arrays. 
+    Arg :: @enum(u8) (memory, table, data, memarg, tag);
     Inst :: @tagged(byte: u8, int: Arg);
     callee: rawptr;
     match: []Inst;
@@ -712,6 +721,7 @@ fn collect_runtime_calls() []InstSeq #fold = @run {
             };
             it[] = compile_ast(it[]);
             @switch(it.ty) {
+                @case(void) => ();  // `#wasm`, don't match anything, called manually. ex. catch
                 @case(u8) => insts&.push(byte = u8.const_eval(it[]));
                 @case(InstSeq.Arg) => {
                     value := InstSeq.Arg.const_eval(it[]);
@@ -733,6 +743,14 @@ fn collect_runtime_calls() []InstSeq #fold = @run {
             name = fr.get_string(name),
         );
     };
+    
+    out&.push(
+        callee = fr.get_jitted(Rt.SysJump.try_impl), 
+        match = empty(),
+        stacked = empty(),
+        result = .Kw,
+        name = "try_impl"
+    );
     out.items()
 };
 #use("@/compiler/ast_external.fr");
@@ -799,8 +817,10 @@ fn compute_slot(self: *LoadWasm, i: i64, A: Wasm.ImportType, B: Fields(Rt.View),
     r
 } 
 
-fn parse_branch_target(self: *LoadWasm) *Qbe.Blk = {
-    depth: i64 = self.read_u().bitcast();
+fn parse_branch_target(self: *LoadWasm) *Qbe.Blk = 
+    self.get_branch_target(self.read_u().bitcast());
+
+fn get_branch_target(self: *LoadWasm, depth: i64) *Qbe.Blk = {
     it := self.blocks[self.blocks.len - depth - 1];
     @if(it.loop, it.continue, it.break)
 }
@@ -1065,14 +1085,7 @@ fn skip_current_instruction(self: *LoadWasm) void = {
         }
         fn TryTable() => {
             self.read_u(); // block type
-            catches: i64 = self.read_u().bitcast();
-            range(0, catches) { _ |
-                kind := self.read_u();
-                if kind == 0 || kind == 1 {
-                    self.read_u();  // tag index
-                };
-                self.read_u();  // label
-            };
+            parse_catches(=> self.read_u().bitcast(), fn(a, b, c) => ());
         }
         @default => ();
     };
@@ -1096,4 +1109,58 @@ preleb :: fn(t: Wasm.ValType) i32 = {
         @debug_assert_eq(t.raw(), buf[0]);
     };
     x.intcast()
+}
+
+fn compile_try_table(self: *LoadWasm) void = {
+    storage, which := (self.f.newtmp("ExceptionStack", .Kl), self.f.newtmp("WhichJump", .Kw));
+    
+    // note: in the previous block
+    try_impl := self.find_runtime_call("try_impl");
+    try_end := self.find_runtime_call("try_end");
+    size_stk := self.f.getcon(size_of(Rt.ExceptionStack));
+    ctx_ext_off := self.f.getcon(offset_of(Rt.Instance, .exceptions));
+    stk_buf_off := self.f.getcon(offset_of(Rt.ExceptionStack, .buf));
+    @run @assert_eq(offset_of(Rt.ExceptionStack, .prev), 0, "ExceptionStack layout changed");
+    t := TYPE(self.pair_i64_rtype);
+    r := self.temporaries(6);
+    ctx := self.local_rt_header;
+    // the call to try_impl can't be in a ./runtime.fr helper because it needs to get the right LR. 
+    self.f.start.push(.alloc8, .Kl, storage, size_stk, Qbe.Null);  // *ExceptionStack
+    self.f.emit(.add, .Kl, r[0], ctx, ctx_ext_off);           // ***ExceptionStack
+    self.f.emit(.load, .Kl, r[1], r[0], Qbe.Null);            // **ExceptionStack
+    self.f.emit(.load, .Kl, r[2], r[1], Qbe.Null);            // *ExceptionStack
+    self.f.emit(.storel, .Kw, Qbe.Null, r[2], storage);       // storage.prev = ctx.exceptions[];
+    self.f.emit(.storel, .Kw, Qbe.Null, storage, r[1]);       // ctx.exceptions[] = storage;
+    self.f.emit(.add, .Kl, r[3], storage, stk_buf_off);       // *JumpBuf
+    self.f.emit(.arg, .Kl, QbeNull, r[3], Qbe.Null);
+    self.f.emit(.call, .Kl, r[4], try_impl, t);        // Ty(rawptr, WhichJump)
+    self.f.emit(.add, .Kl, r[5], r[4], self.f.getcon(8));
+    self.f.emit(.load, .Kw, which, r[5], Qbe.Null);
+    
+    header_block := self.get_blk();
+    self.push_block(self.read_s(), false);
+    @assert_eq(header_block.jmp.type, .jmp);
+    header_block.jmp = (type = .jnz, arg = which);
+    @assert(identical(header_block.s1, self.get_blk()), "sanity");
+    
+    catch_block := zeroed(*Qbe.Blk);
+    parse_catches(=> self.read_u().bitcast()) { kind, tag, depth |
+        @assert_eq(kind, 2, "TODO: support more flavours of catch block");
+        @assert(catch_block.is_null(), "TODO: support multiple catch blocks");
+        catch_block = self.get_branch_target(depth);
+    };
+    @assert(!catch_block.is_null(), "TODO: support no catch blocks");
+    @run @assert_eq(@as(i64) Rt.SysJump.WhichJump.Try, 0, "WhichJump layout changed");
+    header_block.s2 = header_block.s1;
+    header_block.s1 = catch_block;
+    
+    // TODO: this doesn't work because you can jump out of the try.
+    //       need to pop off all the stack nodes you go past when you do that. 
+    //       which will be different for each jump target so will need to insert
+    //       extra trampoline blocks i guess. 
+    break := self.blocks[self.blocks.len - 1].break;
+    push(break, .arg, .Kl, QbeNull, self.local_rt_header, QbeNull);
+    push(break, .call, .Kw, QbeNull, try_end, QbeNull);
+
+    // followed by try body
 }

@@ -2,6 +2,9 @@
 // See tests/exceptional.fr for a basic usage example 
 // and lib/sys/sync/green.fr for something more complex.
 // 
+// calling try() directly only works on native. 
+// see the end of this file for @match_try which also works on wasm.  
+//
 
 JumpBuf :: @struct {
     fp: rawptr;
@@ -22,7 +25,7 @@ JumpBuf :: @struct {
 WhichJump :: @enum(i64) (Try = 0, Catch = 1);
 
 // TODO: version of these that let you pass userdata to throw and retrive it from try(which=Catch)
-fn try(buf: *JumpBuf) WhichJump = {  // aka setjmp
+fn try(buf: *JumpBuf) WhichJump #inline = {  // aka setjmp
     @run assert_eq(@as(i64) WhichJump.Try, 0);
     // note: you can't do anything in this function before this call 
     //       because you can't fuck with the return address before it gets saved in the jumpbuf
@@ -199,15 +202,24 @@ rv64_rclob :: (@const_slice(
     };
 }
 
-// TODO: explain better. native: setjmp/longjump to save registers. 
-//       wasm: exceptions. the jumpbuf is just used to know which to stop at if nested. 
-// TODO: import_wasm: support exceptions. 
-// TODO: backend/wasm/isel: support exceptions. 
-// TODO: move this to lib/sys/jump.fr
-// TODO: make usage look closer to the @match(try()) { fn Try(); fn Catch(); } syntax
+// 
+// @match_try exposes the subset of setjmp/longjmp that can be emulated with exceptions. 
+// (ie. only upwards in a single stack, not sideways stack switching). 
+// - native: 
+//   Expr.WasmTryCatch is a nop (just compiles the contained Expr.If). 
+//   try_impl writes callee saved registers to the JumpBuf and longjmp restores them 
+//   (including the return address) so try_impl appears to return twice (with different values of WhichJump). 
+// - wasm:
+//   the block is tagged as is_wasmtrycatch which makes the backend emit a try_table(catch_all, _) block for it. 
+//   throw_impl sets a flag on the JumpBuf and then does a wasm throw instruction. 
+//   each nested @match_try will catch the exception and if its own JumpBuf has the flag set,
+//   that's the right place to stop and run the catch block, otherwise rethrow and continue up the chain.
+//   (the WasmTryCatch.If.cond field is unused because the wasm runtime handles the control flow instead). 
+// 
 // TODO: update code to use this instead of @match(try())
 // TODO: very fragile, which prong is try vs catch matters. need to fix it in isel instead
-fn match_try(arg: FatExpr) FatExpr #macro = {
+// TODO: import_wasm properly pop the ExceptionStack which jumping out of a trytable block. 
+fn match_try(buf: FatExpr, arg: FatExpr) FatExpr #macro = {
     #use("@/lib/sys/process.fr");
     #use("@/lib/sys/jump.fr");
     wasmtrycatch :: fn(arg: FatExpr) FatExpr #macro = {
@@ -215,7 +227,28 @@ fn match_try(arg: FatExpr) FatExpr #macro = {
         it := ast_alloc().boxed(FatExpr, @{ @if(@[args[0]], @[args[1]], @[args[2]]) });
         (expr = (WasmTryCatch = it), loc = arg.loc)
     };
+    // this is just to get the syntax to look like the manual @match(try()) you can do on native. 
+    try_body, catch_body := {
+        @ct_assert(arg.expr&.is(.Block), arg.loc, "@match_try expected a block");
+        stmts := arg.expr.Block.body.items();
+        try := @{ compile_error("missing Try block", @[@literal arg.loc]) };
+        catch := @{ compile_error("missing Catch block", @[@literal arg.loc]) };
+        each stmts { stmt |
+            @if_let(stmt.stmt) fn DeclFunc(f) => {
+                callable: FatExpr = (expr = (Closure = f), loc = f.loc); 
+                @switch(f.name) {
+                    @case(@symbol Try) => { try = make_unit_call_expr(callable); }
+                    @case(@symbol Catch) => { catch = make_unit_call_expr(callable); }
+                    @default => compile_error("expected name to be Try or Catch", f.loc);
+                };
+            };
+        };
+        (try, catch)
+    };
+    
     // TODO: do the ref one somehow so it doesn't just discard stack traces 
+    //       (like if there's ffi to a js function that throws its own exception, 
+    //        the current way will replace it with one of mine which isn't what you want). 
     rethrow :: AsmFunctionWasmOnly(fn() void = (), fn(out) = {
         out.push(0x00);  // 0 locals
         out.push(0x08);  // throw(0)
@@ -223,10 +256,9 @@ fn match_try(arg: FatExpr) FatExpr #macro = {
         out.push(0x0B);  // end
     });
     
-    args := arg&.items();
     @{
-        buf: *JumpBuf = @[args[0]];
-        // mark it valid for wasm, on non wasm this will get stomped anyway so doesn't matter
+        buf: *JumpBuf = @[buf];
+        // mark it as not currently throwing for wasm, on non wasm this will get stomped anyway so doesn't matter
         buf.registers&[0] = 0;
         @wasmtrycatch(try(buf) == .Catch, {
             // TODO: this will probably have to be asm because it needs to talk to the magic value
@@ -234,9 +266,9 @@ fn match_try(arg: FatExpr) FatExpr #macro = {
                 buf.registers&[0] = 2;
                 rethrow();
             };
-            @[args[2]];
+            @[catch_body];
         }, {
-            @[args[1]];
+            @[try_body];
         });
         buf.registers&[0] = 2;
     }

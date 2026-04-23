@@ -1,4 +1,13 @@
 
+## (Apr 23)
+
+wasm exceptions
+- import_wasm: support the subset of exceptions that i need. 
+  - big insight is that jump.fr/try_impl needs to be called from the stack frame 
+    that stays alive the whole time. the indirection with try() that unwraps the Ty(rawptr, WhichJump)
+    only works in the franca code because it gets inlined. 
+  - TODO: still wrong if you have multiple because it leaks the ExceptionStack
+
 ## (Apr 22)
 
 - sema: make is_rec_hack more strict so you can name something `rec`

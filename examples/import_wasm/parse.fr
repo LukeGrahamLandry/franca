@@ -14,6 +14,7 @@ WasmModule :: @struct(
     elements: List(Wasm.Element),
     import_count := zeroed EnumMap(Wasm.ImportType, i64),
     custom: List(@struct(name: RawList(u8), data: []u8)),
+    tags: List(Wasm.TypeIdx),
 );
 
 ParseWasm :: @struct(w: *WasmModule, src: []u8, cursor := 0);
@@ -187,11 +188,12 @@ fn parse_wasm(self: *ParseWasm) Result(void, Str) = {
             }
             fn Tag() => {
                 count := @try(self.read_u()) return;
+                self.w.tags&.reserve(count);
                 range(0, count) { _ |
                     zero := @try(self.read_u()) return;
                     @if(zero != 0) return(Err = "invalid tag encoding (nonzero)");
                     function_type_index := @try(self.read_u()) return;
-                    // TODO: collect these!
+                    self.w.tags&.push(id = function_type_index.trunc());
                 };
             }
             @default => return(Err = @tfmt("Unhandled section type % (section index % in module)", section_index, section_count));
@@ -299,12 +301,12 @@ fn pop(self: *ParseWasm) Result(u8, Str) = {
     (Ok = b)
 }
 
-fn empty(a: Alloc) WasmModule = {
-    (types = list(a), functions = list(a), exports = list(a), 
+fn empty(a: Alloc) WasmModule = (
+    types = list(a), functions = list(a), exports = list(a), 
     code = list(a), imports = list(a), data = list(a), 
     tables = list(a), memories = list(a), globals = list(a),
-    elements = list(a), custom = list(a))
-}
+    elements = list(a), custom = list(a), tags = list(a),
+);
 
 fn cls(t: Wasm.ValType) import("@/backend/ir.fr").Cls = {
     @switch(t.raw()) {
@@ -340,5 +342,19 @@ try_load_name_section :: fn(data: []u8, function_names: []Str) void = {
             function_names[i] = data.slice(0, len);
             data = data.rest(len);
         };
+    };
+}
+
+// trytable, <block type>, <parse_catches>, <body>, <end>
+parse_catches :: fn($read_leb: @Fn() i64 #duplicated, $yield: @Fn(kind: i64, tag: ?i64, label: i64) void) void = {
+    catches := read_leb();
+    range(0, catches) { _ |
+        kind := read_leb();
+        tag: ?i64 = .None;
+        if kind == 0 || kind == 1 {
+            tag = (Some = read_leb());
+        };
+        label := read_leb();
+        yield(kind, tag, label)
     };
 }

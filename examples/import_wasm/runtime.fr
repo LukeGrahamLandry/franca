@@ -24,6 +24,7 @@ Instance :: @struct {  // !Sized
     counts: Counts;
     exports := zeroed RawHashMap(Str, Export);
     ordered_exports: []Export = empty();
+    exceptions := zeroed(**ExceptionStack);
     // unsized: View #inline;
     
     fn size(self: *Instance) i64 = {
@@ -66,10 +67,12 @@ Counts :: EnumMap(Fields(View), i64);
 View :: @struct {
     local_globals: []GlobalValue;
     local_tables: []Table;
+    local_exceptions: []ExceptionTag;
     globals: []*GlobalValue;
     tables: []*Table;
     imports: []Callable;  // functions only
     runtime: []rawptr;  // function pointers from runtime.fr
+    exceptions: []*ExceptionTag;
 };
 
 GlobalValue :: @union(i64: i64, i32: i32, f64: f64, f32: f32);
@@ -86,7 +89,18 @@ Export :: @tagged(
     Table: *Table,
     Memory: *SaneRawList(u8),
     Global: *GlobalValue,
+    Tag: *ExceptionTag,
 );
+
+// for now, i only implement catch_all so this doesn't need any data. 
+// im just leaving markers of what needs to change so i don't forget. 
+ExceptionTag :: @struct();  
+
+SysJump :: import("@/lib/sys/jump.fr");
+ExceptionStack :: @rec @struct {
+    prev: *ExceptionStack;
+    buf: SysJump.JumpBuf;
+};
 
 Engine :: @rec @struct {
     // TODO: could do much better than this if most modules are [large, of unique length, instantiated once]  
@@ -276,6 +290,11 @@ fn instantiate(engine: *Engine, mod: *Module, imports: *ExportsEnv) *Instance = 
                 view.globals[i[]] = value.Global;
                 i[] += 1;
             }
+            fn Tag() => {
+                i := found&[.exceptions]&;
+                view.exceptions[i[]] = value.Tag;
+                i[] += 1;
+            }
         };
     };
     @assert_eq(missing, 0, "had missing imports");
@@ -284,6 +303,9 @@ fn instantiate(engine: *Engine, mod: *Module, imports: *ExportsEnv) *Instance = 
     view.local_globals.copy_from(mod.loader.init_global_values);
     enumerate view.local_globals { i, it |
         view.globals[found&[.globals] + i] = it;
+    };
+    enumerate view.local_exceptions { i, it |
+        view.exceptions[found&[.exceptions] + i] = it;
     };
     enumerate mod.loader.init_table_sizes { i, it |
         it := instance.gpa.alloc_zeroed(Callable, it[]);
@@ -300,6 +322,7 @@ fn instantiate(engine: *Engine, mod: *Module, imports: *ExportsEnv) *Instance = 
             fn Global() => (Global = view.globals[it.id.zext()]);
             fn Table() => (Table = view.tables[it.id.zext()]);
             fn Memory() => (Memory = instance.memory);
+            fn Tag() => (Tag = view.exceptions[it.id.zext()]);
         };
         instance.exports&.insert(it.name.items(), e, a);
         e
@@ -499,6 +522,18 @@ memory_init :: fn(_: *Instance, data_start: *u8, memory: *SaneRawList(u8), dest:
     src := data_start.offset(src_offset.zext()).slice(size.zext());
     dest := memory.ptr.offset(dest.zext()).slice(size.zext());
     dest.copy_from(src);
+}
+
+#wasm(0x08, .tag)
+throw :: fn(ctx: *Instance, which: **ExceptionTag) void = {
+    @assert_ne(query_current_arch(), .wasm32, "TODO: support exceptions when running import_wasm on wasm (nested)");
+    buf := ctx.exceptions.buf&;
+    ctx.exceptions[] = ctx.exceptions.prev;
+    SysJump'throw(buf);
+}
+
+try_end :: fn(ctx: *Instance) void #wasm = {
+    ctx.exceptions[] = ctx.exceptions.prev;
 }
 
 Futex :: import("@/lib/sys/sync/futex.fr");
