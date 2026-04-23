@@ -293,7 +293,7 @@ fn dump_wasm_expr(o: *Ctx, full_input: []u8, insts: []u8, import_types: []Wasm.T
             }
         };
         
-        if @is(inst, .Block, .Loop, .If) {
+        if @is(inst, .Block, .Loop, .If, .TryTable) {
             indent += 1;
             @fmt(out, "% \"", inst);
             first_type_byte := insts[c];
@@ -312,6 +312,23 @@ fn dump_wasm_expr(o: *Ctx, full_input: []u8, insts: []u8, import_types: []Wasm.T
             };
             stack&.push(n = next_label, loop = inst == .Loop);
             next_label += 1;
+            
+            if inst == .TryTable {
+                catches := read_leb(false);
+                @println("catches = %", catches);
+                range(0, catches) { _ |
+                    kind := read_leb(false);
+                    @println("kind = %", kind);
+                    @fmt(out, "\n  %catch(%, ", f_rep("    ", indent), kind);
+                    if kind == 0 || kind == 1 {
+                        @fmt(out, "tagidx=%, ", read_leb(false));
+                    };
+                    depth := read_leb(false);
+                    @println("%", depth);
+                    label := stack[stack.len - depth - 1].n;
+                    @fmt(out, "labelidx=%); // :%", depth, label);
+                };
+            };
             
             continue();
         };
@@ -350,7 +367,7 @@ fn dump_wasm_expr(o: *Ctx, full_input: []u8, insts: []u8, import_types: []Wasm.T
             @fmt(out, ");");
             continue()
         };
-        if @is(inst, .LocalGet, .LocalSet, .LocalTee, .GlobalGet, .GlobalSet, .Br, .BrIf) {
+        if @is(inst, .LocalGet, .LocalSet, .LocalTee, .GlobalGet, .GlobalSet, .Br, .BrIf, .Throw) {
             arg := push_leb(false);
             @fmt(out, ");");
             

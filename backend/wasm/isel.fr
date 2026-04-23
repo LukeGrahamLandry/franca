@@ -525,7 +525,7 @@ fn insert_blocks_for_conditional_phis(f: *Qbe.Fn) void = {
 //
 
 // TODO: either actually use if/else or remove them
-Flow :: @enum(i64) (end, loop, block, if, else, br, br_if);
+Flow :: @enum(i64) (end, loop, block, if, else, br, br_if, try, catch_all);
 
 // this is the only architecture of which the news has come to harvard.
 // there may be many others but they havent been discovered.
@@ -637,10 +637,26 @@ fn wasm_flow(f: *Qbe.Fn) void = {
             };
             if !exists {
                 // this is the first time we've branched to dest in this scope
+                @if(!b.is_wasmtrycatch)  // :HACK
                 prepend(start, make_ins(.flow, .Kw, QbeNull, block, dest));
                 prepend(s, make_ins(.flow, .Kw, QbeNull, INT(Flow.end.raw()), dest));
             };
             push(b, make_ins(.flow, .Kw, QbeNull, INT(br), dest));
+        };
+        
+        if b.is_wasmtrycatch {
+            // on native it's an if on the result of calling try(),
+            // for wasm, pop off that condition and convert to try-catch block. 
+            @assert_eq(b.s2.id, b.id + 1, "TODO: WasmTryCatch block ordering is fragile (try must be next in rpo). $%", f.name());
+            i := b.ins[b.ins.len - 1]&;
+            @assert(i.op() == .flow && i.arg&[0] == INT(Flow.br_if), "TODO: WasmTryCatch is fragile. $%", f.name());
+            b.ins.len -= 1;
+            push(b, make_ins(.pop, .Kw, QbeNull, QbeNull, QbeNull));  // pop off the condition of the if
+            //push(b, make_ins(.flow, .Kw, QbeNull, INT(Flow.try), INT(b.id.intcast())));
+            // HACK: wasm needs try..end but im doing catch..end which kinda works out in a confusing way, at least for one example program
+            push(b, make_ins(.flow, .Kw, QbeNull, INT(Flow.try), QbeNull));
+            push(b, make_ins(.flow, .Kw, QbeNull, INT(Flow.catch_all), INT(b.s1.id.intcast())));
+            f.globals.wasm_need_tag_section_exception_zero = true;
         };
         
         // - only take from the end of the stack so nesting works out. 

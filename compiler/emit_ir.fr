@@ -927,6 +927,13 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
             @if(DISABLE_IMPORT_FRC) return(@err("TODO: DISABLE_IMPORT_FRC because scoping when you import the compiler is messed up"));
             return(self.emit_import_ref(it, p));
         }
+        fn WasmTryCatch(it) => {
+            if self.m.goal.arch != .wasm32 && self.m.goal.type != .CachedEarly {
+                return self.compile_expr(it[], p);
+            };
+            @assert(it.expr&.is(.If), "Expr.WasmTryCatch expected to contain Expr.If");
+            return(self.compile_wasmtrycatch(it.expr.If&));
+        }
         @default => return(@err("ICE: didn't desugar: %", self.program.log(expr)));
     })
 }
@@ -1316,6 +1323,30 @@ fn emit_call_if(self: *EmitIr, arg: *FatExpr, p: Placement) CRes(Qbe.Ref) #once 
         join_blk.jmp = (type = .hlt, arg = QbeNull); // TODO: remove the useless block 
     };
     (Ok = join_val)
+}
+
+// TODO: factor emit_call_if in a crazy way so don't need this?
+fn compile_wasmtrycatch(self: *EmitIr, it: *get_variant_type(Expr, .If)) CRes(Qbe.Ref) = {
+    self.f.has_wasmtrycatch = true;
+    cond := @try(self.compile_expr(it.cond, .ScalarTransient)) return;
+    
+    t_blk, f_blk, join_blk := (self.new_block("catch"), self.new_block("try"), self.new_block("finally"));
+    seal self { b |
+        b.jmp = (type = .jnz, arg = cond);
+        b.is_wasmtrycatch = true;
+        b.s1 = t_blk;
+        b.s2 = f_blk;
+    };
+    
+    self.blk = t_blk;
+    @try(self.compile_expr(it.if_true, .Discard)) return;
+    seal self { b | b.jmp.type = .jmp; b.s1 = join_blk; };
+    
+    self.blk = f_blk;
+    @try(self.compile_expr(it.if_false, .Discard)) return;
+    seal self { b | b.jmp.type = .jmp; b.s1 = join_blk; };
+    self.blk = join_blk;
+    (Ok = Qbe.Null)
 }
 
 // TODO: use phi for scalars. 

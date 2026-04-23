@@ -30,10 +30,12 @@ fn try(buf: *JumpBuf) WhichJump = {  // aka setjmp
     which
 }
 
-// TODO: this won't get inlined by the backend because it ends in hlt. doesn't matter but makes be sad.
 fn throw(buf: *JumpBuf) Never = {  // aka longjmp
     #use("@/lib/sys/process.fr");
-    @if(query_current_arch() == .wasm32) panic("TODO: longjmp throw");
+    if query_current_arch() == .wasm32 {
+        @assert_eq(buf.registers&[0], 0);
+        buf.registers&[0] = 1;  // mark it as throwing to the catch knows when to stop
+    };
     throw_impl(buf)
 }
 
@@ -78,8 +80,6 @@ try_impl :: AsmFunction(fn(_: *JumpBuf) Ty(rawptr, WhichJump) = (), @const_slice
     encode_imm(PrimaryOp.MovImm32, X86Reg.rdx, 0), 
     PrimaryOp.Ret
 ) out, fn(out) = {
-    // not implemented. throw will assert. 
-
     out.push(0x00);  // 0 locals
     
     range(0, 2) { i |
@@ -147,7 +147,24 @@ throw_impl :: AsmFunction(fn(_: *JumpBuf) Never = (), @const_slice(
     encode_base_plus_offset(PrimaryOp.MovRegLoad, X86Reg.rdi, X86Reg.rdi, 3*8),  // first **argument**
     encode_imm(PrimaryOp.MovImm32, X86Reg.rdx, 1),  // second return value
     PrimaryOp.Ret,
-) out, CrashAsm.wasm, @run {
+) out, fn(out) = {
+    out.push(0x00);  // 0 locals
+    
+    // buf.registers&[0] = 1
+    out.push(0x20);  // local.get(0)
+    out.push(0x00);  // ^
+    out.push(0xA7);  // trunc
+    out.push(0x42);  // i64.const(1)
+    out.push(0x01);  // ^
+    out.push(0x37);  // i64.store
+    out.push(0x03);  // ^ align
+    out.push(32);    // ^ off
+    
+    out.push(0x08);  // throw(0)
+    out.push(0x00);  // ^
+    
+    out.push(0x0B);  // end
+}, @run {
     o := @ref u32.list(32, ast_alloc());
     iterate_riscv_saved { r, off, float |
         o.push(load(r, .A0, off, 8, false, float));
@@ -180,4 +197,47 @@ rv64_rclob :: (@const_slice(
             off += 8;
         };
     };
+}
+
+// TODO: explain better. native: setjmp/longjump to save registers. 
+//       wasm: exceptions. the jumpbuf is just used to know which to stop at if nested. 
+// TODO: import_wasm: support exceptions. 
+// TODO: backend/wasm/isel: support exceptions. 
+// TODO: move this to lib/sys/jump.fr
+// TODO: make usage look closer to the @match(try()) { fn Try(); fn Catch(); } syntax
+// TODO: update code to use this instead of @match(try())
+// TODO: very fragile, which prong is try vs catch matters. need to fix it in isel instead
+fn match_try(arg: FatExpr) FatExpr #macro = {
+    #use("@/lib/sys/process.fr");
+    #use("@/lib/sys/jump.fr");
+    wasmtrycatch :: fn(arg: FatExpr) FatExpr #macro = {
+        args := arg&.items();
+        it := ast_alloc().boxed(FatExpr, @{ @if(@[args[0]], @[args[1]], @[args[2]]) });
+        (expr = (WasmTryCatch = it), loc = arg.loc)
+    };
+    // TODO: do the ref one somehow so it doesn't just discard stack traces 
+    rethrow :: AsmFunctionWasmOnly(fn() void = (), fn(out) = {
+        out.push(0x00);  // 0 locals
+        out.push(0x08);  // throw(0)
+        out.push(0x00);  // ^
+        out.push(0x0B);  // end
+    });
+    
+    args := arg&.items();
+    @{
+        buf: *JumpBuf = @[args[0]];
+        // mark it valid for wasm, on non wasm this will get stomped anyway so doesn't matter
+        buf.registers&[0] = 0;
+        @wasmtrycatch(try(buf) == .Catch, {
+            // TODO: this will probably have to be asm because it needs to talk to the magic value
+            if query_current_arch() == .wasm32 && buf.registers&[0] != 1 {
+                buf.registers&[0] = 2;
+                rethrow();
+            };
+            @[args[2]];
+        }, {
+            @[args[1]];
+        });
+        buf.registers&[0] = 2;
+    }
 }

@@ -11,6 +11,12 @@
     just because i don't want to write my own disassembler right now. 
   - still needs a lot of work to cache better & not rely on PATH for 'franca' & web but it's kinda progress
 
+wasm exceptions
+- plumbing for WasmTryCatch ast node -> flag on ir block (serialize in incremental.fr)
+- decoding for try/throw/catch: dump_wasm, skip_current_instruction
+- very hacky situation in wasm/isel but it does work for one program 
+  (won't work if there is more control flow in the try block tho... baby steps)
+
 ## (Apr 21)
 
 zones

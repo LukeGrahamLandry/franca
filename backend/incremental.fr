@@ -102,7 +102,8 @@ Fnc :: @struct {
 FncFlags :: @bit_fields(
     leaf   := 1,
     vararg := 1,
-    __ := 4,
+    has_wasmtrycatch := 1,
+    __ := 3,
     dynalloc := 1,
     ret_cls := 3,  // Qbe.Cls
     run_early_passes := 1,
@@ -318,6 +319,9 @@ fn push(self: *Writer, f: *Qbe.Fn, did_regalloc: bool) void = {
             jmp = b.jmp,
             phi = phi,
         );
+        if b.is_wasmtrycatch {
+            self.blk[self.blk.len - 1].jmp.type = .WasmTryCatch;
+        };
         self.ins&.push_all(b.ins.items());
     };
     
@@ -333,6 +337,7 @@ fn push(self: *Writer, f: *Qbe.Fn, did_regalloc: bool) void = {
         vararg = int(f.vararg),
         dynalloc = int(f.dynalloc),
         ret_cls = intcast(@as(i32) f.ret_cls),
+        has_wasmtrycatch = int(f.has_wasmtrycatch),
         _ = 0,
         // for now the caller is always finish_passes or emit_fn. 
         // =1 is for modules created by a different writer (ie. rustc_codegen_ferb). 
@@ -525,6 +530,7 @@ fn load(h: *Header, f: *Qbe.Fn, it: One(Sym), syms: []Qbe.Sym) bool /*did_regall
     
     flags: FncFlags = (repr = fnc.flags);
     f.ret_cls = @as(Qbe.Cls) @as(i32) flags.get(.ret_cls).intcast();
+    f.has_wasmtrycatch = flags.get(.has_wasmtrycatch) != 1;
     if !did_regalloc {
         f.retty = fnc.either.retty;
         read_tmp(h, f, fnc.ntmp);
@@ -556,6 +562,10 @@ fn load(h: *Header, f: *Qbe.Fn, it: One(Sym), syms: []Qbe.Sym) bool /*did_regall
         //       (because the first pass makes some changes in place and it gets super confused if those were already done)
         blks[i].ins = as_raw_list(h.get(b.ins).shallow_copy(temp()));
         blks[i].jmp = b.jmp;
+        if b.jmp.type == .WasmTryCatch {
+            blks[i].is_wasmtrycatch = true;
+            blks[i].jmp.type = .jnz;
+        };
         if b.s1 != Qbe.no_symbol {
             blks[i].s1 = blks.index(b.s1.zext());
         }

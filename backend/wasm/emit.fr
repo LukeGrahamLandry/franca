@@ -192,12 +192,14 @@ fn emit_flow(e: *EmitWasmFn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
         fn end() => .End;
         fn br() => .Br;
         fn br_if() => .BrIf;
+        fn catch_all() => @as(Wasm.Inst) 0x02;
+        fn try() => .TryTable;
     });
     s := @if(i.arg&[1] == QbeNull, Qbe.Blk.ptr_from_int(0), e.f.rpo[i.arg&[1].rsval().intcast()]);
     
     // my loops never produce an output (because they never fall through, you break out to a block). 
     // blocks output whatever types thier end block expects. 
-    if @is(flow, .block, .loop) {
+    if @is(flow, .block, .loop, .try) {
         type := pack_wasm_result_type e.f.globals { $yield_arg #duplicated |
             for_phi_rev_TODOSLOW b { p |
                 yield_arg(p.cls);
@@ -212,7 +214,16 @@ fn emit_flow(e: *EmitWasmFn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
         e.block_stack&.push(s);
     };
     
-    if @is(flow, .br, .br_if) {
+    // HACK 
+    if flow == .try {
+        e.a&.push(1);  // catch count
+        e.block_stack&.pop();
+    };
+    if flow == .catch_all {
+        e.block_stack&.push(s);
+    };
+    
+    if @is(flow, .br, .br_if, .catch_all) {
         break :: local_return;
         depth := 0;
         for_rev e.block_stack& { check |
@@ -644,6 +655,17 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
         };
     };
     
+    // TODO: only if referenced but that needs to include the asm for throw which might not be jitted together with the try
+    // @if(m.wasm_need_tag_section_exception_zero)
+    push_buf { buf |
+        buf.push(@as(u8) Wasm.Section.Tag);
+        uleb_patch_delta buf {
+            buf.push(1);  // count
+            buf.push(0);
+            buf.push(0);  // :WasmTypeZeroIsVoidToVoid
+        };
+    };
+    
     {
         // :OnlyTwoGlobals [__stackbase] so don't need patches
         // TODO: this will have to change if we want to allow frontends to create thier own wasm globals. 
@@ -963,6 +985,17 @@ fn output_wasm_module_jit(m: *QbeModule, indirect_table_base: i64) [][]u8 = {
     
     push_buf { buf |
         write_function_section(m, buf);
+    };
+    
+    // TODO: only if referenced but that needs to include the asm for throw which might not be jitted together with the try
+    // @if(m.wasm_need_tag_section_exception_zero)
+    push_buf { buf |
+        buf.push(@as(u8) Wasm.Section.Tag);
+        uleb_patch_delta buf {
+            buf.push(1);  // count
+            buf.push(0);
+            buf.push(0);  // :WasmTypeZeroIsVoidToVoid
+        };
     };
     
     push_buf { buf |

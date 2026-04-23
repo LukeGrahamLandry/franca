@@ -354,7 +354,7 @@ function handle(_msg) {
 
 const show = (s) => postMessage({ tag: "show", text: s });
 const show_error = (s) => {
-    if (s instanceof Error) {
+    if (s instanceof Error || s instanceof WebAssembly.Exception) {
         show(`${s.toString()}\n\n${s.stack}`);
         console.error(s);
         s = s.toString();
