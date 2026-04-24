@@ -8,6 +8,14 @@ quest to replace usefuckinghttpssoicandrawonthefuckingscreen.py
     using the key from openssl -newkey does output a cert that works (same "insecure (blah blah blah)" warning because self signed). 
   - alas they got rid of programs/pkey/rsa_genkey.c and the api has very much changed since then.
     figured it out with random cmd+f of the tfpsacrypto code and https://mbed-tls.readthedocs.io/en/latest/getting_started/psa/
+- programs/ssl/ssl_server.c: swap test/certs.h for the ones i can generate. works. 
+  now just need to replace that with something that actually serves from a directory instead of a hardcoded thing. 
+- using mbedtls from franca (ffi.fr)
+  - need to make compile_mbedtls not need to access the Ctx so need to make #discard_static_scope more versatile. 
+    add an arg. confusion forgot to get rid of the tentatives. 
+  - `panic! Assertion Failed: get_fid untyped psa_get_initialized#26296`
+    problem is i discard_static_scope so it's not in the list of vars so it doesn't get a type when exported. 
+
 
 ## (Apr 23)
 

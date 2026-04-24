@@ -182,6 +182,16 @@ fn compile_to_module(fr: CompCtx, c_source: Str, c: *C.Compile.Ctx, debug_name: 
                 s.imp.weak = obj.is_weak;
             };
         };
+        
+        for c.discarded_statics { obj |
+            id := obj.global_symbol.expect("mangle");
+            idx := map_sym(writer, c.m, id);
+            s := writer.sym[idx]&;
+            if s.type.off == 0 {
+                ty := @if(obj.is_function, obj.ty, c.pointer_to(obj.ty));
+                s.type = export_type(c, ty, false);
+            };
+        };
     
     // TODO: needs to include __os,__arch because include.fr observes them, 
     //       but i want to fix that by providing a stable abi from my libc instead. 
@@ -255,13 +265,22 @@ fn export_type_info(c: *Ctx, type: *CType, decay_arrays: bool) FTy = {
         fn TY_ENUM() => {
             args := Fld.list(type.param_names.len, c.arena);
             enumerate type.param_names { i, it |
+                continue :: local_return;
                 enum_val := if it.file.contents.peek_type(u64)[] == Incremental.MAGIC {
                     it.val.i // :SmuggleEnumVal
                 } else {
                     // this wont work if it was declared in an inner scope, 
                     // but i guess then you wouldn't be able to export it anyway. 
-                    var := c.find_var(it[]) || @panic("failed to find enum value %", it[].str());
-                    @assert(identical(var.enum_ty, type), "expected '%' to be an enum", it[].str());
+                    var := c.find_var(it[]) || {
+                        // TODO
+                        @println("failed to find enum value %", it[].str());
+                        continue();
+                    };
+                    if !identical(var.enum_ty, type) {
+                        // TODO
+                        @println("expected '%' to be an enum", it[].str());
+                        continue();
+                    };
                     var.enum_val
                 };
                 if enum_val.bit_and(0xffffffff) != enum_val {

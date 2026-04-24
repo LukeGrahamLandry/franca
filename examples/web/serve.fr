@@ -1,17 +1,167 @@
 // usefuckinghttpssoicandrawonthefuckingscreen
+// note: this uses a self signed certificate so in browsers you'll have to click through 
+//       a warning and in curl you'll have to pass `-k`. 
 // TODO: extend this to serve a directory like `python3 -m http.server`
-//       with FEAT_TLS as a flag. they have an example program programs/ssl/ssl_server.c (just one fixed page)
 // TODO: i hate that it needs system headers
+// TODO: macos
+// TODO: same import_c target ifdef problem as examples/disassemble.fr (broken cross compiling)
 // TODO: don't compile the implementation of mbedtls and tf-psa thrice. 
+//       (move the key generation to franca)
 // TODO: don't generate a random key. i want reproducible builds. 
 //       the point of the tls for local server is just so it lets you use webgpu/sharedarraybuffer
 //       theres no need for security, it's my own computer... 
 // TODO: add this to autotest
+// TODO: ffi/export_type_info doesn't like typedef enum /*no name*/ { X = Y } name;
+// TODO: a version that just does http and doesn't need mbedtls. have to do the open a socket, etc. myself. 
 
-FEAT_TLS :: true;
 main :: fn() void = {
-    key, cert := @if(FEAT_TLS, @run get_selfsigned_cert(), ());
+    key, cert := @run get_selfsigned_cert();
     println(cert);
+    ssl_server(key, cert);
+}
+
+// adapted from https://github.com/Mbed-TLS/mbedtls/blob/7294fc1c1a3c5e0641fdc7dcdc7c9d9c716a4c4e/programs/ssl/ssl_server.c
+ssl_server :: fn(key: []u8, cert: []u8) void = {    
+    #use(Mbedtls);
+
+    listen_fd := @ref @zeroed mbedtls_net_context;
+    client_fd := @ref @zeroed mbedtls_net_context;
+    ssl := @ref @zeroed mbedtls_ssl_context;
+    conf := @ref @zeroed mbedtls_ssl_config;
+    srvcert := @ref @zeroed mbedtls_x509_crt;
+    pkey := @ref @zeroed mbedtls_pk_context;
+    cache := @ref @zeroed mbedtls_ssl_cache_context;
+    mbedtls_net_init(listen_fd);
+    mbedtls_net_init(client_fd);
+    mbedtls_ssl_init(ssl);
+    mbedtls_ssl_config_init(conf);
+    mbedtls_ssl_cache_init(cache);
+    mbedtls_x509_crt_init(srvcert);
+    mbedtls_pk_init(pkey);
+
+    // TODO: print the name of the callee in the error message 
+    try :: fn(arg: FatExpr) FatExpr #macro = @{
+        status := @[arg];
+        if status != 0 {
+            panic("FAILED");
+        }
+    };
+    S :: fn(s: CStr) *i8 = bit_cast_unchecked(CStr, *i8, s);
+    
+    @try psa_crypto_init();
+    
+    // TODO: use the passsed in key/cert instead
+    @try mbedtls_x509_crt_parse_file(srvcert, S"target/cert.pem");
+    @try mbedtls_pk_parse_keyfile(pkey, S"target/key.pem", zeroed(*i8));
+    
+    port :: @as(CStr) "8000";
+    @println("https://localhost:%", port);
+    @try mbedtls_net_bind(listen_fd, zeroed(*i8), S(port), MBEDTLS_NET_PROTO_TCP_[]);
+    @try mbedtls_ssl_config_defaults(conf, MBEDTLS_SSL_IS_SERVER_[], MBEDTLS_SSL_TRANSPORT_STREAM_[], MBEDTLS_SSL_PRESET_DEFAULT_[]);
+
+    mbedtls_ssl_conf_session_cache(conf, raw_from_ptr(@type cache[], cache), mbedtls_ssl_cache_get, mbedtls_ssl_cache_set);
+    mbedtls_ssl_conf_ca_chain(conf, srvcert.next, zeroed(*mbedtls_x509_crl));
+    @try mbedtls_ssl_conf_own_cert(conf, srvcert, pkey);
+    @try mbedtls_ssl_setup(ssl, conf);
+    
+    println("ready");
+    buf := @ref @uninitialized Array(u8, 1.shift_left(16));
+    buf := items(buf);
+    mark := temp().mark();
+    loop {
+        continue :: local_return;
+        try :: fn(arg: FatExpr, ret: FatExpr) FatExpr #macro = @{
+            status := @[arg];
+            if status != 0 {
+                @println("FAILED");
+                @[ret]();
+            }
+        };
+        temp().reset(mark);
+        
+        mbedtls_net_free(client_fd);
+        mbedtls_ssl_session_reset(ssl);
+        println("waiting...");
+        @try(mbedtls_net_accept(listen_fd, client_fd, zeroed(rawptr), 0, zeroed(*u64))) continue;
+        mbedtls_ssl_set_bio(ssl, raw_from_ptr(@type client_fd[], client_fd), mbedtls_net_send, mbedtls_net_recv, zeroed(mbedtls_ssl_recv_timeout_t));
+        println("req!");
+        
+        dowhile {
+            r := mbedtls_ssl_handshake(ssl);
+            // TODO: explain what this does. (i stole it from programs/ssl/ssl_server.c)
+            if r != 0 && r != MBEDTLS_ERR_SSL_WANT_READ_[] && r != MBEDTLS_ERR_SSL_WANT_WRITE_[] {
+                @println("FAILED: mbedtls_ssl_handshake %", r);
+                continue();
+            };
+            r != 0
+        };
+        println("handshake ok");
+        
+        len := buf.len - 1;  // it null terminates
+        dowhile {
+            again :: local_return;
+            buf.slice(0, len).set_zeroed();
+            r := mbedtls_ssl_read(ssl, buf.ptr, len.bitcast());
+            if r == MBEDTLS_ERR_SSL_WANT_READ_[] || r == MBEDTLS_ERR_SSL_WANT_WRITE_[] {
+                again(true);
+            };
+            if r <= 0 {
+                @switch(r) {
+                    @case(MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY_[]) => println("closed gracefully");
+                    @case(MBEDTLS_ERR_NET_CONN_RESET_[]) => println("reset by peer");
+                    @default => @println("ERROR: mbedtls_ssl_read: %", r);
+                };
+                again(false)
+            };
+            len = r.intcast();
+            @debug_assert_eq(buf[len], 0);
+            @println("read % bytes: %", len, buf.slice(0, len));
+            r <= 0
+        };
+        request := buf.slice(0, len);
+        
+        out := @ref u8.list(1024, temp());
+        @fmt(out, "HTTP/1.0 200 OK\r\n");
+        @fmt(out, "Content-Type: text/html\r\n");
+        @fmt(out, "\r\n");
+        @fmt(out, "Hello World!");
+        
+        dowhile {
+            again :: local_return;
+            r := mbedtls_ssl_write(ssl, out.maybe_uninit.ptr, out.len.bitcast());
+            if r > 0 {
+                again(false);
+            };
+            if r == MBEDTLS_ERR_NET_CONN_RESET_[] {
+                println("peer closed so we failed to respond");
+                continue();
+            };
+            @debug_assert(r == MBEDTLS_ERR_SSL_WANT_READ_[] || r == MBEDTLS_ERR_SSL_WANT_WRITE_[], "mbedtls_ssl_write unexpected error %", r);
+            true
+        };
+        @println("wrote % bytes", out.len);
+        println("closing connection");
+        
+        dowhile {
+            r := mbedtls_ssl_close_notify(ssl);
+            if r != 0 && r != MBEDTLS_ERR_SSL_WANT_READ_[] && r != MBEDTLS_ERR_SSL_WANT_WRITE_[] && r != MBEDTLS_ERR_NET_CONN_RESET_[] {
+                @println("ERROR: mbedtls_ssl_close_notify: %", r);
+                continue();
+            };
+            r != 0
+        };
+        
+        println("ok");
+    };
+
+    mbedtls_net_free(client_fd);
+    mbedtls_net_free(listen_fd);
+    mbedtls_x509_crt_free(srvcert);
+    mbedtls_pk_free(pkey);
+    mbedtls_ssl_free(ssl);
+    mbedtls_ssl_config_free(conf);
+    mbedtls_ssl_cache_free(cache);
+    mbedtls_psa_crypto_free();
 }
 
 get_selfsigned_cert :: fn() Ty([]u8, []u8) = {
@@ -37,13 +187,13 @@ generate_selfsigned_cert :: fn(cert_path: Str, key_path: Str) void = {
         ("target/cert_write.out", cert_write),
     );
     
-    for programs { out_path, source |
+    @assert(query_current_arch() != .rv64 && query_current_os() == .linux, "TODO: move include path stuff into the compiler");        
+    
+    for_rev programs { out_path, source |
         c := C'new_module_and_compiler(.None);
         c.allow_builtin_headers = false;
-        @assert(query_current_arch() != .rv64 && query_current_os() == .linux, "TODO: move include path stuff into the compiler");        
-        import("@/tests/external/curl.fr")'compile_mbedtls(c, mbedtls, tfpsa);
+        src := @ref import("@/tests/external/curl.fr")'mbedtls_source(mbedtls, tfpsa);
         
-        src := @ref u8.list(temp());
         src.push_all(prelude);
         
         @fmt(src, "#add_include_path \"%/include\"\n", mbedtls);
@@ -121,6 +271,40 @@ generate_selfsigned_cert :: fn(cert_path: Str, key_path: Str) void = {
     }
     """;
 }
+
+Mbedtls :: {
+    Ffi :: import("@/examples/import_c/ffi.fr");
+    mbedtls, tfpsa := (Foreign'mbedtls(), Foreign'tfpsa());
+    src := @ref import("@/tests/external/curl.fr")'mbedtls_source(mbedtls, tfpsa);
+    
+    @fmt(src, "#add_include_path \"%/include\"\n", mbedtls);
+    @fmt(src, "#add_include_path \"%/include\"\n", tfpsa);
+    @fmt(src, "#add_include_path \"%/drivers/builtin/include\"\n", tfpsa);
+        
+    @fmt(src, """
+        #include "mbedtls/build_info.h"
+        #include "mbedtls/platform.h"
+        #include "mbedtls/x509.h"
+        #include "mbedtls/ssl.h"
+        #include "mbedtls/net_sockets.h"
+        #include "mbedtls/error.h"
+        #include "mbedtls/debug.h"
+        #include "mbedtls/ssl_cache.h"
+        #include "psa/crypto.h"
+        #include "mbedtls/pk.h"
+
+        // TODO: do this automatically for unnamed enums
+        const int MBEDTLS_NET_PROTO_TCP_ = MBEDTLS_NET_PROTO_TCP;
+        const int MBEDTLS_SSL_IS_SERVER_ = MBEDTLS_SSL_IS_SERVER;
+        const int MBEDTLS_SSL_TRANSPORT_STREAM_ = MBEDTLS_SSL_TRANSPORT_STREAM;
+        const int MBEDTLS_SSL_PRESET_DEFAULT_ = MBEDTLS_SSL_PRESET_DEFAULT;
+        const int MBEDTLS_ERR_SSL_WANT_READ_ = MBEDTLS_ERR_SSL_WANT_READ;
+        const int MBEDTLS_ERR_SSL_WANT_WRITE_ = MBEDTLS_ERR_SSL_WANT_WRITE;
+        const int MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY_ = MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
+        const int MBEDTLS_ERR_NET_CONN_RESET_ = MBEDTLS_ERR_NET_CONN_RESET;
+    """);
+    Ffi'include(src.items())
+};
 
 #use("@/examples/testing.fr");
 #use("@/examples/fetch.fr");

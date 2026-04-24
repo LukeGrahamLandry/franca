@@ -1050,8 +1050,26 @@ handle_directive :: fn(c: *Ctx, tok: *Token, cur: **Token) *Token = {
         };
         fn discard_static_scope() => {
             tok.kind = .TK_discard_static_scope;
+            arg := 0;
             c.append_one(cur, tok, false);
             tok = tok.next;
+            if !tok.at_bol && tok.kind == .TK_PP_NUM {
+                c.convert_pp_number(tok);
+                arg = tok.val.i;
+                tok = tok.next;
+            };
+            cur.val.i = arg;
+            if arg == 1 {
+                c.macros&.clear();
+                c.scope.vars&.clear();
+                c.init_macros();
+                c.pragma_once&.clear();
+                c.include_paths&.clear(); 
+                c.include_guards&.clear();
+            };
+            if arg == 2 {
+                c.filename_cache&.clear();  
+            };
         };
         // `#link_macos_framework "foo"` is like passing `-framework foo` to clang
         fn link_macos_framework() => {  
@@ -1361,7 +1379,10 @@ fn init_macros(c: *Ctx) void = {
     if c.m.goal.os == .linux {
         c.define_macro("__unix__", "1");
     };
-    
+    c.init_fake_types();
+}
+
+fn init_fake_types(c: *Ctx) void = {
     // i don't implement u128 math but it's used in the arm mcontext structs. 
     c.push_scope("__uint128_t")[].type_def = c.new_type(.TY_STRUCT, 16, 16);
     c.push_scope("_Float16")[].type_def = c.new_type(.TY_STRUCT, 2, 2);

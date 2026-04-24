@@ -171,6 +171,13 @@ Ctx :: @rec @struct {
     yielded_builtin_clear_cache: bool;
     have_seen_c_code: bool;  // TODO: remove once top level asm with relocationscan go through CodegenShared
     static_initializer_depth: i32;
+    // TODO: the current way of mangling by obj.tok.file.mangle_index is more convoluted than needed, 
+    //       cause they're supposed to be per compilation unit not per c file
+    //       and rn its sort of a wierd indirection because it chooses the number 
+    //       based on the first file it sees it in. 
+    //       doesn't break #discard_static_scope because that calls new_file for everything anyway. 
+    //       it ends up working out but misses some redeclaration errrors i guess?
+    //static_mangle_index: i64;  // TODO:?
 
     // this isn't part of the function, just something to point at after terminating a block 
     // (ie. return, goto, etc.) so if there's unreachable code / jumps, 
@@ -217,6 +224,7 @@ Ctx :: @rec @struct {
     hash_files_for_frc_deps: bool;
     
     imports: RawList(*Obj);  // needed for frc types for local externs. 
+    discarded_statics: RawList(*Obj);  // needed for frc types when #discard_static_scope
     macos_framework_path: Str;
     current_framework: RawList(Str);
     
@@ -484,7 +492,7 @@ fn new_gvar(c: *Ctx, name: Str, ty: *CType, tok: *Token, is_static: bool) *Obj =
     var.is_definition = true;
     var.is_static = is_static;
     var.tok = tok;
-    var.global_symbol = (Some = c.m.mangle(var));
+    var.global_symbol = (Some = c.mangle(var));
     var
 }
 
@@ -2535,12 +2543,33 @@ fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_d
     tok
 }
 
-discard_static_scope :: fn(c: *Ctx) void = {
+discard_static_scope :: fn(c: *Ctx, arg: i64) void = {
+    //c.static_mangle_index += 1;  TODO:?
+if arg == 0 {
     hack := c.scope;
     sc := hack.end_linked();
     retain sc.vars.raw& { k, v |
         v.var.is_null() || !v.var.is_static
     };
+};
+if arg == 1 {
+    each c.tentative& { name, var |
+        @debug_assert(var.rel.len == 0 && var.init_data.ptr.is_null() && var.is_tentative && !var.is_local, "expected tentative %", var.name);
+        c.yield(var[]);
+    };
+    c.tentative&.clear();
+    
+    // TODO: same for arg==0 case
+    @if(@is(c.m.goal.type, .CachedEarly))
+    each c.scope.vars& { _, v |
+        if !v.var.is_null() && v.var.is_definition {
+            c.discarded_statics&.push(v.var, c.arena);
+        }
+    };
+
+    c.scope.vars&.clear();
+    c.init_fake_types();
+};
 }
 
 fn parse(c: *Ctx, tok: *Token) void = {
@@ -2555,7 +2584,7 @@ fn parse(c: *Ctx, tok: *Token) void = {
             continue();
         };
         fn TK_discard_static_scope() => {
-            c.discard_static_scope();
+            c.discard_static_scope(tok.val.i);
             c.eat(tok&, "TK_discard_static_scope");
             continue();
         };
