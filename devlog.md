@@ -1,4 +1,14 @@
 
+## (Apr 24)
+
+quest to replace usefuckinghttpssoicandrawonthefuckingscreen.py
+- most offensive part is that i need openssl to generate a certificate. 
+  - start with compiling mbedtls's programs/x509/cert_write.c example. 
+    ./target/cert_write.out selfsign=1 issuer_key=target/key.pem output_file=target/cert.pem
+    using the key from openssl -newkey does output a cert that works (same "insecure (blah blah blah)" warning because self signed). 
+  - alas they got rid of programs/pkey/rsa_genkey.c and the api has very much changed since then.
+    figured it out with random cmd+f of the tfpsacrypto code and https://mbed-tls.readthedocs.io/en/latest/getting_started/psa/
+
 ## (Apr 23)
 
 wasm exceptions
