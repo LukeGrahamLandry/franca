@@ -1,4 +1,12 @@
 
+## (Apr 25)
+
+usefuckinghttpssoicandrawonthefuckingscreen
+- factor the code inside out so it's a nicer api. 
+- respond with the file they requested. add some magic headers to make it work. 
+- it's good enough to serve the web demo now. i do think it's slower than the old one, 
+  but that's fair, it would be a bit concerning if mbedtls compiled by my c compiler was faster at math than openssl compiled by a real one. 
+
 ## (Apr 24)
 
 quest to replace usefuckinghttpssoicandrawonthefuckingscreen.py

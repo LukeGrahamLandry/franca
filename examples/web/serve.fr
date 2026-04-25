@@ -1,7 +1,6 @@
 // usefuckinghttpssoicandrawonthefuckingscreen
 // note: this uses a self signed certificate so in browsers you'll have to click through 
 //       a warning and in curl you'll have to pass `-k`. 
-// TODO: extend this to serve a directory like `python3 -m http.server`
 // TODO: i hate that it needs system headers
 // TODO: macos
 // TODO: same import_c target ifdef problem as examples/disassemble.fr (broken cross compiling)
@@ -13,24 +12,103 @@
 // TODO: add this to autotest
 // TODO: ffi/export_type_info doesn't like typedef enum /*no name*/ { X = Y } name;
 // TODO: a version that just does http and doesn't need mbedtls. have to do the open a socket, etc. myself. 
+// TODO: convert genkey to franca too
+// :SLOW should use multiple threads
+
+port: CStr : "8000";
+folder: CStr : "target/web";
 
 main :: fn() void = {
     key, cert := @run get_selfsigned_cert();
-    println(cert);
+    @assert_eq(Mbedtls'psa_crypto_init(), 0, "failed psa_crypto_init");
+    _ := Syscall'chdir(folder);
     ssl_server(key, cert);
+    Mbedtls'mbedtls_psa_crypto_free();
 }
 
-// adapted from https://github.com/Mbed-TLS/mbedtls/blob/7294fc1c1a3c5e0641fdc7dcdc7c9d9c716a4c4e/programs/ssl/ssl_server.c
 ssl_server :: fn(key: []u8, cert: []u8) void = {    
-    #use(Mbedtls);
+    s := @ref @zeroed Server;
+    init(s, key, cert).or(fn(err) => panic(err));
+    @println("https://localhost:% is serving %", port, folder);
+    mark := temp().mark();
+    loop {
+        continue :: local_return;
+        temp().reset(mark);
+        out := @ref u8.list(1024, temp());
+        in := s.wait_for_request();
+        
+        @match(find_response(in)) {
+            fn Ok(it) => {
+                type := @if_else {
+                    @if(it.path.ends_with(".html")) => "text/html";
+                    @if(it.path.ends_with(".js")) => "text/javascript";
+                    @if(it.path.ends_with(".wasm")) => "application/wasm";
+                    @else => "application/octet-stream";
+                };
+                @fmt(out, "HTTP/1.0 200 OK\r\n");
+                // i use this for a little progress bar when loading the wasm
+                @fmt(out, "Content-Length: %\r\n", it.bytes.len);
+                // magic headers to make sharedarraybuffer/webgpu/whatever work
+                @fmt(out, "Cross-Origin-Embedder-Policy: require-corp\r\n");
+                @fmt(out, "Cross-Origin-Opener-Policy: same-origin\r\n");
+                // browser won't run code if you say it's not code
+                @fmt(out, "Content-Type: %\r\n", type);
+                
+                @fmt(out, "\r\n");
+                out.push_all(it.bytes);  // :SLOW wasteful extra copy
+            }
+            fn Err() => {
+                @fmt(out, "HTTP/1.0 404 Not Found\r\n");
+                @fmt(out, "\r\n");
+            }
+        };
+        
+        s.respond(out.items());
+    };
+    deinit(s);
+}
 
-    listen_fd := @ref @zeroed mbedtls_net_context;
-    client_fd := @ref @zeroed mbedtls_net_context;
-    ssl := @ref @zeroed mbedtls_ssl_context;
-    conf := @ref @zeroed mbedtls_ssl_config;
-    srvcert := @ref @zeroed mbedtls_x509_crt;
-    pkey := @ref @zeroed mbedtls_pk_context;
-    cache := @ref @zeroed mbedtls_ssl_cache_context;
+find_response :: fn(in: []u8) Result(@struct(path: Str, bytes: []u8), void) = {
+    prefix := "GET ";
+    @if(!in.starts_with(prefix)) return(.Err);
+    in = in.rest(prefix.len);
+    
+    i := 0;
+    while => i < in.len && !in.rest(i).starts_with(" HTTP/") {
+        i += 1;
+    };
+    path := in.slice(0, i);
+if false {  // im not using any other request headers rn
+    in = in.rest(i);
+    while => in.len > 0 && !in.starts_with("\r\n") {
+        in = in.rest(1);
+    };
+    in = in.rest(2 * int(in.len > 2));
+};
+
+    @if(!path.starts_with("/")) return(.Err);
+    path = path.rest(1);
+    
+    i := path.index_of("?".ascii()) || path.len;
+    path = path.slice(0, i);
+    
+    if path == "" {
+        path = "index.html";
+    };
+    if import("@/examples/fetch.fr")'has_path_escapes(path) {
+        @eprintln("I don't like the path: %", path);
+        return(.Err);
+    };
+    
+    if read_entire_file(temp(), path) { it |
+        return(Ok = (path = path, bytes = it));
+    };
+    .Err
+}
+        
+fn init(s: *Server, key: []u8, cert: []u8) Result(void, Str) = {
+    #use(Mbedtls);
+    listen_fd, client_fd, ssl, conf, cache, srvcert, pkey := (s.listen_fd&, s.client_fd&, s.ssl&, s.conf&, s.cache&, s.srvcert&, s.pkey&);
     mbedtls_net_init(listen_fd);
     mbedtls_net_init(client_fd);
     mbedtls_ssl_init(ssl);
@@ -40,22 +118,20 @@ ssl_server :: fn(key: []u8, cert: []u8) void = {
     mbedtls_pk_init(pkey);
 
     // TODO: print the name of the callee in the error message 
-    try :: fn(arg: FatExpr) FatExpr #macro = @{
+    // TODO: this '=>' shouldn't actually be allowed but it makes the scope work out :compiler
+    try :: fn(arg: FatExpr) FatExpr #macro => @{
         status := @[arg];
         if status != 0 {
-            panic("FAILED");
+            return(Err = @tfmt("FAILED: %: %", "?", status));
         }
     };
     S :: fn(s: CStr) *i8 = bit_cast_unchecked(CStr, *i8, s);
     
-    @try psa_crypto_init();
+    // note: if these were real keys you could obsessively zero them after but that doesn't matter for how i use this program. 
+    // mbedtls_pk_load_file adds a null terminator and includes it in the length because im doing the text shaped one. 
+    @try mbedtls_x509_crt_parse(srvcert, cert.alloc_cstr(temp()).as_ptr(), cert.len.bitcast() + 1);
+    @try mbedtls_pk_parse_key(pkey, key.alloc_cstr(temp()).as_ptr(), key.len.bitcast() + 1, zeroed(*u8), 0);
     
-    // TODO: use the passsed in key/cert instead
-    @try mbedtls_x509_crt_parse_file(srvcert, S"target/cert.pem");
-    @try mbedtls_pk_parse_keyfile(pkey, S"target/key.pem", zeroed(*i8));
-    
-    port :: @as(CStr) "8000";
-    @println("https://localhost:%", port);
     @try mbedtls_net_bind(listen_fd, zeroed(*i8), S(port), MBEDTLS_NET_PROTO_TCP_[]);
     @try mbedtls_ssl_config_defaults(conf, MBEDTLS_SSL_IS_SERVER_[], MBEDTLS_SSL_TRANSPORT_STREAM_[], MBEDTLS_SSL_PRESET_DEFAULT_[]);
 
@@ -64,27 +140,19 @@ ssl_server :: fn(key: []u8, cert: []u8) void = {
     @try mbedtls_ssl_conf_own_cert(conf, srvcert, pkey);
     @try mbedtls_ssl_setup(ssl, conf);
     
-    println("ready");
-    buf := @ref @uninitialized Array(u8, 1.shift_left(16));
-    buf := items(buf);
-    mark := temp().mark();
+    .Ok
+}
+
+fn wait_for_request(s: *Server) []u8 = {
+    #use(Mbedtls);
+    listen_fd, client_fd, ssl := (s.listen_fd&, s.client_fd&, s.ssl&);
     loop {
         continue :: local_return;
-        try :: fn(arg: FatExpr, ret: FatExpr) FatExpr #macro = @{
-            status := @[arg];
-            if status != 0 {
-                @println("FAILED");
-                @[ret]();
-            }
-        };
-        temp().reset(mark);
-        
         mbedtls_net_free(client_fd);
         mbedtls_ssl_session_reset(ssl);
-        println("waiting...");
-        @try(mbedtls_net_accept(listen_fd, client_fd, zeroed(rawptr), 0, zeroed(*u64))) continue;
+        r := mbedtls_net_accept(listen_fd, client_fd, zeroed(rawptr), 0, zeroed(*u64));
+        @if(r != 0) continue(@println("failed: mbedtls_net_accept: %", r));
         mbedtls_ssl_set_bio(ssl, raw_from_ptr(@type client_fd[], client_fd), mbedtls_net_send, mbedtls_net_recv, zeroed(mbedtls_ssl_recv_timeout_t));
-        println("req!");
         
         dowhile {
             r := mbedtls_ssl_handshake(ssl);
@@ -95,65 +163,63 @@ ssl_server :: fn(key: []u8, cert: []u8) void = {
             };
             r != 0
         };
-        println("handshake ok");
         
+        buf := temp().alloc_uninit(u8, 1024);
         len := buf.len - 1;  // it null terminates
         dowhile {
             again :: local_return;
             buf.slice(0, len).set_zeroed();
             r := mbedtls_ssl_read(ssl, buf.ptr, len.bitcast());
-            if r == MBEDTLS_ERR_SSL_WANT_READ_[] || r == MBEDTLS_ERR_SSL_WANT_WRITE_[] {
-                again(true);
-            };
-            if r <= 0 {
-                @switch(r) {
-                    @case(MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY_[]) => println("closed gracefully");
-                    @case(MBEDTLS_ERR_NET_CONN_RESET_[]) => println("reset by peer");
-                    @default => @println("ERROR: mbedtls_ssl_read: %", r);
+            @if(r <= 0) again(@switch(r) {
+                @case(MBEDTLS_ERR_SSL_WANT_READ_[]) => true;
+                @case(MBEDTLS_ERR_SSL_WANT_WRITE_[]) => true;
+                @case(MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY_[]) => false;
+                @case(MBEDTLS_ERR_NET_CONN_RESET_[]) => false;
+                @default => {
+                    @println("ERROR: mbedtls_ssl_read: %", r);
+                    false
                 };
-                again(false)
-            };
+            });
             len = r.intcast();
             @debug_assert_eq(buf[len], 0);
-            @println("read % bytes: %", len, buf.slice(0, len));
-            r <= 0
+            false
         };
-        request := buf.slice(0, len);
-        
-        out := @ref u8.list(1024, temp());
-        @fmt(out, "HTTP/1.0 200 OK\r\n");
-        @fmt(out, "Content-Type: text/html\r\n");
-        @fmt(out, "\r\n");
-        @fmt(out, "Hello World!");
-        
+        return buf.slice(0, len);
+    }
+}
+
+fn respond(s: *Server, out: []u8) void = {
+    #use(Mbedtls);
         dowhile {
             again :: local_return;
-            r := mbedtls_ssl_write(ssl, out.maybe_uninit.ptr, out.len.bitcast());
+            r := mbedtls_ssl_write(s.ssl&, out.ptr, out.len.bitcast());
             if r > 0 {
-                again(false);
+                r := r.intcast();
+                @debug_assert_ule(r, out.len);
+                out = out.rest(r);
+                again(out.len > 0);
             };
             if r == MBEDTLS_ERR_NET_CONN_RESET_[] {
                 println("peer closed so we failed to respond");
-                continue();
+                return();
             };
             @debug_assert(r == MBEDTLS_ERR_SSL_WANT_READ_[] || r == MBEDTLS_ERR_SSL_WANT_WRITE_[], "mbedtls_ssl_write unexpected error %", r);
             true
         };
-        @println("wrote % bytes", out.len);
-        println("closing connection");
         
         dowhile {
-            r := mbedtls_ssl_close_notify(ssl);
+            r := mbedtls_ssl_close_notify(s.ssl&);
             if r != 0 && r != MBEDTLS_ERR_SSL_WANT_READ_[] && r != MBEDTLS_ERR_SSL_WANT_WRITE_[] && r != MBEDTLS_ERR_NET_CONN_RESET_[] {
                 @println("ERROR: mbedtls_ssl_close_notify: %", r);
-                continue();
+                return();
             };
             r != 0
         };
-        
-        println("ok");
-    };
+}
 
+fn deinit(s: *Server) void = {
+    #use(Mbedtls);
+    listen_fd, client_fd, ssl, conf, cache, srvcert, pkey := (s.listen_fd&, s.client_fd&, s.ssl&, s.conf&, s.cache&, s.srvcert&, s.pkey&);
     mbedtls_net_free(client_fd);
     mbedtls_net_free(listen_fd);
     mbedtls_x509_crt_free(srvcert);
@@ -161,8 +227,17 @@ ssl_server :: fn(key: []u8, cert: []u8) void = {
     mbedtls_ssl_free(ssl);
     mbedtls_ssl_config_free(conf);
     mbedtls_ssl_cache_free(cache);
-    mbedtls_psa_crypto_free();
 }
+
+Server :: @struct {
+    listen_fd: Mbedtls.mbedtls_net_context;
+    client_fd: Mbedtls.mbedtls_net_context;
+    ssl: Mbedtls.mbedtls_ssl_context;
+    conf: Mbedtls.mbedtls_ssl_config;
+    srvcert: Mbedtls.mbedtls_x509_crt;
+    pkey: Mbedtls.mbedtls_pk_context;
+    cache: Mbedtls.mbedtls_ssl_cache_context;
+};
 
 get_selfsigned_cert :: fn() Ty([]u8, []u8) = {
     key_path, cert_path := ("target/key.pem", "target/cert.pem");

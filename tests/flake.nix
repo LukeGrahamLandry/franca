@@ -24,7 +24,6 @@
                 curl  # for tests/(external, deps.fr) (to check import_c works)
                 clang  # for tests/backend.fr -use_linker (to check .o files are valid), also examples/emit_c.fr 
                 nodejs  # for tests/test.js (to check wasm modules are valid)
-                # TODO: python3+openssl is an insanely heavy dependency just for usefuckinghttpssoicandrawonthefuckingscreen.py
             ]);
           
             franca_boot_bins = {
