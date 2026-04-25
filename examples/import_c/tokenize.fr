@@ -412,7 +412,7 @@ fn string_literal_end(c: *Ctx, p: *u8) Ty(*u8, bool) = {
             @error_at(c, start, "unclosed string literal");
         };
         if p[] == "\\".ascii() {
-            p = p.offset(1);  // it might be \" so skip one extra  // TODO: memory unsafe if someone gives us an unterminated string with a \ at the end of the file
+            p = p.offset(1);  // it might be \" so skip one extra  // :BoundsPadding
             had_escapes = true;
         };
         p = p.offset(1);
@@ -657,6 +657,21 @@ fn tokenize_raw(c: *Ctx, file: *File) Ty(*Token, *Token) = {
         p = p.offset(3);
     };
     
+    // TODO: this is getting a bit insane. 
+    //       instead, just the first time you see \r\n or \\\n, 
+    //       copy the file and do an extra iteration over the whole thing to normalize it.
+    if_back_nl :: fn(len: i64, $body: @Fn(n: i64) void #duplicated) void = {
+        if p.offset(len+0)[] == "\\".ascii() { 
+            if p.offset(len+1)[] == "\n".ascii() {
+                body(1);
+            } else {
+                if p.offset(len+1)[] == "\r".ascii() && p.offset(len+2)[] == "\n".ascii() {
+                    body(2);
+                };
+            };
+        };
+    };
+    
     c.at_bol    = true;
     c.has_space = false;
     line_no: i32 = 1;
@@ -689,11 +704,10 @@ fn tokenize_raw(c: *Ctx, file: *File) Ty(*Token, *Token) = {
             // Skip line comments.
             if p.offset(1)[] == "/".ascii() {
                 while => p[] != "\n".ascii() && p[] != 0 {
-                    if p[] == "\\".ascii() && p.offset(1)[] == "\n".ascii() {
-                        p = p.offset(1);
+                    if_back_nl 0 { n |
+                        p = p.offset(n);
                         line_no += 1;
                     };
-                    
                     p = p.offset(1);
                 };
                 c.has_space = true;
@@ -720,19 +734,14 @@ fn tokenize_raw(c: *Ctx, file: *File) Ty(*Token, *Token) = {
             
             // fallthrough
         };
-    
-        if p[] == "\\".ascii() && p.offset(1)[] == "\n".ascii() {
-            p = p.offset(2);
+        
+        if_back_nl 0 { n |
+            n += 1;
+            p = p.offset(n);
             line_no += 1;
             // pretend the next token is on the same line so don't set at_bol
-            continue_blank(p.offset(-2));
-        };
-        
-        if p[] == "\\".ascii() && p.offset(1)[] == "\r".ascii() && p.offset(2)[] == "\n".ascii() {
-            p = p.offset(3);
-            line_no += 1;
-            continue_blank(p.offset(-3));
-        };
+            continue_blank(p.offset(-n));
+        }
         
         // Skip newline.
         if p[] == "\n".ascii() {
@@ -819,12 +828,21 @@ fn tokenize_raw(c: *Ctx, file: *File) Ty(*Token, *Token) = {
        
         // Identifier or keyword
         len := read_ident(p);
-        if p.offset(len)[] == "\\".ascii() && p.offset(len + 1)[] == "\n".ascii() {
+        if_back_nl len { n |
             // if you use \ to split an identifier across a line: fuck you, we take quadratic time. 
+            if n == 1 {
             q := p.offset(len).slice(3);
             q[0] = q[2];
             q[1] = "\\".ascii();
             q[2] = "\n".ascii();
+            };
+            if n == 2 {
+                q := p.offset(len).slice(4);
+                q[0] = q[3];
+                q[1] = "\\".ascii();
+                q[2] = "\r".ascii();
+                q[3] = "\n".ascii();
+            };
             // TODO: need to do that for other types of tokens as well. numbers. strings? punctuation. 
             continue();
         };

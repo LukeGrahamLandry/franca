@@ -270,6 +270,7 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
                     eprintln("SKIP: node/wasm tests are :SLOW, only run in actions");
                 };
             };
+            @case("ci-end") => ci_end();
             @default => @eprintln("IGNORE: %", s);
         };
 };
@@ -563,3 +564,26 @@ check_for_xcode :: fn() bool = {
     ok, _o, _e := exec_and_catch("xcode-select", @slice("-p"), temp());
     ok
 };
+
+ci_end :: fn() void = {
+    i := cli_args().index_of(fn(it) => it[] == "ci-end") || 0;
+    commit := cli_args().index(i + 1)[].str();
+    path := "repro-macos-14.txt/repro-macos-14.txt";
+    check :: fn(s) => { diff(path, s); @println("OK: %", s); };
+    check("repro-macos-15-intel.txt/repro-macos-15-intel.txt");
+    check("repro-ubuntu-latest.txt/repro-ubuntu-latest.txt");
+    check("repro-ubuntu-24.04-arm.txt/repro-ubuntu-24.04-arm.txt");
+    sh(@slice(get_executable_path(temp()), "examples/web/build.fr"));
+    
+    srht_path := "repro-srht.txt";
+    url := @tfmt("https://fr.lukegrahamlandry.ca/%/repro.txt", commit);
+    println(url);
+    ok, out, err := exec_and_catch(Foreign.EXE.curl, @slice(
+        url, "-o", srht_path, "-L", "-f", "-s", 
+    ), temp());
+    if !ok {
+        @println("SKIP: builds.sr.ht LOST THE RACE\n%\n%", out.items(), err.items());
+    } else {
+        check(srht_path);
+    };
+}

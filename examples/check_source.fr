@@ -3,7 +3,7 @@
 
 main :: fn() void = {
     file_count, problem_count := (0, 0);
-    for_franca_files "." { path, content | 
+    for_source_files "." { path, content | 
         check_file(path, content, problem_count&);
         file_count += 1;
     }
@@ -13,7 +13,7 @@ main :: fn() void = {
     }
 }
 
-fn for_franca_files(root: CStr, $body: @Fn(path: Str, content: Str) void) void = {
+fn for_source_files(root: CStr, $body: @Fn(path: Str, content: Str) void) void = {
     dirs := CStr.list(general_allocator());
     dirs&.push(root);
     scratch := u8.list(general_allocator());
@@ -21,13 +21,13 @@ fn for_franca_files(root: CStr, $body: @Fn(path: Str, content: Str) void) void =
         dir := dirs&.pop().unwrap();
         walk_directory_unordered dir { entry |
             @match(entry.type) {
-                fn File() => if entry.name.ends_with(".fr") {
+                fn File() => if entry.name.ends_with(".fr") || entry.name.ends_with(".c") || entry.name.ends_with(".h") {
                     path := @tfmt("%/%", dir, entry.name);
                     scratch&.read_and_push_or_crash(path);
                     body(path, scratch.items());
                     scratch&.clear();
                 }
-                fn Directory() => if entry.name != ".." && entry.name != "." {
+                fn Directory() => if entry.name != ".." && entry.name != "." && entry.name != "target" && entry.name != ".git" {
                     path := @fmt_cstr("%/%\0", dir, entry.name);  // :LEAK and means you can't reset temp
                     dirs&.push(path);
                 }
@@ -52,10 +52,17 @@ check_file :: fn(path: Str, content: Str, problem_count: *i64) void = {
     
     State :: @enum(deny, allow_after_open, allow_until_close);
     
+    end_lf := 0;
+    end_crlf := 0;
+    
     i, line_start, line_count, j, block_depth, state_depth, state := (0, 0, 1, 0, 0, 0, State.deny);
     while => i < content.len {
         c, codepoint_length := Utf8'decode_utf8(content.rest(i));
         if c == "\n".char().trunc() {
+            crlf := i > 0 && content[i - 1] == "\r".ascii();
+            end_lf += int(!crlf);
+            end_crlf += int(crlf);
+        
             line_count += 1;
             line_length := i - line_start;
             if line_length > MAX_LINE_LENGTH {
@@ -97,6 +104,15 @@ check_file :: fn(path: Str, content: Str, problem_count: *i64) void = {
         @eprintln("% has too long lines on average (%/%)", path, average_line_length, MAX_AVERAGE_LINE_LENGTH);
         problem_count[] += 1;
     }
+    
+    // im not declaring these a `problem`, it's just good to know
+    if end_lf != 0 && end_crlf != 0 {
+        @eprintln("warn: % has inconsistent line endings (lf=%, crlf=%).", path, end_lf, end_crlf);
+    } else {
+        if end_crlf != 0 {
+            @eprintln("warn: % has crlf line endings.", path);
+        };
+    };
 }
 
 #allow_bidirectional_unicode_text_in_next_block

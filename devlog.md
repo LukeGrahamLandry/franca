@@ -7,6 +7,14 @@ usefuckinghttpssoicandrawonthefuckingscreen
 - it's good enough to serve the web demo now. i do think it's slower than the old one, 
   but that's fair, it would be a bit concerning if mbedtls compiled by my c compiler was faster at math than openssl compiled by a real one. 
 
+c
+- test for crlf endings with `\` line splits. 
+  much confusion because dear apple seems to convert to crlf on copy? 
+  so you can't copy text into a line ending checker website. 
+  i actually trust no one so my own trivial programs to convert endings and show bytes. 
+
+- ci: take out the race with sr.ht now that it loses often
+
 ## (Apr 24)
 
 quest to replace usefuckinghttpssoicandrawonthefuckingscreen.py
