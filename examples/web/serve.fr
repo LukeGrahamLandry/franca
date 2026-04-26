@@ -1,7 +1,6 @@
 // usefuckinghttpssoicandrawonthefuckingscreen
 // note: this uses a self signed certificate so in browsers you'll have to click through 
 //       a warning and in curl you'll have to pass `-k`. 
-// TODO: i hate that it needs system headers
 // TODO: macos
 // TODO: same import_c target ifdef problem as examples/disassemble.fr (broken cross compiling)
 // TODO: don't compile the implementation of mbedtls and tf-psa thrice. 
@@ -14,6 +13,7 @@
 // TODO: a version that just does http and doesn't need mbedtls. have to do the open a socket, etc. myself. 
 // TODO: convert genkey to franca too
 // :SLOW should use multiple threads
+// TODO: their net_sockets.c uses select which has FD_SETSIZE problem
 
 port: CStr : "8000";
 folder: CStr : "target/web";
@@ -122,7 +122,8 @@ fn init(s: *Server, key: []u8, cert: []u8) Result(void, Str) = {
     try :: fn(arg: FatExpr) FatExpr #macro => @{
         status := @[arg];
         if status != 0 {
-            return(Err = @tfmt("FAILED: %: %", "?", status));
+            // TODO: assert tpyes are ok
+            return(Err = @tfmt("FAILED: %: %", @[@literal arg.expr.Call.f.expr.GetVar.name.str()], status));
         }
     };
     S :: fn(s: CStr) *i8 = bit_cast_unchecked(CStr, *i8, s);
@@ -164,11 +165,10 @@ fn wait_for_request(s: *Server) []u8 = {
             r != 0
         };
         
-        buf := temp().alloc_uninit(u8, 1024);
-        len := buf.len - 1;  // it null terminates
+        buf := temp().alloc_uninit(u8, 4096);
+        len := buf.len;
         dowhile {
             again :: local_return;
-            buf.slice(0, len).set_zeroed();
             r := mbedtls_ssl_read(ssl, buf.ptr, len.bitcast());
             @if(r <= 0) again(@switch(r) {
                 @case(MBEDTLS_ERR_SSL_WANT_READ_[]) => true;
@@ -181,7 +181,6 @@ fn wait_for_request(s: *Server) []u8 = {
                 };
             });
             len = r.intcast();
-            @debug_assert_eq(buf[len], 0);
             false
         };
         return buf.slice(0, len);
@@ -217,7 +216,7 @@ fn respond(s: *Server, out: []u8) void = {
         };
 }
 
-fn deinit(s: *Server) void = {
+fn deinit_server(s: *Server) void = {
     #use(Mbedtls);
     listen_fd, client_fd, ssl, conf, cache, srvcert, pkey := (s.listen_fd&, s.client_fd&, s.ssl&, s.conf&, s.cache&, s.srvcert&, s.pkey&);
     mbedtls_net_free(client_fd);
@@ -238,6 +237,7 @@ Server :: @struct {
     pkey: Mbedtls.mbedtls_pk_context;
     cache: Mbedtls.mbedtls_ssl_cache_context;
 };
+
 
 get_selfsigned_cert :: fn() Ty([]u8, []u8) = {
     key_path, cert_path := ("target/key.pem", "target/cert.pem");
@@ -262,11 +262,8 @@ generate_selfsigned_cert :: fn(cert_path: Str, key_path: Str) void = {
         ("target/cert_write.out", cert_write),
     );
     
-    @assert(query_current_arch() != .rv64 && query_current_os() == .linux, "TODO: move include path stuff into the compiler");        
-    
     for_rev programs { out_path, source |
         c := C'new_module_and_compiler(.None);
-        c.allow_builtin_headers = false;
         src := @ref import("@/tests/external/curl.fr")'mbedtls_source(mbedtls, tfpsa);
         
         src.push_all(prelude);

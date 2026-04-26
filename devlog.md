@@ -6,14 +6,29 @@ usefuckinghttpssoicandrawonthefuckingscreen
 - respond with the file they requested. add some magic headers to make it work. 
 - it's good enough to serve the web demo now. i do think it's slower than the old one, 
   but that's fair, it would be a bit concerning if mbedtls compiled by my c compiler was faster at math than openssl compiled by a real one. 
+- slog of writing out headers for socket stuff.
+  - this can't be right...
+  ```
+  frame #0: 0x0000aaaaaeaaa000 a.out`g2926
+  frame #1: 0x0000aaaaaab14908 a.out`mbedtls_entropy_init__22841 + 40
+  ```
+  that's it trying to call memset...
+  need no `&& v.var.is_definition` when adding to discarded_statics. 
+  - somehow you can't steal the magic numbers for SOL_SOCKET/SO_REUSEADDR/SO_TYPE from https://elixir.bootlin.com/glibc/glibc-2.29/source/bits/socket.h
+    you have to steal the from zig which reveals the other one is giving me numbers for mips or sparc somehow? 
+    clearly i shouldn't be doing this at all... 
+    but it's so nice that it works now (ex. can run the thing with nix develop without dealing with openssl or $NIX_CFLAGS_COMPILE)
 
 c
 - test for crlf endings with `\` line splits. 
   much confusion because dear apple seems to convert to crlf on copy? 
   so you can't copy text into a line ending checker website. 
   i actually trust no one so my own trivial programs to convert endings and show bytes. 
+- fixed `#pragma once` for find_builtin_header (the one being looked up in the map had the prefix stripped but the one being put in didn't)
 
+other
 - ci: take out the race with sr.ht now that it loses often
+- arena.fr: yikes. ive been getting lucky to not hit the assertion when the align padding is what puts you at the end of a chunk. 
 
 ## (Apr 24)
 

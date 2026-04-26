@@ -163,6 +163,7 @@ stdint :: """
     // TODO: there are more
     
     #define UINT8_MAX 255
+    #define UINTPTR_MAX 0xffffffffffffffff
 """;
 
 signal :: """
@@ -170,6 +171,7 @@ signal :: """
     typedef int sig_atomic_t;
     
     int sigaction(int, struct sigaction *, struct sigaction *);
+    void *signal(int, void*);
     
     #define SIGINT  2
     #define SIGQUIT 3
@@ -335,11 +337,15 @@ errno :: """
     extern int *__GET_ERRNO();
     #define errno (*__GET_ERRNO())
     
-    // TODO: macos specific?
     #define EINTR 4 
     #define ERANGE 34
     #define EISDIR 21
-    // TODO
+    #define ENOENT 2
+    #define EPIPE 32
+    
+#if __linux
+    #define ECONNRESET 104
+#endif
 """;
 
 inttypes :: """
@@ -494,6 +500,7 @@ stdio :: """
     #define	FILENAME_MAX 1024
     
     int rewind(FILE *f);
+    void setbuf(FILE *, char *);
 """;
 
 time :: """
@@ -830,8 +837,111 @@ ioctl :: """
     
     int ioctl(int fd, long op, ...);
 """;
-};
+socket :: """
+    #pragma once
+    #include <sys/select.h>
+    
+#if __linux
+    #define FD_SETSIZE 1024
+    
+    typedef int socklen_t;
+    typedef short sa_family_t;
+    struct sockaddr;
+    
+    // TOOD: check layout of the fields
+    struct addrinfo {
+        int ai_flags, ai_family, ai_socktype, ai_protocol;
+        socklen_t        ai_addrlen;
+        struct sockaddr *ai_addr;
+        char            *ai_canonname;
+        struct addrinfo *ai_next;
+    };
+    
+    struct sockaddr_storage {
+        sa_family_t ss_family;
+    };
+    
+    #define AF_UNSPEC 0
+    #define AF_INET 2
+    #define SOCK_DGRAM 2
+    #define SOCK_STREAM 1
+    #define SOL_SOCKET 1
+    #define SO_REUSEADDR 2
+    #define SO_TYPE 3
+    #define MSG_PEEK 0x2
+#endif
 
+    int getaddrinfo(char*, char*, struct addrinfo*, struct addrinfo**);
+    int socket(int, int, int);
+    int setsockopt(int, int, int, void*, socklen_t);
+    int bind(int, struct sockaddr *, socklen_t);
+    int listen(int, int);
+    void freeaddrinfo(struct addrinfo*);
+    int connect(int, int, socklen_t);
+    int getsockopt(int, int, int, void*, socklen_t*);
+    int accept(int, struct sockaddr *, socklen_t*);
+    int recvfrom(int, char*, long, int, struct sockaddr *, socklen_t*);
+    int getsockname(int, struct sockaddr *, socklen_t*);
+    int shutdown(int, int);
+                             
+""";
+select :: """
+    #pragma once
+    
+    typedef struct {
+        long _[16];
+    } fd_set;
+    
+    static void FD_ZERO(fd_set *it) { *it = (fd_set) { 0 }; }
+    static void FD_SET(unsigned int fd, fd_set *it) { it->_[fd/64] |= 1 << (fd%64); }
+    static int FD_ISSET(unsigned int fd, fd_set *it) { return (it->_[fd/64] & (1 << (fd%64))) != 0; }
+    
+    int select(int, fd_set*, fd_set*, void*, void*);
+""";
+};
+netinet :: @struct {
+in :: """
+    #pragma once
+#if __linux
+    #define IPPROTO_UDP 17
+    #define IPPROTO_TCP 6
+    
+    struct in_addr {
+        unsigned int s_addr;
+    };
+    
+    struct sockaddr_in {
+        sa_family_t sin_family;
+        short sin_port;
+        struct in_addr sin_addr;
+        char _[8];
+    };
+    
+    struct in6_addr {
+        char s6_addr[16];
+    };
+    struct sockaddr_in6 {
+        sa_family_t sin6_family;
+        short sin6_port;
+        int sin6_flowinfo;
+        struct in6_addr sin6_addr;
+        int sin6_scope_id;
+    };
+#endif
+""";
+};
+arpa :: @struct {
+inet :: """
+    #pragma once
+""";
+};
+netdb :: """
+    #pragma once
+
+#if __linux
+    #define AI_PASSIVE 1
+#endif
+""";
 unistd :: """
     #pragma once
     #include <stddef.h>
@@ -898,6 +1008,7 @@ fcntl :: """
     #define O_TRUNC     0x0000200
     #define O_APPEND    0x0000400
     #define O_CLOEXEC   0x0080000
+    #define O_NONBLOCK  0x0000004
 #endif
 
     #define O_ACCMODE   0b11
@@ -906,6 +1017,8 @@ fcntl :: """
     #define O_RDWR      0b10
     
     #define F_SETFD     2
+    #define F_GETFL 3
+    #define F_SETFL 4
     #define FD_CLOEXEC  1
     int fcntl(int fd, int op, ...);
 """;
@@ -1070,4 +1183,21 @@ alloca :: """
 wchar :: """
     #pragma once
     #include "stddef.h"
+""";
+
+dirent :: """
+    #pragma once
+    typedef struct DIR DIR;
+#if __linux
+    struct dirent {
+        unsigned long d_ino, d_seekoff;
+        unsigned short d_reclen;
+        unsigned char d_type;
+        char d_name[256];
+    };
+#endif
+    
+    DIR* opendir(char *path);
+    struct dirent* readdir(DIR *);
+    int closedir(DIR *);
 """;
