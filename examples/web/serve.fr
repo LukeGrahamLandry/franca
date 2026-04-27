@@ -25,12 +25,21 @@ main :: fn() void = {
     @if(args.h) return(panic(HELP));
 
     key, cert := @run get_selfsigned_cert();
-    @assert_eq(Mbedtls'psa_crypto_init(), 0, "failed psa_crypto_init");
     _ := Syscall'chdir(args.folder.as_cstr());
     s := @ref @zeroed Server;
+with_mbedtls {
     port := init(s, key, cert, args.port.trunc()).or(fn(err) => panic(err));
     @println("https://localhost:% serving %", port, args.folder);  // :TestWaitsForReadyString
     ssl_server(s);
+};
+}
+
+with_mbedtls :: fn($body: @Fn() void) void = {
+    @assert_eq(Mbedtls'psa_crypto_init(), 0, "failed psa_crypto_init");
+    SIG_IGN := rawptr_from_int(1);
+    old := signal(Posix.SIG.PIPE, SIG_IGN);
+    body();
+    signal(Posix.SIG.PIPE, old);
     Mbedtls'mbedtls_psa_crypto_free();
 }
 
@@ -48,6 +57,7 @@ ssl_server :: fn(s: *Server) void = {
                     @if(it.path.ends_with(".html")) => "text/html";
                     @if(it.path.ends_with(".js")) => "text/javascript";
                     @if(it.path.ends_with(".wasm")) => "application/wasm";
+                    @if(it.path.ends_with(".svg")) => "image/svg+xml";
                     @else => "application/octet-stream";
                 };
                 @fmt(out, "HTTP/1.0 200 OK\r\n");
@@ -106,8 +116,10 @@ if false {  // im not using any other request headers rn
     };
     
     if read_entire_file(temp(), path) { it |
+        @eprintln("200: %", path);
         return(Ok = (path = path, bytes = it));
     };
+    @eprintln("404: %", path);
     .Err
 }
 
@@ -173,39 +185,61 @@ fn wait_for_request(s: *Server) []u8 = {
             r != 0
         };
         
-        buf := temp().alloc_uninit(u8, 4096);
-        len := buf.len;
-        dowhile {
-            again :: local_return;
-            r := mbedtls_ssl_read(ssl, buf.ptr, len.bitcast());
-            @if(r <= 0) @switch(r) {
-                @case(MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY_[]) => again(false);
-                @case(NetStatus.again) => again(true);
-                @case(NetStatus.stop) => continue();
-                @default => continue(@eprintln("ERROR: mbedtls_ssl_read: %", r));
-            };
-            len = r.intcast();
-            false
-        };
-        return buf.slice(0, len);
+        buf := read_loop(ssl, false) || continue();
+        return buf;
     }
 }
 
-fn respond(s: *Server, out: []u8) void = {
+read_loop :: fn(ssl: *Mbedtls.mbedtls_ssl_context, repeat: bool) Result([]u8, void) = {
     #use(Mbedtls);
-        dowhile {
-            again :: local_return;
-            r := mbedtls_ssl_write(s.ssl&, out.ptr, out.len.bitcast());
+    buf := @ref u8.list(4096, temp());
+    len := buf.len;
+    dowhile {
+        again :: local_return;
+        r := mbedtls_ssl_read(ssl, buf.items().end_pointer(), (buf.maybe_uninit.len - buf.len).bitcast());
+        @if(r < 0) @switch(r) {
+            @case(MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY_[]) => again(false);
+            @case(MBEDTLS_ERR_SSL_WANT_READ_[]) => again(true);
+            @case(MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET_[]) => again(true);
+            @case(NetStatus.again) => again(true);
+            @case(NetStatus.stop) => return(.Err);
+            @default => return(.Err);
+        };
+        buf.len += r.intcast();
+        @assert_ule(buf.len, buf.maybe_uninit.len);
+        if buf.len == buf.maybe_uninit.len {
+            buf.reserve(1);
+            again(true);
+        };
+        // TODO: its seems that for server you're supposed to choose the end of the message based on 
+        //       the http rules (that's what mbedtls/programs/ssl/ssl_server2.c does) because the other 
+        //       end won't close the connection because they're waiting for a response. 
+        //       rn im relying on whole request coming in as one read (and fitting in the buffer without resizing) which i think is wrong. 
+        //       -
+        //       for client we expect the server to close when done so it's fine to just loop until no more. 
+        @if(repeat, r > 0, false)  
+    };
+    (Ok = buf.items())
+} 
+
+write_loop :: fn(ssl: *Mbedtls.mbedtls_ssl_context, out: []u8) Result(void, void) = {
+    #use(Mbedtls);
+    while => out.len > 0 {
+            r := mbedtls_ssl_write(ssl, out.ptr, out.len.bitcast());
             if r > 0 {
                 r := r.intcast();
                 @debug_assert_ule(r, out.len);
                 out = out.rest(r);
-                again(out.len > 0);
             };
-            @if(r == NetStatus.stop) return();  // the other guy closed before we could respond
-            true
-        };
+            @if(r == NetStatus.stop) return(.Err);  // the other guy closed before we could respond
+    };
+    .Ok
+}
         
+fn respond(s: *Server, out: []u8) void = {
+    #use(Mbedtls);
+    write_loop(s.ssl&, out) || return();
+    
         dowhile {
             r := mbedtls_ssl_close_notify(s.ssl&);
             if r != 0 && r != MBEDTLS_ERR_SSL_WANT_READ_[] && r != MBEDTLS_ERR_SSL_WANT_WRITE_[] && r != MBEDTLS_ERR_NET_CONN_RESET_[] {
@@ -241,8 +275,6 @@ Server :: @struct {
 net_bind :: fn(port: u16) Result(Ty(Fd, u16), Str) = {
     fd: Fd = (fd = -1); error :: fn(msg) => { Syscall'close(fd); return(Err = msg); };
     
-    SIG_IGN := rawptr_from_int(1);
-    signal(Posix.SIG.PIPE, SIG_IGN);
     fd = socket(AF_INET, SOCK_STREAM, 0) || error("failed: socket");
     addr: sockaddr_in = (
         sin_family = AF_INET,
@@ -294,8 +326,8 @@ fd_callback :: fn($callee: @Fn(fd: Fd, p: *u8, l: i64) i64Result) (@Fn(ctx: rawp
 
 S :: Syscall.S;
 signal :: @S("signal") fn(signum: i32, handle: rawptr) rawptr #libc;
-socket :: @S("socket") fn(domain: i32, type: i32, protocol: i32) FdResult #libc #syscall(198, 41, NOSYS);
-bind :: @S("bind") fn(fd: Fd, addr: *sockaddr_in, addr_size: i64) voidResult #libc #syscall(200, 49, NOSYS);
+socket :: @S("socket") fn(domain: u32, type: u32, protocol: u32) FdResult #libc #syscall(198, 41, NOSYS);
+bind :: @S("bind") fn(fd: Fd, addr: *sockaddr_in, addr_size: u32) voidResult #libc #syscall(200, 49, NOSYS);
 listen :: @S("listen") fn(fd: Fd, backlog: i64) voidResult #libc #syscall(201, 50, NOSYS);
 getsockname :: @S("getsockname") fn(fd: Fd, addr: *sockaddr_in, addr_size: *i64) voidResult #libc #syscall(204, 51, NOSYS);
 accept :: @S("accept") fn(fd: Fd, addr: *sockaddr_in, addr_size: *i64) FdResult #libc #syscall(202, 43, NOSYS);
@@ -341,6 +373,7 @@ generate_selfsigned_cert :: fn(cert_path: Str, key_path: Str) void = {
         @fmt(src, "#add_include_path \"%/programs\"\n", mbedtls);
         src.push_all(source);
         write_entire_file_or_crash(@tfmt("%/programs/test/helpers.h", mbedtls), "");
+        write_entire_file_or_crash(@tfmt("%/programs/test/certs.h", mbedtls), "");
         
         result := C'catch_call(c, void) {
             tok := c.tokenize_string("prelude", src.items());
@@ -438,6 +471,11 @@ Mbedtls :: {
         const int MBEDTLS_ERR_SSL_WANT_WRITE_ = MBEDTLS_ERR_SSL_WANT_WRITE;
         const int MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY_ = MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
         const int MBEDTLS_ERR_NET_CONN_RESET_ = MBEDTLS_ERR_NET_CONN_RESET;
+
+        // for ./client.fr    
+        const int MBEDTLS_SSL_IS_CLIENT_ = MBEDTLS_SSL_IS_CLIENT;
+        const int MBEDTLS_SSL_VERIFY_NONE_ = MBEDTLS_SSL_VERIFY_NONE;   // !!!!
+        const int MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET_ = MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET;
     """);
     Ffi'include(src.items())
 };

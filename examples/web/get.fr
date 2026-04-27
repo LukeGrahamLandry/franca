@@ -1,0 +1,132 @@
+// this is trying to be a minimal example of making an https request with mbedtls. 
+// it mostly exists for symmetry so you can test ./serve.fr without any external programs. 
+// UNSAFE: it doesn't check the server's tls certificate.
+// it also doesn't check the http status code or follow redirects
+
+main :: fn() void = {
+    args := import("@/lib/args.fr")'parse_args(@struct {
+        port := 443;
+        host := "";
+        path := "/";
+        v := false;  // show headers?
+    });
+    @assert(args.host != "" && !args.host.contains("/") && args.path.starts_with("/"), 
+        "USAGE: [get.fr] -host [example.com] [-port 443] [-path /] [-v]");
+    server_name := args.host.as_cstr();
+    port: u16 = args.port.trunc();
+    @match(get_https_unsafe(args.host, args.port.trunc(), args.path)) {
+        fn Ok(it) => {
+            @if(args.v) eprint(it.headers);
+            print(it.data);
+        }
+        fn Err(msg) => @panic("failed fetch %:%%: %", args.host, args.port, args.path, msg);
+    }
+}
+
+// TODO: don't early return from this, need to clean up the fd / mbedtls stuff. :LEAK
+get_https_unsafe :: fn(host: Str, port: u16, path: Str) Result(@struct(headers: []u8, data: []u8), Str) = {
+    #use(Mbedtls);
+    server_name := host.as_cstr();
+    request := @tfmt("GET % HTTP/1.0\r\nHost: %\r\n\r\n", path, server_name);
+Sockets'with_mbedtls {
+    ssl := @ref @zeroed mbedtls_ssl_context;
+    conf := @ref @zeroed mbedtls_ssl_config;
+    
+    mbedtls_ssl_init(ssl);
+    mbedtls_ssl_config_init(conf);
+    
+    fd := @try(connect_by_name(server_name, port)) return;
+    
+    r := mbedtls_ssl_config_defaults(conf, MBEDTLS_SSL_IS_CLIENT_[], MBEDTLS_SSL_TRANSPORT_STREAM_[], MBEDTLS_SSL_PRESET_DEFAULT_[]);
+    @if(r != 0) return(Err = "fail: mbedtls_ssl_config_defaults");
+    
+    // !!!! TODO: mbedtls_ssl_conf_ca_chain and force verify if want to be real
+    mbedtls_ssl_conf_authmode(conf, MBEDTLS_SSL_VERIFY_NONE_[]);   
+
+    r := mbedtls_ssl_setup(ssl, conf);
+    @if(r != 0) return(Err = "fail: mbedtls_ssl_setup");
+    r := mbedtls_ssl_set_hostname(ssl, bit_cast_unchecked(*u8, *i8, server_name.ptr));
+    @if(r != 0) return(Err = "fail: mbedtls_ssl_set_hostname");
+
+    mbedtls_ssl_set_bio(ssl, raw_from_ptr(@type fd, fd&), Sockets.fd_writer, Sockets.fd_reader, zeroed(mbedtls_ssl_recv_timeout_t));
+    
+    dowhile {
+        r := mbedtls_ssl_handshake(ssl);
+        // TODO: explain what this does. (i stole it from programs/ssl/ssl_server.c)
+        if r != 0 && r != MBEDTLS_ERR_SSL_WANT_READ_[] && r != MBEDTLS_ERR_SSL_WANT_WRITE_[] {
+            return(Err = "fail: mbedtls_ssl_handshake");
+        };
+        r != 0
+    };
+    
+    Sockets'write_loop(ssl, request)
+        || return(Err = "connection closed while requesting");
+
+    buf := Sockets'read_loop(ssl, true)
+        || return(Err = "connection closed before read");
+    
+    _ := mbedtls_ssl_close_notify(ssl);
+
+    Syscall'close(fd);
+    mbedtls_ssl_free(ssl);
+    mbedtls_ssl_config_free(conf);
+    
+    i := buf.len;
+    if buf.index_of_slice("\r\n\r\n") { j |
+        i = min(buf.len, j + 4);
+    };
+    return(Ok = (headers = buf.slice(0, i), data = buf.rest(i)));
+};
+unreachable() // TODO: don't leak the signal and stuff
+}
+
+Sockets :: import("@/examples/web/serve.fr");
+connect_by_name :: fn(host: CStr, port: u16) Result(Fd, Str) = {
+    #use(Sockets);
+    port := @fmt_cstr("%", port);
+    hints := @ref @zeroed addrinfo;
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    it := zeroed(*addrinfo);
+    getaddrinfo(host, port, hints, it&) 
+        || return(Err = "fail: getaddrinfo");
+
+    list := it;
+    ::ptr_utils(@type it[]);
+    while => !it.is_null() {
+        fd := socket(it.ai_family, it.ai_socktype, it.ai_protocol);
+        if fd.is_ok() {
+            fd := fd.unwrap();
+            ai_addr := @if(query_current_os() == .macos, it.nameaddr.m.ai_addr, it.nameaddr.l.ai_addr);
+            if connect(fd, ai_addr, it.ai_addrlen).is_ok() {
+                freeaddrinfo(list);
+                return(Ok = fd);
+            }
+            Syscall'close(fd);
+        };
+        it = it.ai_next;
+    };
+    freeaddrinfo(list);
+    (Err = "not found")
+}
+
+Mbedtls :: import("@/examples/web/serve.fr").Mbedtls;
+IPPROTO_TCP :: 6;
+AF_UNSPEC :: 0;
+addrinfo :: @rec @struct {
+    ai_flags: u32;
+    ai_family: u32;
+    ai_socktype: u32;
+    ai_protocol: u32;
+    ai_addrlen: u32;
+    nameaddr: @union(
+        l: @struct { ai_addr: *import("@/examples/web/serve.fr").sockaddr_in; ai_canonname: CStr; },
+        m: @struct { ai_canonname: CStr; ai_addr: *import("@/examples/web/serve.fr").sockaddr_in; },
+    );
+    ai_next: *addrinfo;
+};
+
+getaddrinfo :: fn(host: CStr, service: CStr, hints: *addrinfo, list_out: **addrinfo) voidResult #libc;
+freeaddrinfo :: fn(list: *addrinfo) void #libc;
+connect :: fn(fd: Fd, addr: *Sockets.sockaddr_in, addr_size: u32) voidResult #libc;

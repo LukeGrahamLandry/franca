@@ -1,4 +1,9 @@
 
+## (Apr 27)
+
+- even if im not going to use it for anything, i want a client example just for symmetry
+  - apple swaps some fields in addrinfo
+
 ## (Apr 26)
 
 serve
@@ -7,6 +12,16 @@ serve
 - works on macos. seems there's a delay on releasing the port if you run on orb then kill then run on mac. 
 - add it to the curl test so all this new stuff runs in ci
 - ask to be assigned a port for the test instead of hardcoding one chosen by fair die roll
+- to make it serve my old chess program, can't say content-type of pieces.svg file is octet-stream or it doesn't work. 
+
+playing with ssl_client1.c
+- dies on MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET trying to get my real website 
+  but works if i just make it ignore that error.
+- cloudflare and srht.site need you to set the `Host:` header. 
+  which fair enough, i guess multiple things live in one computer so address isn't unique and i have to tell it again because the dns part is on the other end. 
+- so i could use that to fetch dependencies instead of curl but i still have the bootstrapping problem of needing mbedtls so it doesn't really help. 
+- (what i tested was not checking the certificates so didn't need to deal with /etc/ssl/certs or whatever macos equivilent is)
+  which maybe isn't a problem because i check the hash of the content anyway? but it still feels wrong. 
 
 ## (Apr 25)
 
