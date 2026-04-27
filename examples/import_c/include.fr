@@ -330,8 +330,10 @@ errno :: """
     
     #if __macos
         #define __GET_ERRNO __error
+        #define ECONNRESET 54
     #elif __linux
         #define __GET_ERRNO __errno_location
+        #define ECONNRESET 104
     #endif
     
     extern int *__GET_ERRNO();
@@ -343,9 +345,6 @@ errno :: """
     #define ENOENT 2
     #define EPIPE 32
     
-#if __linux
-    #define ECONNRESET 104
-#endif
 """;
 
 inttypes :: """
@@ -842,10 +841,12 @@ socket :: """
     #include <sys/select.h>
     
 #if __linux
-    #define FD_SETSIZE 1024
+    typedef short sa_family_t;
+#elif __macos
+    typedef char sa_family_t;
+#endif
     
     typedef int socklen_t;
-    typedef short sa_family_t;
     struct sockaddr;
     
     // TOOD: check layout of the fields
@@ -865,10 +866,16 @@ socket :: """
     #define AF_INET 2
     #define SOCK_DGRAM 2
     #define SOCK_STREAM 1
+    #define MSG_PEEK 0x2
+
+#if __linux
     #define SOL_SOCKET 1
     #define SO_REUSEADDR 2
     #define SO_TYPE 3
-    #define MSG_PEEK 0x2
+#elif __macos
+    #define SOL_SOCKET 65535
+    #define SO_REUSEADDR 4
+    #define SO_TYPE 4104
 #endif
 
     int getaddrinfo(char*, char*, struct addrinfo*, struct addrinfo**);
@@ -883,11 +890,11 @@ socket :: """
     int recvfrom(int, char*, long, int, struct sockaddr *, socklen_t*);
     int getsockname(int, struct sockaddr *, socklen_t*);
     int shutdown(int, int);
-                             
 """;
 select :: """
     #pragma once
     
+    #define FD_SETSIZE 1024
     typedef struct {
         long _[16];
     } fd_set;
@@ -902,7 +909,7 @@ select :: """
 netinet :: @struct {
 in :: """
     #pragma once
-#if __linux
+    
     #define IPPROTO_UDP 17
     #define IPPROTO_TCP 6
     
@@ -911,23 +918,27 @@ in :: """
     };
     
     struct sockaddr_in {
+#if __macos
+        char sin_len;
+#endif
         sa_family_t sin_family;
         short sin_port;
         struct in_addr sin_addr;
         char _[8];
     };
-    
     struct in6_addr {
         char s6_addr[16];
     };
     struct sockaddr_in6 {
+#if __macos
+        char sin_len;
+#endif
         sa_family_t sin6_family;
         short sin6_port;
         int sin6_flowinfo;
         struct in6_addr sin6_addr;
         int sin6_scope_id;
     };
-#endif
 """;
 };
 arpa :: @struct {
@@ -938,9 +949,7 @@ inet :: """
 netdb :: """
     #pragma once
 
-#if __linux
     #define AI_PASSIVE 1
-#endif
 """;
 unistd :: """
     #pragma once
@@ -1008,8 +1017,8 @@ fcntl :: """
     #define O_TRUNC     0x0000200
     #define O_APPEND    0x0000400
     #define O_CLOEXEC   0x0080000
-    #define O_NONBLOCK  0x0000004
 #endif
+    #define O_NONBLOCK  0x0000004
 
     #define O_ACCMODE   0b11
     #define O_RDONLY    0b00
@@ -1188,14 +1197,18 @@ wchar :: """
 dirent :: """
     #pragma once
     typedef struct DIR DIR;
-#if __linux
     struct dirent {
         unsigned long d_ino, d_seekoff;
         unsigned short d_reclen;
+#if __linux
         unsigned char d_type;
         char d_name[256];
-    };
+#elif __macos
+        short d_namlen;
+        unsigned char d_type;
+        char d_name[255];
 #endif
+    };
     
     DIR* opendir(char *path);
     struct dirent* readdir(DIR *);

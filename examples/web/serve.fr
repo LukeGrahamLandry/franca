@@ -1,35 +1,41 @@
 // usefuckinghttpssoicandrawonthefuckingscreen
 // note: this uses a self signed certificate so in browsers you'll have to click through 
 //       a warning and in curl you'll have to pass `-k`. 
-// TODO: macos
 // TODO: same import_c target ifdef problem as examples/disassemble.fr (broken cross compiling)
 // TODO: don't compile the implementation of mbedtls and tf-psa thrice. 
 //       (move the key generation to franca)
 // TODO: don't generate a random key. i want reproducible builds. 
 //       the point of the tls for local server is just so it lets you use webgpu/sharedarraybuffer
 //       theres no need for security, it's my own computer... 
-// TODO: add this to autotest
 // TODO: ffi/export_type_info doesn't like typedef enum /*no name*/ { X = Y } name;
 // TODO: a version that just does http and doesn't need mbedtls. have to do the open a socket, etc. myself. 
 // TODO: convert genkey to franca too
+// TODO: make it work with -syscalls. need to fill the libc imports from import_c.
+//       for some could set the stuff in platform.c to my own things. 
 // :SLOW should use multiple threads
-// TODO: their net_sockets.c uses select which has FD_SETSIZE problem
+//       but then need to set MBEDTLS_THREADING_C 
 
-port: CStr : "8000";
-folder: CStr : "target/web";
-
+HELP :: "[serve.fr] -port [8000] -folder [target/web]\n";
 main :: fn() void = {
+    args := import("@/lib/args.fr")'parse_args(@struct {
+        port := 8000;
+        folder := "target/web";
+        h := false;
+    });
+    @if(args.h) return(panic(HELP));
+
     key, cert := @run get_selfsigned_cert();
     @assert_eq(Mbedtls'psa_crypto_init(), 0, "failed psa_crypto_init");
-    _ := Syscall'chdir(folder);
-    ssl_server(key, cert);
+    _ := Syscall'chdir(args.folder.as_cstr());
+    @println("https://localhost:% will serve %", args.port, args.folder);
+    ssl_server(key, cert, args.port.trunc());
     Mbedtls'mbedtls_psa_crypto_free();
 }
 
-ssl_server :: fn(key: []u8, cert: []u8) void = {    
+ssl_server :: fn(key: []u8, cert: []u8, port: u16) void = {    
     s := @ref @zeroed Server;
-    init(s, key, cert).or(fn(err) => panic(err));
-    @println("https://localhost:% is serving %", port, folder);
+    init(s, key, cert, port).or(fn(err) => panic(err));
+    @println("ready.");  // :TestWaitsForReadyString
     mark := temp().mark();
     loop {
         continue :: local_return;
@@ -105,24 +111,23 @@ if false {  // im not using any other request headers rn
     };
     .Err
 }
-        
-fn init(s: *Server, key: []u8, cert: []u8) Result(void, Str) = {
+
+fn init(s: *Server, key: []u8, cert: []u8, port: u16) Result(void, Str) = {
     #use(Mbedtls);
     listen_fd, client_fd, ssl, conf, cache, srvcert, pkey := (s.listen_fd&, s.client_fd&, s.ssl&, s.conf&, s.cache&, s.srvcert&, s.pkey&);
-    mbedtls_net_init(listen_fd);
-    mbedtls_net_init(client_fd);
+    listen_fd.fd = -1;
+    client_fd.fd = -1;
     mbedtls_ssl_init(ssl);
     mbedtls_ssl_config_init(conf);
     mbedtls_ssl_cache_init(cache);
     mbedtls_x509_crt_init(srvcert);
     mbedtls_pk_init(pkey);
 
-    // TODO: print the name of the callee in the error message 
     // TODO: this '=>' shouldn't actually be allowed but it makes the scope work out :compiler
     try :: fn(arg: FatExpr) FatExpr #macro => @{
         status := @[arg];
         if status != 0 {
-            // TODO: assert tpyes are ok
+            @[{ @assert(arg.expr&.is(.Call) && arg.expr.Call.f.expr&.is(.GetVar), "@try"); @{} }];
             return(Err = @tfmt("FAILED: %: %", @[@literal arg.expr.Call.f.expr.GetVar.name.str()], status));
         }
     };
@@ -133,7 +138,9 @@ fn init(s: *Server, key: []u8, cert: []u8) Result(void, Str) = {
     @try mbedtls_x509_crt_parse(srvcert, cert.alloc_cstr(temp()).as_ptr(), cert.len.bitcast() + 1);
     @try mbedtls_pk_parse_key(pkey, key.alloc_cstr(temp()).as_ptr(), key.len.bitcast() + 1, zeroed(*u8), 0);
     
-    @try mbedtls_net_bind(listen_fd, zeroed(*i8), S(port), MBEDTLS_NET_PROTO_TCP_[]);
+    fd := net_bind(port).or(fn(msg) => return(Err = msg));
+    listen_fd[] = fd;
+    
     @try mbedtls_ssl_config_defaults(conf, MBEDTLS_SSL_IS_SERVER_[], MBEDTLS_SSL_TRANSPORT_STREAM_[], MBEDTLS_SSL_PRESET_DEFAULT_[]);
 
     mbedtls_ssl_conf_session_cache(conf, raw_from_ptr(@type cache[], cache), mbedtls_ssl_cache_get, mbedtls_ssl_cache_set);
@@ -147,13 +154,15 @@ fn init(s: *Server, key: []u8, cert: []u8) Result(void, Str) = {
 fn wait_for_request(s: *Server) []u8 = {
     #use(Mbedtls);
     listen_fd, client_fd, ssl := (s.listen_fd&, s.client_fd&, s.ssl&);
-    loop {
+    loop {  // note: this leaks temp until one succeeds (and caller can reset it)
         continue :: local_return;
-        mbedtls_net_free(client_fd);
+        Syscall'close(client_fd[]);
+        client_fd.fd = -1;
         mbedtls_ssl_session_reset(ssl);
-        r := mbedtls_net_accept(listen_fd, client_fd, zeroed(rawptr), 0, zeroed(*u64));
-        @if(r != 0) continue(@println("failed: mbedtls_net_accept: %", r));
-        mbedtls_ssl_set_bio(ssl, raw_from_ptr(@type client_fd[], client_fd), mbedtls_net_send, mbedtls_net_recv, zeroed(mbedtls_ssl_recv_timeout_t));
+        fd := accept(listen_fd[], zeroed(*sockaddr_in), zeroed(*i64))
+            || continue(@println("failed: accept"));
+        client_fd[] = fd;
+        mbedtls_ssl_set_bio(ssl, raw_from_ptr(@type client_fd[], client_fd), fd_writer, fd_reader, zeroed(mbedtls_ssl_recv_timeout_t));
         
         dowhile {
             r := mbedtls_ssl_handshake(ssl);
@@ -170,16 +179,12 @@ fn wait_for_request(s: *Server) []u8 = {
         dowhile {
             again :: local_return;
             r := mbedtls_ssl_read(ssl, buf.ptr, len.bitcast());
-            @if(r <= 0) again(@switch(r) {
-                @case(MBEDTLS_ERR_SSL_WANT_READ_[]) => true;
-                @case(MBEDTLS_ERR_SSL_WANT_WRITE_[]) => true;
-                @case(MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY_[]) => false;
-                @case(MBEDTLS_ERR_NET_CONN_RESET_[]) => false;
-                @default => {
-                    @println("ERROR: mbedtls_ssl_read: %", r);
-                    false
-                };
-            });
+            @if(r <= 0) @switch(r) {
+                @case(MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY_[]) => again(false);
+                @case(NetStatus.again) => again(true);
+                @case(NetStatus.stop) => continue();
+                @default => continue(@println("ERROR: mbedtls_ssl_read: %", r));
+            };
             len = r.intcast();
             false
         };
@@ -198,11 +203,7 @@ fn respond(s: *Server, out: []u8) void = {
                 out = out.rest(r);
                 again(out.len > 0);
             };
-            if r == MBEDTLS_ERR_NET_CONN_RESET_[] {
-                println("peer closed so we failed to respond");
-                return();
-            };
-            @debug_assert(r == MBEDTLS_ERR_SSL_WANT_READ_[] || r == MBEDTLS_ERR_SSL_WANT_WRITE_[], "mbedtls_ssl_write unexpected error %", r);
+            @if(r == NetStatus.stop) return();  // the other guy closed before we could respond
             true
         };
         
@@ -218,9 +219,9 @@ fn respond(s: *Server, out: []u8) void = {
 
 fn deinit_server(s: *Server) void = {
     #use(Mbedtls);
-    listen_fd, client_fd, ssl, conf, cache, srvcert, pkey := (s.listen_fd&, s.client_fd&, s.ssl&, s.conf&, s.cache&, s.srvcert&, s.pkey&);
-    mbedtls_net_free(client_fd);
-    mbedtls_net_free(listen_fd);
+    ssl, conf, cache, srvcert, pkey := (s.ssl&, s.conf&, s.cache&, s.srvcert&, s.pkey&);
+    Syscall'close(s.client_fd));
+    Syscall'close(s.listen_fd);
     mbedtls_x509_crt_free(srvcert);
     mbedtls_pk_free(pkey);
     mbedtls_ssl_free(ssl);
@@ -229,8 +230,8 @@ fn deinit_server(s: *Server) void = {
 }
 
 Server :: @struct {
-    listen_fd: Mbedtls.mbedtls_net_context;
-    client_fd: Mbedtls.mbedtls_net_context;
+    listen_fd: Fd;
+    client_fd: Fd;
     ssl: Mbedtls.mbedtls_ssl_context;
     conf: Mbedtls.mbedtls_ssl_config;
     srvcert: Mbedtls.mbedtls_x509_crt;
@@ -238,20 +239,75 @@ Server :: @struct {
     cache: Mbedtls.mbedtls_ssl_cache_context;
 };
 
+net_bind :: fn(port: u16) Result(Fd, Str) = {
+    fd: Fd = (fd = -1); error :: fn(msg) => { Syscall'close(fd); return(Err = msg); };
+    
+    SIG_IGN := rawptr_from_int(1);
+    signal(Posix.SIG.PIPE, SIG_IGN);
+    fd = socket(AF_INET, SOCK_STREAM, 0) || error("failed: socket");
+    addr: sockaddr_in = (
+        sin_family = AF_INET,
+        sin_port = byte_swap(port),
+        sin_addr = 0,
+        _ = zeroed(Array(u8, 8)),
+    );
+    if query_current_os() == .macos {
+        // set sin_len
+        addr.sin_family = addr.sin_family.byte_swap().bit_or(size_of(@type addr));
+    }
+    r := bind(fd, addr&, size_of(@type addr));
+    if r&.is_err() {
+        EADDRINUSE: i32 = @if(query_current_os() == .linux, 98, 48);
+        err := @if(is_linking_libc(), Posix'errno()[], -r.value.intcast());
+        error(@if(err == EADDRINUSE, "failed: bind: address in use", "failed: bind"));
+    };
+    listen(fd, 10) || error("failed: listen");
+    
+    (Ok = fd)
+};
 
+NetStatus :: @struct(again :: -@as(i32)0xFF01, stop :: -@as(i32)0xFF02);
+fd_reader :: fd_callback(Syscall.read);
+fd_writer :: fd_callback(Syscall.write);
+fd_callback :: fn($callee: @Fn(fd: Fd, p: *u8, l: i64) i64Result) (@Fn(ctx: rawptr, p: *u8, l: u64) i32) = {
+    (fn(ctx: rawptr, p: *u8, l: u64) i32 = {
+        fd, buf := (Fd.ptr_from_raw(ctx)[], p.slice(l.bitcast()));
+        r := callee(fd, buf.ptr, buf.len);
+        @if(r.value >= 0) return(r.value.intcast());
+        err := @if(is_linking_libc(), Posix'errno()[], -r.value.intcast());
+        EPIPE :: 32; EINTR :: 4;
+        ECONNRESET: i32 = @if(query_current_os() == .macos, 54, 104);
+        @if(err == EPIPE || err == ECONNRESET) return(NetStatus.stop);
+        @if(err == EINTR) return(NetStatus.again);
+        @eprintln("unexpected io error(%) from fd(%)", err, fd.fd);
+        NetStatus.stop
+    })
+};
+
+S :: Syscall.S;
+signal :: @S("signal") fn(signum: i32, handle: rawptr) rawptr #libc;
+socket :: @S("socket") fn(domain: i32, type: i32, protocol: i32) FdResult #libc #syscall(198, 41, NOSYS);
+bind :: @S("bind") fn(fd: Fd, addr: *sockaddr_in, addr_size: i64) voidResult #libc #syscall(200, 49, NOSYS);
+listen :: @S("listen") fn(fd: Fd, backlog: i64) voidResult #libc #syscall(201, 50, NOSYS);
+accept :: @S("accept") fn(fd: Fd, addr: *sockaddr_in, addr_size: *i64) FdResult #libc #syscall(202, 43, NOSYS);
+shutdown :: @S("shutdown") fn(fd: Fd, how: i64) voidResult #libc #syscall(210, 48, NOSYS);
+AF_INET :: 2;
+SOCK_STREAM :: 1;
+sockaddr_in :: @struct {
+    sin_family: u16;
+    sin_port: u16;
+    sin_addr: u32;
+    _: Array(u8, 8);
+};
 get_selfsigned_cert :: fn() Ty([]u8, []u8) = {
     key_path, cert_path := ("target/key.pem", "target/cert.pem");
-    a := ast_alloc();
-    key := read_entire_file(a, key_path);
-    cert := read_entire_file(a, cert_path);
-    if key.is_none() || cert.is_none() {
+    if !file_exists(key_path) || !file_exists(cert_path) {
         eprintln("generating certificate (:slow)...");
         f: AsFnPtr(generate_selfsigned_cert) = generate_selfsigned_cert;  // jit-shim so don't compile import_c in common case. TODO: use it through ffi'include so it does that automatically
         f(cert_path, key_path);
-        key = (Some = read_entire_file_or_crash(a, key_path));
-        cert = (Some = read_entire_file_or_crash(a, cert_path));
     };
-    (key.unwrap(), cert.unwrap())
+    // doing it this way means deleting one will invalidate the cache and make it regenerate even if the program didn't change
+    (include_bytes(key_path), include_bytes(cert_path))
 }
 
 generate_selfsigned_cert :: fn(cert_path: Str, key_path: Str) void = {
@@ -366,7 +422,6 @@ Mbedtls :: {
         #include "mbedtls/pk.h"
 
         // TODO: do this automatically for unnamed enums
-        const int MBEDTLS_NET_PROTO_TCP_ = MBEDTLS_NET_PROTO_TCP;
         const int MBEDTLS_SSL_IS_SERVER_ = MBEDTLS_SSL_IS_SERVER;
         const int MBEDTLS_SSL_TRANSPORT_STREAM_ = MBEDTLS_SSL_TRANSPORT_STREAM;
         const int MBEDTLS_SSL_PRESET_DEFAULT_ = MBEDTLS_SSL_PRESET_DEFAULT;

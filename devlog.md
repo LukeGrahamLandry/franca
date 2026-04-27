@@ -1,4 +1,12 @@
 
+## (Apr 26)
+
+serve
+- replace `mbedtls_net_(bind, accept)` by doing the syscalls/libc directly. 
+  also don't need their io callbacks. 
+- works on macos. seems there's a delay on releasing the port if you run on orb then kill then run on mac. 
+- add it to the curl test so all this new stuff runs in ci
+
 ## (Apr 25)
 
 usefuckinghttpssoicandrawonthefuckingscreen

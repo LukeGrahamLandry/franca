@@ -1,5 +1,19 @@
 
+- make the lib/sys/subprocess.fr api more uniform. 
+  - easy to choose inherit vs become vs sync capture vs poll capture
+  - easy to pass env vars and change cwd (sadly posix_spawn can't do the latter?)
+  - easy to not bother with path lookup when running a file you just compiled
+  - easy to get result as status (and shift for WEXITSTATUS) or just ok vs err
+- import_c
+  - ffi: cleanup the different symbol tracking: imports/discarded_statics/getting from scope
+  - ffi: auto export enum constants with unnamed type
+  - switch how static mangling works to make it clear that it's per unit not per file
+  - unify all the example programs that maually do :discard_static_scope?
+  - put hash of import_c itself in its saved frc's deps
+  - ffi: don't spam print warnings. put the info about which are broken in the file somehow and only show if you try to use that symbol
 - comments in backend/meta/dis.fr
+  - dlopen for wasm and static
+  - cache better
 - examples/gpu/zones.fr
   - collect stack traces as well as the explicit zone markers. 
   - make it an easier dropin to other programs. maybe the envvar should automatically init/deinit in franca_runtime_init
