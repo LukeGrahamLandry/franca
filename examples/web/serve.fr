@@ -15,7 +15,7 @@
 // :SLOW should use multiple threads
 //       but then need to set MBEDTLS_THREADING_C 
 
-HELP :: "[serve.fr] -port [8000] -folder [target/web]\n";
+HELP :: "USAGE:\n[serve.fr] -port [8000] -folder [target/web]\nuse [-port 0] to assign an ephemeral one.";
 main :: fn() void = {
     args := import("@/lib/args.fr")'parse_args(@struct {
         port := 8000;
@@ -27,15 +27,14 @@ main :: fn() void = {
     key, cert := @run get_selfsigned_cert();
     @assert_eq(Mbedtls'psa_crypto_init(), 0, "failed psa_crypto_init");
     _ := Syscall'chdir(args.folder.as_cstr());
-    @println("https://localhost:% will serve %", args.port, args.folder);
-    ssl_server(key, cert, args.port.trunc());
+    s := @ref @zeroed Server;
+    port := init(s, key, cert, args.port.trunc()).or(fn(err) => panic(err));
+    @println("https://localhost:% serving %", port, args.folder);  // :TestWaitsForReadyString
+    ssl_server(s);
     Mbedtls'mbedtls_psa_crypto_free();
 }
 
-ssl_server :: fn(key: []u8, cert: []u8, port: u16) void = {    
-    s := @ref @zeroed Server;
-    init(s, key, cert, port).or(fn(err) => panic(err));
-    @println("ready.");  // :TestWaitsForReadyString
+ssl_server :: fn(s: *Server) void = {    
     mark := temp().mark();
     loop {
         continue :: local_return;
@@ -112,7 +111,7 @@ if false {  // im not using any other request headers rn
     .Err
 }
 
-fn init(s: *Server, key: []u8, cert: []u8, port: u16) Result(void, Str) = {
+fn init(s: *Server, key: []u8, cert: []u8, port: u16) Result(u16, Str) = {
     #use(Mbedtls);
     listen_fd, client_fd, ssl, conf, cache, srvcert, pkey := (s.listen_fd&, s.client_fd&, s.ssl&, s.conf&, s.cache&, s.srvcert&, s.pkey&);
     listen_fd.fd = -1;
@@ -138,7 +137,7 @@ fn init(s: *Server, key: []u8, cert: []u8, port: u16) Result(void, Str) = {
     @try mbedtls_x509_crt_parse(srvcert, cert.alloc_cstr(temp()).as_ptr(), cert.len.bitcast() + 1);
     @try mbedtls_pk_parse_key(pkey, key.alloc_cstr(temp()).as_ptr(), key.len.bitcast() + 1, zeroed(*u8), 0);
     
-    fd := net_bind(port).or(fn(msg) => return(Err = msg));
+    fd, real_port := net_bind(port).or(fn(msg) => return(Err = msg));
     listen_fd[] = fd;
     
     @try mbedtls_ssl_config_defaults(conf, MBEDTLS_SSL_IS_SERVER_[], MBEDTLS_SSL_TRANSPORT_STREAM_[], MBEDTLS_SSL_PRESET_DEFAULT_[]);
@@ -148,7 +147,7 @@ fn init(s: *Server, key: []u8, cert: []u8, port: u16) Result(void, Str) = {
     @try mbedtls_ssl_conf_own_cert(conf, srvcert, pkey);
     @try mbedtls_ssl_setup(ssl, conf);
     
-    .Ok
+    (Ok = real_port)
 }
 
 fn wait_for_request(s: *Server) []u8 = {
@@ -160,7 +159,7 @@ fn wait_for_request(s: *Server) []u8 = {
         client_fd.fd = -1;
         mbedtls_ssl_session_reset(ssl);
         fd := accept(listen_fd[], zeroed(*sockaddr_in), zeroed(*i64))
-            || continue(@println("failed: accept"));
+            || continue(@eprintln("failed: accept"));
         client_fd[] = fd;
         mbedtls_ssl_set_bio(ssl, raw_from_ptr(@type client_fd[], client_fd), fd_writer, fd_reader, zeroed(mbedtls_ssl_recv_timeout_t));
         
@@ -168,7 +167,7 @@ fn wait_for_request(s: *Server) []u8 = {
             r := mbedtls_ssl_handshake(ssl);
             // TODO: explain what this does. (i stole it from programs/ssl/ssl_server.c)
             if r != 0 && r != MBEDTLS_ERR_SSL_WANT_READ_[] && r != MBEDTLS_ERR_SSL_WANT_WRITE_[] {
-                @println("FAILED: mbedtls_ssl_handshake %", r);
+                @eprintln("FAILED: mbedtls_ssl_handshake %", r);
                 continue();
             };
             r != 0
@@ -183,7 +182,7 @@ fn wait_for_request(s: *Server) []u8 = {
                 @case(MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY_[]) => again(false);
                 @case(NetStatus.again) => again(true);
                 @case(NetStatus.stop) => continue();
-                @default => continue(@println("ERROR: mbedtls_ssl_read: %", r));
+                @default => continue(@eprintln("ERROR: mbedtls_ssl_read: %", r));
             };
             len = r.intcast();
             false
@@ -210,7 +209,7 @@ fn respond(s: *Server, out: []u8) void = {
         dowhile {
             r := mbedtls_ssl_close_notify(s.ssl&);
             if r != 0 && r != MBEDTLS_ERR_SSL_WANT_READ_[] && r != MBEDTLS_ERR_SSL_WANT_WRITE_[] && r != MBEDTLS_ERR_NET_CONN_RESET_[] {
-                @println("ERROR: mbedtls_ssl_close_notify: %", r);
+                @eprintln("ERROR: mbedtls_ssl_close_notify: %", r);
                 return();
             };
             r != 0
@@ -239,7 +238,7 @@ Server :: @struct {
     cache: Mbedtls.mbedtls_ssl_cache_context;
 };
 
-net_bind :: fn(port: u16) Result(Fd, Str) = {
+net_bind :: fn(port: u16) Result(Ty(Fd, u16), Str) = {
     fd: Fd = (fd = -1); error :: fn(msg) => { Syscall'close(fd); return(Err = msg); };
     
     SIG_IGN := rawptr_from_int(1);
@@ -263,7 +262,16 @@ net_bind :: fn(port: u16) Result(Fd, Str) = {
     };
     listen(fd, 10) || error("failed: listen");
     
-    (Ok = fd)
+    if port == 0 {
+        // asked for os to assign one, now report it so this can be composed with other programs. 
+        // (see "ephemeral port" in man 7 ip)
+        size := size_of(@type addr);
+        getsockname(fd, addr&, size&) || error("failed: getsockname");
+        @debug_assert(size >= size_of(@type addr));
+        port = addr.sin_port.byte_swap();
+    };
+    
+    (Ok = (fd, port))
 };
 
 NetStatus :: @struct(again :: -@as(i32)0xFF01, stop :: -@as(i32)0xFF02);
@@ -289,6 +297,7 @@ signal :: @S("signal") fn(signum: i32, handle: rawptr) rawptr #libc;
 socket :: @S("socket") fn(domain: i32, type: i32, protocol: i32) FdResult #libc #syscall(198, 41, NOSYS);
 bind :: @S("bind") fn(fd: Fd, addr: *sockaddr_in, addr_size: i64) voidResult #libc #syscall(200, 49, NOSYS);
 listen :: @S("listen") fn(fd: Fd, backlog: i64) voidResult #libc #syscall(201, 50, NOSYS);
+getsockname :: @S("getsockname") fn(fd: Fd, addr: *sockaddr_in, addr_size: *i64) voidResult #libc #syscall(204, 51, NOSYS);
 accept :: @S("accept") fn(fd: Fd, addr: *sockaddr_in, addr_size: *i64) FdResult #libc #syscall(202, 43, NOSYS);
 shutdown :: @S("shutdown") fn(fd: Fd, how: i64) voidResult #libc #syscall(210, 48, NOSYS);
 AF_INET :: 2;
@@ -360,7 +369,7 @@ generate_selfsigned_cert :: fn(cert_path: Str, key_path: Str) void = {
         @assert(ok, "% % %", ok, o.items(), e.items());
     };
     
-    @println("compiled (%, %) to generate (%, %)", programs[0]._0, programs[1]._0, key_path, cert_path);
+    @eprintln("compiled (%, %) to generate (%, %)", programs[0]._0, programs[1]._0, key_path, cert_path);
 
     prelude :: import("@/tests/external/curl.fr")'prelude;
     

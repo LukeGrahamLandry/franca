@@ -6,6 +6,7 @@ serve
   also don't need their io callbacks. 
 - works on macos. seems there's a delay on releasing the port if you run on orb then kill then run on mac. 
 - add it to the curl test so all this new stuff runs in ci
+- ask to be assigned a port for the test instead of hardcoding one chosen by fair die roll
 
 ## (Apr 25)
 

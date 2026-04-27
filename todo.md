@@ -1,4 +1,7 @@
 
+- wasm exceptions
+  - import_wasm: don't leak ExceptionStack when jumping out of try block
+  - isel/wasm: put the correct blocks in the try (ie. allow multiple)
 - make the lib/sys/subprocess.fr api more uniform. 
   - easy to choose inherit vs become vs sync capture vs poll capture
   - easy to pass env vars and change cwd (sadly posix_spawn can't do the latter?)

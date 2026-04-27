@@ -145,14 +145,14 @@ main :: fn() void = {
         @print("[ok] --help\n");
     };
     
+    @if(enable_tls) test_local(out_path, get_executable_path(temp()));
+    
     if !file_exists(Foreign.PATH.bin_sh) { 
         // :HACK the point of the sandboxing is kinda defeated if i have to change the programs to accommodate it 
         println("SKIP: built successfully but looks like running in a sandbox so not going to try network");
     } else {
         test_web(out_path, enable_tls);
     };
-    
-    @if(enable_tls) test_local(out_path, get_executable_path(temp()));
 }
 
 test_web :: fn(out_path: Str, enable_tls: bool) void = {
@@ -168,27 +168,33 @@ test_web :: fn(out_path: Str, enable_tls: bool) void = {
 }
 
 test_local :: fn(curl_path: Str, franca: Str) void = {
-    // TODO: ask for port 0 and os will give me random open one? 
-    //       then server needs to ask which one it got and print it back and i parse it here. 
-    script, folder, file, port := ("examples/web/serve.fr", "examples/web", "index.html", "55555");
+    script, folder, file := ("examples/web/serve.fr", "examples/web", "index.html");
     
     @println("==== [%]", script);
-    server := spawn_nonblocking(@slice(franca, script, "-folder", folder, "-port", port)).unwrap();
-    out := @ref u8.list(temp());
-    buf := @slice(out, out);
+    server := spawn_nonblocking(@slice(franca, script, "-folder", folder, "-port", "0")).unwrap();
+    out, err := (@ref u8.list(temp()), @ref u8.list(temp()));
+    buf := @slice(out, err);
+    prefix := "https://localhost:";  // :TestWaitsForReadyString
     dowhile {
         r := poll(server&, buf, true, @ref "", true, true).unwrap();
         @assert(r.is_none(), "server setup failed: %", out.items());
-        !out.items().contains("ready.")  // :TestWaitsForReadyString
+        !out.items().contains(prefix) || !out.items().contains(" ")
     };
     
+    // asking for port 0 gets a random free one, need to parse it back from the log message so we can talk to it. 
+    i := out.items().index_of_slice(prefix) || {
+        Posix'kill(server.pid, Posix.SIG.KILL).unwrap();
+        @panic("serve.fr changed output format:\n%", out.items());
+    };
+    port := out.items().slice(i + prefix.len, i + out.items().rest(i).index_of(" ".ascii()).unwrap());
     url := @tfmt("https://localhost:%/%", port, file);
+    
     ok, o, e := exec_and_catch(curl_path, @slice("-f", /*allow selfsigned*/ "-k", url), temp());
     expect := read_entire_file_or_crash(temp(), @tfmt("%/%", folder, file));
     fail := !ok || o.items() != expect;
     Posix'kill(server.pid, Posix.SIG.KILL).unwrap();
     status := poll_until_exit(server&, out, out, "");
-    @assert(!fail, "FAILED\ncurl ok=%\nserver logs:\n%\ncurl err:\n%", ok, out.items(), e.items());
+    @assert(!fail, "FAILED\ncurl ok=%\nserver logs:\n%%\ncurl err:\n%", ok, out.items(), err.items(), e.items());
     @assert_ne(status, 0, "expected to have killed it");
     @println("[ok] fetched (%) = % bytes", url, o.len);
 }
