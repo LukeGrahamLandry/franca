@@ -33,37 +33,23 @@ main :: fn() void = {
 // the output path (.bin/harec) matters because the tests exec it
 compile_harec :: fn() void = {
     files := collect_directory_ordered("src", temp(), temp()).unwrap();
-
     start_time := timestamp();
     arch := to_harec_arch(query_current_arch());
-    files2 := Str.list(temp());
     
+    src := @ref u8.list(temp());
     for files { it |
-        if it.name.ends_with(".c") {
-            files2&.push(@tfmt("src/%", it.name));
-        };
-    };
-    
-    // TODO: use it through import_module
-    C :: import("@/examples/import_c/lib.fr");
-    
-    c := C'new_module_and_compiler(.None);
-    c.include_paths&.push("include");
-    
-    for files2 { it |
-        // :discard_static_scope
-        c.macros&.clear();
-        c.scope.vars&.clear();
-        C'Preprocess'init_macros(c);
-        c.define_macro("VERSION", "\"xxx\"");
-        c.define_macro("DEFAULT_TARGET", @tfmt("\"%\"", arch));
-        c.pragma_once&.clear();
-    
-        C'compile_file_or_crash(c, it);
+        @if(it.name.ends_with(".c"))
+        @fmt(src, """
+            #add_include_path "include"
+            #define VERSION "xxx"
+            #define DEFAULT_TARGET "%"
+            #include "src/%"
+            #discard_static_scope 1
+        """, arch, it.name);
     };
     
     @assert make_dir(".bin");
-    c.finish_aot_module(".bin/harec");
+    import("@/examples/import_c/ffi.fr")'import_c'compile_host_exe(".bin/harec", src.items());
     @println("compiled harec in %ms", timestamp() - start_time);
 }
 

@@ -56,6 +56,10 @@ but the compiler can (slowly) compile itself.
   It can even cross compile a native version of the compiler that you can download as a way to bootstrap your first franca installation. 
 - The beginnings of an operating system for aarch64 [@/examples/os](./examples/os)
 
+Some of the examples have more detailed writeups. 
+- [Prospero](https://lukegrahamlandry.ca/words/prospero)
+- [Shapes and Colours Considered Insecure](https://lukegrahamlandry.ca/words/insecure_shapes)
+
 ## Documentation
 
 I suspect the best way to learn at this point is to just look at the examples folder, 

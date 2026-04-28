@@ -1,4 +1,7 @@
 
+- wasm cfg
+  - backend/wasm/isel.fr: fix_multientry_loops: see comment :TodoSketchyWasmFlow
+  - examples/web/serve.fr: ssl_parse_client_hello: ICE: bad nesting
 - wasm exceptions
   - import_wasm: don't leak ExceptionStack when jumping out of try block
   - isel/wasm: put the correct blocks in the try (ie. allow multiple)
@@ -11,9 +14,14 @@
   - ffi: cleanup the different symbol tracking: imports/discarded_statics/getting from scope
   - ffi: auto export enum constants with unnamed type
   - switch how static mangling works to make it clear that it's per unit not per file
-  - unify all the example programs that maually do :discard_static_scope?
   - put hash of import_c itself in its saved frc's deps
   - ffi: don't spam print warnings. put the info about which are broken in the file somehow and only show if you try to use that symbol
+  - ffi: another problem with the current way is that every time you discard_static_scope you get new versions of the types
+         so need to make sure the ones referenced by the implementation's compilation units don't bother being exported 
+         but they do need to exist a bit for the shim stuff. maybe that should just give up and do it from abi info instead. 
+  - ffi: static inline things ex. psa_set_key_algorithm, end up as import=libc i guess not called so not emitted. 
+         but also need to demangle if want to allow you to call them as though you were including that header. 
+         confusing because sometimes static means private but sometimes it's intended for you to include it and just not conflict. 
 - comments in backend/meta/dis.fr
   - dlopen for wasm and static
   - cache better

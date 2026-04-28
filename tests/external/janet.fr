@@ -54,18 +54,10 @@ bootstrap :: fn(root: Str, c_out_path: Str) void = {
     core_src := collect_with_extension(core_path, ".c").unwrap();
     
     // TODO: use it through import_module
-    // TODO: also using import_c this way is so VERBOSE, 
-    //       at least dedulicate it with tests/external/lox/compile_c_lox. 
-    Qbe :: import("@/backend/ir.fr");
     C :: import("@/examples/import_c/lib.fr");
 
-    c := C'new_module_and_compiler(.None);
-    @assert_ne(c.m.goal.os, .macos, "TODO: #ifdef JANET_APPLE #include <AvailabilityMacros.h> :(");
-    c.do_warnings = false;  // hush "non-scalar variadic argument"
-    
     write_entire_file_or_crash(@tfmt("%/src/include/janetconf.h", root), config_h);
     write_entire_file_or_crash(@tfmt("%/src/include/spawn.h", root), "#ifndef JANET_NO_SPAWN\n#error\n#endif");
-    c.include_paths&.push(@tfmt("%/src/include", root));
     files := Str.list(temp());
     for core_src { it |
         files&.push(@tfmt("%/%", core_path, it));
@@ -74,18 +66,21 @@ bootstrap :: fn(root: Str, c_out_path: Str) void = {
         files&.push(@tfmt("%/%", boot_path, it));
     };
     
+    src := @ref u8.list(temp());
     for files { it |
-        // :discard_static_scope
-        c.macros&.clear();
-        c.pragma_once&.clear();
-        c.scope.vars&.clear();
-        C'Preprocess'init_macros(c);
-        c.define_macro("JANET_BOOTSTRAP", "1");
-    
-        c.compile_file_or_crash(it);
+        @fmt(src, """
+            #add_include_path "%/src/include"
+            #define JANET_BOOTSTRAP 1
+            #include "%"
+            #discard_static_scope 1
+        """, root, it);
     };
     
     path := "target/janet_boot.out";
+    c := C'new_module_and_compiler(.None);
+    @assert_ne(c.m.goal.os, .macos, "TODO: #ifdef JANET_APPLE #include <AvailabilityMacros.h> :(");
+    c.do_warnings = false;  // hush "non-scalar variadic argument"
+    c.compile_src_or_crash(src.items());
     c.finish_aot_module(path);
     end_compile := timestamp();
     

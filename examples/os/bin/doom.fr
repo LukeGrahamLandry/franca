@@ -28,17 +28,13 @@ fetch :: fn() Ty(Str, Str) = {
 }
 
 IWAD :: @static_mut "";  // TODO: const destructure. `a, b :: foo()`
-doom :: (fn() ScopeId = {
+doom :: {
     #use("@/examples/import_c/ffi.fr");
-    Qbe :: import("@/backend/ir.fr");
     root, iwad := fetch();
     IWAD[] = "target/doom.iwad";
     #use("@/lib/sys/fs.fr");
     write_entire_file_or_crash(IWAD[], iwad);
-    fr := current_compiler_context();
-    c := import_c'init_fr(fr);
     src_path := @tfmt("%/fbdoom", root);
-    c.include_paths&.push(src_path);
     write_entire_file_or_crash(@tfmt("%/strings.h", src_path), SRC_strings_h);
     make_dirs(@tfmt("%/linux", src_path));
     write_entire_file_or_crash(@tfmt("%/linux/fb.h", src_path), """
@@ -59,36 +55,18 @@ doom :: (fn() ScopeId = {
     make_dirs(@tfmt("%/sys", src_path));
     write_entire_file_or_crash(@tfmt("%/sys/socket.h", src_path), "");
     
-    root_scope := list(Ty(Str, *import_c'C'Compile'VarScope), temp());
+    src := @ref u8.list(temp());
+    @fmt(src, "#add_include_path \"%\"\n", src_path);
     for source_files { it |
-        println(it);
-        src := read_entire_file_or_crash(c.arena, @tfmt("%/%", src_path, it));
-        or import_c'compile_c(c, it, src) { err |
-            @panic("%", err);
-        };
-        
-        // :discard_static_scope
-        retain c.scope.vars.raw& { name, v |
-            ::ptr_utils(@type v.var[]);
-            keep := v.var.is_null() || !v.var.is_static;
-            if !keep {
-                push(root_scope&, (name[], v[]));
-            };
-            keep
-        };
+        @fmt(src, """
+            #include "%"
+            #discard_static_scope 0
+        """, it);
     };
-    for root_scope { name, value |
-        c.scope.vars&.insert(name, value);
-    };
-    
-    bytes := import_c'compile_fr(fr, SRC, c, "doom");
-    fr'vtable'drop_qbe_module(Qbe.Module.raw_from_ptr(c.m));
-    c.arena_storage&.deinit();
-    result := fr'vtable'import_frc(fr.data, bytes);
-    or result { err |
-        fr.report_error(err)
-    }
-})();
+    src.push_all(SRC);
+
+    include(src.items())
+};
 
 source_files :: @const_slice(
     "wi_stuff.c", // TODO: order shouldn't matter
