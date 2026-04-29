@@ -290,14 +290,14 @@ fn import_frc(self: *SelfHosted, bytes: []u8) CRes(ScopeId) = {
         name := self.pool.insert_owned(header.get(it.name));
         loc := zeroed Span;  // TODO
         type: LazyType = (PendingEval = (
-            expr = (FrcImport = (module = module_handle, index = it.type.off, table = FTY_TABLE)), 
+            expr = (FrcImport = (module = module_handle, index = it.type.off, table = .fty)), 
             ty = Type, done = false, loc = loc,
         ));
         is_type := it.type.off == FTy.TYPE || it.type.off == FTy.SCOPE;
         expr: FatExpr = (ty = UnknownType, done = false, loc = loc, expr = (FrcImport = (
             module = module_handle, 
             index = it.payload.offset, 
-            table = @if(is_type, FTY_TABLE, SYM_TABLE),
+            table = @if(is_type, .fty, .sym),
         )));
         is_function := header.get(it.type)[].tag == .Func;
         if !is_type {
@@ -344,13 +344,13 @@ fn sema_frc_import(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     module := FrcModule.ptr_from_int(import.module); header := module.header;
     @debug_assert_eq(header.magic_v, MAGIC);
     loc := zeroed Span; // TODO
-    if import.table == FTY_TABLE {
+    if import.table == .fty {
         type := self.import_type(module, @as(One(FTy)) (off = import.index));
         @check(self.return_macro_type(expr, type)) return;
         return(.Ok)
     };
     
-    if(import.table != SYM_TABLE, => panic("invalid FrcImport.table")); 
+    if(import.table != .sym, => panic("invalid FrcImport.table")); 
     
     i := import&.get_sym();
     it := header.get(i);
@@ -437,7 +437,7 @@ fn sema_frc_import_fid(self: *SelfHosted, module: *FrcModule, i: One(Sym)) CRes(
                 wasm32 = h.get(it.asm.wasm32),
             ));
         } else {
-            func.body = (FrcImport = (module = FrcModule.int_from_ptr(module), index = i.off, table = SYM_TABLE));
+            func.body = (FrcImport = (module = FrcModule.int_from_ptr(module), index = i.off, table = .sym));
             msg :: "TODO: this won't work if did_regalloc on amd64 because it doesn't see RMem. maybe i should just store those differently\n%";
             //@err_assert(it.fnc.tmp != Qbe.no_symbol, msg, caller_name) return; // TODO
             @if(it.segment == .Code)
@@ -574,9 +574,6 @@ fn import_type_info(self: *SelfHosted, module: *FrcModule, it: *FTy) TypeInfo = 
     }
 }
 
-FTY_TABLE :: 0;
-SYM_TABLE :: 1;
-
 fn move_from_module(emit_ir: *EmitIr, import: *FrcImport) CRes(CodegenTask) = {
     zone := zone_begin(.ImportCache);
     module       := FrcModule.ptr_from_int(import.module); 
@@ -711,7 +708,7 @@ import_baked_var :: fn(self: *SelfHosted, shared: *FrontendCodegen, inst: *FrcMo
 
 fn emit_import_ref(self: *EmitIr, it: *FrcImport, p: EmitIr.P) CRes(Qbe.Ref) = {
     inst := @try(self.find_module(it)) return;
-    @debug_assert_eq(it.table, SYM_TABLE);
+    @debug_assert_eq(it.table, .sym);
     id := @try(import_baked_var(self.program, self.shared, inst, (off = it.index))) return;
     ref := self.as_ref(AddrOfA = (base = id, addend = 0));
     (Ok = self.scalar_result(p, ref, i64))  // :get_or_create_type
@@ -800,7 +797,7 @@ fn get_fid(self: *SelfHosted, module: *FrcModule, i: One(Sym)) CRes(?FuncId) = {
 }
 
 fn get_sym(import: *FrcImport) One(Sym) = {
-    @debug_assert_eq(import.table, SYM_TABLE);
+    @debug_assert_eq(import.table, .sym);
     (off = import.index)
 }
 

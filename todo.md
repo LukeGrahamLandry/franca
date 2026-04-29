@@ -22,6 +22,11 @@
   - ffi: static inline things ex. psa_set_key_algorithm, end up as import=libc i guess not called so not emitted. 
          but also need to demangle if want to allow you to call them as though you were including that header. 
          confusing because sometimes static means private but sometimes it's intended for you to include it and just not conflict. 
+  - when doing a lot of discard_static_scope you spend a lot of time redoing file reading syscalls for all the headers.
+    ex. build examples/web/serve.fr
+    - mac; include_code is 1800 samples. add_file->hash:500, read_and_push:135, search_include_paths:45
+    - orb; include_code:2028. add_file->hash:530, read_and_push:150, search_include_paths:400
+    so perhaps another layer of caching the file system that doesn't get reset with discard_static_scope.
 - comments in backend/meta/dis.fr
   - dlopen for wasm and static
   - cache better

@@ -21,6 +21,11 @@ int main() {
   };
   */
   
+  // enum tags are a new type but the enum's constants don't have that type. 
+  // [/n1570#6.7.2.2p3] "The identifiers in an enumerator list are declared as constants that have type int".
+  ASSERT(2, ({ enum foo { a = 0 }; _Generic(a, enum foo: 1, int: 2); }));
+  ASSERT(1, ({ enum foo { a = 0 }; enum foo b = a; _Generic(b, enum foo: 1, int: 2); }));
+  
   printf("OK\n");
   return 0;
 }
