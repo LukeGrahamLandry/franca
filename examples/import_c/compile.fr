@@ -232,6 +232,7 @@ Ctx :: @rec @struct {
     inline_assembly: RawList(u8);
     
     do_warnings: bool;  // can manually disable when using as a library
+    strict_redef_errors: bool;
 };
 
 TransformCall :: @FnPtr(c: *Ctx, obj: *Obj, task: *CodegenTask) void;
@@ -287,6 +288,7 @@ fn push_scope(c: *Ctx, name: Str, sc: VarScope) void = {
     ::ptr_utils(Scope);
     @debug_assert(!c.scope.is_null(), "uninit Ctx.scope");
     prev := insert(c.scope.vars&, name, sc);
+    @if(c.strict_redef_errors)
     if prev.is_some() {
         // TODO: show location
         @error_tok(c, zeroed(*Token), "shadowed identifier '%'", name);
@@ -2087,9 +2089,11 @@ fn parse_typedef(c: *Ctx, tok: *Token, basety: *CType) *Token = {
         // c.push_scope() but more relaxed rules because you're allowed to redundantly re-typedef a forward declaration like `typedef struct T T; typedef struct T { ... } T;`
         name := c.get_ident(ty.name);
         prev := insert(c.scope.vars&, name, (TypeDef = ty));
+        @if(c.strict_redef_errors)
         if prev { prev |
             @if(!prev&.is(.TypeDef)) @error_tok(c, ty.name, "typedef shadowed a non-typedef");
             if !identical(prev.TypeDef, ty) {
+                // TODO: the prev position gets stomped when reading a declaration in a useless way
                 @warn_tok(c, prev.TypeDef.name, "previously declared here");
                 @error_tok(c, ty.name, "re-typedef-ed with a different type");
             }

@@ -1,4 +1,10 @@
 
+## (Apr 30)
+
+- annoying that i give dumb error messages for a stray identifier. 
+  like oh somehow API_DEPRECATED_END didn't get defined?
+  that's "expected ',' but found " because global_variable fell of the end of a file and hit TK_pop_framework.
+
 ## (Apr 29)
 
 c

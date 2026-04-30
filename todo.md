@@ -11,6 +11,12 @@
   - easy to not bother with path lookup when running a file you just compiled
   - easy to get result as status (and shift for WEXITSTATUS) or just ok vs err
 - import_c
+  - tests/external/raylib.fr without strict_redef_errors=0 hack
+    - something strange with va_list in apple system headers
+    - more real problem is that #include TK_FRC needs to not import libc stuff / `_Float16` / etc. 
+  - `threaded := tls(.comptime)[].is_null();` 
+    :FUCKED what happened to anything you can do a comptime you can do at runtime. 
+    this is the only thing with that problem in 78000 lines of code, im so close to not lying :(
   - ffi: cleanup the different symbol tracking: imports/discarded_statics/getting from scope
   - ffi: auto export enum constants with unnamed type
   - switch how static mangling works to make it clear that it's per unit not per file

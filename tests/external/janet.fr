@@ -36,8 +36,8 @@ run_tests :: fn() void = {
     Janet'janet_deinit();
 }
 
+Ffi  :: import("@/examples/import_c/ffi.fr");
 Janet :: {
-    Ffi  :: import("@/examples/import_c/ffi.fr");
     c_source := @tfmt("""
         #add_include_path "%/src/include"
         #include "target/janet.c"
@@ -53,9 +53,6 @@ bootstrap :: fn(root: Str, c_out_path: Str) void = {
     core_path := @tfmt("%/src/core", root);
     core_src := collect_with_extension(core_path, ".c").unwrap();
     
-    // TODO: use it through import_module
-    C :: import("@/examples/import_c/lib.fr");
-
     write_entire_file_or_crash(@tfmt("%/src/include/janetconf.h", root), config_h);
     write_entire_file_or_crash(@tfmt("%/src/include/spawn.h", root), "#ifndef JANET_NO_SPAWN\n#error\n#endif");
     files := Str.list(temp());
@@ -70,6 +67,7 @@ bootstrap :: fn(root: Str, c_out_path: Str) void = {
     for files { it |
         @fmt(src, """
             #add_include_path "%/src/include"
+            #pragma franca do_warnings 0  // hush "non-scalar variadic argument"
             #define JANET_BOOTSTRAP 1
             #include "%"
             #discard_static_scope 1
@@ -77,11 +75,8 @@ bootstrap :: fn(root: Str, c_out_path: Str) void = {
     };
     
     path := "target/janet_boot.out";
-    c := C'new_module_and_compiler(.None);
-    @assert_ne(c.m.goal.os, .macos, "TODO: #ifdef JANET_APPLE #include <AvailabilityMacros.h> :(");
-    c.do_warnings = false;  // hush "non-scalar variadic argument"
-    c.compile_src_or_crash(src.items());
-    c.finish_aot_module(path);
+    @assert_ne(query_current_os(), .macos, "TODO: #ifdef JANET_APPLE #include <AvailabilityMacros.h> :(");
+    Ffi'import_c'compile_host_exe(path, src.items());
     end_compile := timestamp();
     
     ok, out, err := exec_and_catch(path, @slice(root), temp());

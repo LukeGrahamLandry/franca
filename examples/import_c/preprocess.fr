@@ -209,7 +209,8 @@ replace_defined :: fn(c: *Ctx, tok: **Token) *Token = {
     new
 }
 
-fn eval_const_expr(c: *Ctx, rest: **Token, tok: *Token) bool = {
+// `tok` is one before the expression so if the line ends the error points to the directive that expected an argument
+fn eval_const_expr_int(c: *Ctx, rest: **Token, tok: *Token) i64 = {
     start := tok;
     expr := c.copy_line(rest, tok.next);
     c.is_inside_if_directive_cond = true;
@@ -224,8 +225,11 @@ fn eval_const_expr(c: *Ctx, rest: **Token, tok: *Token) bool = {
     rest2 := zeroed(*Token);
     val   := c.const_expr(rest2&, expr);
     if(rest2.kind != .TK_EOF, => @error_tok(c, rest2, "extra token"));
-    val != 0
+    val
 }
+
+fn eval_const_expr(c: *Ctx, rest: **Token, tok: *Token) bool = 
+    c.eval_const_expr_int(rest, tok) != 0;
 
 fn push_cond_incl(c: *Ctx, tok: *Token, included: bool) void = {
     c.cond_incl&.push((
@@ -1026,6 +1030,16 @@ handle_directive :: fn(c: *Ctx, tok: *Token, cur: **Token) *Token = {
                 tok = c.skip_line(tok.next.next);
                 continue();
             };
+            if equal(tok.next, "franca") && !tok.next.at_bol && !tok.next.next.at_bol && !tok.next.next.next.at_bol {
+                name := tok.next.next;
+                cond := c.eval_const_expr(tok&, name);
+                @switch(name.str()) {
+                    @case("strict_redef_errors") => { c.strict_redef_errors = cond; };
+                    @case("do_warnings") => { c.do_warnings = cond; };
+                    @default => @warn_tok(c, name, "unknown pragma");
+                };
+                continue();
+            };
 
             // same as skip_line but no warning for extra tokens
             dowhile {
@@ -1056,10 +1070,9 @@ handle_directive :: fn(c: *Ctx, tok: *Token, cur: **Token) *Token = {
             tok.kind = .TK_discard_static_scope;
             arg := 0;
             c.append_one(cur, tok, false);
-            tok = tok.next;
-            if !tok.at_bol && tok.kind == .TK_PP_NUM {
-                c.convert_pp_number(tok);
-                arg = tok.val.i;
+            if !tok.next.at_bol {
+                arg = c.eval_const_expr_int(tok&, tok);
+            } else {
                 tok = tok.next;
             };
             cur.val.i = arg;
