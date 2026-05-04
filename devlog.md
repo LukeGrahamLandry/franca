@@ -1,4 +1,10 @@
 
+## (May 4)
+
+c
+- continuing the theme of sanity: stomping the name token on types is confusing. be explicit about when a decl
+- show that export_type_info(bit field) is an abi problem even if franca doesn't try to use it directly
+
 ## (Apr 30)
 
 - annoying that i give dumb error messages for a stray identifier. 
@@ -13,13 +19,9 @@ c
 - more strict errors for variable shadowing. 
   - make TK_FRC implicitly #pragma once. it can't define macros anyway so can't do anything crazy. 
   - need to allow typedef to shadow sometimes for forward declaration
-  - TODO: expect i broke the macos headers (tests/external/raylib)
-
-TODO: fix the log spam cause by:
 - problem with export_type_info(enum) when you discard_static_scope, objs in discarded_static
   can reference an enum whose members have now been removed from scope.vars so they won't be there when you try to finish the type
   (or the current manifestation where !identical(enum_type, type)) because the same header was included again so the names in scope are of the new unique version of that type)
-
 
 ## (Apr 28)
 

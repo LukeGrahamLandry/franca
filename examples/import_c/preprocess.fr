@@ -907,7 +907,6 @@ Directive :: @enum(
     pragma, error, warning, line,
     add_include_path, // TODO: my extensions should probably be pragmas
     discard_static_scope,
-    link_macos_framework,
     _,
 );
 
@@ -1024,19 +1023,25 @@ handle_directive :: fn(c: *Ctx, tok: *Token, cur: **Token) *Token = {
         };
         fn line() => c.read_line_marker(tok&, tok.next);
         fn pragma() => {
+            @if(tok.next.at_bol) @error_tok(c, tok, "#pragma expected an argument");
             if equal(tok.next, "once") {
                 prev := c.pragma_once&.insert(tok.file.name, ());
                 @if(prev.is_some()) @error_tok(c, tok, "ICE: #pragma once but file already in map??");
                 tok = c.skip_line(tok.next.next);
                 continue();
             };
-            if equal(tok.next, "franca") && !tok.next.at_bol && !tok.next.next.at_bol && !tok.next.next.next.at_bol {
+            if equal(tok.next, "franca") {
                 name := tok.next.next;
-                cond := c.eval_const_expr(tok&, name);
+                @if(name.at_bol) @error_tok(c, name, "#pragma franca expected an argument");
                 @switch(name.str()) {
-                    @case("strict_redef_errors") => { c.strict_redef_errors = cond; };
-                    @case("do_warnings") => { c.do_warnings = cond; };
-                    @default => @warn_tok(c, name, "unknown pragma");
+                    @case("strict_redef_errors") => { c.strict_redef_errors = c.eval_const_expr(tok&, name); };
+                    @case("do_warnings") => { c.do_warnings = c.eval_const_expr(tok&, name); };
+                    @case("link_macos_framework") => {
+                        s, _ := c.read_include_filename(tok&, name.next);
+                        a := c.m.forever&.borrow();
+                        c.m.extra_macos_frameworks&.push(s.shallow_copy(a), a);
+                    };
+                    @default => @error_tok(c, name, "unknown #pragma franca %", name.str());
                 };
                 continue();
             };
@@ -1088,12 +1093,6 @@ handle_directive :: fn(c: *Ctx, tok: *Token, cur: **Token) *Token = {
                 c.filename_cache&.clear();  
             };
         };
-        // `#link_macos_framework "foo"` is like passing `-framework foo` to clang
-        fn link_macos_framework() => {  
-            s, _ := c.read_include_filename(tok&, tok.next);
-            a := c.m.forever&.borrow();
-            c.m.extra_macos_frameworks&.push(s.shallow_copy(a), a);
-        }
         fn _() => {
             if tok.kind == .TK_PP_NUM {
                 c.read_line_marker(tok&, tok);
@@ -1373,6 +1372,7 @@ fn init_macros(c: *Ctx) void = {
     c.define_macro(@tfmt("__%__", c.m.goal.arch), "1");
     @if(c.m.goal.arch == .aarch64) c.define_macro("__arm64__", "1");
     @if(c.m.goal.arch == .rv64) c.define_macro("__riscv", "1");
+    @if(c.m.goal.arch == .rv64) c.define_macro("__riscv_xlen", "64");
     
     // TargetConditionals.h doesn't work because I don't define __GNUC__
     if c.m.goal.os == .macos {

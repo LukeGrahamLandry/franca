@@ -139,6 +139,12 @@ InitDesg :: @rec @struct {
     var: *Obj;
 };
 
+Declare :: @struct {
+    type: *CType #use;
+    var_name: *Token;
+    for_missing_name_error: *Token;
+};
+
 #use(Preprocess);
 
 Ctx :: @rec @struct {
@@ -461,19 +467,19 @@ fn new_var(c: *Ctx, name: Str, ty: *CType, a: Alloc) *Obj = {
     var
 }
 
-fn new_lvar(c: *Ctx, name: Str, ty: *CType) *Obj = {
+fn new_lvar_no_slot(c: *Ctx, name: Str, ty: *CType, tok: *Token) *Obj = {
     var := c.new_var(name, ty, temp());
-    var.tok = ty.name;
+    var.tok = tok;
     var.is_local = true;
+    var
+}
 
-    if c.current_fn { current_fn |
+fn new_lvar(c: *Ctx, name: Str, ty: *CType, tok: *Token) *Obj = {
+    var := c.new_lvar_no_slot(name, ty, tok);
+    current_fn := c.current_fn.unwrap();
         if var.ty.size >= 0 {  // :StaticArrayOfUnknownLength
-            if !c.f.start.is_null() {  // HACK: fix create_params_lvars instead of having an insane ordering where we delay making the start block so this knows to delay making variables for no reason
                 c.create_stack_slot(var);
-            };
         };
-    };
-    
     var
 }
 
@@ -763,26 +769,20 @@ fn func_params(c: *Ctx, rest: **Token, tok: *Token, ret: *CType) *CType = {
             continue();
         };
 
-            ty2 := c.declspec(tok&, tok, .None);
-            ty2  = c.declarator(tok&, tok, ty2);
+            arg := c.declspec(tok&, tok, .None);
+            arg := c.declarator(tok&, tok, arg);
     
-            name := ty2.name;
-            @match(ty2.kind) {
+            name := arg.var_name;
+            arg := @match(arg.kind) {
                 // "array of T" is converted to "pointer to T" only in the parameter
                 // context. For example, *argv[] is converted to **argv by this.
-                fn TY_ARRAY() => { 
-                    ty2 = c.pointer_to(ty2.base);
-                    ty2.name = name;
-                }
+                fn TY_ARRAY() => c.pointer_to(arg.base);
                 // Likewise, a function is converted to a pointer to a function
                 // only in the parameter context.
-                fn TY_FUNC() => {
-                    ty2 = c.pointer_to(ty2);
-                    ty2.name = name;
-                }
-                @default => ();
+                fn TY_FUNC() => c.pointer_to(arg.type);
+                @default => arg.type;
             };
-            params&.push(ty2);
+            params&.push(arg);
             names&.push(name);
     };
     rest[] = tok;
@@ -874,7 +874,7 @@ fn ignore(rest: **Token, tok: *Token, $ignored: []Str) bool #inline = {
     false
 }
 
-fn declarator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
+fn declarator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) Declare = {
     ty = c.pointers(tok&, tok, ty);
 
     // "declaration mirrors use"
@@ -904,13 +904,10 @@ fn declarator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
     };
 
     ty = c.type_suffix(rest, tok, ty);
-    // TODO: this makes everything confusing
-    //       we're stomping the name of the type with the name of the variable
-    //       it works out because we only look at one variable at a time, 
-    //       except for in func_params() where they need to be shuffled out into param_names
-    ty.name = name;
-    ty.name_pos = name_pos;
-    ty
+    if ty.def_at.is_null() {
+        ty.def_at = name_pos;
+    };
+    (type = ty, var_name = name, for_missing_name_error = name_pos)
 }
 
 // same as declarator but without an identifier
@@ -1029,7 +1026,7 @@ fn compute_vla_size(c: *Ctx, ty: *CType) Qbe.Ref = {
 }
 
 // TODO: sane error message for `, $body: @Fn(),`
-fn declarators(c: *Ctx, tok: **Token, basety: *CType, first_declarator: *CType, $body: @Fn(decl: *CType) void #duplicated) void = {
+fn declarators(c: *Ctx, tok: **Token, basety: *CType, first_declarator: Declare, $body: @Fn(decl: Declare) void #duplicated) void = {
     body(first_declarator); // TODO: only call once with do while
     while => !consume_end(tok, ";") {
         tok[] = c.skip(tok[], ",");
@@ -1040,25 +1037,28 @@ fn declarators(c: *Ctx, tok: **Token, basety: *CType, first_declarator: *CType, 
 
 // TODO: share more code with global_variable? 
 //       it's weird that static global and static local mean the same thing and have the same syntax but totally different code paths. 
-fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr, first_declarator: *CType, expect_var: bool) *Token = {
+fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr, first_declarator: Declare, expect_var: bool) *Token = {
     start := tok;
     declarators(c, tok&, basety, first_declarator) { ty |
         continue :: local_return;
         if(ty.kind == .TY_VOID, => @error_tok(c, tok, "variable declared void"));
-        if ty.name.is_null() {
+        if ty.var_name.is_null() {
             @if(!expect_var) continue();
-            @error_tok(c, ty.name_pos, "variable name omitted");
+            @error_tok(c, ty.for_missing_name_error, "variable name omitted");
         };
         
+        var_name := ty.var_name;
+        ty := ty.type;
+        name := c.get_ident(var_name);
         is_const := false;
         if attr { attr |
             is_const = attr.is_const && !@is(ty.kind, .TY_PTR, .TY_FUNC);  // :ConstVarInConstExpr
             if attr.is_static {
                 // static locals are secretly globals
                 // note: calling new_gvar would be wrong even tho it also mangles if is_static because then a global static of the same name would mangle to the same thing. todo: add a test that catches that mistake. 
-                var := c.new_anon_gvar(ty, start);
+                var := c.new_anon_gvar(ty, var_name);
                 var.is_const = is_const;
-                c.push_scope(c.get_ident(ty.name), (Var = var));
+                c.push_scope(name, (Var = var));
                 if consume(tok&, tok, "=") {
                     c.gvar_initializer(tok&, tok, var);
                 };
@@ -1072,18 +1072,15 @@ fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr, first_decl
         // (e.g. int (*foo)[n][m] where n and m are variables.)
         vla_size := c.compute_vla_size(ty);
 
+        var := c.new_lvar(name, ty, var_name);
         if ty.kind == .TY_VLA {
             if(equal(tok, "="), => @error_tok(c, tok, "variable-sized object must not be initialized"));
 
-            name := c.get_ident(ty.name);
-            var := c.new_lvar(name, ty);
             var.stack_slot = c.f.newtmp(name, .Kl);
             c.emit(.alloc16, .Kl, var.stack_slot, vla_size, QbeNull);
             continue();
         };
         
-        name := c.get_ident(ty.name);
-        var := c.new_lvar(name, ty);
         if attr { attr |
             if attr.align != 0 {
                 var.align = attr.align;  // TODO
@@ -1112,7 +1109,7 @@ fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr, first_decl
             // but `int main() { int foo; (void)foo; return 0; }` is a valid c program so i should accept it. 
             @if(var.ty.size.ule(8)) c.gen_zero_var(var, tok);  
         };
-        if(var.ty.size < 0,         => @error_tok(c, ty.name, "variable '%' has incomplete type", name));
+        if(var.ty.size < 0,         => @error_tok(c, var_name, "variable '%' has incomplete type", name));
         @debug_assert(var.ty.kind != .TY_VOID);
     };
     
@@ -1911,8 +1908,9 @@ fn struct_members(c: *Ctx, rest: **Token, tok: *Token, parent_struct: *CType) vo
         comma_sep(c, tok&, ";") {
             mem := c.arena.box_zeroed(Member);
             mem.tok = tok;
-            mem.ty = c.declarator(tok&, tok, basety);
-            mem.name = mem.ty.name;
+            it := c.declarator(tok&, tok, basety);
+            mem.ty = it.type;
+            mem.name = it.var_name;
             mem.idx = idx.intcast();
             idx += 1;
             mem.align = if(attr.align != 0, => attr.align, => mem.ty.align);
@@ -1949,6 +1947,7 @@ fn struct_members(c: *Ctx, rest: **Token, tok: *Token, parent_struct: *CType) vo
 fn struct_union_decl(c: *Ctx, rest: **Token, tok: *Token) *CType = {
     ty := c.new_type(.TY_STRUCT, 0, 1);
     tok = c.attribute_list(tok, ty);
+    ty.def_at = tok;
 
     // Read a tag.
     tag: ?*Token = .None;
@@ -2076,28 +2075,28 @@ fn paren_typename(c: *Ctx, rest: **Token, tok: *Token) ?*CType = {
 fn parse_typedef(c: *Ctx, tok: *Token, basety: *CType) *Token = {
     comma_sep(c, tok&, ";") {
         ty := c.declarator(tok&, tok, basety);
-        if(ty.name.is_null(), => @error_tok(c, ty.name_pos, "typedef name omitted"));
+        if(ty.var_name.is_null(), => @error_tok(c, ty.var_name, "typedef name omitted"));
         
         if equal(tok, "__attribute__") {
             _ := c.attribute_list(tok&, tok);
         };
         
         if !equal(tok, ";") && !equal(tok, ",") {
-            @error_tok(c, ty.name_pos, "invalid type after 'typedef'");
+            @error_tok(c, ty.var_name, "invalid type after 'typedef'");
         };
         
         // c.push_scope() but more relaxed rules because you're allowed to redundantly re-typedef a forward declaration like `typedef struct T T; typedef struct T { ... } T;`
-        name := c.get_ident(ty.name);
-        prev := insert(c.scope.vars&, name, (TypeDef = ty));
+        name := c.get_ident(ty.var_name);
+        prev := insert(c.scope.vars&, name, (TypeDef = ty.type));
         @if(c.strict_redef_errors)
         if prev { prev |
-            @if(!prev&.is(.TypeDef)) @error_tok(c, ty.name, "typedef shadowed a non-typedef");
-            if !identical(prev.TypeDef, ty) {
-                // TODO: the prev position gets stomped when reading a declaration in a useless way
-                @warn_tok(c, prev.TypeDef.name, "previously declared here");
-                @error_tok(c, ty.name, "re-typedef-ed with a different type");
+            @if(!prev&.is(.TypeDef)) @error_tok(c, ty.var_name, "typedef shadowed a non-typedef");
+            if !identical(prev.TypeDef, ty.type) {
+                @warn_tok(c, prev.TypeDef.def_at, "previously declared here");
+                @error_tok(c, ty.var_name, "re-typedef-ed with a different type");
             }
         };
+        ty.def_at = ty.var_name;
     };
     tok
 }
@@ -2346,13 +2345,13 @@ fn imported(c: *Ctx, var: *Obj) void = {
     };
 }
 
-fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: *CType) *Token = {
-    t := ty.name_pos;
-    if(ty.name.is_null(), => @error_tok(c, tok, "function name omitted"));
-    name_str := c.get_ident(ty.name);
+fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: Declare) *Token = {
+    t := ty.var_name;
+    ty := ty.type;
+    if(t.is_null(), => @error_tok(c, tok, "function name omitted"));
+    name_str := c.get_ident(t);
     
-    @debug_assert(identical(ty.name, ty.name_pos));  // todo: confusing to have two things
-    f := if c.find_func(ty.name) { f |
+    f := if c.find_func(t) { f |
         if(!f.is_function,                     => @error_tok(c, t, "redeclared as a different kind of symbol"));
         if(f.is_definition && equal(tok, "{"), => {
             @warn_tok(c, f.tok, "previously declared here");
@@ -2491,17 +2490,17 @@ fn init_function(c: *Ctx, a: Alloc) void = {
     c.f.track_ir_names = c.m.debug != 0;
 }
 
-fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_declarator: *CType, expect_var: bool) *Token = {
+fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_declarator: Declare, expect_var: bool) *Token = {
     declarators(c, tok&, basety, first_declarator) { ty |
         continue :: local_return;
-        if ty.name.is_null() {
+        if ty.var_name.is_null() {
             @if(!expect_var) continue();
-            @error_tok(c, ty.name_pos, "variable name omitted");
+            @error_tok(c, ty.for_missing_name_error, "variable name omitted");
         };
         
         prev_is_tentative   := false;
         prev_is_definition := false;
-        prev := c.find_var(ty.name_pos);
+        prev := c.find_var(ty.var_name);
         prev_var := Obj.ptr_from_int(0);
         if prev { prev |
             ::ptr_utils(@type prev_var[]);
@@ -2514,16 +2513,16 @@ fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, first_d
         
         var := prev_var;
         if var.is_null() {
-            var = c.new_gvar(c.get_ident(ty.name), ty, ty.name_pos, attr.is_static);
+            var = c.new_gvar(c.get_ident(ty.var_name), ty.type, ty.var_name, attr.is_static);
             var.is_const = attr.is_const && !@is(ty.kind, .TY_PTR, .TY_FUNC);  // :ConstVarInConstExpr
         } else {
             if var.is_static != attr.is_static {
                 @warn_tok(c, var.tok, "forward declared here");
-                @error_tok(c, ty.name_pos, "static-ness must match forward declaration");
+                @error_tok(c, ty.var_name, "static-ness must match forward declaration");
             };
             
             if var.ty.size <= 0 {  // declared as flexible[]; 
-                var.ty = ty;
+                var.ty = ty.type;
             };
         };
         var.is_definition = !attr.is_extern;
@@ -3057,7 +3056,7 @@ parse_bracketed :: fn(c, rest, tok) #prefix(.@"(") = {
                 c.yield(var);
                 c.new_var_node(var, start)
             } else {  // local
-                var := c.new_lvar(c.new_unique_name(), ty);
+                var := c.new_lvar(c.new_unique_name(), ty, start);
                 var.tok = tok;
                 lhs := c.lvar_initializer(rest, tok, var);
                 rhs := c.new_var_node(var, tok);
@@ -4327,16 +4326,12 @@ fn emit(c: *Ctx, op: Qbe.O, k: Qbe.Cls, to: Qbe.Ref, arg0: Qbe.Ref, arg1: Qbe.Re
 
 fn gen_par(c: *Ctx, ty: *CType) void = {
     obj := c.current_fn.expect("gen_par() in function context");
-    if ty.params.len > ty.param_names.len {    
-        // TODO: unreachable? should be ICE
-        // TODO: this is probably at the wrong place now since we alias types?
-        @error_tok(c, ty.params[ty.param_names.len].name_pos, "parameter name omitted")
-    }
+    @debug_assert_eq(ty.params.len, ty.param_names.len, "unreachable because missing names are filled in with null");
     obj_params := temp().alloc_init(*Obj, ty.params.len) { i |
         name := ty.param_names[i];
         // C23 (WG14-N2510): allow unnamed parameter even if it has a body. 
         name := @if(name.is_null(), c.new_unique_name(), c.get_ident(name)); 
-        c.new_lvar(name, ty.params[i])
+        c.new_lvar_no_slot(name, ty.params[i], ty.param_names[i])
     };
     
     f := c.f; 

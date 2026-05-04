@@ -517,6 +517,7 @@ cset	w0, eq
     - todo/musl
     - todo/coremark
   - the different variations of prospero. !FEAT_JIT, FEAT_PNG
+- examples/web/(serve, get).fr on macos (rn i do it as part of curl test which i only run on linux)
 - anything on riscv
 - everything i test on import_wasm i should test on v8 as well
 - anything about error message quality / source locations / backtraces
@@ -746,6 +747,16 @@ examples/os (tls(.deny_syscalls)[])
 - tests/external/(bubblewrap, curl) (weirdness with multiarch?)
 - wuffs std/json (float bug!!)
 - tcc: bootstrap+abitest
+- tests/external/janet.fr -test
+```
+A franca program received a fatal signal.
+(signal = 11, addr = 140735498602856, value = 0, code = 1, ip = 140735498602856)
+  1: janet_continue_no_check#53__56136 
+  2: janet_continue__56134 
+  3: janet_dobytes__57041 
+  4: janet_dostring__57042 
+  5: main__2460 
+```
 
 wasm
 - tests/fr/(inline_asm_jit, intrins).fr (haven't bothered to write the AsmFunction)
