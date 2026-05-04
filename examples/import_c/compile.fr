@@ -50,7 +50,6 @@ Node :: @rec @struct(
     var: *Obj,
     r: Qbe.Ref,
     lvalue: Qbe.Ref,  // what would you get if you took the & of this expression
-    current_block: *Qbe.Blk,   // TODO: remove
 );
 
 NodeKind :: @enum(i32) (
@@ -72,7 +71,6 @@ NodeKind :: @enum(i32) (
     ND_LT,        // <
     ND_LE,        // <=
     ND_ASSIGN,    // =
-    ND_COND,      // ?:
     ND_MEMBER,    // . (struct member access)
     ND_NOT,       // !
     ND_BITNOT,    // ~
@@ -305,7 +303,6 @@ fn new_node(c: *Ctx, kind: NodeKind, tok: *Token) *Node = {
     node := temp().box_zeroed(Node);
     node.kind = kind;
     node.tok = tok;
-    node.current_block = c.b;
     node
 }
 
@@ -399,7 +396,6 @@ fn new_cast_force(c: *Ctx, expr: *Node, ty: *CType) *Node = {
     node.tok = expr.tok;
     node.lhs = expr;
     node.ty = ty; 
-    node.current_block = expr.current_block; // HACK: this is super confusing, hopefully it will go away with asts
     
     //node.lvalue = expr.lvalue;  // :FrontendConstantFolding, TODO: but this is wrong, we're assuming its a noop cast but what if its a truncation
     
@@ -408,7 +404,6 @@ fn new_cast_force(c: *Ctx, expr: *Node, ty: *CType) *Node = {
     if(to.kind == .TY_VOID, => return(c.ir_node(c.ty_void, QbeNull, QbeNull, expr.tok)));  // explicit discard a value
     
     prev := c.b;
-    c.b = expr.current_block;
     node.r = c.gen_cast(source, from, to, node.tok);
     c.b = prev;
     node
@@ -2984,33 +2979,48 @@ conditional :: fn(c, rest, tok, cond) #infix(.@"?", .Conditional) = {
     else_block := c.new_block();
     join_block := c.new_block();
     
-    ::if(Ty(*CType, *Qbe.Blk, Qbe.Ref, Qbe.Ref));
+    ::if(Ty(*Qbe.Blk, *Node, *Node));
     c.eat(tok&, "?");
-    ty, then_phi_src, then_r, else_r := if consume(tok&, tok, ":") {
+    then_phi_src, then, else := if consume(tok&, tok, ":") {
         // [GNU] Compile `a ?: b` as `tmp = a, tmp ? tmp : b`.
         then_block = join_block;
         then := c.ir_node(cond.ty, original_cond, QbeNull, tok);
         c.b = else_block;
         else := c.parse_expr(rest, tok, .Conditional);
-        ty := c.add_type(.ND_COND, then&, else&);
-        (ty, cond_block, then.r, else.r)
+        (cond_block, then, else)
     } else {
         c.b = then_block;
         then := c.parse_expr(tok&, tok, .None);
+        @if(then.ty.is_null()) @error_tok(c, then.tok, "undeclared var");  // :LabelAsInfix
         then_phi_src := c.b;
         c.jmp_if_unterminated(join_block);
         tok = c.skip(tok, ":");
         c.b = else_block;
         else := c.parse_expr(rest, tok, .Conditional);
-        ty   := c.add_type(.ND_COND, then&, else&);
-        (ty, then_phi_src, then.r, else.r)
+        (then_phi_src, then, else)
+    };
+    
+    // inlined c.usual_arith_conv() so the casts end up in the source blocks (not after the phi in join)
+    ty := if then.ty.kind == .TY_VOID || else.ty.kind == .TY_VOID {
+        c.ty_void
+    } else {
+        c.get_common_type(then.ty, else.ty)
     };
     else_phi_src := c.b;
+    if ty.kind != .TY_VOID {
+        else = c.new_cast(else, ty);
+    };
     c.jmp_if_unterminated(join_block);
     c.b = cond_block;
     c.jnz_if_unterminated(cond_r, then_block, else_block);
-    c.b = join_block;
     
+    if ty.kind != .TY_VOID {
+        c.b = then_phi_src;
+        then = c.new_cast(then, ty);
+    };
+    
+    c.b = join_block;
+    then_r, else_r := (then.r, else.r);
     r := if rtype(cond_r) == .RCon {  
         // :FrontendConstantFolding (only matters if the values are RCon too)
         is_false := iscon(c.f.get_constant(cond_r), false, 0);
@@ -3034,7 +3044,6 @@ conditional :: fn(c, rest, tok, cond) #infix(.@"?", .Conditional) = {
     };
     lvalue := if(@is(ty.kind, .TY_STRUCT, .TY_UNION), => r, => QbeNull);
     node := c.ir_node(ty, r, lvalue, tok);
-    node.current_block = join_block; // this makes a cast from the result go to the right place (when gen_expr gets called again by our caller)
     node
 };
 

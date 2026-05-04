@@ -4,6 +4,9 @@
 c
 - continuing the theme of sanity: stomping the name token on types is confusing. be explicit about when a decl
 - show that export_type_info(bit field) is an abi problem even if franca doesn't try to use it directly
+- remove Node.current_block. the last remaining place where i wasn't doing it eagerly 
+  was add_type for ternary operator. the cast for each side needs to go in the source block not the join
+  because it needs to be before the phi. 
 
 ## (Apr 30)
 
