@@ -1272,7 +1272,6 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 - gui
   - play against uci engine
   - promotion
-  - bit board overlays like the old one (and ui to choose which to show)
   - run search on a seperate thread
   - ui for turning off the bot and choosing which colour to play
 - exe that exposes uci

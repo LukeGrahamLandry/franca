@@ -11,6 +11,9 @@ web/get
   - it seems duplicate header names are common (from my very scientific survey of only google.com). 
   - found the rfc, not following it diligently but it's there for when im in the mood. 
 
+chess/gui
+- copy/paste fen, show bitboard overlay
+
 ## (May 4)
 
 c

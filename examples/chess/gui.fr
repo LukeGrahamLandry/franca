@@ -6,6 +6,15 @@
 // TODO: fetch dependencies in the web demo so this can be pretty. 
 UGLY :: false || GRAPHICS_TARGET_WEB;
 
+HELP :: """
+click source to show moves then target square to move. 
++/-: zoom board in/out.
+cmd+(c/v): get/set fen from/to clipboard.
+space: toggle square labels / fen.
+left/right: cycle highlighted bitboard.
+p: toggle pretty piece images.
+""";
+
 State :: @struct(
     pipe: Sgl.Pipeline,
     pass_action: Sg.PassAction,
@@ -22,6 +31,7 @@ State :: @struct(
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     allocator := general_allocator();
     sapp.set_window_title("Chess");
+    sapp.desc.enable_clipboard = true;
     
     state.draw&.setup(
         allocator = allocator,
@@ -89,6 +99,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         window_size = zeroed Vec2,
         show_square_labels = false,
         ugly_pieces = UGLY,
+        show_bit_board = 4,
     );
     
     state.dirty = true;
@@ -123,6 +134,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         state.dirty = true;
         valid_move := click(state.board&, vec2(event.mouse_x, event.mouse_y));
         if valid_move && state.board.board.nextPlayer == .Black {
+            println(state.board.board&.t_fen());
             state.play_computer_move();
         }
     }
@@ -140,11 +152,28 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             fn P() => if !UGLY {
                 state.board.ugly_pieces = !state.board.ugly_pieces;
             }
+            fn C() => if event.modifiers.get(.super) != 0 {
+                sapp.set_clipboard_string(state.board.board&.t_fen());
+            };
+            fn RIGHT() => state.rotate(1);
+            fn LEFT() => state.rotate(-1);
             @default => return();
         }
         state.dirty = true;
     }
+    
+    rotate :: fn(state: *State, delta: i64) void = {
+        state.board.show_bit_board = mod(state.board.show_bit_board + delta + bit_board_views.len(), bit_board_views.len());
+    };
+    
     if @is(event.type, .RESIZED) {
+        state.dirty = true;
+    }
+    if event.type == .CLIPBOARD_PASTED {
+        if Chess'fromFen(event.pasted) { board |
+            println(state.board.board&.t_fen());
+            state.board.board = board;
+        };
         state.dirty = true;
     }
 };
@@ -169,6 +198,7 @@ BoardView :: @struct {
     size: f32;
     window_size: Vec2;
     show_square_labels: bool;
+    show_bit_board: i64;  // index into bit_board_views
     
     board: Chess.Board;
     lists: Chess.ListPool;
@@ -238,7 +268,7 @@ fn draw(self: *BoardView, sgl: *Sgl.Self, sdtx: *Sdtx.Context) void = {
     if result != .Continue {
         set_font_scale(0.8);
         set_text_position(base + vec2(0, -sdtx.desc.char_height));
-        sdtx.color = pack_rgba(1.0, 0.0, 1.0, 1.0);
+        sdtx.color = pack_rgba(0.0, 0.0, 1.0, 1.0);
         sdtx.put(@tfmt("%", result));
     };
     
@@ -246,11 +276,10 @@ fn draw(self: *BoardView, sgl: *Sgl.Self, sdtx: *Sdtx.Context) void = {
     msg := zeroed(Array(u8, 2));
     @if(self.show_square_labels)
     iter { rank, file, pos, p |
-        ::import("@/examples/chess/uci.fr");
         msg&[0] = fileToLetter(file.trunc()).ascii_to_upper();
         msg&[1] = rankToLetter(rank.trunc());
         set_text_position(pos + base);
-        sdtx.color = pack_rgba(0.0, 0.0, 1.0, 1.0);
+        sdtx.color = pack_rgba(1.0, 1.0, 1.0, 1.0);
         sdtx.put(msg&.items());
     };
     
@@ -259,14 +288,26 @@ fn draw(self: *BoardView, sgl: *Sgl.Self, sdtx: *Sdtx.Context) void = {
         set_text_position(base + vec2(0, self.size + sdtx.desc.char_height));
         sdtx.color = pack_rgba(1.0, 0.0, 1.0, 1.0);
         sdtx.put(@tfmt("%", self.board&.t_fen()));
+        name := bit_board_views[self.show_bit_board]._0;
+        set_text_position(base + vec2(0, self.size + sdtx.desc.char_height*3));
+        sdtx.put(@tfmt("Highlight: % (%/%)", name, self.show_bit_board, bit_board_views.len()));
     };
     
-    note :: fn(i: u8, colour: u32) void => {
-        scale: f32 = 0.60;
+    small :: 0.60; big :: 0.85;
+    note :: fn(i: u8, colour: u32, scale: f32) void => {
         rank, file := i.div_mod(8);
         pos := to_pixels(file, rank);
         square(base + pos + vec2((1.0 - scale) / 2 * s), vec2(s * scale), colour);
     };
+    
+    _, f := bit_board_views[self.show_bit_board];
+    c, b, w := @match(f) {
+        fn One(f) => (pack_rgba(0.0, 1.0, 0.0, 1.0), f(self.board&), 0);
+        fn Two(f) => (pack_rgba(0.0, 0.0, 1.0, 1.0), f(self.board&, .Black), f(self.board&, .White));
+    };
+    for_bits(w.bit_and(b.bit_not()), fn(i) => note(i.trunc(), pack_rgba(1.0, 0.0, 0.0, 1.0), big));
+    for_bits(b.bit_and(w.bit_not()), fn(i) => note(i.trunc(), c, big));
+    for_bits(b.bit_and(w), fn(i) => note(i.trunc(), pack_rgba(1.0, 0.0, 1.0, 1.0), big));
     
     if self.click_index { i |
         break :: local_return;
@@ -279,10 +320,10 @@ fn draw(self: *BoardView, sgl: *Sgl.Self, sdtx: *Sdtx.Context) void = {
         // TODO: only generate moves from the one piece, not all of them!
         moves := possibleMoves(self.board&, p.colour(), self.lists&);
         
-        note(i.trunc(), pack_rgba(1.0, 1.0, 0.0, 1.0));
+        note(i.trunc(), pack_rgba(1.0, 1.0, 0.0, 1.0), small);
         for moves { move |
             if move.from == i.trunc() {
-                note(move.to, pack_rgba(0.678, 0.847, 0.902, 1.0));
+                note(move.to, pack_rgba(0.678, 0.847, 0.902, 1.0), small);
             }
         };
         
@@ -365,9 +406,30 @@ main :: fn() void =
 driver :: fn(vtable: *ImportVTable) void = 
     Easy'build_for_graphics(vtable, @source_file_name()); 
 
+::import("@/examples/chess/uci.fr");
 Chess :: import("@/examples/chess/moves.fr");
 Search :: import("@/examples/chess/search.fr");
 #use("@/graphics/lib.fr");
+
+WebUi :: import("@/examples/chess/web.fr");
+BitBoardView :: @tagged(
+    One: @FnPtr(*Chess.Board) i64, 
+    Two: @FnPtr(*Chess.Board, Chess.Colour) i64,
+);
+bit_board_views :: @const_slice(@as(Ty(Str, BitBoardView))
+    ("None", (One = fn(_) = 0)),
+    ("All Pieces", (Two = WebUi.getPositionsBB)),
+    ("Kings", (Two = WebUi.getKingsBB)),
+    ("Castling", (Two = WebUi.getCastlingBB)),
+    ("Last Move", (One = WebUi.getLastMoveBB)),
+    ("French Move", (One = WebUi.getFrenchMoveBB)),
+    ("Attacks", (Two = WebUi.getAttackBB)),
+    ("Sliding Checks", (Two = WebUi.slidingChecksBB)),
+    ("Pins By Bishop", (Two = WebUi.pinsByBishopBB)),
+    ("Pins By Rook", (Two = WebUi.pinsByRookBB)),
+    ("French Pins By Bishop", (Two = WebUi.pinsFrenchByBishopBB)),
+    ("French Pins Rook", (Two = WebUi.pinsFrenchByRookBB)),
+);
 
 Stb :: {
     root := Foreign'stb();
