@@ -1,41 +1,86 @@
 // this is trying to be a minimal example of making an https request with mbedtls. 
 // it mostly exists for symmetry so you can test ./serve.fr without any external programs. 
 // UNSAFE: it doesn't check the server's tls certificate.
-// it also doesn't check the http status code or follow redirects
+// TODO: support http as well (no 's')
+// TODO: if i want all the curl arguments my programs use: --oauth2-bearer and -Fcontent=@path
+// TODO: option in fetch.fr to use this instead of exec(PATH[curl]) if the deps for mbedtls are already cached
 
-main :: fn() void = {
-    args := import("@/lib/args.fr")'parse_args(@struct {
-        port := 443;
-        host := "";
-        path := "/";
-        v := false;  // show headers?
-    });
-    @assert(args.host != "" && !args.host.contains("/") && args.path.starts_with("/"), 
-        "USAGE: [get.fr] -host [example.com] [-port 443] [-path /] [-v]");
-    server_name := args.host.as_cstr();
-    port: u16 = args.port.trunc();
-    @match(get_https_unsafe(args.host, args.port.trunc(), args.path)) {
-        fn Ok(it) => {
-            @if(args.v) eprint(it.headers);
-            print(it.data);
-        }
-        fn Err(msg) => @panic("failed fetch %:%%: %", args.host, args.port, args.path, msg);
+Args :: @struct {
+    port := 443;
+    host := "";
+    path := "/";
+    urls: []Str #rest = empty();
+    @"-max-redirs" := 30;  // only used if L=true
+    L := false;            // follow redirects?
+    f := false;            // crash if status != 200
+    o := "";               // output file path
+    v := false;            // show headers?
+};
+
+main :: fn() void = cli(import("@/lib/args.fr")'parse_args(Args));
+cli :: fn(args: Args) void = {
+    deconstructed := args.host != "" && !args.host.contains("/") && args.path.starts_with("/");
+    redirects := @if(args.L, args.@"-max-redirs", 0);
+    urls := @ref Url.list(temp());
+    if deconstructed {
+        urls.push(scheme = "https", host = args.host, port = args.port.trunc(), path = args.path);
+    };
+    for args.urls { s |
+        if s.contains("://") {
+            url := parse_url(s)
+                .or(fn(msg) => @panic("failed to parse url (%): %", s, msg));
+            urls.push(url);
+        };
+    };
+    for urls { url |
+        @match(get_https_unsafe(url, redirects)) {
+            fn Ok(it) => {
+                @if(args.v) eprint(it.raw.slice(0, it.data.len));
+                if args.o == "" {
+                    print(it.data);
+                } else {
+                    import("@/lib/sys/fs.fr")'write_entire_file_or_crash(args.o, it.data);
+                };
+                @assert(!args.f || it.status == 200, "status=%; %", it.status, it.msg);
+            }
+            fn Err(msg) => @panic("failed fetch (%): %", url&, msg);
+        };
+    };
+    @assert(urls.len > 0, "USAGE: [get.fr] -host [example.com] [-port 443] [-path /] [-v]");
+}
+
+get_https_unsafe :: fn(url: Url, redirects: i64) Result(Response, Str) = {
+    loop {
+        continue :: local_return;
+        buf := @try(get_https_unsafe_raw(url)) return;
+        r := @try(parse_headers(buf)) return;
+        @if(redirects > 0) if (@try(r&.get_redirect()) return) { it |
+            url = it;
+            redirects -= 1;
+            continue();
+        };
+        return(Ok = r);
     }
 }
 
-// TODO: don't early return from this, need to clean up the fd / mbedtls stuff. :LEAK
-get_https_unsafe :: fn(host: Str, port: u16, path: Str) Result(@struct(headers: []u8, data: []u8), Str) = {
+get_https_unsafe_raw :: fn(url: Url) Result([]u8, Str) = {
+    @if(url.scheme != "https") return(Err = @tfmt("expected https (url=%)", url&));
+    host, port, path := (url.host, url.port, url.path);
     #use(Mbedtls);
     server_name := host.as_cstr();
     request := @tfmt("GET % HTTP/1.0\r\nHost: %\r\n\r\n", path, server_name);
-Sockets'with_mbedtls {
+    result: Result(Str, Str) = (Err = "unreachable");
+    defer_fd: ?Fd = .None;
     ssl := @ref @zeroed mbedtls_ssl_context;
     conf := @ref @zeroed mbedtls_ssl_config;
-    
     mbedtls_ssl_init(ssl);
     mbedtls_ssl_config_init(conf);
+Sockets'with_mbedtls {
+    B :: local_return;
+    return :: fn(it: @type result) => { result = it; B() };
     
     fd := @try(connect_by_name(server_name, port)) return;
+    defer_fd = (Some = fd);
     
     r := mbedtls_ssl_config_defaults(conf, MBEDTLS_SSL_IS_CLIENT_[], MBEDTLS_SSL_TRANSPORT_STREAM_[], MBEDTLS_SSL_PRESET_DEFAULT_[]);
     @if(r != 0) return(Err = "fail: mbedtls_ssl_config_defaults");
@@ -67,18 +112,87 @@ Sockets'with_mbedtls {
     
     _ := mbedtls_ssl_close_notify(ssl);
 
-    Syscall'close(fd);
+    return(Ok = buf);
+};
     mbedtls_ssl_free(ssl);
     mbedtls_ssl_config_free(conf);
-    
-    i := buf.len;
-    if buf.index_of_slice("\r\n\r\n") { j |
-        i = min(buf.len, j + 4);
-    };
-    return(Ok = (headers = buf.slice(0, i), data = buf.rest(i)));
-};
-unreachable() // TODO: don't leak the signal and stuff
+    if(defer_fd, fn(it) => { Syscall'close(it); });
+    result
 }
+
+#use("@/lib/collections/map.fr");
+Response :: @struct(status: i64, msg: Str, raw: []u8, data: []u8, headers: RawHashMap(Str, Str));
+
+// TODO: you're allowed more whitespace: https://datatracker.ietf.org/doc/html/rfc2616#section-4.2
+// TODO: names should be case insensitive
+parse_headers :: fn(buf: []u8) Result(Response, Str) = {
+    // if let specify non-arena it will leak on error or duplicate headers (because you can't know to free). 
+    full_input, line, a := (buf, 1, temp());
+    h: HashMap(Str, Str) = init(a);
+    error :: fn(msg) => return(Err = @tfmt("(http headers, error at line %): %", line, msg));
+    @if(!buf.starts_with("HTTP/")) error("missing magic");
+    i := buf.index_of_slice(" ") || error("missing status");
+    buf := buf.rest(i + 1);
+    status, r := convert_number(buf, 10, dec_digit);
+    buf := r;
+    i := buf.index_of_slice("\r\n") || error("truncated");
+    msg := buf.slice(0, i);
+    line += 1;
+    buf := buf.rest(i + 2);
+    while => !buf.starts_with("\r\n") {
+        name_end := buf.index_of_slice(": ") 
+            || error("truncated");
+        name := buf.slice(0, name_end);
+        buf = buf.rest(name_end + 2);
+        data_end := buf.index_of_slice("\r\n") 
+            || error("truncated");
+        data := buf.slice(0, data_end);
+        if h&.insert(name, data) { prev |
+            // rfc says duplicate headers become comma separated list
+            new := @afmt(a, "%,%", prev, data);
+            h&.insert(name, new);
+        };
+        buf = buf.rest(data_end + 2);
+        @if(buf.len == 0) error("truncated");
+        line += 1;
+    };
+    buf = buf.rest(2);
+    (Ok = (raw = full_input, data = buf, status = status, headers = h.raw, msg = msg))
+}
+
+Url :: @struct(scheme: Str, host: Str, port: u16, path: Str);
+// TODO: check for characters that need to be url encoded
+parse_url :: fn(url: []u8) Result(Url, Str) = {
+    scheme_end := url.index_of_slice("://") || return(Err = "missing scheme");
+    scheme := url.slice(0, scheme_end);
+    url := url.rest(scheme_end + 3);
+    path_start := url.index_of_slice("/") || url.len;
+    port := 443;
+    host := url.slice(0, path_start);
+    // :slow went over it already to find "/", could merge the loops, but also io is so slow theres no world where this matters
+    if url.index_of_slice(":") { port_start |
+        if port_start < path_start {
+            p, extra := convert_number(url.rest(port_start + 1), 10, dec_digit);
+            @if(p <= 0 || p >= 65535) return(Err = "invalid port"); 
+            @if(!identical(extra.ptr, host.end_pointer())) return(Err = "invalid character in port");
+            port = p;
+            host = url.slice(0, port_start);
+        };
+    };
+    path := url.rest(path_start);
+    path := @if(path.len == 0, "/", path);
+    (Ok = (scheme = scheme, host = host, port = port.trunc(), path = path))
+}
+
+fn get_redirect(r: *Response) Result(?Url, Str) = {
+    @if(!(r.status >= 300 && r.status <= 399)) return(Ok = .None);
+    url := r.headers&.get("Location") || return(Err = "3xx status missing Location header");
+    url := @try(parse_url(url)) return;
+    (Ok = (Some = url))
+}
+
+fn display(it: *Url, out: *List(u8)) void = 
+    @fmt(out, "%://%:%%", it.scheme, it.host, it.port, it.path);
 
 Sockets :: import("@/examples/web/serve.fr");
 connect_by_name :: fn(host: CStr, port: u16) Result(Fd, Str) = {
@@ -121,8 +235,8 @@ addrinfo :: @rec @struct {
     ai_protocol: u32;
     ai_addrlen: u32;
     nameaddr: @union(
-        l: @struct { ai_addr: *import("@/examples/web/serve.fr").sockaddr_in; ai_canonname: CStr; },
-        m: @struct { ai_canonname: CStr; ai_addr: *import("@/examples/web/serve.fr").sockaddr_in; },
+        l: @struct { ai_addr: *Sockets.sockaddr_in; ai_canonname: CStr; },
+        m: @struct { ai_canonname: CStr; ai_addr: *Sockets.sockaddr_in; },
     );
     ai_next: *addrinfo;
 };

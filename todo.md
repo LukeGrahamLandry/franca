@@ -1,4 +1,14 @@
 
+- finish examples/gpu/rtc.fr. 
+  make graphics/shaders translation support a more interesting subset of the language. 
+  need to be able to pass around pointers to mutable arrays on the stack.
+  might be time to give up and do address space annotations. 
+- debug tests/external/tigr.fr. 
+  crashes in rosetta and if i try to run fewer tests by passing a level to ci.c. 
+  for sanity make sure it works when compiled by clang on my machine 
+  (at least the latter must be my fault because they run it in github actions too)
+- would be nice if i could access the return type of the current function
+  so wasn't forced to name it if need to put it in a var to get around @must_return
 - wasm cfg
   - backend/wasm/isel.fr: fix_multientry_loops: see comment :TodoSketchyWasmFlow
   - examples/web/serve.fr: ssl_parse_client_hello: ICE: bad nesting
@@ -33,11 +43,17 @@
     - mac; include_code is 1800 samples. add_file->hash:500, read_and_push:135, search_include_paths:45
     - orb; include_code:2028. add_file->hash:530, read_and_push:150, search_include_paths:400
     so perhaps another layer of caching the file system that doesn't get reset with discard_static_scope.
+  - document how TK_push_framework and friends work. 
+  - make TK_push_framework work when jitting. needs more involved version of fill_from_libc. 
+    for franca code it's handled by graphics/easy.fr/build_for_graphics 
+    but im already doing loads of apple specific stuff 
+    so there's no purity argument for not putting it in the c frontend too. 
 - comments in backend/meta/dis.fr
   - dlopen for wasm and static
   - cache better
 - examples/gpu/zones.fr
   - collect stack traces as well as the explicit zone markers. 
+    - get jitted symbol names from perfmap like samply does
   - make it an easier dropin to other programs. maybe the envvar should automatically init/deinit in franca_runtime_init
   - option to automatically start the ui after running like samply does
   - add it to tests/gpu.fr. run something to generate some data for it. 
@@ -1259,6 +1275,10 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
   - bit board overlays like the old one (and ui to choose which to show)
   - run search on a seperate thread
   - ui for turning off the bot and choosing which colour to play
+- exe that exposes uci
+- my old ChessBot/uci.zig needed someone else's uci->lichess thingy.
+  that could be a good demo to make web/get.fr usable as a library. 
+  https://lichess.org/api
 
 ### Terminal
 
@@ -1657,9 +1677,6 @@ A :: @struct {
 - https://andrewkelley.me/post/string-matching-comptime-perfect-hashing-zig.html
 - fix examples/compiler_gui
 - rust format! macro. they have format_args! builtin to the compiler which is kinda funny
-- make graphics/shaders translation support a more interesting subset of the language 
-- profiler gui 
-  - samply solves my problem but it would be nice to have something basic that works without installing random stuff
 - something that generates point clouds / LAZ files so you can use the geo demo without 
 needing to go find some data in the right format (and without me including a blob for it)   
 - http://www.xmailserver.org/diff2.pdf
@@ -1667,6 +1684,7 @@ needing to go find some data in the right format (and without me including a blo
 - runner for 
   - https://github.com/ertdfgcvb/play.core/tree/master/src/programs/demos
   - https://github.com/bellard/quickjs
+- qr
 
 ### assembler
 

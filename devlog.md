@@ -1,4 +1,16 @@
 
+## (May 5)
+
+web/get
+- support the curl parameters that fetch.fr uses. 
+  (despite not being useful because of bootstrapping, i like having code like that as documentation of how the external programs are expected to behave)
+  follow redirects and error on non-success status so now it's actually usable. 
+- more structured about parsing urls/headers. 
+  - its hard to get out of the habit of feeling guilty for allocating things ever
+    but network doesn't get out of bed for less than 100ms so it really doesn't matter. 
+  - it seems duplicate header names are common (from my very scientific survey of only google.com). 
+  - found the rfc, not following it diligently but it's there for when im in the mood. 
+
 ## (May 4)
 
 c
@@ -9,6 +21,11 @@ c
   because it needs to be before the phi. 
 - reset temp around function body, still leaks but that was the most offensive one. 
   hopefully didn't miss anything that's in there. also reuse one ND_STMT node. 
+- clicking around on github found a charming little ui thing to add as an example. 
+  - apple's linker must be doing some crazy look at the object files stuff to figure out where externs go. 
+    maybe that's what tbd files are, i vaguely remember reading zig people talking about that? 
+    idc tho, for now just going to annotate them. i kinda respect them for not including AppKit/AppKit.h
+    for the one variable even if it means more work for me now. 
 
 ## (Apr 30)
 

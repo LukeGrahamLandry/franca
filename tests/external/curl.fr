@@ -170,9 +170,13 @@ test_local :: fn(curl_path: Str, franca: Str) void = {
     ok, o, e := exec_and_catch(curl_path, @slice("-f", /*allow selfsigned*/ "-k", url), temp());
     expect := read_entire_file_or_crash(temp(), @tfmt("%/%", folder, file));
     fail := !ok || o.items() != expect;
-    get :: import("@/examples/web/get.fr")'get_https_unsafe;
+    S :: import("@/examples/web/get.fr");
+    get :: S'get_https_unsafe;
     f: AsFnPtr(get) = get;  // :shim so don't compile if !enable_tls and this whole function is never called
-    result := f("localhost", port.parse_int().trunc(), @tfmt("/%", file));
+    it := S'parse_url(url);
+    it := it.or(fn(msg) => @panic("failed to parse url (%): %", url, msg));
+    @assert(it.host == "localhost" && it.port == port.parse_int().trunc() && it.path == @tfmt("/%", file), "failed to parse url: %", url);
+    result := f(it, 0);
     Posix'kill(server.pid, Posix.SIG.KILL).unwrap();
     status := poll_until_exit(server&, out, out, "");
     @assert(!fail, "FAILED\ncurl ok=%\nserver logs:\n%%\ncurl err:\n%", ok, out.items(), err.items(), e.items());

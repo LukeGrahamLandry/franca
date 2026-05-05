@@ -37,12 +37,21 @@ with_mbedtls {
 }
 
 with_mbedtls :: fn($body: @Fn() void) void = {
-    @assert_eq(Mbedtls'psa_crypto_init(), 0, "failed psa_crypto_init");
-    SIG_IGN := rawptr_from_int(1);
-    old := signal(Posix.SIG.PIPE, SIG_IGN);
-    body();
-    signal(Posix.SIG.PIPE, old);
-    Mbedtls'mbedtls_psa_crypto_free();
+    guard := @static zeroed(import("@/lib/sys/sync/mutex.fr").Mutex);
+    // TODO: audit this. idk what global state they'd have but it's better i remember to look at it than be confused when it breaks. 
+    @assert(guard.try_lock(), "TODO: compile with MBEDTLS_THREADING_C enabled");  // (could just use this mutex to make it safe but that's a footgun if you spawned threads because you expected there to actually be threads)
+    old := zeroed rawptr;
+    if guard.count == 1 {  // if you know you're going to call this in a loop, can hoist it and be less slow
+        @assert_eq(Mbedtls'psa_crypto_init(), 0, "failed psa_crypto_init");
+        SIG_IGN := rawptr_from_int(1);
+        old = signal(Posix.SIG.PIPE, SIG_IGN);
+    };
+    @must_return body();
+    if guard.count == 1 {
+        signal(Posix.SIG.PIPE, old);
+        Mbedtls'mbedtls_psa_crypto_free();
+    };
+    guard.unlock();
 }
 
 ssl_server :: fn(s: *Server) void = {    
@@ -90,18 +99,8 @@ find_response :: fn(in: []u8) Result(@struct(path: Str, bytes: []u8), void) = {
     @if(!in.starts_with(prefix)) return(.Err);
     in = in.rest(prefix.len);
     
-    i := 0;
-    while => i < in.len && !in.rest(i).starts_with(" HTTP/") {
-        i += 1;
-    };
+    i := in.index_of_slice(" ") || return(.Err);
     path := in.slice(0, i);
-if false {  // im not using any other request headers rn
-    in = in.rest(i);
-    while => in.len > 0 && !in.starts_with("\r\n") {
-        in = in.rest(1);
-    };
-    in = in.rest(2 * int(in.len > 2));
-};
 
     @if(!path.starts_with("/")) return(.Err);
     path = path.rest(1);
