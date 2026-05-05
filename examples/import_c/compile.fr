@@ -187,8 +187,8 @@ Ctx :: @rec @struct {
     // (ie. return, goto, etc.) so if there's unreachable code / jumps, 
     // they can be emitted without stomping anything important. 
     // not a @static_mut so it doesn't try to get baked if was already used at comptime. 
-    // TODO: need to forget .ins when i want to reset temp
     discard_block: *Qbe.Blk;  
+    nd_stmt: *Node;  // i make a lot of these and they never need to be nested or make any interesting typecheck errors, etc.
     
     // I'm probably going to regret this. 
     error_buf: List(u8);
@@ -260,6 +260,7 @@ fn enter_scope(c: *Ctx) void = {
 }
 
 // TODO: reuse if it's empty (which it often will be because of :WackyConstScope) :SLOW
+//       (but be careful because i reset temp now)
 fn leave_scope(c: *Ctx) void = {
     c.scope = c.scope.next;
     c.scope_depth -= 1;
@@ -299,7 +300,8 @@ fn push_scope(c: *Ctx, name: Str, sc: VarScope) void = {
     };
 }
 
-fn new_node(c: *Ctx, kind: NodeKind, tok: *Token) *Node = {
+fn new_node(c: *Ctx, kind: NodeKind, tok: *Token) *Node #inline = {
+    @if(kind == .ND_STMT) return(c.nd_stmt);
     node := temp().box_zeroed(Node);
     node.kind = kind;
     node.tok = tok;
@@ -503,7 +505,7 @@ fn new_gvar(c: *Ctx, name: Str, ty: *CType, tok: *Token, is_static: bool) *Obj =
 }
 
 fn new_unique_name(c: *Ctx) Str = {
-    s := u8.list(c.arena);
+    s := u8.list(9, c.arena);
     @fmt(s&, ".L..%", c.next_var_id);
     c.next_var_id += 1;
     s.items()
@@ -1855,8 +1857,7 @@ fn compound_stmt(c: *Ctx, rest: **Token, tok: *Token) *Node = {
                 expect_var := !equal(tok, ";");
                 ty := c.declarator(tok&, tok, basety);
                 @if_else {
-                    // TODO: error if it has a body
-                    @if(ty.kind == .TY_FUNC) => c.function(tok, basety, attr&, ty);
+                    @if(ty.kind == .TY_FUNC) => c.function(tok, basety, attr&, ty, false);
                     @if(attr.is_extern)   => c.global_variable(tok, basety, attr&, ty, expect_var);
                     @else => c.declaration(tok, basety, (Some = attr&), ty, expect_var);
                 }
@@ -2340,7 +2341,7 @@ fn imported(c: *Ctx, var: *Obj) void = {
     };
 }
 
-fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: Declare) *Token = {
+fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: Declare, allow_body: bool) *Token = {
     t := ty.var_name;
     ty := ty.type;
     if(t.is_null(), => @error_tok(c, tok, "function name omitted"));
@@ -2376,6 +2377,8 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: Declare) *
         ty := c.declarator(tok&, tok, basety);
         return c.global_variable(tok, basety, attr, ty, true);
     };
+    @if(!allow_body) @error_tok(c, tok, "nested function has a body");
+enter_task c.emitter { entry | 
     depth := c.scope_depth;
     f.is_definition = true;
     c.current_fn = (Some = f);
@@ -2445,18 +2448,16 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: Declare) *
     if c.inline_assembly.len == 0 {
         c.f.set_link_from_rpo();
         f.f = c.f;
-        c.yield(f);
+        c.yield(f, entry);
     } else {
         // TODO: assert no other code in body until im ready to split it into a call to another function
         f.yielded = true;
         @assert(!@is(c.m.goal.type, .Cached, .CachedEarly), "TODO: need to be consistant about how to handle modules like this that don't actually compile anything");
         c.have_seen_c_code = true;
-        enter_task c.emitter { entry | 
             code := temp().box_zeroed(MultiArchAsm);
             code[c.m.goal.arch] = c.inline_assembly.items().shallow_copy(temp());
             entry.task = (Asm = (lnk = c.f.lnk&, code = code));
             c'transform(c, f, entry.task&);
-        };
         c.inline_assembly&.clear();
     };
     
@@ -2464,13 +2465,14 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr, ty: Declare) *
     c.current_fn = .None;
     c.f = Qbe.Fn.ptr_from_int(0);
     @debug_assert_eq(depth, c.scope_depth);
+    c.discard_block.ins = empty();  // don't leave it pointing at temp() if some extra junk instructions were emitted
+};
     tok
 }
 
 fn init_function(c: *Ctx, a: Alloc) void = {
     c.f = a.box_uninit(Qbe.Fn);
     c.f.default_init(c.m);
-    // todo: f.con is still in tmp which is kinda not what you want for the toplevel one
     
     c.consts = a.box_zeroed(@type c.consts[]);
     c.consts[] = init(a);
@@ -2650,7 +2652,8 @@ fn parse(c: *Ctx, tok: *Token) void = {
             if ty.kind == .TY_FUNC {
                 prev_c := c.consts;
                 prev := c.f;   // :TopLevelFunction
-                tok := c.function(tok, basety, attr&, ty);
+                tok := c.function(tok, basety, attr&, ty, true);
+                // c.cache_con01 doesn't matter because 1 is always going to be the first thing we add in init_function  
                 c.f = prev;
                 c.consts = prev_c;
                 c.b = c.f.start; // HACK
@@ -2659,9 +2662,6 @@ fn parse(c: *Ctx, tok: *Token) void = {
                 c.global_variable(tok, basety, attr&, ty, expect_var)
             }
         };
-        
-        // TODO: reset temp() here? but then if want to delay adding functions to the module, 
-        //       need to have them not in temp(), or copy them out at the end. 
     };
 
     each c.tentative& { name, var |
@@ -2819,7 +2819,6 @@ fn parse_expr(c: *Ctx, rest: **Token, tok: *Token, prec: Prec) *Node = {
     };
     rest[] = tok;
     @if(SPAM) @println("End Expression: % % %", tok.str(), tok.kind, node.kind);
-    c.gen_expr(node);
     node
 }
 
@@ -3154,7 +3153,7 @@ parse_ident :: fn(c, rest, tok) #prefix(.TK_IDENT) = {
         // might be a label: the colon will be treated as an infix operator
         // this case can't skip the var lookup tho because of `a?b:c;`, from here we can't tell that b is not a label.
         // it's fine if didn't get here because it was a Var/Enum, the infix(:) just looks at the indentifier of the Node. 
-        node := c.new_node(.ND_STMT, start);
+        node := c.new_node(.ND_NULL_EXPR, start);
         node.r = Qbe.Null;
         node.lvalue = Qbe.Null;
         return(node);
@@ -3248,7 +3247,6 @@ pre_inc :: fn(c, rest, tok) #prefix(.@"++") = { // Read ++i as i+=1
     lhs := c.parse_expr(rest, tok, .Unary);
     c.new_add(lhs&, rhs&, rhs.tok);
     node := c.to_assign(.ND_ADD, lhs, rhs, rhs.tok);
-    c.gen_expr(node);
     node
 };
 
@@ -3259,7 +3257,6 @@ pre_dec :: fn(c, rest, tok) #prefix(.@"--") = { // Read --i as i-=1
         node.lhs = node.lhs.lhs;  // HACK. 
     };
     node := c.to_assign(node.kind, node.lhs, node.rhs, node.tok);
-    c.gen_expr(node);
     node
 };
 
@@ -3586,6 +3583,7 @@ default :: fn(c, rest, tok) #prefix(.default, .ND_STMT) = {
     c.eat(tok&, "default");
     tok = c.skip(tok, ":");
     c.stmt(rest, tok);
+    @if(!current_switch.default.is_null()) @error_tok(c, tok, "switch has multiple default cases");
     current_switch.default = unique_label;
     
     next_block := c.new_block();
@@ -4113,7 +4111,6 @@ fn get_struct_member(ty: *CType, name: *Token) ?*Member = {
 //
 // This function takes care of anonymous structs.
 fn struct_ref(c: *Ctx, node: *Node, tok: *Token) *Node = {
-    c.add_type(node);
     ty := node.ty;
     has_fields := @is(ty.kind, .TY_STRUCT, .TY_UNION);
     if(!has_fields, => @error_tok(c, node.tok, "not a struct nor a union (%, %)", node.kind, ty.kind));
@@ -4302,7 +4299,7 @@ fn ir_node(c: *Ctx, ty: *CType, r: Qbe.Ref, lvalue: Qbe.Ref, tok: *Token) *Node 
 ********************/
 
 fn new_block(c: *Ctx) *Qbe.Blk = {
-    @if(c.speculate) return(c.discard_block);
+    @if(c.speculate || c.static_initializer_depth != 0) return(c.discard_block);
     
     f := c.f;
     b := newblk();
@@ -4384,7 +4381,7 @@ fn gen_expr(c: *Ctx, node: *Node) Qbe.Ref = {
     if(node.r != QbeNull, => return(node.r));
     c.add_type(node);
     ::ptr_utils(@type c.f[]);
-    if(c.f.is_null() || c.speculate, => return(node.r));
+    if(c.speculate, => return(node.r));
     node.r = c.gen_expr_inner(node);
     node.r
 }
@@ -4651,11 +4648,6 @@ fn gen_call(c: *Ctx, callee: *Node, function_ty: *CType, arg: []*Node, tok: *Tok
     if variadic_marker_index == 0 {
         arguments&.push(make_ins(.argv, .Kw, QbeNull, QbeNull, QbeNull));
     };
-    
-    ::ptr_utils(Obj);
-    
-    // TODO: compiler bug: if you get a compile error here when jitting, 
-    //       you fault in the jit shim (stack overflow maybe?).  -- Mar 11, 2025
 
     for arguments { i |    
         c.b.push(i);

@@ -7,6 +7,8 @@ c
 - remove Node.current_block. the last remaining place where i wasn't doing it eagerly 
   was add_type for ternary operator. the cast for each side needs to go in the source block not the join
   because it needs to be before the phi. 
+- reset temp around function body, still leaks but that was the most offensive one. 
+  hopefully didn't miss anything that's in there. also reuse one ND_STMT node. 
 
 ## (Apr 30)
 

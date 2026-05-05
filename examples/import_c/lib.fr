@@ -41,6 +41,8 @@ fn reset_ctx(c: *Compile.Ctx, m: *QbeModule, worker: *CodegenShared, arena: Aren
     c.do_warnings = true;
     c.strict_redef_errors = true;
     c.discard_block = c.arena.box_zeroed(Qbe.Blk);
+    c.nd_stmt = c.arena.box_zeroed(Compile.Node);
+    c.nd_stmt.kind = .ND_STMT;
     
     if m.goal.os == .macos {  // TODO: do you ever need multiple?
         c.macos_framework_path = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks";
@@ -51,12 +53,14 @@ fn reset_ctx(c: *Compile.Ctx, m: *QbeModule, worker: *CodegenShared, arena: Aren
         // :TopLevelFunction
         c.init_function(c.arena);
         c.top_level_fn = c.f;
+        // can't use temp when newcon inside enter_task
+        c.f.con = new_copy_long_life(c.m, c.f.con.slice(0, c.f.ncon.zext()));
         
         // HACK: need to be able to generate instructions because when you parse `&some_global`, 
         //       thats a valid constant expression but we issue a load for the bare identifier before
         //       recursing back up and just taking the lvalue. 
-        c.f.rpo = new(0); // HACK
-        c.f.start = c.new_block();// HACK
+        c.f.rpo = c.m.new_long_life(0);
+        c.f.start = c.discard_block;
         c.b = c.f.start; // HACK
     };
     
@@ -136,30 +140,29 @@ new_module_and_compiler :: fn(goal: ?Qbe.Goal) *Compile.Ctx #inline/*semantic*/ 
 }
 
 fn yield(c: *Compile.Ctx, obj: *Compile.Obj) void = {
+    // TODO: maybe export types etc for ffi here instead of waiting until the end?
+    //       but need to be careful of fighting with the other thread over the writer if we allow threaded at the same time
+    enter_task c.emitter { entry | 
+        yield(c, obj, entry);
+    };
+}
+
+// TODO: hoist this so temp() is in the arena of the entry
+fn yield(c: *Compile.Ctx, obj: *Compile.Obj, entry: *CodegenEntry) void = {
     if obj.yielded {
         @error_tok(c, obj.tok, "double yield '%'", obj.name);
     };
     obj.yielded = true;
-    // TODO: maybe export types etc for ffi here instead of waiting until the end?
-    //       but need to be careful of fighting with the other thread over the writer if we allow threaded at the same time
-        emit_one(c, obj);
-}
-
-// TODO: hoist this so temp() is in the arena of the entry
-fn emit_one(c: *Compile.Ctx, obj: *Compile.Obj) void = {
-    ctx := c.emitter;
     @assert(obj.yielded);
     c.have_seen_c_code = true;
-    enter_task ctx { entry | 
         if obj.is_function {
             f := obj.f;
             entry.task = (Func = f);
         } else {
             @if(obj.align > 8) @error_tok(c, obj.tok, "TODO: var % align %", obj.name, obj.align.intcast());
-            entry.task = (AotVar2 = translate_data(ctx.m, obj));
+            entry.task = (AotVar2 = translate_data(c.m, obj));
         };
         c'transform(c, obj, entry.task&);
-    };
 }
 
 // TODO: implement _Alignas
