@@ -1,0 +1,48 @@
+// #foreign("this example requires system headers");
+
+tigr :: fn() = group(
+    url = "https://github.com/erkkah/tigr/archive/f7bf2abbf6b26e649ced5691003e87b61c03762e.tar.gz", 
+    legacy = "da89cdd16d4234c31b9a2d1e40b32489892ef1bfe1c6eecae219216e95c9696b",
+);
+
+main :: fn() void = {
+    // TODO: reproduce the generated files: tigr.c, src/tigr_font.h
+    run_ci_example(cli_args().contains(fn(it) => it[] == "-compileonly"));
+}
+
+run_ci_example :: fn(compile_only: bool) void = {
+    @assert_eq(query_current_os(), .macos, "TODO: put the right stuff on include path");
+    @assert_eq(query_current_arch(), .aarch64, "TODO: make sure it's not my bug that's breaking it in rosetta (try it with clang)");
+    path := "target/tigr_ci.out";
+    root := tigr();
+    start := get_working_directory(temp()).items();
+    src := @tfmt(source, root, "ci/ci.c");
+    import("@/examples/import_c/ffi.fr")'import_c'compile_host_exe(path, src);
+    @if(compile_only) return();
+    Syscall'chdir(@fmt_cstr("%/ci", root)).unwrap();
+    // TODO: debug! @slice("1") is what their macos github actions does but i crash if i do that. 
+    args := make_args_for_exec(@tfmt("%/%", start, path), empty(), temp());
+    become(args[0], args);
+}
+
+source :: """
+#if __macos
+#add_include_path "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include"
+#pragma franca strict_redef_errors 0
+// they extern these instead of including whatever headers have them so my automatic framework detection doesn't work. 
+// i don't read whatever magic files clang does to know which framework has them. i want the code to have all the information i need. 
+#pragma franca push_macos_framework "AppKit"
+extern void* NSApp;
+extern void* NSDefaultRunLoopMode;
+#pragma franca pop_macos_framework
+#endif
+
+#add_include_path "%"
+#include "tigr.c"
+// ci/ci.c, examples/_/_.c flags clip hello opengl shader
+#include "%"
+""";
+
+#use("@/examples/fetch.fr");
+#use("@/lib/sys/subprocess.fr");
+#use("@/lib/sys/process.fr");
