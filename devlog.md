@@ -7,6 +7,11 @@ chess/gui: promotion ui in case you don't want a queen.
   so like, that's the same as The Web(tm) where the browser is helping you. 
   maybe it's just bound to be annoying as soon as your interface could be discribed by a flow chart. 
 
+new tests/external: wasm4. using runtimes/native but replacing the rendering & wasm backend/ with my own. 
+- i think it's kinda cute to unpack the framebuffer in the fragment shader instead of making a texture in a sane format. 
+  - spent a very long time on not floor-ing pos.xy
+    now it still looks different from real one but at least same on gpu and on cpu just dumping a ppm. 
+
 ## (May 5)
 
 web/get

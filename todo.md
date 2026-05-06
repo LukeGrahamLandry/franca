@@ -21,6 +21,7 @@
   - easy to not bother with path lookup when running a file you just compiled
   - easy to get result as status (and shift for WEXITSTATUS) or just ok vs err
 - import_c
+  - need to do idiom recognition for using memcpy for just an unaligned load
   - tests/external/raylib.fr without strict_redef_errors=0 hack
     - something strange with va_list in apple system headers
     - more real problem is that #include TK_FRC needs to not import libc stuff / `_Float16` / etc. 

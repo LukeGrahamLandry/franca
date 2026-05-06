@@ -1,4 +1,6 @@
 // TODO: gallery that lets you select a game from site/static/carts
+// TODO: autoscale and center the square
+// TODO: pixelvszombies needs Start section
 
 wasm4 :: fn() = group(
     url = "https://github.com/aduros/wasm4/archive/bed690f456bfa716ed21d410162c1c6e7c4e9c6c.tar.gz",
@@ -7,6 +9,7 @@ wasm4 :: fn() = group(
 );
 Wasm :: import("@/examples/import_wasm/runtime.fr");
 Ffi :: import("@/examples/import_c/ffi.fr");
+#use("@/graphics/lib.fr");
 
 Game :: @struct {
     rt: Wasm.Engine;
@@ -19,10 +22,14 @@ Game :: @struct {
 State :: @struct {
     game: Game;
     exports: Wasm.ExportsEnv;
+    
+    pipe: Sg.Pipeline;
+    frame: Sg.Buffer;
+    uni: Shaders.Uni;
 };
 
-main :: fn() void = {
-    state := @ref zeroed(State);
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    init_gfx(state, sg);
     state.exports = (_ = init(general_allocator()));
     fill_exports(state.exports&, state.game&);
     state.start_game(builtin_cart);
@@ -39,12 +46,11 @@ fn start_game(state: *State, cart: []u8) void = {
     a := general_allocator();
     rt[] = init_for_jit(a, "");
     mod := rt.compile(cart);
-    buf := page_allocator.alloc_uninit(u8, 1.shift_left(16));  // TODO: wrong if stomp memory
+    buf := page_allocator.alloc_uninit(u8, 1.shift_left(16));
     rt.memories&.push(buf, rt.gpa);
     game.memory = (ptr = buf.ptr, cap = buf.len, len = buf.len);
     instance := instantiate(rt, mod, state.exports&);
     
-    start := get_fn("start");
     game.update = get_fn("update");
     get_fn :: fn(name: Str) => {
         it := instance.exports&.get(name)
@@ -54,8 +60,116 @@ fn start_game(state: *State, cart: []u8) void = {
     };
     
     Wasm4'w4_runtimeInit(game.memory.ptr, game.disk&);
-    bit_cast_unchecked(rawptr, @FnPtr(_: rawptr) void, start.callee)(start.context);
+    names := @const_slice("start", "_start", "_initialize");
+    for names { name |
+        start := get_fn(name);
+        bit_cast_unchecked(rawptr, @FnPtr(_: rawptr) void, start.callee)(start.context);
+    };
 }
+
+fn init_gfx(state: *State, sg: *Sg.Self) void = {
+    state.pipe = sg.make(
+        shader = sg.make(choose_shader_impl(SOKOL_BACKEND, Shaders)),
+    );
+    state.frame = sg.make(
+        usage = .DYNAMIC,
+        size = 160 * 160 / 4,
+    );
+}
+
+Shaders :: @struct {
+    OutV :: @struct(pos: Vec4 #position);
+    vs   :: fn(i: u32 #vertex_id) OutV = (pos = @vec(Easy'six_vertex_full_square(i), 0.0, 1.0));
+    OutF :: @struct(colour: Vec4 #colour);
+    fs   :: fn(
+        in: OutV #input,
+        uni: Uni #uniform(0), 
+        frame: Buf(u32) #buffer(0),
+    ) Shaders.OutF = {
+        p := in.pos / 3;
+        x := @swizzle p.x;
+        y := @swizzle p.y;
+        @if(x >= 160 || y >= 160) return(colour = vec4(0.0, 0.0, 0.0, 1.0));
+        
+        pixel_i := (floor(y) * 160 + floor(x));
+        slot := frame[f32_to_u32(pixel_i) / 16];
+        local_i := f32_to_i32(pixel_i).mod(16).zext();
+        i := 8 * (local_i / 4);
+        i += local_i.mod(4) * 2;
+        c := slot.shift_right_logical(i).bit_and(0b11);
+        c := @switch(c) {  // stupid :( need array
+            @case(0) => uni.c0;
+            @case(1) => uni.c1;
+            @case(2) => uni.c2;
+            @default => uni.c3;
+        };
+        c := c.unpack();
+        (colour = @vec(@swizzle c.zyx, 1.0))
+    };
+    Uni :: @struct {
+        // TODO: need arrays in shader translation
+        c0: UByte4;
+        c1: UByte4;
+        c2: UByte4;
+        c3: UByte4;
+    };
+};
+
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    // w4_runtimeUpdate
+    memory := bit_cast_unchecked(*u8, *Wasm4.Memory, state.game.memory.ptr);
+    if memory.systemFlags.bit_and(Wasm4.SYSTEM_PRESERVE_FRAMEBUFFER_[]) == 0 {
+        Wasm4'w4_framebufferClear();
+    }
+    f := state.game.update;
+    bit_cast_unchecked(rawptr, @FnPtr(_: rawptr) void, f.callee)(f.context);
+    Wasm4'w4_apuTick();
+    
+    state.uni.c0._ = memory.palette&[0];
+    state.uni.c1._ = memory.palette&[1];
+    state.uni.c2._ = memory.palette&[2];
+    state.uni.c3._ = memory.palette&[3];
+    
+    ::Array(u8, 6400);
+    sg.update_buffer(state.frame, memory.framebuffer&.items());
+    
+    bind := zeroed Sg.Bindings;
+    bind.storage_buffers&[0] = state.frame;
+    Easy'glue_begin_pass(sapp, sg, zeroed Sg.PassAction);
+    sg.apply_pipeline(state.pipe);
+    ::[]Shaders.Uni;
+    sg.apply_uniforms(0, state.uni&.slice(1).interpret_as_bytes());
+    sg.apply_bindings(bind&);
+    draw(sg = sg, base = 0, elements = 6, instances = 1);
+    sg.end_pass();
+    sg.commit();
+    
+    //screenshot(memory, "target/a.ppm"); Syscall'exit(0);
+}
+
+screenshot :: fn(memory: *Wasm4.Memory, path: Str) void = {
+    out := @ref u8.list(15 + 160*160*3, temp());
+    @fmt(out, "P6 160 160 255\n");
+    range(0, 160) { y |
+        range(0, 160) { x |
+            i := y*160+x;
+            byte: i64 = memory.framebuffer&[i / 4].zext();
+            bits := byte.shift_right_logical(i.mod(4)*2).bit_and(0b11);
+            c := memory.palette&[bits];
+            out.reserve_type(u32)[] = c.byte_swap().shift_right_logical(8);
+            out.len -= 1;
+        };
+    };
+    write_entire_file_or_crash(path, out.items());
+}
+
+// TODO
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    @match(event.type) {
+        @default => ();
+    };
+}
+
 
 fill_exports :: fn(it: *Wasm.ExportsEnv, game: *Game) void = {
     S :: Type.scope_of(Exports);
@@ -102,11 +216,13 @@ WrapI4 :: fn($fid: FuncId) FuncId = (fn(g: *Game, a: i32, b: i32, c: i32, d: i32
     
 // TODO: demo aot wasm->native instead of doing it at runtime
 // TODO: compile examples/watris/src/main.c myself instead of using the committed blob
-builtin_cart :: import("@/lib/sys/fs.fr")'read_entire_file_or_crash(ast_alloc(), @tfmt("%/site/static/carts/watris.wasm", wasm4()));
+cart_name :: "watris";
+builtin_cart :: import("@/lib/sys/fs.fr")'read_entire_file_or_crash(ast_alloc(), @tfmt("%/site/static/carts/%.wasm", wasm4(), cart_name));
 
 Wasm4 :: {
     src := @ref u8.list(temp());
     root := wasm4();
+    println(root);
     files := @slice("apu.c", "framebuffer.c", "runtime.c", "util.c");
     for files { it |
         @fmt(src, """
@@ -115,7 +231,13 @@ Wasm4 :: {
             #discard_static_scope 0
         """, root, it);
     };
+    @fmt(src, """
+        const unsigned char SYSTEM_PRESERVE_FRAMEBUFFER_ = SYSTEM_PRESERVE_FRAMEBUFFER;
+        _Static_assert(WIDTH == 160 && HEIGHT == 160);
+    """);
     Ffi'include(src.items())
 };
-
 #use("@/examples/fetch.fr");
+
+main :: fn() void = Easy'start(State);
+driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
