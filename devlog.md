@@ -1,4 +1,12 @@
 
+## (May 6)
+
+chess/gui: promotion ui in case you don't want a queen. 
+- felt like it was made convoluted by needing to manually implement buttons so maybe i want to make some ui stuff easier. 
+  but the diff was +66,-16 and adding the same thing to the old chess.js was +106,-58 (859c82f), 
+  so like, that's the same as The Web(tm) where the browser is helping you. 
+  maybe it's just bound to be annoying as soon as your interface could be discribed by a flow chart. 
+
 ## (May 5)
 
 web/get

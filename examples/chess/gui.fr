@@ -130,7 +130,16 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 };
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    @if(event.type == .MOUSE_MOVE) @if_let(state.board.promote&) fn Ask(info) => {
+        state.dirty = true;
+        info.hover_pos = vec2(event.mouse_x, event.mouse_y);
+    };
     if event.type == .MOUSE_DOWN && event.mouse_button == .LEFT {
+        @if_let(state.board.promote&) fn Ask(info) => @match(info.hover) {
+            fn Pawn() => return();  // clicked off the button
+            fn Empty() => { state.board.promote = .None; };  // cancel
+            @default => { state.board.promote = (Play = (pos = info.pos, new = info.hover)); };
+        };
         state.dirty = true;
         valid_move := click(state.board&, vec2(event.mouse_x, event.mouse_y));
         if valid_move && state.board.board.nextPlayer == .Black {
@@ -173,6 +182,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         if Chess'fromFen(event.pasted) { board |
             println(state.board.board&.t_fen());
             state.board.board = board;
+            println(state.board.board&.t_fen());
         };
         state.dirty = true;
     }
@@ -203,6 +213,9 @@ BoardView :: @struct {
     board: Chess.Board;
     lists: Chess.ListPool;
     click_index: ?i64;
+    promote: @tagged(None: void, Ask: @struct(
+        pos: Chess.Move, hover_pos := zeroed(Vec2), hover := Chess.Kind.Empty,
+    ), Play: @struct(pos: Chess.Move, new: Chess.Kind)) = .None;
     ugly_pieces: bool;
 };
 
@@ -305,9 +318,10 @@ fn draw(self: *BoardView, sgl: *Sgl.Self, sdtx: *Sdtx.Context) void = {
         fn One(f) => (pack_rgba(0.0, 1.0, 0.0, 1.0), f(self.board&), 0);
         fn Two(f) => (pack_rgba(0.0, 0.0, 1.0, 1.0), f(self.board&, .Black), f(self.board&, .White));
     };
-    for_bits(w.bit_and(b.bit_not()), fn(i) => note(i.trunc(), pack_rgba(1.0, 0.0, 0.0, 1.0), big));
-    for_bits(b.bit_and(w.bit_not()), fn(i) => note(i.trunc(), c, big));
-    for_bits(b.bit_and(w), fn(i) => note(i.trunc(), pack_rgba(1.0, 0.0, 1.0, 1.0), big));
+    size: f32 = @if(f&.is(.One), small, big);
+    for_bits(w.bit_and(b.bit_not()), fn(i) => note(i.trunc(), pack_rgba(1.0, 0.0, 0.0, 1.0), size));
+    for_bits(b.bit_and(w.bit_not()), fn(i) => note(i.trunc(), c, size));
+    for_bits(b.bit_and(w), fn(i) => note(i.trunc(), pack_rgba(1.0, 0.0, 1.0, 1.0), size));
     
     if self.click_index { i |
         break :: local_return;
@@ -359,6 +373,29 @@ fn draw(self: *BoardView, sgl: *Sgl.Self, sdtx: *Sdtx.Context) void = {
         sgl.begin(.QUADS);
     };
     
+    // show the promotion options, highlight and remember which one the mouse is over. 
+    @if_let(self.promote&) fn Ask(info) => { 
+        options := @const_slice(Chess.Kind.Empty, .Queen, .Rook, .Bishop, .Knight);
+        set_font_scale(0.5);
+        rank, file := self.which_square(info.hover_pos) || (0, 0);
+        
+        info.hover = .Pawn;
+        enumerate options { i, it |
+            height := 4 - i + 1;
+            sdtx.color = pack_rgba(1.0, 1.0, 0.0, 1.0);
+            if height == rank && file >= 2 && file <= 4 {
+                info.hover = it[];
+                sdtx.color = pack_rgba(0, 0, 0, 255);
+            };
+            set_text_position(to_pixels(2, height) + base + vec2(0, s/4));
+            if it[] == .Empty { 
+                sdtx.put("Cancel\n");
+            } else {
+                sdtx.put(@tfmt("%\n", it[]));
+            };
+        };
+    };
+    
     sgl.end();
     
     iter :: fn($body: @Fn(rank: i64, file: i64, pos: Vec2, p: Chess.Piece) void) void => {
@@ -371,33 +408,46 @@ fn draw(self: *BoardView, sgl: *Sgl.Self, sdtx: *Sdtx.Context) void = {
     }    
 }
 
-fn click(self: *BoardView, pos: Vec2) bool = {
+ fn which_square(self: *BoardView, pos: Vec2) ?Ty(i64, i64) = {
     // TODO: why are these off by a factor of two compared to the rendering ones? is it high_dpi related?
     pos *= 2;
     pos -= self.pos;
     if pos.x < 0 || pos.y < 0 || pos.x > self.size || pos.y > self.size {
-        return(false)
+        return(.None)
     };
     pos /= self.size / 8;
     rank, file := (7 - pos.y.cast().int(), pos.x.cast().int());
-    new := rank * 8 + file;
+    (Some = (rank, file))
+}
 
+fn click(self: *BoardView, pos: Vec2) bool = {
+    rank, file := self.which_square(pos) || return(false);
+    new := rank * 8 + file;
+    
     if self.click_index { old |
-        if infer_play_move(self.board&, old, new, self.lists&) {
+        hint := Chess.Kind.Queen;
+        @if_let(self.promote&) fn Play(info) => {
+            new = info.pos.to.zext();
+            old = info.pos.from.zext();
+            hint = info.new;
+        };
+        if self.board&.inferMove(old, new, hint, self.lists&) { move |
+            @if(move.action == .promote) @match(self.promote) {
+                fn None() => {
+                    self.promote = (Ask = (pos = move));
+                    return false;
+                }
+                fn Ask() => return(false);
+                fn Play() => { self.promote = .None; };
+            };
+            
+            _ := self.board&.play(move);
             self.click_index = .None;
             return(true);
-        }
+        };
     };
     self.click_index = (Some = new);
     false
-}
-
-// TODO: be able to ask for promotion
-fn infer_play_move(self: *Chess.Board, from: i64, to: i64, lists: *Chess.ListPool) bool = {
-    move := self.inferMove(from, to, .Queen, lists) 
-        || return(false);
-    _ := self.play(move);
-    true
 }
 
 main :: fn() void = 

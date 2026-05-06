@@ -1271,7 +1271,6 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 - Move would fit in 16 bits. 6 per square leaves 4 for promote+action. 
 - gui
   - play against uci engine
-  - promotion
   - run search on a seperate thread
   - ui for turning off the bot and choosing which colour to play
 - exe that exposes uci
