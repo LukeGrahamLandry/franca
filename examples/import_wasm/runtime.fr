@@ -2,8 +2,6 @@
 // stores just the compiled code, can be instantiated multiple times
 Module :: @rec @struct {
     loader: import("@/examples/import_wasm/convert.fr").Loaded;
-    w: WasmModule;
-    counts: Counts;
     // function pointers from runtime.fr 
     // (only the ones reachable from this module)
     runtime: []rawptr;  
@@ -14,6 +12,7 @@ Module :: @rec @struct {
     datas: [][]u8;
     m: ?*Qbe.Module;
     trace: ?*Crash.LocationResolverNode;
+    w: ?*WasmModule;  // kinda hack: want to pass this out to include() and it will set this to none so it's not baked. 
 };
 
 // the code linked with imports and storage for globals/tables
@@ -109,7 +108,7 @@ Engine :: @rec @struct {
     debug: Str;
     lock := zeroed Mutex;
     target: Qbe.QbeTargetEnv;
-    gpa: Alloc;
+    gpa: Alloc;  // this is a thread safe arena (not the one passed to init(), that's just used to back the arena)
     generation: u32 = 0;
     storage: *Arena.Allocator;
     memories := zeroed RawList([]u8);
@@ -165,19 +164,20 @@ fn compile(self: *Engine, wasm: []u8) *Module = {
 fn compile_uncached(self: *Engine, wasm: []u8) *Module = {
     a := self.gpa;
     mod := a.box_zeroed(Module);
+    mod.w = .None;
     mod.trace = .None;
     m := a.box_uninit(Qbe.Module);
     Qbe'backend'init_module(m, self.target);
     mod.m = (Some = m);
     m.set_debug_types(self.debug, true);
-    mod.w = empty(a);
-    p: ParseWasm = (w = mod.w&, src = wasm);
+    w := a.boxed(WasmModule, empty(a));
+    p: ParseWasm = (w = w, src = wasm);
     or parse_wasm(p&) { e |
         @panic("% (at byte index %)", e, p.cursor);
     };
+    mod.w = (Some = w);
     
-    mod.loader = load(m, mod.w&, a);
-    mod.counts = mod.loader.counts;
+    mod.loader = load(m, w, a);
     m.Qbe'backend'compile_suspended();
     if m.goal.type == .JitOnly {
         m.make_exec();
@@ -217,7 +217,7 @@ fn instantiate(engine: *Engine, mod: *Module, imports: *ExportsEnv) *Instance = 
         it: Instance = (
             memory = zeroed(*SaneRawList(u8)),
             gpa = general_allocator(),
-            counts = mod.counts,
+            counts = mod.loader.counts,
         );
         r := a.alloc_zeroed(i64, it&.size() / size_of(i64));
         r := bit_cast_unchecked(*i64, *Instance, r.ptr);
@@ -227,8 +227,9 @@ fn instantiate(engine: *Engine, mod: *Module, imports: *ExportsEnv) *Instance = 
     view := instance.view();
     view.runtime.copy_from(mod.runtime);
     
-    @assert_le(mod.w.memories.len, 1, "TODO: multiple memories");
-    for mod.w.memories { it |
+    @assert(mod.m.is_none() || mod.m.Some.goal.type == .JitOnly, "cannot instantiate aot module");
+    @assert_le(mod.loader.memories.len, 1, "TODO: multiple memories");
+    for mod.loader.memories { it |
         // max=MAX_u32 means no max was specified, clamp to 2^16 pages = 4gb
         len, cap := (it.min.zext() * wasm_page_size, it.max.zext().min(wasm_page_size) * wasm_page_size);
         buf := imports.get("main", "memory") || {  // i only support one memory anyway and Globals.memory needs to be it even if the module doesn't export it so the imports can see it. 
@@ -246,7 +247,7 @@ fn instantiate(engine: *Engine, mod: *Module, imports: *ExportsEnv) *Instance = 
 
     found := zeroed Instance.Counts;
     missing := 0;
-    enumerate mod.w.imports& { i, it |
+    enumerate mod.loader.imports { i, it |
         continue :: local_return;
         module_s, name_s := (it.module.items(), it.name.items());
         value := imports.get(module_s, name_s) || {
@@ -313,8 +314,8 @@ fn instantiate(engine: *Engine, mod: *Module, imports: *ExportsEnv) *Instance = 
         view.tables[found&[.tables] + i] = view.local_tables[i]&;
     };
     
-    instance.ordered_exports = a.alloc_init(Export, mod.w.exports.len) { i |
-        it := mod.w.exports.index(i);
+    instance.ordered_exports = a.alloc_init(Export, mod.loader.exports.len) { i |
+        it := mod.loader.exports.index(i);
         ::?Callable;
         e: Export = @match(it.type) {
             fn Func() => (Function = get_callable(instance, mod, it.id.zext()) 
@@ -335,14 +336,16 @@ fn instantiate(engine: *Engine, mod: *Module, imports: *ExportsEnv) *Instance = 
 }
 
 fn run_initializers(self: *Instance, mod: *Module) void = {
-    // it would work if you just did this part at comptime but you don't want to 
+    // when baking with ./ffi.fr/include():
+    // in theory could do this part at comptime but you don't want to 
     // bake the whole memory if theres a bunch of zero padding in there. 
     // better to keep it in the split form like in the wasm module. 
-    @debug_assert_eq(mod.loader.datas.len, mod.datas.len, "TODO: delay run_initializers when not jitting");
     
+    @debug_assert_eq(mod.loader.datas.len, mod.datas.len);
     enumerate mod.loader.datas { i, it |
         if it.active_at { off |
             src := mod.datas[i];
+            @debug_assert_eq(src.len, it.size);
             self.memory.len = max(self.memory.len, off + src.len);
             @debug_assert_le(self.memory.len, self.memory.cap);
             self.memory_init(src.ptr, self.memory, off.trunc(), 0, src.len.trunc());
@@ -539,6 +542,7 @@ try_end :: fn(ctx: *Instance) void #wasm = {
 }
 
 // :SLOW i can't inline them when do it this way
+// TODO: either convoluted fix by bundling the ir or just stop being lazy and generate it manually in ./convert.fr
 F32_Abs :: fn(_: *Instance, a: f32) f32 #wasm(0x8B) = @if(a >= 0, a, -a);
 F64_Abs :: fn(_: *Instance, a: f64) f64 #wasm(0x99) = @if(a >= 0, a, -a);
 F64_Floor :: fn(_: *Instance, a: f64) f64 #wasm(0x9C) = floor(a);
@@ -555,16 +559,7 @@ wasm_page_size :: 65536;
 fn bake_relocatable_value(self: *Module) []BakedEntry = {
     msg :: "you can't bake a jitted Module. see import_wasm/ffi.fr";
     @assert(self.m.is_none()/* || self.m.Some.goal.type != .JitOnly*/, msg);
-
-    // HACK: because you can't bake the ast_alloc
-    // TODO: really i should deal with that more generally
-    inline_for WasmModule.get_fields() { $f |
-        @if(@run IsCollection(List)(f.ty)) {
-            it := WasmModule.get_field_ptr(self.w&, f);
-            it.gpa = zeroed(Alloc);
-        }
-    };
-    
+    @assert(self.w.is_none(), "can't bake the ast_alloc but you don't want all these fields anyway. see import_wasm/ffi/include");
     dyn_bake_relocatable_value(Module.cast_to_bytes(self), Module, true)
 }
 

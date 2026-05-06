@@ -15,10 +15,16 @@ Loaded :: @rec @struct {
     counts: Rt.Counts;
     functions: []Qbe.Sym;  // [padding for imports, ...exports]
     function_types: []Wasm.TypeIdx;
+    
+    // these just point into the WasmModule passed to load() 
+    // so the Rt.Module doesn't keep all the rest of those bytes live when baked. 
+    exports: []Wasm.Export;
+    imports: []Wasm.Import;
+    memories: []Wasm.Limits;
 };
 
 RtNeeded :: StaticBitSet(collect_runtime_calls().len());
-Data :: @struct(id: Qbe.Sym, size: i64, active_at: ?i64);
+Data :: @struct(id: Qbe.Sym, size: i64, active_at: ?i64, source_bytes_hack_for_aot: []u8);
 Elem :: @struct(functions: []i64, active_at: ?@struct(table: i64, offset: i64));
 
 fn load(m: *Qbe.Module, w: *WasmModule, a: Alloc) Loaded = {
@@ -82,8 +88,11 @@ fn load(m: *Qbe.Module, w: *WasmModule, a: Alloc) Loaded = {
             });
             id := m.intern(@tfmt("data%@W", i));
             m.Qbe'backend'compile_dat(template = (Bytes = data.bytes.items()), id = id, relocations = empty());
-            (id = id, size = data.bytes.len, active_at = off)
+            (id = id, size = data.bytes.len, active_at = off, source_bytes_hack_for_aot = data.bytes.items())
         },
+        exports = w.exports.items(),
+        imports = w.imports.items(),
+        memories = w.memories.items(),
     );
     
     range(0, w.code.len) { i |

@@ -1,12 +1,11 @@
 #use("@/examples/import_wasm/convert.fr");
 #use("@/examples/import_wasm/parse.fr");
 
-// This works well enough for the examples/bf demo but pretty much nothing else. 
 // TODO: many problems to fix:
-// - convert tables/globals to baked var id
 // - wasm doesn't have type info so you need some way to give it bindings 
 //   and have it deal with generating code for offseting the pointers from 
 //   the base memory so it's not such a massive pain to use. 
+// - doing threads needs a bigger runtime to reinstantate on each (like ./run.fr does)
 
 // this is an unusual situation where everybody has to be bake-aware. 
 // it doesn't just work magically because bake_relocatable_value can't 
@@ -17,15 +16,17 @@
 // shows up as normal functions. here there's no side benifit other
 // than being able to bake a Rt.Module. 
 // TODO: should talk about this in docs/aot_bake.md
+// TODO: don't keep the whole Rt.Module.WasmModule around (it includes the all the code again, etc.)
 
-// import_from :: @struct { module_name :: @struct { function_name : FuncId : fn(); }; };  
-fn include(wasm: []u8, fr: CompCtx, import_from: ScopeId) *Rt.Module = {
+// binding imports and allocating globals/tables/data is still done at runtime when you call instantate. 
+fn include(wasm: []u8, fr: CompCtx) *Rt.Module = {
     mark := mark_temporary_storage();
+    // TODO: nested arena is wasteful
     // TODO: "need to be consistant about how to handle modules like this that don't actually compile anything"
     rt: Rt.Engine = init(ast_alloc(), (arch = query_current_arch(), os = query_current_os(), type = .CachedEarly), "");
-    // TODO: allow Engine without cache, don't need to keep the wasm bytes like in hashmap? 
-    mod := rt&.compile(wasm);
-    m := mod.m.unwrap();
+    mod := rt&.compile_uncached(wasm);
+    m := mod.m&.take().unwrap();
+    w := mod.w&.take().unwrap();
     writer := m.save.unwrap();
     // TODO: making everyone remember to do this is kinda lame
     range(0, FTy.COUNT) { _ |
@@ -33,9 +34,9 @@ fn include(wasm: []u8, fr: CompCtx, import_from: ScopeId) *Rt.Module = {
     };
     decls := Fld.list(temp());
     
-    n := mod.w.import_count&[.Func];
-    range(0, mod.w.code.len) { i |
-        sign := mod.w.types[mod.loader.function_types[n+i].id.zext()]&;
+    n := mod.loader.counts&[.imports];
+    range(0, mod.loader.function_types.len - n) { i |
+        sign := w.types[mod.loader.function_types[n+i].id.zext()]&;
         type := function_type(writer, sign.arg.items(), sign.ret.items());
         
         id := mod.loader.functions[n+i];
@@ -45,17 +46,21 @@ fn include(wasm: []u8, fr: CompCtx, import_from: ScopeId) *Rt.Module = {
     meta: Meta = (arch_os = 0x0F0F, root_scope = save_fields(writer, .Scope, decls.items()));
     b := writer.to_bytes(meta, m);
     bytes := concat(b, ast_alloc());
-    mod.m = .None;
     drop(m);
     result := fr'vtable'import_frc(fr.data, bytes);
     root_scope := result.or(fn(err) => fr.report_error(err));
     
     fns, _ := import("@/compiler/incremental.fr")'collect_fns_from_scope(fr, root_scope);
-    @assert_eq(mod.loader.datas.len, 0, "TODO: import_wasm/ffi data");
     @assert_eq(mod.loader.functions.len - n, fns.len);
     mod.functions = ast_alloc().alloc_zeroed(rawptr, mod.loader.functions.len);
     enumerate fns { i, fid | 
         mod.functions[n + i] = fr.get_jitted(fid[]);
+    };
+    
+    mod.datas = ast_alloc().alloc_zeroed([]u8, mod.loader.datas.len);
+    enumerate mod.loader.datas { i, it |
+        // TODO: get it from the import_frc-ed thing instead of this
+        mod.datas[i] = it.source_bytes_hack_for_aot;
     };
 
     reset_temporary_storage(mark);

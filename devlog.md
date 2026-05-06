@@ -18,6 +18,13 @@ new tests/external: wasm4. using runtimes/native but replacing the rendering & w
   oh im dumb, w4_runtimeInit is zeroing all the memory for good luck so can't instantiate first. 
 - wasm: float select. abs,floor. 
 - keyboard/mouse input
+- wasm/ffi: don't include the whole WasmModule when baking an Rt.Module, just enough for instantiate().
+  bytes of `-d d` output for examples/bf/via_wasm.fr: 7107 -> 4115
+- allow precompiling the builtin cart so the exe gets real native code. 
+  bit of plumbing for ffi/include to do active data, not a big deal now that it's more dynamic anyway. 
+  more invasive than just `@run` but still, reminds me that my language is actually good. 
+  like this is kinda better than their bundle.js (other than mine being mac only... and some not working... lol)
+- cli arg, make the builtin one optional. deduplicate the image loading code. 
 
 ## (May 5)
 

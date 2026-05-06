@@ -4,6 +4,7 @@
 // limitations: no audio. no netplay. 
 //     THIS IS NOT A SANDBOX (don't run untrusted wasm modules).
 // 
+// pass a wasm file as a cli arg to run a cart (otherwise defaults to a builtin one).
 // controls: arrows,x,z,mouse. 
 // press escape to exit to gallery of the examples in site/static/carts (click one to play it).
 // 
@@ -13,18 +14,28 @@
 // - Select(K) when both inputs are constants can't just assume Kl. need to track the types harder. 
 // - more missing float instructions
 // - "int_reg RCon:239" !!! assertion
+// TODO: im still doing something wrong: tetris freezes instead of clearing a row.
 // TODO: persist the save disk somewhere when end_game()
 // TODO: menu when press enter like runtimes/web does 
 //       (then maybe get rid of R to reset even tho they do it, i don't really like it because it feels easy to press by mistake)
-// TODO: running this in franca.lukegrahamlandry.ca it works for the builtin_cart but breaks when you try to select a new one from the gallery
+//       especially the save/load whole state would be nice so i didn't keep having to play tetris all the way. 
+// TODO: running this in the web demo it works for the builtin_cart but breaks when you try to select a new one from the gallery
 // TODO: make the shader less ugly (need arrays)
 // TODO: add to tests/gpu.fr
+//       that test runner also needs to stop leaking the pool resources.
 // TODO: player2 controls
-// TODO: cli arg to run a cart
+// TODO: compile examples/watris/src/main.c myself instead of using the committed blob
 // (there are more todo comments in the actual code)
 //
 
+// true includes `builtin_cart_name` aot in the executable instead of including the wasm module as bytes so starts up faster. 
+FEAT_AOT_CART :: true;
+// false gets smaller binary but can only run `builtin_cart_name`
+FEAT_GALLERY :: true;
+// a file in wasm4/site/static/carts to be bundled into the exe. empty string for none (only load them at runtime)
 builtin_cart_name :: "watris";
+@run @assert(FEAT_GALLERY || builtin_cart_name.len() != 0, "wasm4 FEAT: this program will do nothing");
+
 wasm4 :: fn() = group(
     url = "https://github.com/aduros/wasm4/archive/bed690f456bfa716ed21d410162c1c6e7c4e9c6c.tar.gz",
     legacy = "20894af584ebe86d72382c3712d9c0de281302fb677f4b69291d78511e91cb07",
@@ -32,6 +43,7 @@ wasm4 :: fn() = group(
 );
 Wasm :: import("@/examples/import_wasm/runtime.fr");
 Ffi :: import("@/examples/import_c/ffi.fr");
+Viewer :: import("@/examples/gpu/viewer.fr");
 #use("@/graphics/lib.fr");
 
 Game :: @struct {
@@ -40,7 +52,7 @@ Game :: @struct {
     update: Wasm.Callable;
     disk: Wasm4.w4_Disk;  // TODO: persist this?
     active: bool;
-    cart: []u8;
+    cart: Cart;
 };
 
 State :: @struct {
@@ -63,27 +75,44 @@ State :: @struct {
     mouse_pressed: u8;
 };
 
-Cart :: @struct(wasm: []u8, logo: Sg.Image, name: Str);
-
+Cart :: @tagged(
+    Raw: @struct(wasm: []u8, logo: Sg.Image, name: Str),
+    Aot: @struct(mod: *Wasm.Module, name: Str),
+);
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     // TODO: this is annoying because when using easy_init can't do desc at all
     //       but want to use easy_init so it works with tests/gpu.fr 
+    //       but also this breaks that test anyway because the sg was already used so this is pointless. 
     R :: Sg.Image;
+    @if(FEAT_GALLERY)
     init_pool(sg.pools&.index(R.Tag), sg.desc.allocator, 1024, size_of(R.T));  // SNEAK
 
-    sapp.set_window_title(@tfmt("% (press escape to see gallery)", builtin_cart_name));
+    sapp.set_window_title(@tfmt("%%", builtin_cart_name, @if(FEAT_GALLERY, " (press escape to see gallery)", "")));
     state.arena = init(page_allocator, 1.shift_left(16));
     init_gfx(state, sg);
-    state.exports = (_ = init(state.arena&.borrow()));
+    a := state.arena&.borrow();
+    state.exports = (_ = init(a));
     fill_exports(state.exports&, state.game&);
-    state.start_game(builtin_cart);
     state.set_scale(sapp);
+    
+    for cli_args() { it |
+        it := it.str();
+        @if(it.ends_with(".wasm"))
+        if read_entire_file(a, it) { wasm |
+            @if(FEAT_GALLERY) panic("wasm4 FEAT: runtime loading is disabled");
+            state.start_game(Raw = (wasm = wasm, logo = (id = 0), name = it));
+            return();
+        };
+    };
+    
+    @if(builtin_cart_name.len() != 0) {
+        state.start_game(builtin_cart);
+    };
 }
 
 fn load_carts(state: *State, sg: *Sg.Self) void = {
     start := timestamp();
     a := state.arena&.borrow();
-    // TODO: option to do this at comptime (+aot the wasm) and bundle them
     carts_dir := @tfmt("%/site/static/carts", wasm4());  // TODO: make this an arg
     #use("@/examples/testing.fr");
     @if_let(collect_with_extension(carts_dir, ".wasm")) fn Ok(files) => {
@@ -91,19 +120,23 @@ fn load_carts(state: *State, sg: *Sg.Self) void = {
         for files { it |
             name := it.slice(0, it.len - ".wasm".len());
             if read_entire_file(a, @tfmt("%/%.wasm", carts_dir, name)) { wasm_bytes |
-                cart: Cart = (wasm = wasm_bytes, logo = (id = 0), name = name.shallow_copy(a));
+                cart: Cart = (Raw = (wasm = wasm_bytes, logo = (id = 0), name = name.shallow_copy(a)));
+                @if(Viewer.FEAT_PNG)
                 if read_entire_file(temp(), @tfmt("%/%.png", carts_dir, name)) { logo |
-                    // TODO: handle error from stb
+                    break :: local_return;
+                    img, _0, _1 := Viewer'load_texture_from_data(sg, logo)
+                        .or(fn(msg) => { eprintln(msg); break(); });
+                
                     // TODO: handle POOL_EXHAUSTED
                     // TODO: this is dumb, use an atlas
                     // TODO: could be cool to automate just rendering the first frame of the game and using that instead of the committed thumbnails
-                    cart.logo = load_png(sg, logo);
+                    cart.Raw.logo = img;
                 };
                 carts.push(cart);
             };
         };
         state.carts = carts.items();
-        @println("found % carts in %ms", carts.len, timestamp() - start);    // :SLOW
+        @eprintln("found % carts in %ms", carts.len, timestamp() - start);    // :SLOW
     };
 }
 
@@ -112,7 +145,7 @@ fn end_game(game: *Game) void = if game.active {
     game[] = zeroed(Game);
 };
 
-fn start_game(state: *State, cart: []u8) void = {
+fn start_game(state: *State, cart: Cart) void = {
     state.dirty = true;
     game := state.game&;
     rt := game.rt&;
@@ -121,10 +154,30 @@ fn start_game(state: *State, cart: []u8) void = {
     game.cart = cart;
     a := general_allocator();
     rt[] = init_for_jit(a, "");
-    mod := rt.compile(cart);
-    buf := page_allocator.alloc_uninit(u8, 1.shift_left(16));
+    @eprintln("loading (%): %", cart&.tag(), cart&.name());
+    mod := @match(cart) {
+        fn Raw(it) => {
+            @if(@run (!FEAT_GALLERY && FEAT_AOT_CART)) panic("FEAT_GALLERY=false, cannot load raw cart");  // show the compiler it's unreachable
+            @assert_le(it.wasm.len, 1.shift_left(16), "(arbitrary wasm4 cart size limit)");
+            rt.compile(it.wasm)
+        }
+        fn Aot(it) => it.mod;
+    };
+    
+    // TODO: move this logic to runtime.fr so everyone gets it 
+    // TODO: tecnically should be <<33, memory access instructions have u32+u32 static+dynamic range. 
+    //       could track max static offset and convert them to faults if it's past memory.max?
+    // on native, over allocate so bounds checks are free 
+    // (will only cost page table entries if we trust the os to overcommit). 
+    // however if doing nested wasm, it doesn't expose virtual memory so reusing after munmap i have to zero the whole thing which is expensive. 
+    web, page := (query_current_arch() == .wasm32, 1.shift_left(16));
+    buf := page_allocator.alloc_uninit(u8, @if(web, page, 1.shift_left(32)));  
+    if !web {
+        Syscall'mprotect(u8.raw_from_ptr(buf.ptr.offset(page)), buf.len - page, 0);
+    };
+    
     rt.memories&.push(buf, rt.gpa);
-    game.memory = (ptr = buf.ptr, cap = buf.len, len = buf.len);
+    game.memory = (ptr = buf.ptr, cap = page, len = page);
 
     // w4_runtimeInit zeroes the memory so must be called before instantiate (which copies in active data sections)
     Wasm4'w4_runtimeInit(game.memory.ptr, game.disk&);
@@ -147,6 +200,7 @@ fn start_game(state: *State, cart: []u8) void = {
 }
 
 fn init_gfx(state: *State, sg: *Sg.Self) void = {
+    @assert(!(query_current_arch() == .x86_64 && query_current_os() == .macos), "TODO: old metal doesn't like non-const u32 buffer");
     state.game_pipe = sg.make(
         shader = sg.make(choose_shader_impl(SOKOL_BACKEND, Shaders)),
     );
@@ -232,6 +286,7 @@ if state.game.active {
     draw(sg = sg, base = 0, elements = 6, instances = 1);
 } else {
     @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
+    @if(!FEAT_GALLERY) unreachable();
     if !state.loaded_carts {
         state.load_carts(sg);
         state.loaded_carts = true;
@@ -265,7 +320,7 @@ if state.game.active {
             state.hovered = i;
         };
         
-        sgl.texture(cart.logo, (id = Sg.INVALID_ID));
+        sgl.texture(cart.logo(), (id = Sg.INVALID_ID));
         sgl.begin(.QUADS);
         sgl.v2f_t2f(x1, y1, 0, 0);
         sgl.v2f_t2f(x2, y1, 1, 0);
@@ -284,12 +339,11 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     @match(event.type) {
         fn KEY_DOWN() => if state.game.active {
             @match(event.key_code) {
-                fn ESCAPE() => {
+                fn ESCAPE() => if FEAT_GALLERY {
                     state.dirty = true;
                     state.game&.end_game();
                     sapp.set_window_title("franca/wasm4");
                 }
-                // TODO: wasteful that this recompiles it but they're all so tiny it doesn't matter
                 fn R() => {  // matches their runtimes/web
                     state.start_game(state.game.cart);
                 }
@@ -298,8 +352,8 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         }
         fn MOUSE_DOWN() => if !state.game.active && state.hovered.ult(state.carts.len) {
             cart := state.carts[state.hovered];
-            sapp.set_window_title(cart.name);
-            state.start_game(cart.wasm);
+            sapp.set_window_title(cart&.name());
+            state.start_game(cart);
         }
         fn MOUSE_MOVE() => {
             state.dirty = true;
@@ -390,9 +444,12 @@ WrapP16I :: fn($fid: FuncId) FuncId = (fn(g: *Game, a: u32, b: i32) =
 WrapI3 :: fn($fid: FuncId) FuncId = (fn(g: *Game, a: i32, b: i32, c: i32) = fid(a, b, c));
 WrapI4 :: fn($fid: FuncId) FuncId = (fn(g: *Game, a: i32, b: i32, c: i32, d: i32) = fid(a, b, c, d));
     
-// TODO: demo aot wasm->native instead of doing it at runtime
-// TODO: compile examples/watris/src/main.c myself instead of using the committed blob
-builtin_cart :: import("@/lib/sys/fs.fr")'read_entire_file_or_crash(ast_alloc(), @tfmt("%/site/static/carts/%.wasm", wasm4(), builtin_cart_name));
+builtin_cart_bytes :: import("@/lib/sys/fs.fr")'read_entire_file_or_crash(ast_alloc(), @tfmt("%/site/static/carts/%.wasm", wasm4(), builtin_cart_name));
+
+builtin_cart :: @as(Cart) @if(FEAT_AOT_CART, {
+    mod := import("@/examples/import_wasm/ffi.fr")'include(builtin_cart_bytes, current_compiler_context());
+    (Aot = (name = builtin_cart_name, mod = mod))
+}, (Raw = (wasm = builtin_cart_bytes, name = builtin_cart_name, logo = (id = 0))));
 
 W :: Wasm4.WIDTH_[];
 Wasm4 :: {
@@ -425,41 +482,8 @@ Wasm4 :: {
 };
 #use("@/examples/fetch.fr");
 
+fn name(it: *Cart) Str = @match(it) { fn Raw(it) => it.name; fn Aot(it) => it.name; };
+fn logo(it: *Cart) Sg.Image = @match(it) { fn Raw(it) => it.logo; fn Aot(it) => (id = 0); };
+
 main :: fn() void = Easy'start(State);
 driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
-
-// pasted from chess/gui.fr
-// TODO: import something from viewer.fr?
-load_png :: fn(sg: *Sg.Self, data: []u8) Sg.Image = {
-    p, w, h := {
-        src_w :i32= 0;
-        src_h :i32= 0;
-        bytes_per_pixel :i32= 4; 
-        pixels := Stb'stbi_load_from_memory(data.ptr, data.len.intcast(), src_w&, src_h&, zeroed(*i32), bytes_per_pixel);
-        (pixels.slice(intcast(src_w*src_h*bytes_per_pixel)), src_w, src_h)
-    };
-    
-    sg.make(
-        width = w,
-        height = h,
-        pixel_format = .RGBA8,
-        data = (
-            subimage = (
-                (p, ..""), 
-                ..zeroed(Array([]u8, 16)),
-            ),
-        ),
-    )
-};
-Stb :: {
-    root := Foreign'stb();
-    Ffi  :: import("@/examples/import_c/ffi.fr");
-    c_source := @tfmt("""
-        #define STB_IMAGE_IMPLEMENTATION
-        #define STBI_ONLY_PNG
-        #define STBI_NO_SIMD
-        #define STBI_NO_STDIO
-        #include "%/stb_image.h"
-    """, root);
-    Ffi'include(current_compiler_context(), c_source)
-};
