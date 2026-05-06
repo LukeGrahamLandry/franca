@@ -14,6 +14,10 @@ new tests/external: wasm4. using runtimes/native but replacing the rendering & w
 - it's too tedious to keep changing the string to test different carts.
   added gallery ui that lets you select a game from site/static/carts. 
   mandatory coordinate system hell. 
+- why no tetris? odd that some of the text draws and some doesn't. seems only the atoi computed ones work, not string literals. 
+  oh im dumb, w4_runtimeInit is zeroing all the memory for good luck so can't instantiate first. 
+- wasm: float select. abs,floor. 
+- keyboard/mouse input
 
 ## (May 5)
 

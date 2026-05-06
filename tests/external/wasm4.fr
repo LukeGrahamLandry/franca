@@ -1,26 +1,26 @@
 // this is a runtime for https://wasm4.org (which is a fantasy console where each game is a wasm module). 
 // it uses their runtimes/native for the exports that draw shapes/text on the framebuffer, 
 // but implements the "/backend/* with @/graphics and @/examples/import_wasm. 
-// no audio. 
+// limitations: no audio. no netplay. 
+//     THIS IS NOT A SANDBOX (don't run untrusted wasm modules).
 // 
+// controls: arrows,x,z,mouse. 
 // press escape to exit to gallery of the examples in site/static/carts (click one to play it).
 // 
 // THIS IS UNFINISHED
-// TODO: keyboard/mouse input
 // TODO: most of the modules i can't deal with yet (and will crash if you try to load them)
 // - Start section
-// - Select(K) on a float
+// - Select(K) when both inputs are constants can't just assume Kl. need to track the types harder. 
 // - more missing float instructions
 // - "int_reg RCon:239" !!! assertion
-// TODO: even the ones that do run, im clearly miscompiling a bunch. 
-//       ex. tetris each block is one square, some are just blank, etc.
-//       problem could be import_wasm or import_c or my rendering
-// TODO: autoscale and center the square
 // TODO: persist the save disk somewhere when end_game()
 // TODO: menu when press enter like runtimes/web does 
 //       (then maybe get rid of R to reset even tho they do it, i don't really like it because it feels easy to press by mistake)
 // TODO: running this in franca.lukegrahamlandry.ca it works for the builtin_cart but breaks when you try to select a new one from the gallery
 // TODO: make the shader less ugly (need arrays)
+// TODO: add to tests/gpu.fr
+// TODO: player2 controls
+// TODO: cli arg to run a cart
 // (there are more todo comments in the actual code)
 //
 
@@ -44,10 +44,11 @@ Game :: @struct {
 };
 
 State :: @struct {
+    WIDTH :: 500; HEIGHT :: 500;
     menu_pipe: Sgl.Pipeline;
     carts: []Cart;
     draw: Sgl.Self;
-    mouse_pos: Vec2;
+    mouse_pos: Vec2;  // event pixel coordinates
     dirty: bool;
     arena: Arena.Allocator;
     hovered: i64;  // annoying that i update this in rendering instead of event but it lets me not paste the coordinate math twice
@@ -58,7 +59,10 @@ State :: @struct {
     exports: Wasm.ExportsEnv;
     frame: Sg.Buffer;
     uni: Shaders.Uni;
+    key_pressed: u8;
+    mouse_pressed: u8;
 };
+
 Cart :: @struct(wasm: []u8, logo: Sg.Image, name: Str);
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -67,11 +71,13 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     R :: Sg.Image;
     init_pool(sg.pools&.index(R.Tag), sg.desc.allocator, 1024, size_of(R.T));  // SNEAK
 
+    sapp.set_window_title(@tfmt("% (press escape to see gallery)", builtin_cart_name));
     state.arena = init(page_allocator, 1.shift_left(16));
     init_gfx(state, sg);
     state.exports = (_ = init(state.arena&.borrow()));
     fill_exports(state.exports&, state.game&);
     state.start_game(builtin_cart);
+    state.set_scale(sapp);
 }
 
 fn load_carts(state: *State, sg: *Sg.Self) void = {
@@ -119,6 +125,10 @@ fn start_game(state: *State, cart: []u8) void = {
     buf := page_allocator.alloc_uninit(u8, 1.shift_left(16));
     rt.memories&.push(buf, rt.gpa);
     game.memory = (ptr = buf.ptr, cap = buf.len, len = buf.len);
+
+    // w4_runtimeInit zeroes the memory so must be called before instantiate (which copies in active data sections)
+    Wasm4'w4_runtimeInit(game.memory.ptr, game.disk&);
+    
     instance := instantiate(rt, mod, state.exports&);
     
     game.update = get_fn("update");
@@ -129,7 +139,6 @@ fn start_game(state: *State, cart: []u8) void = {
         it.Function
     };
     
-    Wasm4'w4_runtimeInit(game.memory.ptr, game.disk&);
     names := @const_slice("start", "_start", "_initialize");
     for names { name |
         start := get_fn(name);
@@ -143,7 +152,7 @@ fn init_gfx(state: *State, sg: *Sg.Self) void = {
     );
     state.frame = sg.make(
         usage = .DYNAMIC,
-        size = 160 * 160 / 4,
+        size = cast(W * W).int() / 4,
     );
     
     state.draw&.setup(allocator = general_allocator(), sg = sg);
@@ -159,12 +168,12 @@ Shaders :: @struct {
         uni: Uni #uniform(0), 
         frame: Buf(u32) #buffer(0),
     ) Shaders.OutF = {
-        p := in.pos / 3;
+        p := in.pos / uni.scale;
         x := @swizzle p.x;
         y := @swizzle p.y;
-        @if(x >= 160 || y >= 160) return(colour = vec4(0.0, 0.0, 0.0, 1.0));
+        @if(x >= W || y >= W) return(colour = vec4(0.0, 0.0, 0.0, 1.0));
         
-        pixel_i := (floor(y) * 160 + floor(x));
+        pixel_i := (floor(y) * W + floor(x));
         slot := frame[f32_to_u32(pixel_i) / 16];
         local_i := f32_to_i32(pixel_i).mod(16).zext();
         i := 8 * (local_i / 4);
@@ -185,6 +194,7 @@ Shaders :: @struct {
         c1: UByte4;
         c2: UByte4;
         c3: UByte4;
+        scale: f32;
     };
 };
 
@@ -194,6 +204,12 @@ if state.game.active {
     if memory.systemFlags.bit_and(Wasm4.SYSTEM_PRESERVE_FRAMEBUFFER_[]) == 0 {
         Wasm4'w4_framebufferClear();
     }
+    screen_size := min(sapp.width().float().cast(), sapp.height().float().cast());
+    mouse := state.mouse_pos / vec2(screen_size) * W;
+    x, y := (mouse.x.cast().int().toi16(), mouse.y.cast().int().toi16());
+    toi16 :: fn(a: i64) i16 #ir(.extsh, .Kw);
+    Wasm4'w4_runtimeSetGamepad(0, state.key_pressed);
+    Wasm4'w4_runtimeSetMouse(x, y, state.mouse_pressed);
     f := state.game.update;
     bit_cast_unchecked(rawptr, @FnPtr(_: rawptr) void, f.callee)(f.context);
     // Wasm4'w4_apuTick();  // i don't do audio thus far. 
@@ -262,25 +278,6 @@ if state.game.active {
 };
     sg.end_pass();
     sg.commit();
-    
-    //screenshot(memory, "target/a.ppm"); Syscall'exit(0);
-}
-
-// just used this for debugging the shader. could keep it and expose it to the user tho. 
-screenshot :: fn(memory: *Wasm4.Memory, path: Str) void = {
-    out := @ref u8.list(15 + 160*160*3, temp());
-    @fmt(out, "P6 160 160 255\n");
-    range(0, 160) { y |
-        range(0, 160) { x |
-            i := y*160+x;
-            byte: i64 = memory.framebuffer&[i / 4].zext();
-            bits := byte.shift_right_logical(i.mod(4)*2).bit_and(0b11);
-            c := memory.palette&[bits];
-            out.reserve_type(u32)[] = c.byte_swap().shift_right_logical(8);
-            out.len -= 1;
-        };
-    };
-    write_entire_file_or_crash(path, out.items());
 }
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
@@ -290,9 +287,9 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 fn ESCAPE() => {
                     state.dirty = true;
                     state.game&.end_game();
-                    state.mouse_pos = vec2(0);
                     sapp.set_window_title("franca/wasm4");
                 }
+                // TODO: wasteful that this recompiles it but they're all so tiny it doesn't matter
                 fn R() => {  // matches their runtimes/web
                     state.start_game(state.game.cart);
                 }
@@ -308,9 +305,46 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             state.dirty = true;
             state.mouse_pos = vec2(event.mouse_x, event.mouse_y);
         };
-        fn RESIZED() => { state.dirty = true; }
+        fn RESIZED() => { 
+            set_scale(state, sapp);
+            state.dirty = true; 
+        }
         @default => ();
     };
+    
+    set_key_masks(event, state.mouse_pressed&, state.key_pressed&);
+}
+
+// i just send events but it wants current state of key, 
+// so need to remember the old flags and just toggle the bits. 
+set_key_masks :: fn(event: *Sapp.Event, mouse_pressed: *u8, key_pressed: *u8) void #once = {
+    #use(Wasm4);
+    bit_xor :: fn(a: u8, b: u8) u8 #ir(.xor, .Kw);
+    if @is(event.type, .MOUSE_DOWN, .MOUSE_UP) {
+        o := mouse_pressed[];
+        X :: fn(it: Sapp.Mousebutton, $flag: u8) => 
+            { o = o.bit_xor(@if(event.mouse_button == it, flag, 0)); }
+        X(.LEFT, W4_MOUSE_LEFT_[]);
+        X(.RIGHT, W4_MOUSE_RIGHT_[]);
+        X(.MIDDLE, W4_MOUSE_MIDDLE_[]);
+        mouse_pressed[] = o;
+    };
+    if !event.key_repeat && @is(event.type, .KEY_DOWN, .KEY_UP) {
+        o := key_pressed[];
+        X :: fn(it: Sapp.Keycode, $flag: u8) => 
+            { o = o.bit_xor(@if(event.key_code == it, flag, 0)); }
+        X(.X, W4_BUTTON_X_[]);
+        X(.Z, W4_BUTTON_Z_[]);
+        X(.LEFT, W4_BUTTON_LEFT_[]);
+        X(.RIGHT, W4_BUTTON_RIGHT_[]);
+        X(.UP, W4_BUTTON_UP_[]);
+        X(.DOWN, W4_BUTTON_DOWN_[]);
+        key_pressed[] = o;
+    }
+}
+
+fn set_scale(state: *State, sapp: *Sapp.Self) void = {
+    state.uni.scale = min(sapp.width().float().cast(), sapp.height().float().cast()) / W;
 }
 
 fill_exports :: fn(it: *Wasm.ExportsEnv, game: *Game) void = {
@@ -360,6 +394,7 @@ WrapI4 :: fn($fid: FuncId) FuncId = (fn(g: *Game, a: i32, b: i32, c: i32, d: i32
 // TODO: compile examples/watris/src/main.c myself instead of using the committed blob
 builtin_cart :: import("@/lib/sys/fs.fr")'read_entire_file_or_crash(ast_alloc(), @tfmt("%/site/static/carts/%.wasm", wasm4(), builtin_cart_name));
 
+W :: Wasm4.WIDTH_[];
 Wasm4 :: {
     src := @ref u8.list(temp());
     root := wasm4();
@@ -373,8 +408,18 @@ Wasm4 :: {
         """, root, it);
     };
     @fmt(src, """
-        const unsigned char SYSTEM_PRESERVE_FRAMEBUFFER_ = SYSTEM_PRESERVE_FRAMEBUFFER;
-        _Static_assert(WIDTH == 160 && HEIGHT == 160);
+        const uint8_t SYSTEM_PRESERVE_FRAMEBUFFER_ = SYSTEM_PRESERVE_FRAMEBUFFER;
+        const uint8_t W4_BUTTON_X_ = W4_BUTTON_X;
+        const uint8_t W4_BUTTON_Z_ = W4_BUTTON_Z;
+        const uint8_t W4_BUTTON_LEFT_ = W4_BUTTON_LEFT;
+        const uint8_t W4_BUTTON_RIGHT_ = W4_BUTTON_RIGHT;
+        const uint8_t W4_BUTTON_UP_ = W4_BUTTON_UP;
+        const uint8_t W4_BUTTON_DOWN_ = W4_BUTTON_DOWN;
+        const uint8_t W4_MOUSE_LEFT_ = W4_MOUSE_LEFT;
+        const uint8_t W4_MOUSE_RIGHT_ = W4_MOUSE_RIGHT;
+        const uint8_t W4_MOUSE_MIDDLE_ = W4_MOUSE_MIDDLE;
+        const float WIDTH_ = WIDTH;
+        _Static_assert(WIDTH == HEIGHT);
     """);
     Ffi'include(src.items())
 };
