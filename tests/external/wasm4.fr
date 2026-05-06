@@ -1,0 +1,121 @@
+// TODO: gallery that lets you select a game from site/static/carts
+
+wasm4 :: fn() = group(
+    url = "https://github.com/aduros/wasm4/archive/bed690f456bfa716ed21d410162c1c6e7c4e9c6c.tar.gz",
+    legacy = "20894af584ebe86d72382c3712d9c0de281302fb677f4b69291d78511e91cb07",
+    discard = @const_slice("cli", "devtools", "scripts", "test", "runtimes/web", "site/src", "site/blog"),
+);
+Wasm :: import("@/examples/import_wasm/runtime.fr");
+Ffi :: import("@/examples/import_c/ffi.fr");
+
+Game :: @struct {
+    rt: Wasm.Engine;
+    memory: SaneRawList(u8);
+    update: Wasm.Callable;
+    disk: Wasm4.w4_Disk;  // TODO: persist this?
+    active: bool;
+};
+
+State :: @struct {
+    game: Game;
+    exports: Wasm.ExportsEnv;
+};
+
+main :: fn() void = {
+    state := @ref zeroed(State);
+    state.exports = (_ = init(general_allocator()));
+    fill_exports(state.exports&, state.game&);
+    state.start_game(builtin_cart);
+}
+
+fn start_game(state: *State, cart: []u8) void = {
+    game := state.game&;
+    rt := game.rt&;
+    if game.active {
+        drop(rt);
+        game[] = zeroed(Game);
+    };
+    game.active = true;
+    a := general_allocator();
+    rt[] = init_for_jit(a, "");
+    mod := rt.compile(cart);
+    buf := page_allocator.alloc_uninit(u8, 1.shift_left(16));  // TODO: wrong if stomp memory
+    rt.memories&.push(buf, rt.gpa);
+    game.memory = (ptr = buf.ptr, cap = buf.len, len = buf.len);
+    instance := instantiate(rt, mod, state.exports&);
+    
+    start := get_fn("start");
+    game.update = get_fn("update");
+    get_fn :: fn(name: Str) => {
+        it := instance.exports&.get(name)
+            || (Function = (callee = fn(_: rawptr) void = (), context = zeroed(rawptr)));
+        @assert(it&.is(.Function), "expected exports[%] to be a function", name);
+        it.Function
+    };
+    
+    Wasm4'w4_runtimeInit(game.memory.ptr, game.disk&);
+    bit_cast_unchecked(rawptr, @FnPtr(_: rawptr) void, start.callee)(start.context);
+}
+
+fill_exports :: fn(it: *Wasm.ExportsEnv, game: *Game) void = {
+    S :: Type.scope_of(Exports);
+    inline_for get_constants(S) { $name |
+        fid :: FuncId.get_constant(S, name[]).unwrap();
+        it.insert("env", @run name[].str(), fid, game);
+    };
+    it.insert("env", "memory", (Memory = game.memory&));
+}
+
+// TODO: this is tedious but doing it with reflection is also tedious :(
+Exports :: @struct {
+    blit :: fn(g: *Game, a: u32, b: i32, c: i32, d: i32, e: i32, f: i32) void = 
+        Wasm4'w4_runtimeBlit(g.memory.index(a.zext()), b, c, d, e, f);
+    blitSub :: fn(g: *Game, a: u32, b: i32, c: i32, d: i32, e: i32, f: i32, gg: i32, h: i32, i: i32) void = 
+        Wasm4'w4_runtimeBlitSub(g.memory.index(a.zext()), b, c, d, e, f, gg, h, i);
+    line :: WrapI4 Wasm4.w4_runtimeLine;
+    hline :: WrapI3 Wasm4.w4_runtimeHLine;
+    vline :: WrapI3 Wasm4.w4_runtimeVLine;
+    oval :: WrapI4 Wasm4.w4_runtimeOval;
+    rect :: WrapI4 Wasm4.w4_runtimeRect;
+    text :: fn(g: *Game, a: u32, b: i32, c: i32) void = 
+        Wasm4'w4_runtimeText(g.memory.index(a.zext()), b, c);
+    textUtf8 :: fn(g: *Game, a: u32, b: i32, c: i32, d: i32) void = 
+        Wasm4'w4_runtimeTextUtf8(g.memory.index(a.zext()), b, c, d);
+    textUtf16 :: fn(g: *Game, a: u32, b: i32, c: i32, d: i32) void = 
+        Wasm4'w4_runtimeTextUtf16(bit_cast_unchecked(*u8, *u16, g.memory.index(a.zext())), b, c, d);
+    tone :: WrapI4 Wasm4.w4_runtimeTone;
+    diskr :: WrapPI Wasm4.w4_runtimeDiskr;
+    diskw :: WrapPI Wasm4.w4_runtimeDiskw;
+    trace :: fn(g: *Game, a: u32) void = 
+        Wasm4'w4_runtimeTrace(g.memory.index(a.zext()));
+    traceUtf8 :: WrapPI Wasm4.w4_runtimeTraceUtf8;
+    traceUtf16 :: WrapP16I Wasm4.w4_runtimeTraceUtf16;
+    tracef :: fn(g: *Game, a: u32, b: u32) void = 
+        Wasm4'w4_runtimeTracef(g.memory.index(a.zext()), bit_cast_unchecked(*u8, rawptr, g.memory.index(b.zext())));
+};
+WrapPI :: fn($fid: FuncId) FuncId = (fn(g: *Game, a: u32, b: i32) = 
+    fid(g.memory.index(a.zext()), b));
+WrapP16I :: fn($fid: FuncId) FuncId = (fn(g: *Game, a: u32, b: i32) = 
+    fid(bit_cast_unchecked(*u8, *u16, g.memory.index(a.zext())), b));
+WrapI3 :: fn($fid: FuncId) FuncId = (fn(g: *Game, a: i32, b: i32, c: i32) = fid(a, b, c));
+WrapI4 :: fn($fid: FuncId) FuncId = (fn(g: *Game, a: i32, b: i32, c: i32, d: i32) = fid(a, b, c, d));
+    
+// TODO: demo aot wasm->native instead of doing it at runtime
+// TODO: compile examples/watris/src/main.c myself instead of using the committed blob
+builtin_cart :: import("@/lib/sys/fs.fr")'read_entire_file_or_crash(ast_alloc(), @tfmt("%/site/static/carts/watris.wasm", wasm4()));
+
+Wasm4 :: {
+    src := @ref u8.list(temp());
+    root := wasm4();
+    files := @slice("apu.c", "framebuffer.c", "runtime.c", "util.c");
+    for files { it |
+        @fmt(src, """
+            #add_include_path "%/runtimes/native/src"
+            #include "%"
+            #discard_static_scope 0
+        """, root, it);
+    };
+    Ffi'include(src.items())
+};
+
+#use("@/examples/fetch.fr");
