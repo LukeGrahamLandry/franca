@@ -1,4 +1,15 @@
 
+## (May 7)
+
+wasm progress. i was right that getting a little game for every fix would be good incentive to implement stuff i dont use myself.  
+- call start section in instantiate. 
+- memory.fill instruction. also caught the same sign mistake in memory.size as i fixed in memory.grow, just didn't matter because i don't use it. 
+- non-const size memory.copy. 
+- `predecessors not matched in phi`: 
+  If without Else wasn't popping a node from if_stack, so the next If stomped the wrong s2. 
+- before i was giving Else the incoming phis of if.src instead of the outgoing phis (ie. incoming of Then). 
+- backend: `Assertion Failed: int_reg RCon:`. arm/isel lowering rotl wasn't fixarg lhs. 
+
 ## (May 6)
 
 chess/gui: promotion ui in case you don't want a queen. 

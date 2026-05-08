@@ -211,6 +211,7 @@ fn compile_uncached(self: *Engine, wasm: []u8) *Module = {
     mod
 }
 
+// note: this includes running a function for the start section if present. 
 fn instantiate(engine: *Engine, mod: *Module, imports: *ExportsEnv) *Instance = {
     a := engine.gpa;
     instance := {
@@ -318,8 +319,7 @@ fn instantiate(engine: *Engine, mod: *Module, imports: *ExportsEnv) *Instance = 
         it := mod.loader.exports.index(i);
         ::?Callable;
         e: Export = @match(it.type) {
-            fn Func() => (Function = get_callable(instance, mod, it.id.zext()) 
-                || @panic("uncompiled export %", it.name.items()));
+            fn Func() => (Function = get_callable(instance, mod, it.id.zext()));
             fn Global() => (Global = view.globals[it.id.zext()]);
             fn Table() => (Table = view.tables[it.id.zext()]);
             fn Memory() => (Memory = instance.memory);
@@ -358,21 +358,26 @@ fn run_initializers(self: *Instance, mod: *Module) void = {
             table := view.tables[active_at.table][].from_sane().items();
             dest := table.subslice(active_at.offset, it.functions.len);
             enumerate dest { i, dest |
-                dest[] = self.get_callable(mod, it.functions[i]) 
-                    || @panic("failed to get callable for active elem");
+                dest[] = self.get_callable(mod, it.functions[i]);
             };
         };
     };
+    
+    if mod.loader.start { start |
+        // my own modules don't use this but tests/external/wasm4.fr does. 
+        start := self.get_callable(mod, start);
+        bit_cast_unchecked(rawptr, @FnPtr(rawptr) void, start.callee)(start.context);
+    };
 }
 
-fn get_callable(self: *Instance, mod: *Module, global_i: i64) ?Callable = {
+fn get_callable(self: *Instance, mod: *Module, global_i: i64) Callable = {
     @debug_assert_ne(mod.functions.len, 0, "when not jitted you have to manually copy functions/datas");
     view := self.view();
     if global_i < view.imports.len {
-        return(Some = view.imports[global_i]);
+        return view.imports[global_i];
     };
     f := mod.functions[global_i];
-    (Some = (callee = f, context = Instance.raw_from_ptr(self)))
+    (callee = f, context = Instance.raw_from_ptr(self))
 }
 
 ExportsEnv :: @struct(_: HashMap(Str, RawHashMap(Str, Export)));
@@ -508,7 +513,7 @@ atomic_fence :: fn(ctx: *Instance) void = {
 // but keep track of a smaller "length" value so user code can use memory_grow as the page allocator.
 #wasm(0x40, .memory)
 memory_grow :: fn(ctx: *Instance, memory: *SaneRawList(u8), delta_pages: i32) i32 = {
-    delta := delta_pages.intcast().shift_left(16);
+    delta := delta_pages.zext().shift_left(16);
     old := i64.cas(memory.len&) { old |
         new := old + delta;
         @if(new > memory.cap) return(-1);
@@ -519,15 +524,23 @@ memory_grow :: fn(ctx: *Instance, memory: *SaneRawList(u8), delta_pages: i32) i3
 
 #wasm(0x3F, .memory)
 memory_size :: fn(_: *Instance, memory: *SaneRawList(u8)) i32 = {
-    memory.len.intcast().shift_right_arithmetic(16)
+    memory_grow(_, memory, 0)
 }
 
 #wasm(0xFC, 0x08, .data, .memory)
 memory_init :: fn(_: *Instance, data_start: *u8, memory: *SaneRawList(u8), dest: u32, src_offset: u32, size: u32) void = {
     src := data_start.offset(src_offset.zext()).slice(size.zext());
-    dest := memory.ptr.offset(dest.zext()).slice(size.zext());
+    dest := memory.items().subslice(dest.zext(), size.zext());
     dest.copy_from(src);
 }
+
+#wasm(0xFC, 0x0B, .memory)
+memory_fill :: fn(_: *Instance, memory: *SaneRawList(u8), dest: u32, value: u32, size: u32) void = {
+    dest := memory.items().subslice(dest.zext(), size.zext());
+    dest.set_bytes(value.trunc());
+}
+
+data_drop :: fn(_: *Instance, _data: *u8) void #wasm(0xFC, 0x09, .data) = ();  // optimisation hint that i ignore
 
 #wasm(0x08, .tag)
 throw :: fn(ctx: *Instance, which: **ExceptionTag) void = {

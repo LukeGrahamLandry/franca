@@ -15,6 +15,7 @@ WasmModule :: @struct(
     import_count := zeroed EnumMap(Wasm.ImportType, i64),
     custom: List(@struct(name: RawList(u8), data: []u8)),
     tags: List(Wasm.TypeIdx),
+    start: ?i64 = .None,  // global FuncIdx  
 );
 
 ParseWasm :: @struct(w: *WasmModule, src: []u8, cursor := 0);
@@ -196,7 +197,12 @@ fn parse_wasm(self: *ParseWasm) Result(void, Str) = {
                     self.w.tags&.push(id = function_type_index.trunc());
                 };
             }
-            @default => return(Err = @tfmt("Unhandled section type % (section index % in module)", section_index, section_count));
+            fn Start() => {
+                i := @try(self.read_u()) return;
+                n := self.w.functions.len + self.w.import_count&[.Func];
+                @if(!i.ult(n)) return(Err = @tfmt("start section oob (i=%,len=%)", i, n));
+                self.w.start = (Some = i);
+            }
         };
         
         if self.cursor != end_of_section {

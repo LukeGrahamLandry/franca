@@ -33,7 +33,7 @@ function, native code should also let you do that.
 - basic arithmetic and control flow
 - globals, functions, data segments
 - tables: call_indirect, set, get, grow
-- memory: init, grow
+- memory: init, grow, fill
 - atomics: rmw.cmpxchg, rmw.cmpxchg, wait32, notify, fence
 
 ### NOT IMPLEMENTED
@@ -42,8 +42,7 @@ function, native code should also let you do that.
 - validation
 - float: trunc, ceil, floor, nearest, copysign
 - correct saturating conversions on non-arm
-- memory.copy: allow non-constant size. allow overlapping where you need to copy backwards. 
-- memory ops: fill/drop
+- memory.copy: allow overlapping where you need to copy backwards. 
 - more atomic ops
 - atomic wait with timeout
 - more table ops: fill/copy/init/drop
@@ -53,5 +52,6 @@ function, native code should also let you do that.
 - reference types: null/is_null/func/as_non_null/br_on_null/eq/br_on_non_null
 - gc
 - exception handling
+  - started the minimum to be able to implement part of setjmp/longjmp for franca but unfinished
 - reference typed strings
 - atomic.notify: return number woken (mine always says 0)

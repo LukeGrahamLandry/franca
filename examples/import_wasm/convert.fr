@@ -21,6 +21,7 @@ Loaded :: @rec @struct {
     exports: []Wasm.Export;
     imports: []Wasm.Import;
     memories: []Wasm.Limits;
+    start: ?i64;  // index in functions
 };
 
 RtNeeded :: StaticBitSet(collect_runtime_calls().len());
@@ -50,6 +51,11 @@ fn load(m: *Qbe.Module, w: *WasmModule, a: Alloc) Loaded = {
     };
 
     functions, function_types, function_names := declare_functions(m, w, a);
+    
+    if w.start { start |
+        it := w.types[function_types[start].id.zext()];
+        @assert(it.arg.len == 0 && it.ret.len == 0, "start section's function must be (void)->(void)");
+    };
     
     loaded: Loaded = (
         rt_needed = zeroed(RtNeeded),
@@ -93,6 +99,7 @@ fn load(m: *Qbe.Module, w: *WasmModule, a: Alloc) Loaded = {
         exports = w.exports.items(),
         imports = w.imports.items(),
         memories = w.memories.items(),
+        start = w.start,
     );
     
     range(0, w.code.len) { i |
@@ -423,10 +430,23 @@ fn emit_the_code(self: *LoadWasm) void = {
             };
             fn Loop()  => self.push_block(self.read_s(),  true);
             fn Block() => self.push_block(self.read_s(), false);
-            fn End()   => self.end_block(true);
+            fn End() => {
+                if if_stack.last() { current_if |
+                    dest := self.blocks[self.blocks.len - 1].break;  // fallthrough target
+                    if identical(dest, current_if.src.s2) {
+                        // If without Else
+                        arg, ret := self.decode_block_type(current_if.block_type);
+                        @assert(arg.len == 0 && ret.len == 0, "TODO: handle (if without else) with arg/ret");  // its fine if they're equal to eachother but need to make the phis work out
+                        if_stack&.pop();
+                    };  // else: this is some other block inside the If
+                };  // else: not inside an if
+                
+                self.end_block(true);
+            }
             fn If() => {
                 block_type := self.read_s();
                 old := self.get_blk();
+                @debug_assert_eq(old.jmp.type, .Jxxx, "if in already closed block");
                 old.jmp = (type = .jnz, arg = self.stack&.pop().expect("arg on stack for If"));
                 if_stack&.push(src = old, block_type = block_type); 
                 self.push_block(block_type, false);
@@ -439,9 +459,16 @@ fn emit_the_code(self: *LoadWasm) void = {
                 self.end_block(true);
                 if_node := if_stack&.pop()
                     || @panic("else outside if (in $%)", self.f.name());
-                self.phi_to_stack(if_node.src);
                 new := self.link_new_block();
                 self.blocks&.push(continue = new, break = break, current = new, loop = false);
+
+                // phi_to_stack: else block has the same input values from src as then block. 
+                for_phi_rev_TODOSLOW if_node.src.s1 { p |
+                    p2 := new_phi(self.f, new, p.cls, 1);
+                    p2.push(if_node.src, p.arg[index_in_phi(if_node.src, p)]);
+                    self.stack&.push(p2.to);
+                };
+                
                 @debug_assert_eq(if_node.src.jmp.type, .jnz);
                 if_node.src.s2 = self.get_blk();
             }
@@ -567,7 +594,14 @@ fn emit_the_code(self: *LoadWasm) void = {
                         self.f.emit(.blit0, .Kw, QbeNull, src, dest);
                         self.f.emit(.blit1, .Kw, Qbe.Null, INT(n), Qbe.Null);
                     } else {
-                        panic("TODO: non-constant memory.copy");
+                        impl := Qbe'Precompiled'builtin_memove_symbol(self.m)
+                            || @panic("TODO: non-constant memory.copy without builtin_memove_symbol");
+                        r := self.f.newtmp("", .Kl);
+                        self.f.emit(.extuw, .Kl, r, n, QbeNull);
+                        self.f.emit(.arg, .Kl, QbeNull, dest, QbeNull);
+                        self.f.emit(.arg, .Kl, QbeNull, src, QbeNull);
+                        self.f.emit(.arg, .Kl, QbeNull, r, QbeNull);
+                        self.f.emit(.call, .Kw, QbeNull, self.f.symcon(impl), QbeNull);
                     }
                     continue();
                 };
@@ -579,6 +613,7 @@ fn emit_the_code(self: *LoadWasm) void = {
             @default => self.choose_runtime_call(start_cursor);
         }
     });
+    @debug_assert_eq(if_stack.len, 0, "leaked if_stack in %", self.f.name());
 }
 
 fn do_select(self: *LoadWasm, k: Qbe.Cls) void = {
@@ -587,17 +622,17 @@ fn do_select(self: *LoadWasm, k: Qbe.Cls) void = {
     cond := self.stack&.pop().expect("stack for sel-cond");
     f := self.stack&.pop().expect("stack for sel-false");
     t := self.stack&.pop().expect("stack for sel-true");
+    ki := @if(k.is_wide(), Qbe.Cls.Kl, .Kw);
     if !k.is_int() {
-        ki := @if(k.is_wide(), Qbe.Cls.Kl, .Kw);
         r0, r1, r2 := (self.f.newtmp("S", ki), self.f.newtmp("S", ki), self.f.newtmp("S", ki));
         self.f.emit(.cast, ki, r0, t, QbeNull);
         self.f.emit(.cast, ki, r1, f, QbeNull);
         t = r0; f = r1; result = r2;
     };
     self.f.emit(.sel0, .Kw, QbeNull, cond, QbeNull);
-    self.f.emit(.sel1, k, result, t, f);
+    self.f.emit(.sel1, ki, result, t, f);
     if !k.is_int() {
-        self.f.emit(.cast, k, r, result, f);
+        self.f.emit(.cast, k, r, result, Qbe.Null);
         result = r;
     };
     self.stack&.push(result);
