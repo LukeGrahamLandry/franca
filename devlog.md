@@ -1,4 +1,13 @@
 
+## (May 8)
+
+wasm4
+- most useful menu thing is save/load whole state would be nice so i didn't keep having to play tetris all the way. 
+  rare W for wasm not having aslr, can just dump the memory + globals to a file. 
+  im being a bit overly paranoid about not letting it accidently get loaded into a different module cause that would be super confusing. 
+- do menu actions for disk/screenshot. dragndrop carts/saves. 
+  keep game state when opening gallery so can change your mind. 
+
 ## (May 7)
 
 wasm progress. i was right that getting a little game for every fix would be good incentive to implement stuff i dont use myself.  
@@ -9,6 +18,8 @@ wasm progress. i was right that getting a little game for every fix would be goo
   If without Else wasn't popping a node from if_stack, so the next If stomped the wrong s2. 
 - before i was giving Else the incoming phis of if.src instead of the outgoing phis (ie. incoming of Then). 
 - backend: `Assertion Failed: int_reg RCon:`. arm/isel lowering rotl wasn't fixarg lhs. 
+
+wasm4: menu ui like the web version 
 
 ## (May 6)
 

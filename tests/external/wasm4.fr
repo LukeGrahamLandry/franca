@@ -5,20 +5,17 @@
 //     THIS IS NOT A SANDBOX (don't run untrusted wasm modules).
 // 
 // pass a wasm file as a cli arg to run a cart (otherwise defaults to a builtin one).
+// you can also drop a wasm file on the window to run it. 
 // controls: arrows,x,z,mouse. 
+// press enter to show menu. 
 // press escape to exit to gallery of the examples in site/static/carts (click one to play it).
 // 
 // THIS IS UNFINISHED
 // TODO: most of the modules i can't deal with yet (and will crash if you try to load them)
-// - Start section
 // - Select(K) when both inputs are constants can't just assume Kl. need to track the types harder. 
 // - more missing float instructions
-// - "int_reg RCon:239" !!! assertion
 // TODO: im still doing something wrong: tetris freezes instead of clearing a row.
-// TODO: persist the save disk somewhere when end_game()
-// TODO: menu when press enter like runtimes/web does 
-//       (then maybe get rid of R to reset even tho they do it, i don't really like it because it feels easy to press by mistake)
-//       especially the save/load whole state would be nice so i didn't keep having to play tetris all the way. 
+//       and many more are broken in odd ways. platformer-test, the-legend-of-geml-awakening, etc. 
 // TODO: running this in the web demo it works for the builtin_cart but breaks when you try to select a new one from the gallery
 // TODO: make the shader less ugly (need arrays)
 // TODO: add to tests/gpu.fr
@@ -26,6 +23,10 @@
 // TODO: player2 controls
 // TODO: compile examples/watris/src/main.c myself instead of using the committed blob
 // (there are more todo comments in the actual code)
+// TODO: runtime.c doesn't implement w4_runtimeTraceUtf16
+// TODO: do i want to auto save/load disk like their native version? 
+//       rn you have to manually do it in the menu because i find it annoying to spew files when im testing. 
+//       should probably put them next to the cart instead of with short name in cwd. 
 //
 
 // true includes `builtin_cart_name` aot in the executable instead of including the wasm module as bytes so starts up faster. 
@@ -53,6 +54,7 @@ Game :: @struct {
     disk: Wasm4.w4_Disk;  // TODO: persist this?
     active: bool;
     cart: Cart;
+    instance: *Wasm.Instance;  // need this to access globals for save/load state
 };
 
 State :: @struct {
@@ -65,6 +67,7 @@ State :: @struct {
     arena: Arena.Allocator;
     hovered: i64;  // annoying that i update this in rendering instead of event but it lets me not paste the coordinate math twice
     loaded_carts: bool;
+    text: Sdtx.Self;
     
     game_pipe: Sg.Pipeline;
     game: Game;
@@ -73,12 +76,19 @@ State :: @struct {
     uni: Shaders.Uni;
     key_pressed: u8;
     mouse_pressed: u8;
+    
+    screen: @enum(Game, Menu, Gallery);
 };
 
-Cart :: @tagged(
-    Raw: @struct(wasm: []u8, logo: Sg.Image, name: Str),
-    Aot: @struct(mod: *Wasm.Module, name: Str),
-);
+Cart :: @struct {
+    name: Str;
+    logo: Sg.Image = (id = 0);
+    impl: @tagged(
+        Raw: []u8, 
+        Aot: @struct(mod: *Wasm.Module, hash: *Sha256.Digest),
+    );
+};
+
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     // TODO: this is annoying because when using easy_init can't do desc at all
     //       but want to use easy_init so it works with tests/gpu.fr 
@@ -87,6 +97,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     @if(FEAT_GALLERY)
     init_pool(sg.pools&.index(R.Tag), sg.desc.allocator, 1024, size_of(R.T));  // SNEAK
 
+    sapp.desc.enable_dragndrop = FEAT_GALLERY;
     sapp.set_window_title(@tfmt("%%", builtin_cart_name, @if(FEAT_GALLERY, " (press escape to see gallery)", "")));
     state.arena = init(page_allocator, 1.shift_left(16));
     init_gfx(state, sg);
@@ -99,8 +110,8 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         it := it.str();
         @if(it.ends_with(".wasm"))
         if read_entire_file(a, it) { wasm |
-            @if(FEAT_GALLERY) panic("wasm4 FEAT: runtime loading is disabled");
-            state.start_game(Raw = (wasm = wasm, logo = (id = 0), name = it));
+            @if(!FEAT_GALLERY) panic("wasm4 FEAT: runtime loading is disabled");
+            state.start_game(impl = (Raw = wasm), name = it);
             return();
         };
     };
@@ -108,6 +119,8 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     @if(builtin_cart_name.len() != 0) {
         state.start_game(builtin_cart);
     };
+    state.screen = @if(state.game.active, .Game, .Gallery);
+    state.dirty = true;
 }
 
 fn load_carts(state: *State, sg: *Sg.Self) void = {
@@ -120,7 +133,7 @@ fn load_carts(state: *State, sg: *Sg.Self) void = {
         for files { it |
             name := it.slice(0, it.len - ".wasm".len());
             if read_entire_file(a, @tfmt("%/%.wasm", carts_dir, name)) { wasm_bytes |
-                cart: Cart = (Raw = (wasm = wasm_bytes, logo = (id = 0), name = name.shallow_copy(a)));
+                cart: Cart = (impl = (Raw = wasm_bytes), name = name.shallow_copy(a));
                 @if(Viewer.FEAT_PNG)
                 if read_entire_file(temp(), @tfmt("%/%.png", carts_dir, name)) { logo |
                     break :: local_return;
@@ -130,7 +143,7 @@ fn load_carts(state: *State, sg: *Sg.Self) void = {
                     // TODO: handle POOL_EXHAUSTED
                     // TODO: this is dumb, use an atlas
                     // TODO: could be cool to automate just rendering the first frame of the game and using that instead of the committed thumbnails
-                    cart.Raw.logo = img;
+                    cart.logo = img;
                 };
                 carts.push(cart);
             };
@@ -140,26 +153,25 @@ fn load_carts(state: *State, sg: *Sg.Self) void = {
     };
 }
 
-fn end_game(game: *Game) void = if game.active {
-    drop(game.rt&);
-    game[] = zeroed(Game);
-};
-
 fn start_game(state: *State, cart: Cart) void = {
     state.dirty = true;
     game := state.game&;
     rt := game.rt&;
-    game.end_game();
+    if game.active {
+        drop(rt);
+        game[] = zeroed(Game);
+    };
     game.active = true;
     game.cart = cart;
     a := general_allocator();
     rt[] = init_for_jit(a, "");
-    @eprintln("loading (%): %", cart&.tag(), cart&.name());
-    mod := @match(cart) {
-        fn Raw(it) => {
+    @eprintln("loading (%): %", cart.impl&.tag(), cart.name);
+    mod := @match(cart.impl) {
+        fn Raw(wasm) => {
             @if(@run (!FEAT_GALLERY && FEAT_AOT_CART)) panic("FEAT_GALLERY=false, cannot load raw cart");  // show the compiler it's unreachable
-            @assert_le(it.wasm.len, 1.shift_left(16), "(arbitrary wasm4 cart size limit)");
-            rt.compile(it.wasm)
+            // could not bother so it would work for debug builds if those were bigger?
+            @assert_le(wasm.len, 1.shift_left(16), "(arbitrary wasm4 cart size limit)");
+            rt.compile(wasm)
         }
         fn Aot(it) => it.mod;
     };
@@ -183,6 +195,7 @@ fn start_game(state: *State, cart: Cart) void = {
     Wasm4'w4_runtimeInit(game.memory.ptr, game.disk&);
     
     instance := instantiate(rt, mod, state.exports&);
+    state.game.instance = instance;
     
     game.update = get_fn("update");
     get_fn :: fn(name: Str) => {
@@ -192,11 +205,17 @@ fn start_game(state: *State, cart: Cart) void = {
         it.Function
     };
     
-    names := @const_slice("start", "_start", "_initialize");
+    // instantiate() already called the Start section of the module if present. 
+    // idk why wasi wants redundant blessed names instead of just using ^ 
+    // but this matches what the other wasm4 runtimes do. 
+    // `start` is specified by wasm4 itself. 
+    names := @const_slice("_start", "_initialize", "start");
     for names { name |
+        // TODO: provide easy way to call a Callable after checking its signature
         start := get_fn(name);
         bit_cast_unchecked(rawptr, @FnPtr(_: rawptr) void, start.callee)(start.context);
     };
+    state.screen = .Game;
 }
 
 fn init_gfx(state: *State, sg: *Sg.Self) void = {
@@ -211,6 +230,8 @@ fn init_gfx(state: *State, sg: *Sg.Self) void = {
     
     state.draw&.setup(allocator = general_allocator(), sg = sg);
     init_pipeline(state.draw&, state.menu_pipe&, sg, ());
+    
+    state.text&.setup(sg = sg, allocator = general_allocator(), fonts = @slice(Sdtx.font.cpc));
 }
 
 Shaders :: @struct {
@@ -240,6 +261,10 @@ Shaders :: @struct {
             @default => uni.c3;
         };
         c := c.unpack();
+        if uni.paused == 1 {
+            // when in the menu, still draw the last frame of the game but darkened
+            c = c / 10;
+        };
         (colour = @vec(@swizzle c.zyx, 1.0))
     };
     Uni :: @struct {
@@ -249,12 +274,18 @@ Shaders :: @struct {
         c2: UByte4;
         c3: UByte4;
         scale: f32;
+        paused: i32;  // bool
     };
 };
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
-if state.game.active {
+    is_ui := @is(state.screen, .Menu, .Gallery);
+    @if(is_ui && Easy'should_skip_frame(sapp, state.dirty&)) return();
+    
+    sdtx := state.text.default_context&;
     memory := bit_cast_unchecked(*u8, *Wasm4.Memory, state.game.memory.ptr);
+if @is(state.screen, .Menu, .Game) {
+    @debug_assert(state.game.active);
     if memory.systemFlags.bit_and(Wasm4.SYSTEM_PRESERVE_FRAMEBUFFER_[]) == 0 {
         Wasm4'w4_framebufferClear();
     }
@@ -272,6 +303,7 @@ if state.game.active {
     state.uni.c1._ = memory.palette&[1];
     state.uni.c2._ = memory.palette&[2];
     state.uni.c3._ = memory.palette&[3];
+    state.uni.paused = int(state.screen == .Menu).intcast();
     
     ::Array(u8, 6400);
     sg.update_buffer(state.frame, memory.framebuffer&.items());
@@ -284,8 +316,24 @@ if state.game.active {
     sg.apply_uniforms(0, state.uni&.slice(1).interpret_as_bytes());
     sg.apply_bindings(bind&);
     draw(sg = sg, base = 0, elements = 6, instances = 1);
-} else {
-    @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
+};
+    
+    if state.screen == .Menu {
+        sdtx.canvas(sapp, 1/4);
+        i := 0;
+        for_enum MenuItem { it |
+            sdtx.color = @if(i == state.hovered, 0xFFFFFFFF, 0xFFAAAAAA);
+            sdtx.put(@tfmt("%\n", it));
+            i += 1;
+        };
+        sdtx.canvas(sapp, 1);
+        sdtx.color = 0xFFFFFFFF;
+        sdtx.pos.y = 4 * (0.5 + MenuItem.enum_count());
+        sdtx.put(HELP);
+        sdtx.pos.y += 1;
+        sdtx.put(@tfmt("CART: %\n", state.game.cart.name));
+    };
+if state.screen == .Gallery {
     @if(!FEAT_GALLERY) unreachable();
     if !state.loaded_carts {
         state.load_carts(sg);
@@ -307,6 +355,7 @@ if state.game.active {
     scale: f32 = 1.5;
     mouse := (state.mouse_pos / screen * 2 - vec2(1)) * vec2(1, -1);
     state.hovered = -1;
+    sdtx.canvas(sapp, 1/2);
     enumerate state.carts { i, cart |
         xx, yy := i.div_mod(step);
         // 1/step is sane and then fix to be -1..+1
@@ -318,9 +367,11 @@ if state.game.active {
         if x1 < mouse.x && mouse.x < x2 && y1 < mouse.y && mouse.y < y2 {
             sgl.color = pack_rgba(1.0, 0.0, 0.0, 1.0);
             state.hovered = i;
+            sdtx.color = 0xFF00FFFF;
+            sdtx.put(cart.name);
         };
         
-        sgl.texture(cart.logo(), (id = Sg.INVALID_ID));
+        sgl.texture(cart.logo, (id = Sg.INVALID_ID));
         sgl.begin(.QUADS);
         sgl.v2f_t2f(x1, y1, 0, 0);
         sgl.v2f_t2f(x2, y1, 1, 0);
@@ -331,42 +382,98 @@ if state.game.active {
     Easy'glue_begin_pass(sapp, sg, zeroed Sg.PassAction);
     sgl.draw_layer(sg, 0);
 };
+    sdtx.draw_layer(0);
     sg.end_pass();
     sg.commit();
 }
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     @match(event.type) {
-        fn KEY_DOWN() => if state.game.active {
+        fn KEY_DOWN() => {
+            menu := state.screen == .Menu;
             @match(event.key_code) {
                 fn ESCAPE() => if FEAT_GALLERY {
                     state.dirty = true;
-                    state.game&.end_game();
                     sapp.set_window_title("franca/wasm4");
+                    state.screen = @if(state.screen == .Gallery && state.game.active, .Game, .Gallery);
                 }
-                fn R() => {  // matches their runtimes/web
+                fn R() => if state.game.active {
                     state.start_game(state.game.cart);
                 }
+                fn ENTER() => {
+                    if menu {
+                        state.run_menu_item(@as(MenuItem) state.hovered);
+                    } else {
+                        state.screen = .Menu;
+                    };
+                    state.dirty = true;
+                    state.hovered = 0;
+                }
+                fn UP() => if menu {
+                    state.dirty = true;
+                    state.hovered = state.hovered.sub(1).add(MenuItem.enum_count()).mod(MenuItem.enum_count());
+                };
+                fn DOWN() => if menu {
+                    state.dirty = true;
+                    state.hovered = state.hovered.add(1).mod(MenuItem.enum_count());
+                };
                 @default => ();
             }
         }
-        fn MOUSE_DOWN() => if !state.game.active && state.hovered.ult(state.carts.len) {
+        fn MOUSE_DOWN() => if state.screen == .Gallery && state.hovered.ult(state.carts.len) {
             cart := state.carts[state.hovered];
-            sapp.set_window_title(cart&.name());
+            sapp.set_window_title(cart.name);
             state.start_game(cart);
         }
         fn MOUSE_MOVE() => {
-            state.dirty = true;
+            state.dirty = state.screen == .Gallery;
             state.mouse_pos = vec2(event.mouse_x, event.mouse_y);
         };
         fn RESIZED() => { 
             set_scale(state, sapp);
             state.dirty = true; 
         }
+        fn FILES_DROPPED() => {
+            @if(!FEAT_GALLERY) return();
+            @if(event.drop.len == 0) return();
+            path := event.drop[0];
+            buf := read_entire_file(temp(), path) || return();
+            open_from_file(state, path, buf);
+        };
         @default => ();
     };
     
+    @if(state.screen == .Game)
     set_key_masks(event, state.mouse_pressed&, state.key_pressed&);
+}
+
+fn open_from_file(state: *State, path: Str, buf: []u8) void = {
+    if buf.starts_with(Wasm.Wasm.version_magic) {
+        a := state.arena&.borrow(); // :LEAK
+        path = @if(path.ends_with(".wasm"), path.slice(0, path.len - 5), path);
+        state.start_game(impl = (Raw = buf.shallow_copy(a)), name = path.shallow_copy(a));
+        return();
+    };
+    if state.game.active {
+        if buf.starts_with((@slice Save.MAGIC).interpret_as_bytes()) {
+            @eprintln("loading (%) as memory dump of (%)", path, state.game.cart.name);
+            load_state(state.game&, buf)
+                .or(fn(msg) => @eprintln("FAIL: %", msg));
+            return();
+        };
+        
+        if buf.len >= 2 {
+            size: i64 = buf&.pop_type(u16)[].zext();
+            if size <= 1024 && (buf.len == 1024 || buf.len == size) {
+                @eprintln("loading (%) as disk of (%)", path, state.game.cart.name);
+                state.game.disk.size = size.trunc();
+                ::Array(u8, 1024);
+                state.game.disk.data&.items().slice(0, size).copy_from(buf.slice(0, size));
+                return();
+            }
+        };
+    };
+    @eprintln("couldn't open dropped file (%)", path);
 }
 
 // i just send events but it wants current state of key, 
@@ -396,6 +503,133 @@ set_key_masks :: fn(event: *Sapp.Event, mouse_pressed: *u8, key_pressed: *u8) vo
         key_pressed[] = o;
     }
 }
+
+MenuItem :: @enum(Continue, SaveState, LoadState, ExportDisk, ImportDisk, ClearDisk, ResetCart, ScreenShot, Gallery);
+fn run_menu_item(state: *State, it: MenuItem) void = {
+    disk_path := @tfmt("%.disk", state.game.cart.name);
+    state_path := @tfmt("%.dump", state.game.cart.name);
+    disk := state.game.disk&;
+    @match(it) {
+        fn Continue() => ();
+        fn SaveState() => {
+            buf := save_state(state.game&);
+            if !write_entire_file(state_path, buf) {
+                @eprintln("SaveState: failed to write %", state_path);
+            };
+        }
+        fn LoadState() => {
+            buf := read_entire_file(temp(), state_path) || return();
+            load_state(state.game&, buf)
+                .or(fn(msg) => println(msg));
+        }
+        // TODO: their native one automatically read/write the file on start/stop. 
+        fn ExportDisk() => {
+            ::[]@type disk[];
+            @debug_assert_le(disk.size, 1024);
+            it := disk.slice(1).interpret_as_bytes().slice(0, 2 + disk.size.zext());
+            if !write_entire_file(disk_path, it) {
+                @eprintln("ExportDisk: failed to write to %", disk_path);
+            };
+        }
+        fn ImportDisk() => {
+            data := read_entire_file(temp(), disk_path) || return();
+            @if(data.len < 2) return();
+            size := data&.pop_type(u16)[];
+            @if(data.len < size.zext() || size > 1024) return();
+            data = data.slice(0, size.zext());
+            disk.size = size;
+            ::Array(u8, 1024);
+            disk.data&.items().slice(0, data.len).copy_from(data);
+        }
+        fn ClearDisk() => {
+            disk.size = 0;
+            state.run_menu_item(.ExportDisk);
+        }
+        fn ResetCart() => state.start_game(state.game.cart);
+        fn Gallery() => if FEAT_GALLERY {
+            state.screen = .Gallery;
+            return();
+        }
+        fn ScreenShot() => {
+            memory := bit_cast_unchecked(*u8, *Wasm4.Memory, state.game.memory.ptr);
+            ppm := screenshot(memory);
+            path := "target/a.ppm";
+            make_dirs_or_crash("target");
+            write_entire_file_or_crash(path, ppm);
+            println(path);
+        }
+    };
+    state.screen = .Game; 
+}
+
+screenshot :: fn(memory: *Wasm4.Memory) []u8 = {
+    ::Array(u8, 6400);
+    w := W.cast().int();
+    out := @ref u8.list(15 + w*w*3, temp());
+    @fmt(out, "P6 % % 255\n", w, w);
+    range(0, w) { y |
+        range(0, w) { x |
+            i := y*w+x;
+            // TODO: be able to share this three decoding lines with the shader. to prove a point. problem is that Buf is a magic type. 
+            byte: i64 = memory.framebuffer&[i / 4].zext();
+            bits := byte.shift_right_logical(i.mod(4)*2).bit_and(0b11);
+            c := memory.palette&[bits];
+            out.reserve_type(u32)[] = c.byte_swap().shift_right_logical(8);
+            out.len -= 1;
+        };
+    };
+    out.items()
+}
+
+// TODO: this doesn't work if they mutated a table (but neither does the official one)
+Save :: @struct {
+    MAGIC :: "FR\x00WASM4".peek_type(i64)[];
+    magic: i64;
+    size: i64;
+    global_count: i64;
+    cart_hash: Sha256.Digest;
+    disk: Wasm4.w4_Disk;
+    memory: Array(u8, 1.shift_left(16));
+    // globals: Array(Wasm.GlobalValue, global_count) #inline;
+};
+
+fn save_state(g: *Game) []u8 = {
+    view := g.instance.view();
+    size := size_of(Save) + size_of(Wasm.GlobalValue) * view.local_globals.len;
+    out := @ref u8.list(size, temp());
+    save := out.reserve_type(Save);
+    save.magic = Save.MAGIC;
+    save.size = size;
+    save.global_count = view.local_globals.len;
+    save.disk = g.disk;
+    save.cart_hash = g.cart&.wasm_hash();
+    save.memory&.items().copy_from(g.instance.memory.items());
+    for view.local_globals { it |
+        out.reserve_type(Wasm.GlobalValue)[] = it;
+    };
+    out.items()
+}
+
+fn load_state(g: *Game, buf: []u8) Result(void, Str) = {
+    view := g.instance.view();
+    @if(buf.len < size_of(Save)) return(Err = "truncated");
+    save := buf&.pop_type(Save);
+    n := view.local_globals.len * size_of(Wasm.GlobalValue);
+    @if(save.magic != Save.MAGIC || save.size != size_of(Save) + n) return(Err = "bad magic");
+    @if(save.global_count != view.local_globals.len) return(Err = "wrong global count for wasm module");
+    @if(save.cart_hash&.items() != (@ref g.cart&.wasm_hash()).items()) return(Err = "different wasm module");
+    @assert(buf.len >= n);
+    
+    g.instance.memory.items().copy_from(save.memory&.items());
+    g.disk = save.disk;
+    each view.local_globals { it |
+        it[] = buf&.pop_type(Wasm.GlobalValue)[];
+    };
+    .Ok
+}
+
+fn wasm_hash(cart: *Cart) Sha256.Digest = 
+    @match(cart.impl) { fn Raw(wasm) => Sha256'hash(wasm); fn Aot(it) => it.hash[]; };
 
 fn set_scale(state: *State, sapp: *Sapp.Self) void = {
     state.uni.scale = min(sapp.width().float().cast(), sapp.height().float().cast()) / W;
@@ -446,10 +680,10 @@ WrapI4 :: fn($fid: FuncId) FuncId = (fn(g: *Game, a: i32, b: i32, c: i32, d: i32
     
 builtin_cart_bytes :: import("@/lib/sys/fs.fr")'read_entire_file_or_crash(ast_alloc(), @tfmt("%/site/static/carts/%.wasm", wasm4(), builtin_cart_name));
 
-builtin_cart :: @as(Cart) @if(FEAT_AOT_CART, {
+builtin_cart :: @as(Cart) (name = builtin_cart_name, impl = @if(FEAT_AOT_CART, {
     mod := import("@/examples/import_wasm/ffi.fr")'include(builtin_cart_bytes, current_compiler_context());
-    (Aot = (name = builtin_cart_name, mod = mod))
-}, (Raw = (wasm = builtin_cart_bytes, name = builtin_cart_name, logo = (id = 0))));
+    (Aot = (mod = mod, hash = @static Sha256'hash(builtin_cart_bytes)))
+}, (Raw = builtin_cart_bytes)));
 
 W :: Wasm4.WIDTH_[];
 Wasm4 :: {
@@ -477,13 +711,23 @@ Wasm4 :: {
         const uint8_t W4_MOUSE_MIDDLE_ = W4_MOUSE_MIDDLE;
         const float WIDTH_ = WIDTH;
         _Static_assert(WIDTH == HEIGHT);
+        _Static_assert(sizeof(w4_Disk) == sizeof(short) + 1024);
     """);
     Ffi'include(src.items())
 };
 #use("@/examples/fetch.fr");
 
-fn name(it: *Cart) Str = @match(it) { fn Raw(it) => it.name; fn Aot(it) => it.name; };
-fn logo(it: *Cart) Sg.Image = @match(it) { fn Raw(it) => it.logo; fn Aot(it) => (id = 0); };
-
 main :: fn() void = Easy'start(State);
 driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
+
+HELP :: """
+game controls: arrows,x,z,mouse.
+enter: select menu item.
+
+Gallery: escape
+ResetCart: r
+(Save,Load)State: snapshot wasm memory in [CART].dump
+(Export,Import,Clear)Disk: game save data in [CART].disk
+ScreenShot: write target/a.ppm
+
+""";
