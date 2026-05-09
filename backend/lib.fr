@@ -86,7 +86,6 @@ QbeModule :: @rec @struct(
     fixups_locked := false,
     goal: QbeTargetEnv,
     start_of_writable_code: *u8,
-    // these are special sections that live inside the main segments. 
     wasm_types: SegmentCursor,
     
     exports: List(Qbe.Sym),
@@ -195,7 +194,7 @@ QbeTargetEnv :: @struct(
     commands_size_guess := 16384,
     chained_size_guess  := 2000000,
     
-    _3 := 0,
+    wasm := @static { x: WasmLayout = (); x },
     
     default_wasm_import_module := "env",
     entry_point := "main",
@@ -227,6 +226,24 @@ QbeTargetEnv :: @struct(
 );
 
 QbeOutputPurpose :: @enum(i64) (Cached, JitOnly, Exe, Relocatable, Dynamic, CachedEarly);
+
+// TODO: move default_wasm_import_module,wasm_shared_memory here. 
+// TODO: use this in examples/chess/web.fr so don't have to have the null import in the js  
+// memory layout: [0..=global_base]=unused, [..+MutableData.len]=constants, [..+stack_size]
+WasmLayout :: @struct {
+    // wasting a page feels worth it to me so we don't live in crazy town where the null pointer is valid. 
+    // also means the first global_base function pointer values (table indices) are unlikely to alias data which is probably good. 
+    global_base := 1.shift_left(16);
+    stack_size := 1.shift_left(franca_required_stack_bits);
+    types_size_guess := 1.shift_left(12);  // just because im lazy and want m.types_cache to borrow m.wasm_types and not worry about reallocating
+    import_memory := ("main", "memory");
+    // more sane if function 0 is never a valid pointer.
+    // currently my table indices match module indices so i do this by having the first 
+    // import be something fake i never use. TODO: that's dumb tho, just offset the indices in the table instead. 
+    null_import := true;
+    // examples/os for my web demo needs to replace some imported names so give the code access to something like a GOT to know which function indices were assigned
+    embed_import_names := true;
+};
 
 fn text_padding(m: *QbeModule) i64 = 
     m.goal.commands_size_guess;
@@ -392,11 +409,10 @@ if need_segments {
         m.last_perfmap_end = m.start_of_writable_code;
         
         if m.goal.arch == .wasm32 {
-            // :WasmZeroPage Skip the low page so we don't live in crazy town where the null pointer is valid. 
+            goal.wasm = forever.boxed(WasmLayout, goal.wasm[]);
             next := m.segments&[.MutableData].next&;
-            next[] = next[].offset(wasm_page_size); 
-            // TODO: make this size configurable on .goal
-            mem := forever.alloc_uninit(u8, 1.shift_left(12));
+            next[] = next[].offset(goal.wasm.global_base); 
+            mem := forever.alloc_uninit(u8, goal.wasm.types_size_guess);
             m.wasm_types = (mmapped = mem, next = mem.ptr);
             
             // :WasmTypeZeroIsVoidToVoid HACK

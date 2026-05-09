@@ -1,4 +1,11 @@
 
+## (May 9)
+
+backend/wasm: allow settting offset to globals and stack size so don't have to cheat in wasm4.fr. 
+originally i was trying to not get sucked in to doing wasm specific craziness 
+but that's not really achievable since i care about being able to follow someone else's abi. 
+doing it properly is just changing two numbers which is easier than the hacks i was doing to make it work without. 
+
 ## (May 8)
 
 wasm4
@@ -7,6 +14,11 @@ wasm4
   im being a bit overly paranoid about not letting it accidently get loaded into a different module cause that would be super confusing. 
 - do menu actions for disk/screenshot. dragndrop carts/saves. 
   keep game state when opening gallery so can change your mind. 
+- HACK to make watris work when compiled by my compiler 
+  - runner: requires a bigger memory because i space things out (+ disable bounds check in runtime.c)
+  - import_c: allow export_name/import_name annotations
+  but that also confirmed that the problem is some shape of control flow my wasm backend doesn't generate 
+  because with the one i compiled myself clearing a row works. 
 
 ## (May 7)
 

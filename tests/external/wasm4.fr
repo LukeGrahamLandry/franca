@@ -21,7 +21,6 @@
 // TODO: add to tests/gpu.fr
 //       that test runner also needs to stop leaking the pool resources.
 // TODO: player2 controls
-// TODO: compile examples/watris/src/main.c myself instead of using the committed blob
 // (there are more todo comments in the actual code)
 // TODO: runtime.c doesn't implement w4_runtimeTraceUtf16
 // TODO: do i want to auto save/load disk like their native version? 
@@ -29,13 +28,15 @@
 //       should probably put them next to the cart instead of with short name in cwd. 
 //
 
-// true includes `builtin_cart_name` aot in the executable instead of including the wasm module as bytes so starts up faster. 
+// compile builtin carts to native code at comptime instead of including the wasm module as bytes so starts up faster. 
 FEAT_AOT_CART :: true;
-// false gets smaller binary but can only run `builtin_cart_name`
-FEAT_GALLERY :: true;
-// a file in wasm4/site/static/carts to be bundled into the exe. empty string for none (only load them at runtime)
-builtin_cart_name :: "watris";
-@run @assert(FEAT_GALLERY || builtin_cart_name.len() != 0, "wasm4 FEAT: this program will do nothing");
+// false can only run builtin carts (and gets you a smaller binary if AOT_CART=false because doesn't have to include the wasm jit)
+FEAT_LOADER :: true;
+// build wasm4/examples/(watris,platformer-test,multiplayer) with import_c and include them as builtin carts. 
+FEAT_FROM_SOURCE :: true;
+// prebuilt files in wasm4/site/static/carts to be bundled into the exe.
+// note: these are the (CC BY-NC-SA 4.0) blobs submitted to wasm4.org, might not be reproducible, etc.
+builtin_static_carts: []Str : empty();  // @const_slice("watris");
 
 wasm4 :: fn() = group(
     url = "https://github.com/aduros/wasm4/archive/bed690f456bfa716ed21d410162c1c6e7c4e9c6c.tar.gz",
@@ -76,6 +77,7 @@ State :: @struct {
     uni: Shaders.Uni;
     key_pressed: u8;
     mouse_pressed: u8;
+    disable_gallery: bool;
     
     screen: @enum(Game, Menu, Gallery);
 };
@@ -94,30 +96,31 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     //       but want to use easy_init so it works with tests/gpu.fr 
     //       but also this breaks that test anyway because the sg was already used so this is pointless. 
     R :: Sg.Image;
-    @if(FEAT_GALLERY)
+    @if(FEAT_LOADER)
     init_pool(sg.pools&.index(R.Tag), sg.desc.allocator, 1024, size_of(R.T));  // SNEAK
 
-    sapp.desc.enable_dragndrop = FEAT_GALLERY;
-    sapp.set_window_title(@tfmt("%%", builtin_cart_name, @if(FEAT_GALLERY, " (press escape to see gallery)", "")));
+    sapp.desc.enable_dragndrop = FEAT_LOADER;
     state.arena = init(page_allocator, 1.shift_left(16));
     init_gfx(state, sg);
     a := state.arena&.borrow();
     state.exports = (_ = init(a));
     fill_exports(state.exports&, state.game&);
     state.set_scale(sapp);
+    state.carts = builtin_carts;
     
     for cli_args() { it |
         it := it.str();
         @if(it.ends_with(".wasm"))
         if read_entire_file(a, it) { wasm |
-            @if(!FEAT_GALLERY) panic("wasm4 FEAT: runtime loading is disabled");
+            @if(!FEAT_LOADER) panic("wasm4 FEAT: runtime loading is disabled");
             state.start_game(impl = (Raw = wasm), name = it);
             return();
         };
     };
     
-    @if(builtin_cart_name.len() != 0) {
-        state.start_game(builtin_cart);
+    @run @assert(FEAT_LOADER || builtin_carts.len() != 0, "wasm4 FEAT: this program will do nothing");
+    if state.carts.len > 0 {
+        state.start_game(state.carts[0]);
     };
     state.screen = @if(state.game.active, .Game, .Gallery);
     state.dirty = true;
@@ -130,6 +133,7 @@ fn load_carts(state: *State, sg: *Sg.Self) void = {
     #use("@/examples/testing.fr");
     @if_let(collect_with_extension(carts_dir, ".wasm")) fn Ok(files) => {
         carts := @ref Cart.list(files.len, a);
+        carts.push_all(builtin_carts);
         for files { it |
             name := it.slice(0, it.len - ".wasm".len());
             if read_entire_file(a, @tfmt("%/%.wasm", carts_dir, name)) { wasm_bytes |
@@ -168,7 +172,7 @@ fn start_game(state: *State, cart: Cart) void = {
     @eprintln("loading (%): %", cart.impl&.tag(), cart.name);
     mod := @match(cart.impl) {
         fn Raw(wasm) => {
-            @if(@run (!FEAT_GALLERY && FEAT_AOT_CART)) panic("FEAT_GALLERY=false, cannot load raw cart");  // show the compiler it's unreachable
+            @if(@run (!FEAT_LOADER && FEAT_AOT_CART)) panic("FEAT_LOADER=false, cannot load raw cart");  // show the compiler it's unreachable
             // could not bother so it would work for debug builds if those were bigger?
             @assert_le(wasm.len, 1.shift_left(16), "(arbitrary wasm4 cart size limit)");
             rt.compile(wasm)
@@ -334,8 +338,7 @@ if @is(state.screen, .Menu, .Game) {
         sdtx.put(@tfmt("CART: %\n", state.game.cart.name));
     };
 if state.screen == .Gallery {
-    @if(!FEAT_GALLERY) unreachable();
-    if !state.loaded_carts {
+    if FEAT_LOADER && !state.loaded_carts {
         state.load_carts(sg);
         state.loaded_carts = true;
     };
@@ -392,7 +395,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         fn KEY_DOWN() => {
             menu := state.screen == .Menu;
             @match(event.key_code) {
-                fn ESCAPE() => if FEAT_GALLERY {
+                fn ESCAPE() => {
                     state.dirty = true;
                     sapp.set_window_title("franca/wasm4");
                     state.screen = @if(state.screen == .Gallery && state.game.active, .Game, .Gallery);
@@ -434,7 +437,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             state.dirty = true; 
         }
         fn FILES_DROPPED() => {
-            @if(!FEAT_GALLERY) return();
+            @if(!FEAT_LOADER) return();
             @if(event.drop.len == 0) return();
             path := event.drop[0];
             buf := read_entire_file(temp(), path) || return();
@@ -546,7 +549,7 @@ fn run_menu_item(state: *State, it: MenuItem) void = {
             state.run_menu_item(.ExportDisk);
         }
         fn ResetCart() => state.start_game(state.game.cart);
-        fn Gallery() => if FEAT_GALLERY {
+        fn Gallery() => {
             state.screen = .Gallery;
             return();
         }
@@ -678,12 +681,63 @@ WrapP16I :: fn($fid: FuncId) FuncId = (fn(g: *Game, a: u32, b: i32) =
 WrapI3 :: fn($fid: FuncId) FuncId = (fn(g: *Game, a: i32, b: i32, c: i32) = fid(a, b, c));
 WrapI4 :: fn($fid: FuncId) FuncId = (fn(g: *Game, a: i32, b: i32, c: i32, d: i32) = fid(a, b, c, d));
     
-builtin_cart_bytes :: import("@/lib/sys/fs.fr")'read_entire_file_or_crash(ast_alloc(), @tfmt("%/site/static/carts/%.wasm", wasm4(), builtin_cart_name));
+builtin_carts :: {
+    carts := Cart.list(4, ast_alloc()); 
+    
+    for builtin_static_carts { builtin_cart_name |
+        path := @tfmt("%/site/static/carts/%.wasm", wasm4(), builtin_cart_name);
+        wasm := include_bytes(path);
+        carts&.push(name = builtin_cart_name, impl = (Raw = wasm));
+    };
+    
+    names := @slice("watris", "platformer-test", "multiplayer");
+    @if(FEAT_FROM_SOURCE)
+    for names { it |
+        carts&.push(name = it, impl = (Raw = build_example(it)));
+    };
 
-builtin_cart :: @as(Cart) (name = builtin_cart_name, impl = @if(FEAT_AOT_CART, {
-    mod := import("@/examples/import_wasm/ffi.fr")'include(builtin_cart_bytes, current_compiler_context());
-    (Aot = (mod = mod, hash = @static Sha256'hash(builtin_cart_bytes)))
-}, (Raw = builtin_cart_bytes)));
+    @if(FEAT_AOT_CART) 
+    each carts { it |
+        @if_let(it.impl) fn Raw(wasm) => {
+            mod := import("@/examples/import_wasm/ffi.fr")'include(wasm, current_compiler_context());
+            hash := ast_alloc().boxed(Sha256.Digest, Sha256'hash(wasm));
+            it.impl = (Aot = (mod = mod, hash = hash));
+        }; 
+    };
+    
+    carts.items()
+};
+
+build_example :: fn(it: Str) []u8 = {
+    src := @ref u8.list(temp());
+    @fmt(src, """
+        #add_include_path "%/examples/%/src"
+        %
+        #include "main.c"
+    """, wasm4(), it, @if(it == "watris", """#include "utils.c" """ , ""));
+    #use("@/examples/import_c/lib.fr");
+    c := new_module_and_compiler(Some = (
+        arch = .wasm32, os = .linux, type = .Exe, 
+        wasm_shared_memory = false /*use active memory*/,
+        // limited to one page so can't be as wasteful as i default to being
+        wasm = @ref @as(Compile.Qbe.WasmLayout) (
+            global_base = 6560,  // header of Wasm4.Memory is used for memory mapped io
+            stack_size = 1024,
+            import_memory = ("env", "memory"),
+            null_import = false,
+            embed_import_names = false,
+        ),
+    ));
+    c.compile_src_or_crash(src.items());
+    m, ctx := (c.m, c.emitter);
+    ctx.join_codegen_thread();
+    chunks := {m.target.finish_module}(m);
+    wasm := concat(chunks, ast_alloc());
+    drop(m);
+    c.arena_storage&.deinit();
+    write_entire_file_or_crash("target/a.wasm", wasm);
+    wasm
+};
 
 W :: Wasm4.WIDTH_[];
 Wasm4 :: {

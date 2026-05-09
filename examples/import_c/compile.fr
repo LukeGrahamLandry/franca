@@ -2106,6 +2106,8 @@ Attributes :: @struct {
     noinline := false;
     align: ?i64 = .None;
     alias: ?*Token = .None;
+    wasm_import: ?Str = .None;
+    wasm_export: ?Str = .None;
 };
 
 fn attribute_list(c: *Ctx, tok: *Token, ty: *CType) *Token = {
@@ -2133,6 +2135,8 @@ AttrName :: @enum(
     visibility,
     constructor,
     noinline,
+    import_name,
+    export_name,
     _,
 );
 
@@ -2232,6 +2236,12 @@ fn one_attribute(c: *Ctx, tok: *Token, result: *Attributes) *Token #once = {
         fn noinline() => {
             result.noinline = true;
         }
+        fn import_name() => str_arg { it |
+            result.wasm_import = (Some = it);
+        }
+        fn export_name() => str_arg { it |
+            result.wasm_export = (Some = it);
+        }
     };
     tok
 }
@@ -2282,6 +2292,21 @@ fn parse_symbol_attributes(c: *Ctx, rest: **Token, tok: *Token, obj: *Obj) void 
                     ));
                     entry.task = (Bounce = (lnk = lnk, target = target.global_symbol.unwrap()));
                 };
+        };
+        
+        // TODO: rn these are only used for tests/external/wasm4.fr which happens to never use a different symbol name so these are a nop. 
+        if c.m.goal.arch == .wasm32 {
+            if it.wasm_import { name | 
+                old_name := str(c.m, obj.global_symbol.unwrap());
+                @if(name != old_name) @error_tok(c, obj.tok, "TODO: import_name attr alias");
+            };
+            if it.wasm_export { name | 
+                old_name := str(c.m, obj.global_symbol.unwrap());
+                @if(name != old_name) @error_tok(c, obj.tok, "TODO: export_name attr alias");
+                use_symbol(c.m, obj.global_symbol.unwrap()) { s |
+                    s.export = true;
+                };
+            };
         };
         // TODO: lnk.noinline = it.noinline. 
         //       currently i only inline single block functions so it won't come up often but should probably still do as instructed. 
