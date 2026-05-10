@@ -1,4 +1,12 @@
 
+
+## (May 10)
+
+wasm4
+- indulge my mandelbrot addiction with move/zoom/julia controls. 
+- player 2/3 controls
+- slightly less stub version of runtimeTraceUtf16
+
 ## (May 9) wasm4
 
 backend/wasm: allow settting offset to globals and stack size so don't have to cheat in wasm4.fr. 

@@ -14,12 +14,15 @@
 // TODO: make the shader less ugly (need arrays)
 // TODO: add to tests/gpu.fr
 //       that test runner also needs to stop leaking the pool resources.
-// TODO: player2 controls
 // (there are more todo comments in the actual code)
 // TODO: runtime.c doesn't implement w4_runtimeTraceUtf16
 // TODO: do i want to auto save disk like their native version? 
+//       especially not keeping it on ResetCart is a bit silly. 
 //       rn you have to manually do it in the menu because i find it annoying to spew files when im testing. 
 //       should probably put them next to the cart instead of with short name in cwd. 
+// TODO: for builtin source carts, render one frame for gallery image
+// TODO: i'd be more confident it worked if i had a test where i ran a few frames 
+//       in mine and in a real wasm runtime and compared that the memory was identical. 
 //
 
 // compile builtin carts to native code at comptime instead of including the wasm module as bytes so starts up faster. 
@@ -69,9 +72,9 @@ State :: @struct {
     game_pipe: Sg.Pipeline;
     game: Game;
     exports: Wasm.ExportsEnv;
-    frame: Sg.Buffer;
+    frame: Sg.Buffer;  // still in 2 bits per pixel format of wasm4 framebuffer
     uni: Shaders.Uni;
-    key_pressed: u8;
+    key_pressed: Array(u8, 3);
     mouse_pressed: u8;
     disable_gallery: bool;
     
@@ -115,9 +118,6 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     
     @run @assert(FEAT_LOADER || builtin_carts.len() != 0, "wasm4 FEAT: this program will do nothing");
-    if state.carts.len > 0 {
-        state.start_game(state.carts[0]);
-    };
     state.screen = @if(state.game.active, .Game, .Gallery);
     state.dirty = true;
 }
@@ -284,18 +284,21 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     @if(is_ui && Easy'should_skip_frame(sapp, state.dirty&)) return();
     
     sdtx := state.text.default_context&;
-    memory := bit_cast_unchecked(*u8, *Wasm4.Memory, state.game.memory.ptr);
-if @is(state.screen, .Menu, .Game) {
+if state.screen == .Game {
     @debug_assert(state.game.active);
+    memory := bit_cast_unchecked(*u8, *Wasm4.Memory, state.game.memory.ptr);
     if memory.systemFlags.bit_and(Wasm4.SYSTEM_PRESERVE_FRAMEBUFFER_[]) == 0 {
         Wasm4'w4_framebufferClear();
     }
     screen_size := min(sapp.width().float().cast(), sapp.height().float().cast());
     mouse := state.mouse_pos / vec2(screen_size) * W;
-    x, y := (mouse.x.cast().int().toi16(), mouse.y.cast().int().toi16());
-    toi16 :: fn(a: i64) i16 #ir(.extsh, .Kw);
-    Wasm4'w4_runtimeSetGamepad(0, state.key_pressed);
-    Wasm4'w4_runtimeSetMouse(x, y, state.mouse_pressed);
+    toi16 :: fn(a: f32) i16 #ir(.stosi, .Kw);
+    enumerate state.key_pressed& { i, it |
+        memory.gamepads&[i] = it[];
+    };
+    memory.mouseX = mouse.x.toi16();
+    memory.mouseY = mouse.y.toi16();
+    memory.mouseButtons = state.mouse_pressed;
     f := state.game.update;
     bit_cast_unchecked(rawptr, @FnPtr(_: rawptr) void, f.callee)(f.context);
     // Wasm4'w4_apuTick();  // i don't do audio thus far. 
@@ -304,14 +307,18 @@ if @is(state.screen, .Menu, .Game) {
     state.uni.c1._ = memory.palette&[1];
     state.uni.c2._ = memory.palette&[2];
     state.uni.c3._ = memory.palette&[3];
-    state.uni.paused = int(state.screen == .Menu).intcast();
     
     ::Array(u8, 6400);
     sg.update_buffer(state.frame, memory.framebuffer&.items());
+};
+
+    Easy'glue_begin_pass(sapp, sg, zeroed Sg.PassAction);
+if @is(state.screen, .Menu, .Game) {
+    @debug_assert(state.game.active);
+    state.uni.paused = int(state.screen == .Menu).intcast();
     
     bind := zeroed Sg.Bindings;
     bind.storage_buffers&[0] = state.frame;
-    Easy'glue_begin_pass(sapp, sg, zeroed Sg.PassAction);
     sg.apply_pipeline(state.game_pipe);
     ::[]Shaders.Uni;
     sg.apply_uniforms(0, state.uni&.slice(1).interpret_as_bytes());
@@ -379,7 +386,6 @@ if state.screen == .Gallery {
         sgl.v2f_t2f(x1, y2, 0, 1);
         sgl.end();
     };
-    Easy'glue_begin_pass(sapp, sg, zeroed Sg.PassAction);
     sgl.draw_layer(sg, 0);
 };
     sdtx.draw_layer(0);
@@ -400,7 +406,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 fn R() => if state.game.active {
                     state.start_game(state.game.cart);
                 }
-                fn ENTER() => {
+                fn ENTER() => if state.game.active {
                     if menu {
                         state.run_menu_item(@as(MenuItem) state.hovered);
                     } else {
@@ -417,6 +423,10 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                     state.dirty = true;
                     state.hovered = state.hovered.add(1).mod(MenuItem.enum_count());
                 };
+                fn _2() => @if(state.game.active) state.run_menu_item(.SaveState);
+                fn _4() => @if(state.game.active) state.run_menu_item(.LoadState);
+                fn F9() => @if(state.game.active) state.run_menu_item(.ScreenShot);
+                fn F11() => sapp.toggle_fullscreen();
                 @default => ();
             }
         }
@@ -443,7 +453,6 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         @default => ();
     };
     
-    @if(state.screen == .Game)
     set_key_masks(event, state.mouse_pressed&, state.key_pressed&);
 }
 
@@ -478,9 +487,10 @@ fn open_from_file(state: *State, path: Str, buf: []u8) void = {
 
 // i just send events but it wants current state of key, 
 // so need to remember the old flags and just toggle the bits. 
-set_key_masks :: fn(event: *Sapp.Event, mouse_pressed: *u8, key_pressed: *u8) void #once = {
+// - stored outside memory so don't forget state if game writes to it
+// - update even when screen!=.Game so don't forget if toggle menu then release key
+set_key_masks :: fn(event: *Sapp.Event, mouse_pressed: *u8, key_pressed: *Array(u8, 3)) void #once = {
     #use(Wasm4);
-    bit_xor :: fn(a: u8, b: u8) u8 #ir(.xor, .Kw);
     if @is(event.type, .MOUSE_DOWN, .MOUSE_UP) {
         o := mouse_pressed[];
         X :: fn(it: Sapp.Mousebutton, $flag: u8) => 
@@ -491,17 +501,24 @@ set_key_masks :: fn(event: *Sapp.Event, mouse_pressed: *u8, key_pressed: *u8) vo
         mouse_pressed[] = o;
     };
     if !event.key_repeat && @is(event.type, .KEY_DOWN, .KEY_UP) {
-        o := key_pressed[];
-        X :: fn(it: Sapp.Keycode, $flag: u8) => 
-            { o = o.bit_xor(@if(event.key_code == it, flag, 0)); }
-        X(.X, W4_BUTTON_X_[]);
-        X(.Z, W4_BUTTON_Z_[]);
-        X(.LEFT, W4_BUTTON_LEFT_[]);
-        X(.RIGHT, W4_BUTTON_RIGHT_[]);
-        X(.UP, W4_BUTTON_UP_[]);
-        X(.DOWN, W4_BUTTON_DOWN_[]);
-        key_pressed[] = o;
-    }
+        enumerate key_pressed { i, key_pressed |
+            o := key_pressed[];
+            range(0, 8) { j |
+                o = o.bit_xor(@if(event.key_code == keymap[i][j], flag[j], 0));
+            };
+            key_pressed[] = o;
+        };
+    };
+    
+    // x/z have two options per player
+    // TODO: track them seperately so pressing x then . doesn't count as releasing it
+    keymap :: @const_slice(
+        @const_slice(Sapp.Keycode.X, .Z, .PERIOD, .COMMA, .LEFT, .RIGHT, .UP, .DOWN),
+        @const_slice(Sapp.Keycode.A, .TAB, .Q, .LEFT_SHIFT, .S, .F, .E, .D),
+        @const_slice(Sapp.Keycode.KP_MULTIPLY, .KP_SUBTRACT, .KP_DECIMAL, .KP_ENTER, .KP_4, .KP_6, .KP_8, .KP_5),
+    );
+    flag :: @const_slice(W4_BUTTON_X_[], W4_BUTTON_Z_[], W4_BUTTON_X_[], W4_BUTTON_Z_[], W4_BUTTON_LEFT_[], W4_BUTTON_RIGHT_[], W4_BUTTON_UP_[], W4_BUTTON_DOWN_[]);
+    bit_xor :: fn(a: u8, b: u8) u8 #ir(.xor, .Kw);
 }
 
 MenuItem :: @enum(Continue, SaveState, LoadState, ExportDisk, ImportDisk, ClearDisk, ResetCart, ScreenShot, Gallery);
@@ -568,7 +585,8 @@ fn run_menu_item(state: *State, it: MenuItem) void = {
 screenshot :: fn(memory: *Wasm4.Memory) []u8 = {
     ::Array(u8, 6400);
     w := W.cast().int();
-    out := @ref u8.list(15 + w*w*3, temp());
+    // one extra byte of capacity because i over reserve for the unused byte of the palette
+    out := @ref u8.list(16 + w*w*3, temp());
     @fmt(out, "P6 % % 255\n", w, w);
     range(0, w) { y |
         range(0, w) { x |
@@ -670,7 +688,10 @@ Exports :: @struct {
     trace :: fn(g: *Game, a: u32) void = 
         Wasm4'w4_runtimeTrace(g.memory.index(a.zext()));
     traceUtf8 :: WrapPI Wasm4.w4_runtimeTraceUtf8;
-    traceUtf16 :: WrapP16I Wasm4.w4_runtimeTraceUtf16;
+    traceUtf16 :: fn(g: *Game, a: u32, b: u32) void = {
+        buf := g.memory&.items().subslice(a.zext(), b.zext());
+        runtimeTraceUtf16(u16.reinterpret_bytes(buf));
+    };
     tracef :: fn(g: *Game, a: u32, b: u32) void = 
         Wasm4'w4_runtimeTracef(g.memory.index(a.zext()), bit_cast_unchecked(*u8, rawptr, g.memory.index(b.zext())));
 };
@@ -681,34 +702,127 @@ WrapP16I :: fn($fid: FuncId) FuncId = (fn(g: *Game, a: u32, b: i32) =
 WrapI3 :: fn($fid: FuncId) FuncId = (fn(g: *Game, a: i32, b: i32, c: i32) = fid(a, b, c));
 WrapI4 :: fn($fid: FuncId) FuncId = (fn(g: *Game, a: i32, b: i32, c: i32, d: i32) = fid(a, b, c, d));
 
+// Wasm4'w4_runtimeTraceUtf16 is a stub. 
+// TODO: should convert non-ascii to utf8 properly but 
+//       the only interesting call to this on wasm4.org is particle-editor.wasm which prints js code.
+runtimeTraceUtf16 :: fn(buf: []u16) void = {
+    out := @ref u8.list(buf.len, temp());
+    for buf { c |
+        if c < 127 {
+            out.push(c.trunc());
+        } else {
+            @fmt(out, "\\x%\\x%", c.bit_and(0xFF), c.shift_right_logical(8));
+        };
+    };
+    // can't call w4_runtimeTraceUtf8(out) because it bounds checks that it's in the wasm memory. 
+    println(out.items());
+};
+
 MandelbrotCart :: fn() void = {
-    memory :: bit_cast_unchecked(i64, *Wasm4.Memory, 0);
+    memory :: bit_cast_unchecked(i64, *Wasm4.Memory, 0);  // SAFETY: https://wasm4.org/docs/reference/memory
     w :: W.cast().int();
     M :: import("@/examples/mandelbrot.fr");
-    memory.palette&[0] = 0xFF0000;
-    memory.palette&[1] = 0x0000FF;
+    V :: Vec(f64, 2);
+    start_pos: V : (v = (-2.1, -1.7));
+    state := @static_mut @anon_literal(
+        c := start_pos,
+        z := zeroed(V),
+        saved := (zeroed(V), 1.0),
+        julia := false,
+        zoom := 0.0182,
+        mouse := zeroed(V),
+        pressed := false,
+        init := false,  // could use start() but i find it being one function aesthetically pleasing
+        pressed_x := false,
+    );
     
-    max_steps, x_speed, y_speed, x_start, y_start := (45, 0.015, 0.03, -1.5, -1.0);
-    pos: M.Pos = (x = x_start, y = y_start);
+    mouse: V = (v = (memory.mouseX.itof(), memory.mouseY.itof()));
+    pressed := memory.mouseButtons.bit_and(@run Wasm4.W4_MOUSE_LEFT_[]) != 0;
+    zoom_in := memory.gamepads&[0].bit_and(@run Wasm4.W4_BUTTON_UP_[]) != 0;
+    zoom_out := memory.gamepads&[0].bit_and(@run Wasm4.W4_BUTTON_DOWN_[]) != 0;
+    pressed_x := memory.gamepads&[0].bit_and(@run Wasm4.W4_BUTTON_X_[]) != 0;
+    delta_zoom := float(int(zoom_out) - int(zoom_in));
+    toggle_julia := pressed_x && !state.pressed_x;
+    dirty := !state.init || toggle_julia || delta_zoom != 0 || (pressed && (state.mouse.x != mouse.x || state.mouse.y != mouse.y));
+    if !state.init {
+        memory.palette = (0xFF0000, 0x00FF00, 0x0000FF, 0x000000);
+        memory.systemFlags = @run Wasm4.SYSTEM_PRESERVE_FRAMEBUFFER_[];
+        state.mouse = mouse;
+    };
+    if pressed && !state.pressed {
+        state.mouse = mouse;
+    };
+    
+    state.pressed = pressed;
+    state.pressed_x = pressed_x;
+    @if(!dirty) return();
+    
+    if toggle_julia {
+        state.julia = !state.julia;
+        if !state.julia {
+            state.z = zeroed(V);
+            state.c = state.saved._0;
+            state.zoom = state.saved._1;
+        } else {
+            state.saved = (state.c, state.zoom);
+            state.c += mouse * splat(state.zoom);
+            state.z = start_pos;
+        }
+    };
+    
+    p := @if(state.julia, state.z&, state.c&);
+    delta_zoom /= 30 / state.zoom;
+    pos0 := mouse * splat(state.zoom);
+    state.zoom += delta_zoom;
+    pos1 := mouse * splat(state.zoom);
+    offset := (pos1 - pos0);
+    p[] -= offset;
+    
+    delta := mouse - state.mouse;
+    state.mouse = mouse;
+    if pressed {
+        p[] -= delta * state.zoom;
+    };
+    
+    max_steps := 100;
+    c: M.Pos = (x = state.c.x, y = state.c.y);
+    z: M.Pos = (x = state.z.x, y = state.z.y);
+    p := @if(state.julia, z&, c&);
+    x_start := p.x;
     range(0, w) { y |
         range(0, w) { x |
-            steps := mandelbrot(pos, (x = 0, y = 0), max_steps);
-            set_pixel(x, y, @if(steps == max_steps, 0, 1));
-            pos.x += x_speed;
+            steps := M'mandelbrot(c, z, max_steps);
+            c := @if(steps == max_steps, 3, steps.udiv(4).mod(3));
+            set_pixel(x, y, c);
+            p.x += state.zoom;
         };
-        pos.x = x_start;
-        pos.y += y_speed;
+        p.x = x_start;
+        p.y += state.zoom;
+    };
+    
+    if !state.init {
+        state.init = true;
+        memory.drawColors&[0] = 4;
+        text("\x86\x87: zoom in/out", 0, 0);
+        text("click+drag: move", 0, 10);
+        text("\x80: toggle julia set", 0, 20);
     };
     
     set_pixel :: fn(x: i64, y: i64, bits: i64) void = {
         i := y*w+x;
-        byte := memory.framebuffer&[i / 4]&;
-        shift := i.mod(4)*2;
+        by, bi := i.udiv_mod(4);
+        byte := memory.framebuffer&[by]&;
+        shift := bi*2;
         b: i64 = byte[].zext();
         b = b.bit_and(0b11.shift_left(shift).bit_not());
         b = b.bit_or(bits.shift_left(shift));
         byte[] = b.trunc();
     };
+    itof :: fn(a: i16) f64 #ir(.swtof, .Kd);
+    text :: fn(s: Str, x: i32, y: i32) void = {
+        textUtf8 :: fn(a: u32, b: u32, c: i32, d: i32) void #libc;
+        textUtf8(u8.int_from_ptr(s.ptr).trunc(), s.len.trunc(), x, y);
+    }
 };
 
 builtin_carts :: {
@@ -788,6 +902,7 @@ build_franca :: fn(c: CompCtx, update: FuncId) []u8 = {
     c'vtable'drop_qbe_module(M.raw_from_ptr(m&));
     // if you want to test it in the official wasm4 runtime: 
     // write_entire_file_or_crash("target/a.wasm", wasm);
+    // (also don't forget to run with -unsafe if you want it smaller)
     // TODO: rn it works in mine and wasm4/web but not wasm4/native 
     wasm
 }
