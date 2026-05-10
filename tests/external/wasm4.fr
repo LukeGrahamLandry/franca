@@ -34,6 +34,7 @@ FEAT_AOT_CART :: true;
 FEAT_LOADER :: true;
 // build wasm4/examples/(watris,platformer-test,multiplayer) with import_c and include them as builtin carts. 
 FEAT_FROM_SOURCE :: true;
+builtin_franca_carts: []FuncId : @const_slice(MandelbrotCart);
 // prebuilt files in wasm4/site/static/carts to be bundled into the exe.
 // note: these are the (CC BY-NC-SA 4.0) blobs submitted to wasm4.org, might not be reproducible, etc.
 builtin_static_carts: []Str : empty();  // @const_slice("watris");
@@ -680,7 +681,37 @@ WrapP16I :: fn($fid: FuncId) FuncId = (fn(g: *Game, a: u32, b: i32) =
     fid(bit_cast_unchecked(*u8, *u16, g.memory.index(a.zext())), b));
 WrapI3 :: fn($fid: FuncId) FuncId = (fn(g: *Game, a: i32, b: i32, c: i32) = fid(a, b, c));
 WrapI4 :: fn($fid: FuncId) FuncId = (fn(g: *Game, a: i32, b: i32, c: i32, d: i32) = fid(a, b, c, d));
+
+MandelbrotCart :: fn() void = {
+    memory :: bit_cast_unchecked(i64, *Wasm4.Memory, 0);
+    w :: W.cast().int();
+    M :: import("@/examples/mandelbrot.fr");
+    memory.palette&[0] = 0xFF0000;
+    memory.palette&[1] = 0x0000FF;
     
+    max_steps, x_speed, y_speed, x_start, y_start := (45, 0.015, 0.03, -1.5, -1.0);
+    pos: M.Pos = (x = x_start, y = y_start);
+    range(0, w) { y |
+        range(0, w) { x |
+            steps := mandelbrot(pos, (x = 0, y = 0), max_steps);
+            set_pixel(x, y, @if(steps == max_steps, 0, 1));
+            pos.x += x_speed;
+        };
+        pos.x = x_start;
+        pos.y += y_speed;
+    };
+    
+    set_pixel :: fn(x: i64, y: i64, bits: i64) void = {
+        i := y*w+x;
+        byte := memory.framebuffer&[i / 4]&;
+        shift := i.mod(4)*2;
+        b: i64 = byte[].zext();
+        b = b.bit_and(0b11.shift_left(shift).bit_not());
+        b = b.bit_or(bits.shift_left(shift));
+        byte[] = b.trunc();
+    };
+};
+
 builtin_carts :: {
     carts := Cart.list(4, ast_alloc()); 
     
@@ -691,9 +722,16 @@ builtin_carts :: {
     };
     
     names := @slice("watris", "platformer-test", "multiplayer");
+    // TODO: make these cachable like ffi'include so don't have to compile the c compiler every time
     @if(FEAT_FROM_SOURCE)
     for names { it |
         carts&.push(name = it, impl = (Raw = build_example(it)));
+    };
+    
+    fr := current_compiler_context();
+    for builtin_franca_carts { it |
+        name := fr'vtable'mangle_name(fr.data, it).shallow_copy(ast_alloc());
+        carts&.push(name = name, impl = (Raw = fr.build_franca(it)));
     };
 
     @if(FEAT_AOT_CART) 
@@ -716,18 +754,7 @@ build_example :: fn(it: Str) []u8 = {
         #include "main.c"
     """, wasm4(), it, @if(it == "watris", """#include "utils.c" """ , ""));
     #use("@/examples/import_c/lib.fr");
-    c := new_module_and_compiler(Some = (
-        arch = .wasm32, os = .linux, type = .Exe, 
-        wasm_shared_memory = false /*use active memory*/,
-        // limited to one page so can't be as wasteful as i default to being
-        wasm = @ref @as(Compile.Qbe.WasmLayout) (
-            global_base = 6560,  // header of Wasm4.Memory is used for memory mapped io
-            stack_size = 1024,
-            import_memory = ("env", "memory"),
-            null_import = false,
-            embed_import_names = false,
-        ),
-    ));
+    c := new_module_and_compiler(Some = target);
     c.compile_src_or_crash(src.items());
     m, ctx := (c.m, c.emitter);
     ctx.join_codegen_thread();
@@ -735,9 +762,50 @@ build_example :: fn(it: Str) []u8 = {
     wasm := concat(chunks, ast_alloc());
     drop(m);
     c.arena_storage&.deinit();
-    write_entire_file_or_crash("target/a.wasm", wasm);
     wasm
 };
+
+build_franca :: fn(c: CompCtx, update: FuncId) []u8 = {
+    M :: Wasm.Qbe.Module;
+    m := @uninitialized M;
+    init_default_module_dyn(m&, c.vtable, target);
+    
+    fake_write :: fn(_: Fd, p: *u8, l: i64) i64 = {
+        traceUtf8 :: fn(p: u32, l: u32) void #libc;
+        traceUtf8(u8.int_from_ptr(p).trunc(), l.trunc());
+        l
+    };
+    set_name(fake_write, "write", false);
+    set_name(update, "update", true);
+    set_name :: fn(dest: FuncId, src: Str, export: bool) => 
+        declare_alias(m = m&, target = m&.intern(c'vtable'mangle_name(c.data, dest)), alias = @ref @as(Wasm.Qbe.Lnk) (
+            id = m&.intern(src),
+            export = export,
+        ));
+    
+    fns := @slice(update, fake_write);
+    wasm := c'vtable'emit_qbe_included(M.raw_from_ptr(m&), c&, fns, .ExportWithNames);
+    wasm := wasm.concat(ast_alloc());
+    c'vtable'drop_qbe_module(M.raw_from_ptr(m&));
+    // if you want to test it in the official wasm4 runtime: 
+    // write_entire_file_or_crash("target/a.wasm", wasm);
+    // TODO: rn it works in mine and wasm4/web but not wasm4/native 
+    wasm
+}
+
+target: Wasm.Qbe.Goal : (
+    arch = .wasm32, os = .linux, type = .Exe, 
+    wasm_shared_memory = false /*use active memory*/,
+    // limited to one page so can't be as wasteful as i default to being
+    wasm = ast_alloc().boxed(Wasm.Qbe.WasmLayout, (
+        global_base = 6560,  // header of Wasm4.Memory is used for memory mapped io
+        stack_size = 1024,
+        import_memory = ("env", "memory"),
+        null_import = false,
+        embed_import_names = false,
+        exceptions = false,
+    )),
+);
 
 W :: Wasm4.WIDTH_[];
 Wasm4 :: {
