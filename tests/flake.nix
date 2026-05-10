@@ -6,8 +6,6 @@
 # TODO: do the flake-utils thing so you don't have to edit the system variable 
 #       then magic words: nix develop ./tests#devShell.x86_64-linux
 # TODO: have buildphase do '[run_tests] release' so it can build for all the arches?
-# TODO: add wast2json to dependencies for tests/external/wasm_spec.fr
-# TODO: maybe i want to fix some stuff before committing to the new bootstrap version being 2fa04a7374f3202c9778d6b9b70701072beb87f6 so i might break this flake
 
 {
   inputs = {
@@ -24,6 +22,7 @@
                 curl  # for tests/(external, deps.fr) (to check import_c works)
                 clang  # for tests/backend.fr -use_linker (to check .o files are valid), also examples/emit_c.fr 
                 nodejs  # for tests/test.js (to check wasm modules are valid)
+                wabt # for tests/external/wasm_spec.fr
             ]);
           
             franca_boot_bins = {

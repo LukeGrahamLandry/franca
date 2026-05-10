@@ -1,4 +1,6 @@
 
+- catch the mistake of calling destroy_compiler on the one from current_compiler_context
+  if you fail at copy pasting from default_driver... not that i'd ever make that mistake of course... 
 - finish examples/gpu/rtc.fr. 
   make graphics/shaders translation support a more interesting subset of the language. 
   need to be able to pass around pointers to mutable arrays on the stack.

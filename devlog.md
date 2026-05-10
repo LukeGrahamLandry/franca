@@ -1,10 +1,22 @@
 
-## (May 9)
+## (May 9) wasm4
 
 backend/wasm: allow settting offset to globals and stack size so don't have to cheat in wasm4.fr. 
 originally i was trying to not get sucked in to doing wasm specific craziness 
 but that's not really achievable since i care about being able to follow someone else's abi. 
 doing it properly is just changing two numbers which is easier than the hacks i was doing to make it work without. 
+
+import_wasm: the bug is Else end_block(fallthrough=true).
+right because that's phi_to_stack pushes to self.stack but then we go on to parse else
+which isn't supposed to have those and it gets messed up when you pop back out to the fallthrough of the if and it has everything twice. 
+easy to find once i knew it worked in import_c but perhaps a good sign to get more disiplined about checking that the stack works out. 
+i need to track types better to make SelectK work anyway (rn constants just remember their bits which doesn't work). 
+also did enough hacky versions of float ops to make the rest of the games not die immediately. 
+
+it not rendering in the web demo after choosing from gallery is extra odd because it works if you open the menu. 
+problem is that presenting the surface works differently in browser. 
+graphics/web/app/post_frame wasn't resetting noframe 
+so it only worked if should_skip_frame was called on every frame or no frame. 
 
 ## (May 8)
 

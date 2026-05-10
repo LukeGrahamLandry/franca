@@ -179,7 +179,7 @@ LoadWasm :: @struct {
     cursor: i64;
     function_names: []Str;
     
-    stack: List(Qbe.Ref);
+    stack: List(Ty(Qbe.Ref, Qbe.Cls));
     blocks: List(BlockEntry);
     locals: []Qbe.Ref;  // TODO: we can't store a 128 bit vector in a temporary 
     f: *Qbe.Fn;
@@ -316,33 +316,30 @@ fn emit_the_code(self: *LoadWasm) void = {
                         encoding.op = .copy;
                     };
                     r = self.f.newtmp("w", encoding.cls);
-                    a := self.stack[self.stack.len - 1]&;
-                    a0 = a[];
-                    a[] = r;
+                    a0 = self.pop(argcls(encoding.op, encoding.cls, 0));
+                    self.push(r, encoding.cls);
                 };
                 fn binary() => {
                     r = self.f.newtmp("w", encoding.cls);
-                    a1 = self.stack[self.stack.len - 1];
-                    b := self.stack[self.stack.len - 2]&;
-                    self.stack.len -= 1;
-                    a0 = b[];
-                    b[] = r;
+                    a1 = self.pop(argcls(encoding.op, encoding.cls, 1));
+                    a0 = self.pop(argcls(encoding.op, encoding.cls, 0));
+                    self.push(r, encoding.cls);
                 };
                 fn load() => {
                     _align := self.read_u();
                     offset := self.read_u();
-                    addr := self.stack&.pop().expect("stack for load addr");
+                    addr := self.pop(k_mem);
                     addr := self.compute_address(addr, offset.bitcast());
                     
                     result := self.f.newtmp("load", encoding.cls);
-                    self.stack&.push(result);
+                    self.push(result, encoding.cls);
                     a0 = addr; a1 = QbeNull; r = result; 
                 };
                 fn store() => {
                     _align := self.read_u();
                     offset := self.read_u();
-                    value := self.stack&.pop().expect("stack for store value");
-                    addr := self.stack&.pop().expect("stack for store addr");
+                    value := self.pop(argcls(encoding.op, encoding.cls, 0));
+                    addr := self.pop(k_mem);
                     addr := self.compute_address(addr, offset.bitcast());
                     encoding.cls = .Kw;  // HACK: undo "this being Kl is subtle"
                     a0 = value; a1 = addr; r = QbeNull; 
@@ -354,8 +351,8 @@ fn emit_the_code(self: *LoadWasm) void = {
         }; // Otherwise it's a more complicated instruction. 
         
         @match(inst) {
-            fn I32_Const() => self.stack&.push(self.f.getcon(self.read_s()));
-            fn I64_Const() => self.stack&.push(self.f.getcon(self.read_s()));
+            fn I32_Const() => self.push(self.f.getcon(self.read_s()), .Kw);
+            fn I64_Const() => self.push(self.f.getcon(self.read_s()), .Kl);
             fn F64_Const() => self.push_float(u64);
             fn F32_Const() => self.push_float(u32);
             fn LocalGet()  => self.local_inst(1);
@@ -366,7 +363,7 @@ fn emit_the_code(self: *LoadWasm) void = {
             fn CallIndirect() => {
                 type_index := self.read_u();
                 table := self.read_u();
-                index := self.stack&.pop().expect("call index on stack");
+                index := self.pop(k_mem);
                 externref := self.table_get(table, index);
                 r := self.temporaries(3);
                 self.f.emit(.add, .Kl, r[2], externref, self.f.getcon(8));
@@ -376,14 +373,14 @@ fn emit_the_code(self: *LoadWasm) void = {
             }
             fn TableGet() => {
                 table := self.read_u();
-                index := self.stack&.pop().expect("table index on stack");
+                index := self.pop(k_mem);
                 r := self.table_get(table, index);
-                self.stack&.push(r);
+                self.push(r, .Ke);
             }
             fn TableSet() => {
                 table := self.read_u();
-                value := self.stack&.pop().unwrap();
-                index := self.stack&.pop().unwrap();
+                value := self.pop(.Ke);
+                index := self.pop(k_mem);
                 table_slot := self.compute_table_slot(table, index);
                 self.f.emit(.blit0, .Kw, QbeNull, value, table_slot);
                 self.f.emit(.blit1, .Kw, Qbe.Null, INT(size_of(Rt.Callable)), Qbe.Null);
@@ -411,8 +408,8 @@ fn emit_the_code(self: *LoadWasm) void = {
             fn GlobalSet() => {
                 i: i64 = self.read_u().bitcast();
                 g := self.compute_global_slot(i);
-                val := self.stack&.pop().expect("enough stack");
                 k := self.global_cls[i];
+                val := self.pop(k);
                 self.f.emit(k.store_op(), .Kw, QbeNull, val, g); 
             }
             fn GlobalGet() => {
@@ -420,7 +417,7 @@ fn emit_the_code(self: *LoadWasm) void = {
                 g := self.compute_global_slot(i);
                 k := self.global_cls[i];
                 val := self.f.newtmp("global_get", k);
-                self.stack&.push(val);
+                self.push(val, k);
                 self.f.emit(.load, k, val, g, QbeNull);
             }
             fn VectorPrefix() => panic("Vector instructions are not supported (0xFD prefix)");
@@ -447,7 +444,7 @@ fn emit_the_code(self: *LoadWasm) void = {
                 block_type := self.read_s();
                 old := self.get_blk();
                 @debug_assert_eq(old.jmp.type, .Jxxx, "if in already closed block");
-                old.jmp = (type = .jnz, arg = self.stack&.pop().expect("arg on stack for If"));
+                old.jmp = (type = .jnz, arg = self.pop(.Kw));
                 if_stack&.push(src = old, block_type = block_type); 
                 self.push_block(block_type, false);
                 continuation := self.blocks[self.blocks.len - 1].break;
@@ -456,7 +453,7 @@ fn emit_the_code(self: *LoadWasm) void = {
             }
             fn Else() => {
                 break := self.blocks[self.blocks.len - 1].break;
-                self.end_block(true);
+                self.end_block(false);
                 if_node := if_stack&.pop()
                     || @panic("else outside if (in $%)", self.f.name());
                 new := self.link_new_block();
@@ -466,10 +463,10 @@ fn emit_the_code(self: *LoadWasm) void = {
                 for_phi_rev_TODOSLOW if_node.src.s1 { p |
                     p2 := new_phi(self.f, new, p.cls, 1);
                     p2.push(if_node.src, p.arg[index_in_phi(if_node.src, p)]);
-                    self.stack&.push(p2.to);
+                    self.push(p2.to, p2.cls);
                 };
-                
                 @debug_assert_eq(if_node.src.jmp.type, .jnz);
+                @debug_assert(identical(break, if_node.src.s2), "confused if target");
                 if_node.src.s2 = self.get_blk();
             }
             fn Br() => {
@@ -480,11 +477,11 @@ fn emit_the_code(self: *LoadWasm) void = {
             }
             fn BrIf() => {
                 src := self.get_blk();
-                src.jmp = (type = .jnz, arg = self.stack&.pop().expect("arg on stack for BrIf"));
-                // TODO: only clone the part that gets popped. 
-                stack := self.stack.items().clone(temp());
+                src.jmp = (type = .jnz, arg = self.pop(.Kw));
+                stack_size := self.stack.len;
                 src.s1 = self.parse_branch_target();
                 self.stack_to_phi(src, src.s1);
+                self.stack.len = stack_size;  // SAFETY: relies on pop just decrementing .len
                 
                 // If the condition is false, fallthrough and keep parsing instructions into a new block 
                 // (without consuming anything from the stack). don't need phis since this is the only entry point. 
@@ -492,11 +489,10 @@ fn emit_the_code(self: *LoadWasm) void = {
                 current := self.blocks[self.blocks.len - 1].current&;
                 self.f.copy_instructions_from_scratch_reversed_which_means_forwards(current[]);
                 current[] = src.s2;
-                self.stack = stack;
             }
             fn BrTable() => {
                 src := self.get_blk();
-                inspect := self.stack&.pop().expect("arg for br_table");
+                inspect := self.pop(.Kw);
                 r := self.f.newtmp("switch", .Kl);
                 self.f.emit(.extuw, .Kl, r, inspect, Qbe.Null);
                 n: i64 = self.read_u().bitcast();
@@ -505,31 +501,26 @@ fn emit_the_code(self: *LoadWasm) void = {
                 case := self.f.new_switch(n, src, r, b[b.len - 1]);
                 ss := self.f.switches[case]&;
                 
-                // TODO: only clone the part that gets popped. 
-                stack := self.stack.items().clone(temp());
+                stack_size := self.stack.len;
                 enumerate b.slice(0, b.len - 1) { i, s |
                     s := s[];
                     // careful not to call stack_to_phi multiple times if default used explicitly
-                    // TODO: same applies to other labels being reused
-                    if !identical(s, ss.default) {
+                    dup := b.slice(0, i).contains(fn(it) => identical(it[], s));
+                    if !identical(s, ss.default) && !dup {
                         self.stack_to_phi(src, s);
-                        self.stack = stack;
+                        self.stack.len = stack_size;  // SAFETY: relies on pop just decrementing .len
+                    }
+                    if !identical(s, ss.default) {
                         push(ss.cases&, ss.case_count&, (s, i));
                     }
                 };
                 self.stack_to_phi(src, ss.default);
             }
             fn Drop() => {
-                self.stack&.pop().expect("stack for store drop");
+                self.stack&.pop().expect("stack for drop");
             }
             fn SelectK() => {
-                a := @slice(self.stack[self.stack.len - 2], self.stack[self.stack.len - 3]);
-                k := Qbe.Cls.Kl;
-                for a { a |
-                    if self.f.get_tmp(a) { t |
-                        k = t.cls;
-                    };
-                };
+                k := self.stack[self.stack.len - 2]._1;
                 self.do_select(k);
             }
             fn Select() => {
@@ -553,22 +544,22 @@ fn emit_the_code(self: *LoadWasm) void = {
                     };
                 };
                 
-                new := self.stack&.pop().expect("stack for cas-new");
-                old := self.stack&.pop().expect("stack for cas-old");
-                p := self.stack&.pop().expect("stack for cas-p");
+                new := self.pop(k);
+                old := self.pop(k);
+                p := self.pop(k_mem);
                 p := self.compute_address(p, offset.bitcast());
                 prev := self.f.newtmp("cas-prev", k);
                 
                 self.f.emit(.cas0, .Kw, QbeNull, p, QbeNull);
                 self.f.emit(.cas1, k, prev, old, new);
-                self.stack&.push(prev);
+                self.push(prev, k);
             }
             fn PrefixFC() => {
                 opcode := @as(u64) self.read_u();
                 
                 if opcode <= 7 {   // iCC.trunc_sat_A_fBB
                     unsigned, from_f64, to_i64 := (opcode.bit_and(0b1) != 0, opcode.bit_and(0b10) != 0, opcode.bit_and(0b100) != 0);
-                    a := self.stack&.pop().expect("stack for cas-old");
+                    a := self.pop(@if(from_f64, .Kd, .Ks));
                     // TODO: i think this is only right on arm. nan->0. 
                     //       amd64/isel/sel_ftoi is already doing a bunch of shit. do i also want it to make it saturate?
                     k: Qbe.Cls = @if(to_i64, .Kl, .Kw);
@@ -577,16 +568,16 @@ fn emit_the_code(self: *LoadWasm) void = {
                         @if(from_f64, .dtosi, .stosi));
                     r := self.f.newtmp("k", k);
                     self.f.emit(o, k, r, a, Qbe.Null);
-                    self.stack&.push(r);
+                    self.push(r, k);
                     continue();
                 };
                 
                 if opcode == 10 {  // memory.copy
                     @debug_assert(self.src[self.cursor] == 0 && self.src[self.cursor + 1] == 0);
                     self.cursor += 2;
-                    n := self.stack&.pop().unwrap();
-                    src := self.stack&.pop().unwrap();
-                    dest := self.stack&.pop().unwrap();
+                    n := self.pop(k_mem);
+                    src := self.pop(k_mem);
+                    dest := self.pop(k_mem);
                     src := self.compute_address(src, 0);
                     dest := self.compute_address(dest, 0);
                     if self.f.get_int(n) { n |
@@ -619,9 +610,9 @@ fn emit_the_code(self: *LoadWasm) void = {
 fn do_select(self: *LoadWasm, k: Qbe.Cls) void = {
     result := self.f.newtmp("select", k);
     r := result;
-    cond := self.stack&.pop().expect("stack for sel-cond");
-    f := self.stack&.pop().expect("stack for sel-false");
-    t := self.stack&.pop().expect("stack for sel-true");
+    cond := self.pop(.Kw);
+    f := self.pop(k);
+    t := self.pop(k);
     ki := @if(k.is_wide(), Qbe.Cls.Kl, .Kw);
     if !k.is_int() {
         r0, r1, r2 := (self.f.newtmp("S", ki), self.f.newtmp("S", ki), self.f.newtmp("S", ki));
@@ -635,13 +626,13 @@ fn do_select(self: *LoadWasm, k: Qbe.Cls) void = {
         self.f.emit(.cast, k, r, result, Qbe.Null);
         result = r;
     };
-    self.stack&.push(result);
+    self.push(result, k);
 }
 
 fn choose_runtime_call(self: *LoadWasm, start: i64) void = {
     it, rt_i, indices := self.match_runtime_call(start)
-        || @panic("unhandled instruction %\n(at byte index % of %)", 
-            self.src[start], start, self.m.str(self.f.lnk.id));
+        || @panic("unhandled instruction % (%)\n(at byte index % of %)", 
+            self.src[start], @as(Wasm.Inst) @as(u8) self.src[start], start, self.m.str(self.f.lnk.id));
     // found the right instruction so emit a call to the function in Rt
 
     args := self.stack.items().rest(self.stack.len - it.stacked.len);
@@ -667,7 +658,7 @@ fn choose_runtime_call(self: *LoadWasm, start: i64) void = {
                 fn data() => self.f.symcon(self.datas[indices[i]].id);
                 fn memarg() => {
                     _align, off := (indices[i], indices[i + 1]);
-                    args[0] = self.compute_address(args[0], off);
+                    args[0] = (self.compute_address(args[0]._0, off), .Ke);
                     i += 2;
                     continue()
                 }
@@ -690,7 +681,8 @@ fn choose_runtime_call(self: *LoadWasm, start: i64) void = {
         self.f.emit(.arg, .Kl, QbeNull, it, QbeNull);
     };
     range(0, args.len) { i |
-        self.f.emit(.arg, it.stacked[i], QbeNull, args[i], QbeNull);
+        // TODO: deal with memarg @debug_assert_eq(it.stacked[i], args[i]._1, "choose_runtime_call: bad ard type");
+        self.f.emit(.arg, it.stacked[i], QbeNull, args[i]._0, QbeNull);
     };
     self.stack.len -= it.stacked.len;
     if it.result == .Kx {
@@ -698,7 +690,7 @@ fn choose_runtime_call(self: *LoadWasm, start: i64) void = {
     } else {
         result := self.f.newtmp(it.name, it.result);
         self.f.emit(.call, it.result, result, callee, Qbe.Null);
-        self.stack&.push(result);
+        self.push(result, it.result);
     };
 }
 
@@ -759,6 +751,7 @@ InstSeq :: @struct {
 fn collect_runtime_calls() []InstSeq #fold = @run {
     out := InstSeq.list(ast_alloc());
     fr := current_compiler_context();
+    manual_count := 0;
     for get_constants(Rt) { name |
         continue :: local_return;
         val, ty := get_constant(Rt, name) || continue();
@@ -776,7 +769,15 @@ fn collect_runtime_calls() []InstSeq #fold = @run {
             };
             it[] = compile_ast(it[]);
             @switch(it.ty) {
-                @case(void) => ();  // `#wasm`, don't match anything, called manually. ex. catch
+                @case(void) => {
+                    @debug_assert(args.len == 1, "void but not just `#wasm`");
+                    if Qbe.Wasm.Inst.from_name(name.str()) { inst |
+                        insts&.push(byte = @as(u8) inst);
+                    } else {
+                        // else: don't match anything, called manually. ex. catch
+                        manual_count += 1;
+                    };
+                };
                 @case(u8) => insts&.push(byte = u8.const_eval(it[]));
                 @case(InstSeq.Arg) => {
                     value := InstSeq.Arg.const_eval(it[]);
@@ -798,6 +799,7 @@ fn collect_runtime_calls() []InstSeq #fold = @run {
             name = fr.get_string(name),
         );
     };
+    @assert_eq(manual_count, 1, "typo in `#wasm` name or need to update manual_count");
     
     out&.push(
         callee = fr.get_jitted(Rt.SysJump.try_impl), 
@@ -822,9 +824,9 @@ fr_ty_to_cls :: fn(ty: Type) Qbe.Cls = @switch(ty) {
 
 fn eqz(self: *LoadWasm, o: Qbe.O) void = {
     result := self.f.newtmp("eqz", .Kw);
-    value := self.stack&.pop().unwrap();
+    value := self.pop(@if(o == .ceqw, .Kw, .Kl));
     self.f.emit(o, .Kw, result, value, Qbe.ConZero);
-    self.stack&.push(result);
+    self.push(result, .Kw);
 }
 
 fn table_get(self: *LoadWasm, table_index: u64, index_in_table_W: Qbe.Ref) Qbe.Ref = {
@@ -884,12 +886,12 @@ fn push_float(self: *LoadWasm, $Bits: Type) void = {
     v := Bits.cast_front_unaligned(self.src.rest(self.cursor));
     value: i64 = v.int();
     self.cursor += Bits.size_of();
-    self.stack&.push(self.f.getcon(value));
+    self.push(self.f.getcon(value), @if(Bits == u32, .Ks, .Kd));
 }
 
 fn stack_to_phi(self: *LoadWasm, src: *Qbe.Blk, dest: *Qbe.Blk) void = {
     for_phi dest { p |
-        p.push(src, self.stack&.pop() || @panic("missing value for phi % -> % %", src.id, dest.id, { printfn(self.f, self.f.globals.debug_out); ""}));
+        p.push(src, self.pop(p.cls));
     }
 }
 
@@ -902,10 +904,9 @@ fn decode_block_type(self: *LoadWasm, block_type: i64) Ty([]Wasm.ValType, []Wasm
         return(empty(), empty());
     };
     
-    // :SLOW
     values :: get_cases(Wasm.ValType);
-    each values { it |
-        if block_type == preleb(it[]).intcast() {
+    inline_for values { $it |
+        if block_type == preleb(@run it[]).intcast() {
             return(empty(), (ptr = it, len = 1));
         };
     };
@@ -960,7 +961,7 @@ fn end_block(self: *LoadWasm, fallthrough: bool) void = {
 fn phi_to_stack(self: *LoadWasm, b: *Qbe.Blk) void = {
     ::import("@/backend/wasm/isel.fr");
     for_phi_rev_TODOSLOW b { p |
-        self.stack&.push(p.to);
+        self.push(p.to, p.cls);
     }
 }
 
@@ -985,32 +986,34 @@ fn compute_address(self: *LoadWasm, addr: Qbe.Ref, offset: i64) Qbe.Ref = {
     r2
 }
 
+// TODO: check stack types
 fn local_inst(self: *LoadWasm, delta: i64) void = {
     i    := self.read_u();
     var  := self.locals[i.bitcast()];
     k := self.f.get_temporary(var)[].cls;
     ::if(Qbe.Ref);
     dest := if(delta == 1, => self.f.newtmp(@tfmt("getL%", i), k), => var);
-    src  := if(delta == 1, => var, => self.stack[self.stack.len - 1]);
+    src  := if(delta == 1, => var, => self.stack[self.stack.len - 1]._0);
     self.stack&.reserve(abs(delta));
     self.stack.len += delta;
     if delta == 1 {
         @debug_assert(self.stack.len > 0, "tried to access empty stack in local_inst");
-        self.stack[self.stack.len - 1] = dest;
+        self.stack[self.stack.len - 1] = (dest, k);
     };
     self.f.emit(.copy, k, dest, src, QbeNull);
 }
 
 fn emit_return(self: *LoadWasm) void = {
-    @debug_assert(self.get_blk()[].jmp.type == .Jxxx, "tried to return from terminated block");
+    b := self.get_blk();
+    @debug_assert(b.jmp.type == .Jxxx, "tried to return from terminated block");
     @switch(self.return_types.len) {
         @case(0) => {
-            self.get_blk()[].jmp.type = .ret0;
+            b.jmp.type = .ret0;
         };
         @case(1) => {
             k := self.return_types[0].cls();
-            self.get_blk()[].jmp = (type = k.retk(), arg = self.stack[self.stack.len - 1]);
-            self.stack.len -= 1;
+            r := self.pop(k);
+            b.jmp = (type = k.retk(), arg = r);
             self.f.ret_cls = k;
         };
         @default => panic("TODO: handle multiple returns");
@@ -1027,8 +1030,9 @@ fn emit_call_from_stack(self: *LoadWasm, callee: Qbe.Ref, header: Qbe.Ref, type:
 
     self.f.emit(.arg, .Kl, QbeNull, header, QbeNull);
     range(0, type.arg.len) { i |
-        ref := self.stack[self.stack.len - type.arg.len + i];
+        ref, k2 := self.stack[self.stack.len - type.arg.len + i];
         k := type.arg[i].cls();
+        // TODO: @debug_assert_eq(k, k2, "call wrong arg type");
         self.f.emit(.arg, k, QbeNull, ref, QbeNull);
     };
     self.stack.len -= type.arg.len;
@@ -1041,10 +1045,21 @@ fn emit_call_from_stack(self: *LoadWasm, callee: Qbe.Ref, header: Qbe.Ref, type:
             k := type.ret[0].cls();
             ref := self.f.newtmp("ret", k);
             self.f.emit(.call, k, ref, callee, QbeNull);
-            self.stack&.push(ref);
+            self.push(ref, k);
         };
         @default => panic("TODO: handle multiple returns");
     };
+}
+
+fn push(self: *LoadWasm, r: Qbe.Ref, k: Qbe.Cls) void = {
+    push(self.stack&, (r, k));
+}
+
+fn pop(self: *LoadWasm, k: Qbe.Cls) Qbe.Ref = {
+    ::?Qbe.Ref;
+    r, k2 := self.stack&.pop().unwrap();
+    //TODO: @debug_assert_eq(k, k2, "pop wrong stack type");
+    r
 }
 
 fn temporaries(self: *LoadWasm, $n: i64) []Qbe.Ref #inline/*semantic*/ = {
@@ -1155,7 +1170,7 @@ Qbe :: import("@/backend/ir.fr");
 #use("@/examples/import_wasm/parse.fr");
 
 // returns the number that when encoded in sleb128 will encode this type. 
-preleb :: fn(t: Wasm.ValType) i32 = {
+preleb :: fn(t: Wasm.ValType) i32 #fold = {
     mask :: bit_and(-1, bit_not(1.shift_left(6) - 1));
     x :i64= bit_or(t.raw().zext(), mask);
     @if(::safety_check_enabled(.DebugAssertions)) {
@@ -1219,3 +1234,5 @@ fn compile_try_table(self: *LoadWasm) void = {
 
     // followed by try body
 }
+
+k_mem :: Qbe.Cls.Kw;

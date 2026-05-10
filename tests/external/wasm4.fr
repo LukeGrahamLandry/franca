@@ -10,20 +10,14 @@
 // press enter to show menu. 
 // press escape to exit to gallery of the examples in site/static/carts (click one to play it).
 // 
-// THIS IS UNFINISHED
-// TODO: most of the modules i can't deal with yet (and will crash if you try to load them)
-// - Select(K) when both inputs are constants can't just assume Kl. need to track the types harder. 
-// - more missing float instructions
-// TODO: im still doing something wrong: tetris freezes instead of clearing a row.
-//       and many more are broken in odd ways. platformer-test, the-legend-of-geml-awakening, etc. 
-// TODO: running this in the web demo it works for the builtin_cart but breaks when you try to select a new one from the gallery
+// TODO: FEAT_FROM_SOURCE doesn't work in the web demo because i pretend pointers are 64 bit. 
 // TODO: make the shader less ugly (need arrays)
 // TODO: add to tests/gpu.fr
 //       that test runner also needs to stop leaking the pool resources.
 // TODO: player2 controls
 // (there are more todo comments in the actual code)
 // TODO: runtime.c doesn't implement w4_runtimeTraceUtf16
-// TODO: do i want to auto save/load disk like their native version? 
+// TODO: do i want to auto save disk like their native version? 
 //       rn you have to manually do it in the menu because i find it annoying to spew files when im testing. 
 //       should probably put them next to the cart instead of with short name in cwd. 
 //
@@ -33,7 +27,8 @@ FEAT_AOT_CART :: true;
 // false can only run builtin carts (and gets you a smaller binary if AOT_CART=false because doesn't have to include the wasm jit)
 FEAT_LOADER :: true;
 // build wasm4/examples/(watris,platformer-test,multiplayer) with import_c and include them as builtin carts. 
-FEAT_FROM_SOURCE :: true;
+FEAT_FROM_SOURCE :: true 
+    && !GRAPHICS_TARGET_WEB;  // TODO
 builtin_franca_carts: []FuncId : @const_slice(MandelbrotCart);
 // prebuilt files in wasm4/site/static/carts to be bundled into the exe.
 // note: these are the (CC BY-NC-SA 4.0) blobs submitted to wasm4.org, might not be reproducible, etc.
@@ -195,6 +190,7 @@ fn start_game(state: *State, cart: Cart) void = {
     
     rt.memories&.push(buf, rt.gpa);
     game.memory = (ptr = buf.ptr, cap = page, len = page);
+    state.run_menu_item(.ImportDisk);
 
     // w4_runtimeInit zeroes the memory so must be called before instantiate (which copies in active data sections)
     Wasm4'w4_runtimeInit(game.memory.ptr, game.disk&);
@@ -533,6 +529,8 @@ fn run_menu_item(state: *State, it: MenuItem) void = {
             it := disk.slice(1).interpret_as_bytes().slice(0, 2 + disk.size.zext());
             if !write_entire_file(disk_path, it) {
                 @eprintln("ExportDisk: failed to write to %", disk_path);
+            } else {
+                @eprintln("ExportDisk(%)", disk_path);
             };
         }
         fn ImportDisk() => {
@@ -540,6 +538,7 @@ fn run_menu_item(state: *State, it: MenuItem) void = {
             @if(data.len < 2) return();
             size := data&.pop_type(u16)[];
             @if(data.len < size.zext() || size > 1024) return();
+            @eprintln("ImportDisk(%)", disk_path);
             data = data.slice(0, size.zext());
             disk.size = size;
             ::Array(u8, 1024);
