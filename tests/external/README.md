@@ -17,12 +17,14 @@ c programs to test import_c:
 - curl: "command line tool and library for transferring data with URLs"
 - janet: "a dynamic language and bytecode vm" 
 - hare: "a systems programming language designed to be simple, stable, and robust"
+- wasm4: "build retro games using WebAssembly for a fantasy console"
 
 compilers that output qbe ir as text for qbe_frontend.fr:
 - hare
 
 wasm programs to test import_wasm:
 - wasm_spec: the .wast spectests (most of which i fail currently)
+- wasm4: site/static/carts
 
 ### sadly
 

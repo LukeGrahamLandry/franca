@@ -1,15 +1,22 @@
 ## Entry Points
 
+- runtime: jit instantiate wasm modules (similar to the browsers WebAssembly api)
 - run: execute a wasm module as though it were a native program.
   (a host that provides libc-like imports for my tests but doesn't follow a standard abi)
-- ffi: import a wasm module so that another franca program can call its functions.
-  (see examples/bf/via_wasm.fr for simple usage)
+- ffi: wasm -> ir at compile time so another franca program can call its functions and get native code in its executable. 
 
 ## Limitations
 
 - THIS IS NOT A SANDBOX
 - it only supports the features that franca generates
 - slow: no tiering or wasm specific optimisations 
+
+## Embedding Examples
+
+- tests/external/wasm4.fr (fantasy console emulator)
+- examples/import_wasm/run.fr
+- examples/bf/(via_wasm, via_wasm_rt).fr (brainfuck -> wasm compiler)
+- tests/external/wasm_spec.fr (some fail)
 
 ## Why
 
@@ -40,7 +47,7 @@ function, native code should also let you do that.
 
 - traps
 - validation
-- float: trunc, ceil, floor, nearest, copysign
+- sketchy: trunc, ceil, floor, nearest, copysign
 - correct saturating conversions on non-arm
 - memory.copy: allow overlapping where you need to copy backwards. 
 - more atomic ops

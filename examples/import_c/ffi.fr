@@ -45,29 +45,35 @@ fn include(fr: CompCtx, c_source: Str) ScopeId = {
     // TODO: using a hash for the name is annoying because if you change the source it won't replace the old one, 
     //       so it just leaks them and you have to delete the cache directory occasionally to reclaim disk space. 
     name := Sha256'hex(c_source);
-    cachepath := FrIncr'choose_cache_filename(name);
-    if !no_cache {
-        if FrIncr'read_cached(fr.get_alloc(), cachepath) { header |
-            entry_source := header.get(header.entry_source);
-            // checking entry_source is redundant rn because its hash is used as the file name 
-            if FrIncr'files_unchanged(header, read_entire_file, fr.vtable.self_hash) && entry_source == c_source {
-                @if(show_backend_stats()) @eprintln(">>> (c) hit: %", cachepath);
-                result := fr'vtable'import_frc(fr.data, header.as_bytes());
-                return result.or(fn(err) => fr.report_error(err));
-            };
-        };
+    // checking entry_source is redundant rn because its hash is used as the file name 
+    if fr.check_cache(name, c_source) { header |
+        result := fr'vtable'import_frc(fr.data, header.FrIncr'as_bytes());
+        return result.or(fn(err) => fr.report_error(err));
     };
-    
     // force a jit shim so the c compiler isn't recompiled if it isn't going to be called
     // TODO: should have a macro that does this so it's more explicit and you can grep for where i do it
     include_cold: (@FnPtr(fr: CompCtx, c_source: Str, name: Str) ScopeId) = include_cold;
     include_cold(fr, c_source, name)
 }
 
+check_cache :: fn(fr: CompCtx, name: Str, entry_source: Str) ?*Incremental.Header = {
+    no_cache := fr.get_build_options()[].no_cache;
+    cachepath := FrIncr'choose_cache_filename(name);
+    if !no_cache {
+        if FrIncr'read_cached(fr.get_alloc(), cachepath) { header |
+            entry_source := header.get(header.entry_source);
+            if FrIncr'files_unchanged(header, read_entire_file, fr.vtable.self_hash) && entry_source == entry_source {
+                @if(show_backend_stats()) @eprintln(">>> (c) hit: %", cachepath);
+                return(Some = header);
+            };
+        };
+    };
+    .None
+}
+
 include_cold :: fn(fr: CompCtx, c_source: Str, name: Str) ScopeId = {
     c := import_c'init_fr(fr);
-    c.do_warnings = false;  // TODO: have a #pragma so can just do it for tests/external/janet  
-    no_cache := Foreign.ENV.FRANCA_NO_CACHE.get_environment_variable().is_some();
+    no_cache := get_build_options()[].no_cache;
     c.hash_files_for_frc_deps = !no_cache;
     bytes := import_c'compile_fr(fr, c_source, c, mangle_name_for_cache(name));
     if query_current_arch() != .wasm32 && !no_cache {

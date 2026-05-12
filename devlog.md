@@ -1,4 +1,8 @@
 
+## (May 11)
+
+wasm4: cache the FROM_SOURCE c carts so don't have to rebuild import_c. 
+was going to add a `Meta.cached_blob: Ref(u8);` but putting it as a Dat works just as well. 
 
 ## (May 10)
 

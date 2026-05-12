@@ -6,16 +6,17 @@
 // 
 // pass a wasm file as a cli arg to run a cart (otherwise defaults to a builtin one).
 // you can also drop a wasm file on the window to run it. 
-// controls: arrows,x,z,mouse. 
-// press enter to show menu. 
-// press escape to exit to gallery of the examples in site/static/carts (click one to play it).
+// you can change the FEAT_xxx settings to behave like `w4 bundle --mac` instead (embed a cart into a native executable). 
 // 
+// there's an example cart written in franca near the end of this file. 
+// it's also available online at https://wasm4.org/play/mandelbrot or https://franca.lukegrahamlandry.ca/?file=tests%2Fexternal%2Fwasm4.fr 
+// (the latter is the franca playground which ships this program as source and jits to wasm in the browser so it takes longer to start).  
+//
 // TODO: FEAT_FROM_SOURCE doesn't work in the web demo because i pretend pointers are 64 bit. 
 // TODO: make the shader less ugly (need arrays)
 // TODO: add to tests/gpu.fr
 //       that test runner also needs to stop leaking the pool resources.
 // (there are more todo comments in the actual code)
-// TODO: runtime.c doesn't implement w4_runtimeTraceUtf16
 // TODO: do i want to auto save disk like their native version? 
 //       especially not keeping it on ResetCart is a bit silly. 
 //       rn you have to manually do it in the menu because i find it annoying to spew files when im testing. 
@@ -23,6 +24,9 @@
 // TODO: for builtin source carts, render one frame for gallery image
 // TODO: i'd be more confident it worked if i had a test where i ran a few frames 
 //       in mine and in a real wasm runtime and compared that the memory was identical. 
+// TODO: 2048 cart in web demo "ICE: bad nesting. expected to end @25 but found @26"
+// TODO: needing to ::Array() to get index overloads for types that are used in the 
+//       import_c-ed Memory struct but not the main program is annoying. 
 //
 
 // compile builtin carts to native code at comptime instead of including the wasm module as bytes so starts up faster. 
@@ -37,11 +41,7 @@ builtin_franca_carts: []FuncId : @const_slice(MandelbrotCart);
 // note: these are the (CC BY-NC-SA 4.0) blobs submitted to wasm4.org, might not be reproducible, etc.
 builtin_static_carts: []Str : empty();  // @const_slice("watris");
 
-wasm4 :: fn() = group(
-    url = "https://github.com/aduros/wasm4/archive/bed690f456bfa716ed21d410162c1c6e7c4e9c6c.tar.gz",
-    legacy = "20894af584ebe86d72382c3712d9c0de281302fb677f4b69291d78511e91cb07",
-    discard = @const_slice("cli", "devtools", "scripts", "test", "runtimes/web", "site/src", "site/blog"),
-);
+wasm4 :: Foreign.wasm4;
 Wasm :: import("@/examples/import_wasm/runtime.fr");
 Ffi :: import("@/examples/import_c/ffi.fr");
 Viewer :: import("@/examples/gpu/viewer.fr");
@@ -293,6 +293,7 @@ if state.screen == .Game {
     screen_size := min(sapp.width().float().cast(), sapp.height().float().cast());
     mouse := state.mouse_pos / vec2(screen_size) * W;
     toi16 :: fn(a: f32) i16 #ir(.stosi, .Kw);
+    ::Array(u8, 4);
     enumerate state.key_pressed& { i, it |
         memory.gamepads&[i] = it[];
     };
@@ -540,6 +541,7 @@ fn run_menu_item(state: *State, it: MenuItem) void = {
                 .or(fn(msg) => println(msg));
         }
         // TODO: their native one automatically read/write the file on start/stop. 
+        // TODO: when GRAPHICS_TARGET_WEB expose local storage as a FileVTable so can be like their runtimes/web
         fn ExportDisk() => {
             ::[]@type disk[];
             @debug_assert_le(disk.size, 1024);
@@ -575,6 +577,7 @@ fn run_menu_item(state: *State, it: MenuItem) void = {
             ppm := screenshot(memory);
             path := "target/a.ppm";
             make_dirs_or_crash("target");
+            // TODO: yield_file if GRAPHICS_TARGET_WEB
             write_entire_file_or_crash(path, ppm);
             println(path);
         }
@@ -723,13 +726,14 @@ MandelbrotCart :: fn() void = {
     w :: W.cast().int();
     M :: import("@/examples/mandelbrot.fr");
     V :: Vec(f64, 2);
+    start_zoom :: 0.0182;
     start_pos: V : (v = (-2.1, -1.7));
     state := @static_mut @anon_literal(
         c := start_pos,
         z := zeroed(V),
         saved := (zeroed(V), 1.0),
         julia := false,
-        zoom := 0.0182,
+        zoom := start_zoom,
         mouse := zeroed(V),
         pressed := false,
         init := false,  // could use start() but i find it being one function aesthetically pleasing
@@ -767,6 +771,7 @@ MandelbrotCart :: fn() void = {
             state.saved = (state.c, state.zoom);
             state.c += mouse * splat(state.zoom);
             state.z = start_pos;
+            state.zoom = start_zoom;
         }
     };
     
@@ -835,12 +840,12 @@ builtin_carts :: {
     };
     
     names := @slice("watris", "platformer-test", "multiplayer");
-    // TODO: make these cachable like ffi'include so don't have to compile the c compiler every time
     @if(FEAT_FROM_SOURCE)
     for names { it |
         carts&.push(name = it, impl = (Raw = build_example(it)));
     };
     
+    ::Array(u8, 2);
     fr := current_compiler_context();
     for builtin_franca_carts { it |
         name := fr'vtable'mangle_name(fr.data, it).shallow_copy(ast_alloc());
@@ -866,17 +871,65 @@ build_example :: fn(it: Str) []u8 = {
         %
         #include "main.c"
     """, wasm4(), it, @if(it == "watris", """#include "utils.c" """ , ""));
+    
+    // these programs are so tiny that caching them seems silly, 
+    // but the point is to avoid needing to compile import_c itself if they haven't changed. 
+    // TODO: the cache file needs to be added as a dep like import_frc does
+    //       so it knows to invalidate this program's top level cache if one of the c files changes. 
+    
+    name := @tfmt("wasm4_%", it);
+    fr := current_compiler_context();
+    if Ffi'check_cache(fr, name, src.items()) { header |
+        s := header.get(header.all(Ffi.Incremental.Sym));
+        if s.len != 0 && header.get(s[0].name) == "cart" {
+            return header.get(s[0].dat.bytes);
+        };
+    };
+    
+    f: AsFnPtr(c_wasm_cache_miss) = c_wasm_cache_miss;  // jit-shim so compiles lazily
+    f(name, src.items())
+};
+
+c_wasm_cache_miss :: fn(name: Str, src: Str) []u8 = {
     #use("@/examples/import_c/lib.fr");
+    
     c := new_module_and_compiler(Some = target);
-    c.compile_src_or_crash(src.items());
+    no_cache := get_build_options()[].no_cache;
+    c.hash_files_for_frc_deps = !no_cache;
+    Ffi'import_c'compile_c(c, "<src>", src)
+        .or(fn(msg) => panic(msg));
     m, ctx := (c.m, c.emitter);
     ctx.join_codegen_thread();
     chunks := {m.target.finish_module}(m);
     wasm := concat(chunks, ast_alloc());
+    
+    if !no_cache {
+        writer: Ffi.Incremental.Writer = init(temp()); writer := writer&;
+        writer.sym&.push(
+            segment = .ConstantData,
+            name = writer.push("cart"),
+            payload = (dat = (bytes = writer.push(wasm))),
+        );
+        
+        fr := current_compiler_context();
+        _, all_deps := Ffi'FrIncr'write_deps(writer, c.codemap&, "", fr.vtable.self_hash);
+        meta: Ffi.Incremental.Meta = (
+            arch_os = 0, 
+            entry_source = writer.push(src),
+            debug_name = writer.push(name),
+            all_deps = all_deps,
+        );
+        // TODO: need to include import_c as a dep as well
+        frc := writer.to_bytes(meta, c.m);
+        cache_path := Ffi'FrIncr'choose_cache_filename(name);
+        @if(show_backend_stats()) @eprintln(">>> (c) save: %", cache_path);
+        write_entire_file_or_crash(cache_path, concat(frc, temp()));
+    };
+    
     drop(m);
     c.arena_storage&.deinit();
     wasm
-};
+}
 
 build_franca :: fn(c: CompCtx, update: FuncId) []u8 = {
     M :: Wasm.Qbe.Module;
@@ -926,7 +979,7 @@ Wasm4 :: {
     src := @ref u8.list(temp());
     root := wasm4();
     println(root);
-    files := @slice("apu.c", "framebuffer.c", "runtime.c", "util.c");
+    files := @slice("framebuffer.c", "runtime.c", "util.c");
     for files { it |
         @fmt(src, """
             #add_include_path "%/runtimes/native/src"
@@ -935,6 +988,11 @@ Wasm4 :: {
         """, root, it);
     };
     @fmt(src, """
+        // i don't implement an audio backend yet so no point compiling apu.c just to do nothing. 
+        void w4_apuInit() {};
+        void w4_apuTick() {};
+        void w4_apuTone(int,int,int,int) {};
+        
         const uint8_t SYSTEM_PRESERVE_FRAMEBUFFER_ = SYSTEM_PRESERVE_FRAMEBUFFER;
         const uint8_t W4_BUTTON_X_ = W4_BUTTON_X;
         const uint8_t W4_BUTTON_Z_ = W4_BUTTON_Z;
@@ -960,8 +1018,8 @@ HELP :: """
 game controls: arrows,x,z,mouse.
 enter: select menu item.
 
-Gallery: escape
-ResetCart: r
+Gallery: show examples in site/static/carts (escape)
+ResetCart: (r)
 (Save,Load)State: snapshot wasm memory in [CART].dump
 (Export,Import,Clear)Disk: game save data in [CART].disk
 ScreenShot: write target/a.ppm
