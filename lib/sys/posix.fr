@@ -289,27 +289,36 @@ dirent :: @struct {
 };
 
 opendir :: fn(path: CStr) SysResult(*DIR) = {
-    a := general_allocator();
     if prefer_syscalls() {
         fd := @try(open(path, @or(O.RDONLY, O.DIRECTORY))) return;
+        return fdopendir(fd);
+    };
+    f := choose_inode64_on_applex8664(Syscall'opendir, Syscall'@"opendir$INODE64");
+    fix_libc_DIR(f(path))
+};
+
+fdopendir :: fn(fd: Fd) SysResult(*DIR) = {
+    if prefer_syscalls() {
+        a := general_allocator();
         dir := a.box_zeroed(DIR);
         dir.impl.fd = fd;
         dir.impl.buf = a.alloc_uninit(u8, 4096);
         dir.impl.valid = true;
         return(Ok = dir);
     };
-    {
-        f := choose_inode64_on_applex8664(Syscall'opendir, Syscall'@"opendir$INODE64");
-        r := f(path);
-        if r == 0 {
-            return fix_errno(*DIR, r);
-        };
-        dir := a.box_zeroed(DIR);
-        dir.system = rawptr_from_int r;
-        return(Ok = dir, Err = (_ = int(r == 0)));
-    };
-    
+    f := choose_inode64_on_applex8664(Syscall'fdopendir, Syscall'@"fdopendir$INODE64");
+    fix_libc_DIR(f(fd))
 };
+
+fix_libc_DIR :: fn(r: i64) SysResult(*DIR) = {
+    if r == 0 {
+        return fix_errno(*DIR, r);
+    };
+    a := general_allocator();
+    dir := a.box_zeroed(DIR);
+    dir.system = rawptr_from_int r;
+    (Ok = dir, Err = (_ = int(r == 0)))
+}
 
 readdir :: fn(dir: *DIR) SysResult(*dirent) = {
     r := @if(dir.impl.valid, {

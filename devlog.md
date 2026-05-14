@@ -1,8 +1,24 @@
 
+## (May 13)
+
+im making this too complicated. just going to write down what i thought about and come back later. 
+if the only reason i care rn is to add it to the wasm4 cli, 
+it doesn't matter, the import(@) already overlays the cwd so its fine if you build 
+in the right folder which you have to anyway. all this was so you could do `franca /whatever/cart.fr` instead of `cd /whatever && franca cart.fr`.
+ifi m trying to show that my language is usable by other people i shouldn't be inventing new compiler weirdness that i don't use anywhere else. 
+
 ## (May 11)
 
 wasm4: cache the FROM_SOURCE c carts so don't have to rebuild import_c. 
 was going to add a `Meta.cached_blob: Ref(u8);` but putting it as a Dat works just as well. 
+
+fr: make it easy to import files that aren't in the main franca library folder. 
+because i want to be like the other wasm4 languages where other people can actually write programs without me needing to bless a set of bindings. 
+(previously could do single file scripts outside but not multifile unless you were in that directory when running). 
+turns out it's annoying to do without breaking the nice properties of the current codemap system (wrote some docs about that so i don't forget). 
+but i do have to deal with this better anyway because it revealed an existing problem if comptime code tries to change cwd and then call a jit-shim.  
+
+wrote wasm4.fr bindings for template in their cli. 
 
 ## (May 10)
 

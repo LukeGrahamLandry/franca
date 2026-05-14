@@ -19,7 +19,7 @@ runtime code will automatically be included in the final binary.
 - nonlocal returns from (non-escaping) inline lambdas so you can define your own control structures
 - manual memory management with explicit allocators 
 - no seperate build system language. write a program that builds your program
-- full c abi support so you can call extern-c code written in other languages
+- c abi support so you can call extern-c code written in other languages
   - (limitations: no f16,f80,f128,i128,bitfields,tls,stack switching)
 
 ## Supported Targets
@@ -75,6 +75,7 @@ These are not polished yet but hopefully better than nothing.
 - [codegen](./docs/codegen.md): how to create new code (macros, asm, ir, import_c, etc.)
 - [annotations](./docs/annotations.md): how to attach metadata to franca programs and query it from comptime code
 - [comptime](./docs/comptime.md): example usecases for compile time execution
+- [freestanding](./docs/freestanding.md): what comes before main() / writing embeddable libraries
 - [higher_level](./docs/higher_level.md): a nonexhaustive list of features i don't have
 - [debugging](./docs/debugging.md)
 - [caching](./docs/caching.md): details about `.frc` files

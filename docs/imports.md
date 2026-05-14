@@ -16,14 +16,24 @@ it is treated as though it were first passed to `import()`.
 Passing a string literal instead of a scope expression avoids the sketchiness 
 of needing to compile the expression but then adding more symbols to the scope later 
 (it also works better at top level where it might run before the full compilation environment is ready). 
-TODO: explain that better. 
-TODO: explain how namespaces work. there main file is the global namespace, child files you #use will have to #use eachother or not get symbols. 
-TODO: note you can use #use in a function signeture and it will just affect the body. 
-TODO: talk about SNEAK (using a FuncId as a scope)
-TODO: note overload sets are always global
-TODO: compare to import_module. 
-TODO: be consistant about where root path is. 
-TODO: talk about passing string of source code to import() instead of a file path. 
+
+Importing strings starting with `@/` first looks up the path in the library root folder and then falls back to the current working directory if it doesn't exist. 
+The root folder is something that contains a file called "lib/franca_stdlib_1.fr". 
+The compiler will guess it's location based on the location of the compiler executable but you can override it with the FRANCA_LIBRARY_DIR environment variable. 
+
+Importing strings starting with "{" treats them as franca code. (see `./codegen.md## Import String` for details). 
+
+### Scopes
+
+The entry point file passed to the compiler contains the global scope. 
+Any other files you import() have that global scope as their parent (they can see identifiers declared there). 
+If they need to access constants declared in other files not #use-ed by the global scope they must import them explicitly. 
+Calls to import() are memoized. Importing the same file twice doesn't recompile it and uses the same versions of @static variables, etc. 
+Overload set entries (`fn foo(a) r = ();`) default to being in the global scope unless there's 
+a closer empty local overload set declaration (`fn foo();` without a body) for them to bind to. 
+Local overload sets like that are constant values in their scope (can be accessed with dot syntax or #use like any other). 
+
+TODO: talk about other ways of making scopes (Type.scope_of and FuncId.scope_of) and other ways of using scopes (get_constants, get_constant). 
 
 ## Linking Extern Symbols
 
@@ -54,6 +64,9 @@ chooses between `__error` and `__errno_location` based on the operating system.
 It also lets you access data symbols, not just functions. 
 It's useful in comptime code where you want to do things in a less declarative way. 
 (example: `@/lib/sys/syscall.fr/syscall` dynamically chooses to import a libc function or use direct syscalls). 
+
+If you want the inverse (another language is the main program and it imports symbols from franca) 
+extra care is needed, see [docs/freestanding](./freestanding.md). 
 
 ## Fetching Dependencies
 

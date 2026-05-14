@@ -1,4 +1,11 @@
 
+- (@/graphics/easy.fr/build_for_graphics and wasm4/cli/assets/templates/franca/wasm4.fr/build)
+  i like the style where the user program targeting a specific environment 
+  has a driver stub that imports something generic because it makes programs 
+  self describing (you can just point the compiler at it instead of remembering which driver it expects). 
+  however, this makes driver caching less effective because the compiler doesn't know that 
+  most changes to the main program file won't affect the driver code. 
+  (ex. for wasm4 it makes the minimium feedback loop 160ms instead of 60ms).
 - add to wasm4 cli?
   - get better at importing files not in the franca root folder
   - update the commit hash in wasm4.fr
@@ -7,7 +14,6 @@
   - add to docs? `site/src/components/MultiLanguageCode.js`
   - sane error message if you try to use StaticTls
   - guess_library_path 
-    - allow env var in case it fails
     - follow if try_get_executable_path is a symlink
 - allow list imports with import_c/include. well designed libs like stb,wuffs,wasm4 will have a very sane short list 
   and it doesn't do anything anyway because c isn't memory safe but there's no reason to make it easy. 
@@ -251,6 +257,21 @@ export function w $main() {
     ie. `franca examples/sudoku.fr` works anywhere you run it but `franca examples/chess/gui.fr -jit` 
     doesn't because include_bytes doesn't fallback to the root dir. 
   - make sure the inverse works too. you should be able to write a .fr script that doesn't live in the root dir
+- relatedly consider making it easy to import franca code that isn't in the library folder and isn't in current working directory. 
+  - rn you could always just do it yourself with comptime code and `import({ })` but it won't interact well with driver caching because compiler doesn't know about it. 
+  - im tempted to do something like how build.zig lets you add a module and then you can `import("module name").dir_in_module.file.value` from the code. 
+    tho it feels a bit weird to be doing another layer of virtual file system. 
+    can't just be for code imports, ex. include_bytes() wants to read files and feels like it should accept the same strings import() does. 
+  - whatever i do also has to be represented in the cache file's Dep. 
+    you want it to be able to find files before needing to run code, 
+    which doesn't really work with allowing comptime code to add new module paths 
+    (tho fine if you only allow it from the driver because that's a different compilation unit)
+  - i don't like depending on cwd because it's nice to be able to run a script from somewhere else. 
+    so another thing i tried was chopping off the file you pass to the compiler and using that path as the root of the workspace instead of the cwd. 
+    again that's annoying because you force code to decide if it wants to lookup paths in the real file system or the compiler's made up one. 
+    drivers have to remember to be consistant with the entry file, cache needs to deal with it somehow, etc. 
+  - don't want to use absolute paths anywhere because they end up in the executable if you build with -debug-info (also the .frc files)
+  - want to hold on to file descriptors instead of doing paths relative to cwd so comptime code can't confuse the compiler by calling chdir
 - go through and add cases to check_opt.fr for everything in backend/opt
 - should error if you try to make a bake_relocatable_value which will never be called because the type doesn't contain pointers
 - deal with Crash'hook_backtrace();

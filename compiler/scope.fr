@@ -1106,7 +1106,7 @@ fn import_as_scope(self: *SelfHosted, name: Symbol, _loc: Span, force_scope: ?Sc
     selector := name_s[0];
     file := @switch(selector) {
         @case("@".ascii()) => {
-            @err_assert(name_s.len > 2 && name_s[1] == "/".ascii(), "expected import descriptor to start with '@/'") return;
+            @err_assert(name_s.len > 2 && name_s[1] == "/".ascii(), "expected import descriptor to start with '@/' (%)", name_s) return;
             @err_assert(!name_s[name_s.len - 1].is_ascii_whitespace(), "illegal trailing whitespace in import descriptor'") return;
             name_s := name_s.rest(2);
             @unwrap(self.get_library_parse(name_s), "unknown library path %", name_s) return
@@ -1116,10 +1116,6 @@ fn import_as_scope(self: *SelfHosted, name: Symbol, _loc: Span, force_scope: ?Sc
             file := self.codemap.add_file(Incr.import_literal_file_name, name_s);
             id := push_parse(self.parser, name_s, file);
             id
-        };
-        @case("F".ascii()) => {
-            @if(DISABLE_IMPORT_FRC) return(@err("TODO: DISABLE_IMPORT_FRC because scoping when you import the compiler is messed up"));
-            return(self.import_frc(name_s))
         };
         @default => return(@err("invalid selector (first character) of import(Str) %. expected @ or {", selector));
     };
@@ -1209,7 +1205,7 @@ fn get_library_file_text(_a: Alloc, name: Str) ?Str = {
 // I like that users can put the lib somewhere and edit it for thier program. I dont want the compiler to just force its blessed version.
 fn guess_library_path(a: Alloc) ?RawList(u8) = {
     // :io_driver
-    check :: fn(p: *List(u8)) bool = {
+    check2 :: fn(p: *List(u8)) bool = {
         p.push_path_segment("lib");
         p.push_path_segment("franca_stdlib_1.fr");
         good := file_exists(p.items());
@@ -1217,17 +1213,26 @@ fn guess_library_path(a: Alloc) ?RawList(u8) = {
         p.pop_path_segment();
         good
     };
+    check :: fn(p) => @if(check2(p)) return(Some = p.as_raw());
+    
+    p := u8.list(a); 
+    p := p&;
+    
+    if get_environment_variable(Foreign.ENV.FRANCA_LIBRARY_DIR) { it |
+        p.push_all(it.str());
+        check(p);
+        p.clear();
+    };
 
     // if a project wants to supply its own version, that should take priority.
-    p := u8.list(a); p&.push_all("."); // get_working_directory(a);
-    p := p&;
-    if(check(p), => return(Some = p.as_raw()));
+    p.push_all("."); // get_working_directory(a);
+    check(p);
     
     // TODO: this doesn't work if we're just using '.' ^
     // TODO: also check like ./vendor/franca
     range(0, 3) { _ |
         p.pop_path_segment();
-        if(check(p), => return(Some = p.as_raw()));
+        check(p);
     };
 
         // TODO: this doesn't work if its a symlink to the exe. need to follow that? 
@@ -1236,18 +1241,18 @@ fn guess_library_path(a: Alloc) ?RawList(u8) = {
         assert(p.pop_until_endswith("/"), "path should have slashes"); // we want our folder, not our exe. 
         
         p.push_path_segment("franca");
-        if(check(p), => return(Some = p.as_raw()));
+        check(p);
         // exe might be in franca/target/release/franca or franca/target/debug/deps/compiler-21be1aa281dbe5d6, so go up
         range(0, 5) { _ |
             p.pop_path_segment();
-            if(check(p), => return(Some = p.as_raw()));
+            check(p);
         };
         
         p.clear();
         if read_link("/usr/local/bin/franca", p) {
             range(0, 5) { _ |
                 p.pop_path_segment();
-                if(check(p), => return(Some = p.as_raw()));
+                check(p);
             };
         };
     };

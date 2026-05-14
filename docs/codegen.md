@@ -195,6 +195,15 @@ The c frontend only runs once and the resulting ir is compiled for each target
 so only one version of the preprocessor constants are baked in. 
 Many useful c libraries are well behaved and don't suffer from this problem. 
 
+This can be made more convoluted by adding another layer. 
+examples/disassembler.fr wants to use a library written in lua 
+so it uses import_c to call a lua interpreter written in c 
+and then uses that to run luajit's disassemblers. 
+
+> This isn't the only way to call c code. 
+> If depending on an external c compiler and linker is an acceptable price to pay for better optimization, 
+> see `./imports.md## Linking Extern Symbols`.
+
 ## TODO: document me!
 
 - import_frc

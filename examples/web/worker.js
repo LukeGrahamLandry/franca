@@ -285,6 +285,7 @@ let weak_imports = [
     "posix_spawnp", 
     "posix_spawn_file_actions_init", "posix_spawn_file_actions_destroy",
     "posix_spawn_file_actions_adddup2", "posix_spawn_file_actions_addclose", 
+    "fdopendir", "fdopendir$INODE64",
 ];
 
 for (const it of weak_imports) {
