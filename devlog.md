@@ -1,4 +1,11 @@
 
+##
+
+use atlas for logos. before i wasflipping by rotating but that flips the whole texture which moves the 
+individual images of the atlas around. need to just flip each one. 
+was confused about how chess is doing it. right swapping v1,v2 so it interpolates in the other direction 
+(chess has y1,y2 swapped but that's the same because they just matter relative to eachother)
+
 ## (May 13)
 
 im making this too complicated. just going to write down what i thought about and come back later. 

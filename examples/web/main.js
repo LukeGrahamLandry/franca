@@ -439,14 +439,14 @@ function enable_graphics(on) {
     document.getElementById("togglecanvas").checked = on;
     let out = document.getElementById("out");
     let c = document.getElementById("canvas");
-    c.hidden = !on;
     if (on) {
         out.style.height = "29%";
-        c.style.height = "70%";
+        c.style.display = "block";
         c.style.width = "100%";
         c.width = c.clientWidth * window.devicePixelRatio;
         c.height = c.clientHeight * window.devicePixelRatio;
     } else {
+        c.style.display = "none";
         out.style.height = "100%";
     }
 }

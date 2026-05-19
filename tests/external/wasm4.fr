@@ -25,6 +25,7 @@
 // TODO: i'd be more confident it worked if i had a test where i ran a few frames 
 //       in mine and in a real wasm runtime and compared that the memory was identical. 
 // TODO: 2048 cart in web demo "ICE: bad nesting. expected to end @25 but found @26"
+// TODO: endless-runner "panic! TODO: handle multiple returns"
 // TODO: needing to ::Array() to get index overloads for types that are used in the 
 //       import_c-ed Memory struct but not the main program is annoying. 
 //
@@ -36,6 +37,8 @@ FEAT_LOADER :: true;
 // build wasm4/examples/(watris,platformer-test,multiplayer) with import_c and include them as builtin carts. 
 FEAT_FROM_SOURCE :: true 
     && !GRAPHICS_TARGET_WEB;  // TODO
+FEAT_LOGO_PNG :: true;  // use the committed wasm4/site/static/carts/*.png as gallery image.  
+FEAT_LOGO_GEN :: true;  // run the first frame and use that as the gallery image (if no png available)
 builtin_franca_carts: []FuncId : @const_slice(MandelbrotCart);
 // prebuilt files in wasm4/site/static/carts to be bundled into the exe.
 // note: these are the (CC BY-NC-SA 4.0) blobs submitted to wasm4.org, might not be reproducible, etc.
@@ -55,6 +58,7 @@ Game :: @struct {
     active: bool;
     cart: Cart;
     instance: *Wasm.Instance;  // need this to access globals for save/load state
+    silence_trace: bool;
 };
 
 State :: @struct {
@@ -68,13 +72,14 @@ State :: @struct {
     hovered: i64;  // annoying that i update this in rendering instead of event but it lets me not paste the coordinate math twice
     loaded_carts: bool;
     text: Sdtx.Self;
+    logo_atlas: Sg.Image;
     
     game_pipe: Sg.Pipeline;
     game: Game;
     exports: Wasm.ExportsEnv;
     frame: Sg.Buffer;  // still in 2 bits per pixel format of wasm4 framebuffer
     uni: Shaders.Uni;
-    key_pressed: Array(u8, 3);
+    key_pressed: Array(u8, 4);
     mouse_pressed: u8;
     disable_gallery: bool;
     
@@ -83,7 +88,7 @@ State :: @struct {
 
 Cart :: @struct {
     name: Str;
-    logo: Sg.Image = (id = 0);
+    logo := zeroed Ty(Vec2, Vec2);
     impl: @tagged(
         Raw: []u8, 
         Aot: @struct(mod: *Wasm.Module, hash: *Sha256.Digest),
@@ -91,13 +96,6 @@ Cart :: @struct {
 };
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
-    // TODO: this is annoying because when using easy_init can't do desc at all
-    //       but want to use easy_init so it works with tests/gpu.fr 
-    //       but also this breaks that test anyway because the sg was already used so this is pointless. 
-    R :: Sg.Image;
-    @if(FEAT_LOADER)
-    init_pool(sg.pools&.index(R.Tag), sg.desc.allocator, 1024, size_of(R.T));  // SNEAK
-
     sapp.desc.enable_dragndrop = FEAT_LOADER;
     state.arena = init(page_allocator, 1.shift_left(16));
     init_gfx(state, sg);
@@ -128,44 +126,84 @@ fn load_carts(state: *State, sg: *Sg.Self) void = {
     carts_dir := @tfmt("%/site/static/carts", wasm4());  // TODO: make this an arg
     #use("@/examples/testing.fr");
     @if_let(collect_with_extension(carts_dir, ".wasm")) fn Ok(files) => {
-        carts := @ref Cart.list(files.len, a);
+        w := W.cast().int();
+        n := files.len + builtin_carts.len();
+        atlas := @ref new_atlas(temp(), n, w);
+        carts := @ref Cart.list(n, a);
         carts.push_all(builtin_carts);
+        
+        @if(FEAT_LOGO_GEN) each carts {cart |
+            img := screenshot_rgba(cart[]);
+            cart.logo = atlas.push(img, w, w);
+        };
+        
         for files { it |
             name := it.slice(0, it.len - ".wasm".len());
             if read_entire_file(a, @tfmt("%/%.wasm", carts_dir, name)) { wasm_bytes |
                 cart: Cart = (impl = (Raw = wasm_bytes), name = name.shallow_copy(a));
-                @if(Viewer.FEAT_PNG)
+                have_logo := false;
+                @if(FEAT_LOGO_PNG)
                 if read_entire_file(temp(), @tfmt("%/%.png", carts_dir, name)) { logo |
                     break :: local_return;
-                    img, _0, _1 := Viewer'load_texture_from_data(sg, logo)
+                    img, width, height := Viewer'stbi_load(logo)
                         .or(fn(msg) => { eprintln(msg); break(); });
-                
-                    // TODO: handle POOL_EXHAUSTED
-                    // TODO: this is dumb, use an atlas
-                    // TODO: could be cool to automate just rendering the first frame of the game and using that instead of the committed thumbnails
-                    cart.logo = img;
+                    if width != w.intcast() || width != height {
+                        break();
+                    };
+                    cart.logo = atlas.push(u32.reinterpret_bytes(img), width.intcast(), height.intcast());
+                    Viewer'Stb'stbi_image_free(u8.raw_from_ptr(img.ptr));
+                    have_logo = true;
+                };
+                @if(FEAT_LOGO_GEN) if !have_logo && cart.name != "endless-runner" /*multivalue*/ { 
+                    img := screenshot_rgba(cart);
+                    cart.logo = atlas.push(img, w, w);
                 };
                 carts.push(cart);
             };
         };
         state.carts = carts.items();
+        @assert(state.logo_atlas.id == 0, "TODO: if call this function multiple times, free the old image");
+        state.logo_atlas = atlas.build(sg);
+        
         @eprintln("found % carts in %ms", carts.len, timestamp() - start);    // :SLOW
     };
 }
 
+screenshot_rgba :: fn(cart: Cart) []u32 = {
+    exports: Wasm.ExportsEnv = (_ = init(temp()));
+    game := zeroed Game;
+    fill_exports(exports&, game&);
+    start_game(game&, cart, exports&, @ref @zeroed Wasm4.w4_Disk, true);
+    game&.tick(vec2(0,0), 0, (0,0,0,0));
+    w := W.cast().int();
+    buf := temp().alloc_uninit(u32, w*w);
+    iter_framebuffer game&.memory() { i, c |
+        buf[i] = c;
+    };
+    drop(game.rt&);
+    buf
+}
+
 fn start_game(state: *State, cart: Cart) void = {
+    @eprintln("loading (%): %", cart.impl&.tag(), cart.name);
+    disk := @zeroed Wasm4.w4_Disk;
+    try_load_disk(state.game.disk&, cart&.disk_path());
+    start_game(state.game&, cart, state.exports&, disk&, false);
     state.dirty = true;
-    game := state.game&;
+    state.screen = .Game;
+}
+
+fn start_game(game: *Game, cart: Cart, exports: *Wasm.ExportsEnv, disk: *Wasm4.w4_Disk, silent: bool) void = {
     rt := game.rt&;
     if game.active {
         drop(rt);
         game[] = zeroed(Game);
     };
     game.active = true;
+    game.silence_trace = silent;
     game.cart = cart;
     a := general_allocator();
     rt[] = init_for_jit(a, "");
-    @eprintln("loading (%): %", cart.impl&.tag(), cart.name);
     mod := @match(cart.impl) {
         fn Raw(wasm) => {
             @if(@run (!FEAT_LOADER && FEAT_AOT_CART)) panic("FEAT_LOADER=false, cannot load raw cart");  // show the compiler it's unreachable
@@ -190,13 +228,13 @@ fn start_game(state: *State, cart: Cart) void = {
     
     rt.memories&.push(buf, rt.gpa);
     game.memory = (ptr = buf.ptr, cap = page, len = page);
-    state.run_menu_item(.ImportDisk);
+    game.disk = disk[];
 
     // w4_runtimeInit zeroes the memory so must be called before instantiate (which copies in active data sections)
     Wasm4'w4_runtimeInit(game.memory.ptr, game.disk&);
     
-    instance := instantiate(rt, mod, state.exports&);
-    state.game.instance = instance;
+    instance := instantiate(rt, mod, exports);
+    game.instance = instance;
     
     game.update = get_fn("update");
     get_fn :: fn(name: Str) => {
@@ -216,7 +254,6 @@ fn start_game(state: *State, cart: Cart) void = {
         start := get_fn(name);
         bit_cast_unchecked(rawptr, @FnPtr(_: rawptr) void, start.callee)(start.context);
     };
-    state.screen = .Game;
 }
 
 fn init_gfx(state: *State, sg: *Sg.Self) void = {
@@ -279,31 +316,33 @@ Shaders :: @struct {
     };
 };
 
+fn tick(game: *Game, mouse: Vec2, mouse_pressed: u8, key_pressed: Array(u8, 4)) void = {
+    @debug_assert(game.active);
+    memory := game.memory();
+    if memory.systemFlags.bit_and(Wasm4.SYSTEM_PRESERVE_FRAMEBUFFER_[]) == 0 {
+        Wasm4'w4_framebufferClear();
+    }
+    toi16 :: fn(a: f32) i16 #ir(.stosi, .Kw);
+    
+    memory.gamepads = key_pressed;
+    memory.mouseX = mouse.x.toi16();
+    memory.mouseY = mouse.y.toi16();
+    memory.mouseButtons = mouse_pressed;
+    f := game.update;
+    bit_cast_unchecked(rawptr, @FnPtr(_: rawptr) void, f.callee)(f.context);
+}
+
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     is_ui := @is(state.screen, .Menu, .Gallery);
     @if(is_ui && Easy'should_skip_frame(sapp, state.dirty&)) return();
     
     sdtx := state.text.default_context&;
-if state.screen == .Game {
-    @debug_assert(state.game.active);
-    memory := bit_cast_unchecked(*u8, *Wasm4.Memory, state.game.memory.ptr);
-    if memory.systemFlags.bit_and(Wasm4.SYSTEM_PRESERVE_FRAMEBUFFER_[]) == 0 {
-        Wasm4'w4_framebufferClear();
-    }
     screen_size := min(sapp.width().float().cast(), sapp.height().float().cast());
+if state.screen == .Game {
     mouse := state.mouse_pos / vec2(screen_size) * W;
-    toi16 :: fn(a: f32) i16 #ir(.stosi, .Kw);
-    ::Array(u8, 4);
-    enumerate state.key_pressed& { i, it |
-        memory.gamepads&[i] = it[];
-    };
-    memory.mouseX = mouse.x.toi16();
-    memory.mouseY = mouse.y.toi16();
-    memory.mouseButtons = state.mouse_pressed;
-    f := state.game.update;
-    bit_cast_unchecked(rawptr, @FnPtr(_: rawptr) void, f.callee)(f.context);
-    // Wasm4'w4_apuTick();  // i don't do audio thus far. 
+    tick(state.game&, mouse, state.mouse_pressed, state.key_pressed);
     
+    memory := state.game&.memory();
     state.uni.c0._ = memory.palette&[0];
     state.uni.c1._ = memory.palette&[1];
     state.uni.c2._ = memory.palette&[2];
@@ -350,20 +389,20 @@ if state.screen == .Gallery {
     
     sgl := state.draw&;
     sgl.defaults();
-    sgl.viewport(0.intcast(), 0.intcast(), sapp.width().intcast(), sapp.height().intcast(), true);
+    ssi32 := screen_size.cast().int().intcast();
+    sgl.viewport(0.intcast(), 0.intcast(), ssi32, ssi32, true);
     sgl.load_pipeline(state.menu_pipe);
-    sgl.cur_matrix_mode = .TEXTURE;
-    sgl.rotate(PI, 0.0, 1.0, 0.0);
-    sgl.rotate(PI, 0.0, 0.0, 1.0);
-
     sgl.texturing_enabled = true;
-    step := sqrt(state.carts.len.float()).int() + 1;
+    step := approx_root(state.carts.len);
     
-    screen := vec2(sapp.width().float().cast(), sapp.height().float().cast());
-    scale: f32 = 1.5;
+    screen := vec2(screen_size);
+    scale: f32 = 1.9;
     mouse := (state.mouse_pos / screen * 2 - vec2(1)) * vec2(1, -1);
     state.hovered = -1;
     sdtx.canvas(sapp, 1/2);
+    sgl.texture(state.logo_atlas, (id = Sg.INVALID_ID));
+    
+    sgl.begin(.QUADS);
     enumerate state.carts { i, cart |
         xx, yy := i.div_mod(step);
         // 1/step is sane and then fix to be -1..+1
@@ -379,19 +418,24 @@ if state.screen == .Gallery {
             sdtx.put(cart.name);
         };
         
-        sgl.texture(cart.logo, (id = Sg.INVALID_ID));
-        sgl.begin(.QUADS);
-        sgl.v2f_t2f(x1, y1, 0, 0);
-        sgl.v2f_t2f(x2, y1, 1, 0);
-        sgl.v2f_t2f(x2, y2, 1, 1);
-        sgl.v2f_t2f(x1, y2, 0, 1);
-        sgl.end();
+        // note: uv(1,2).y flipped. image is stored with top row first which would be upside down. 
+        uv1, uv2 := cart.logo;
+        sgl.v2f_t2f(x1, y1, uv1.x, uv2.y);
+        sgl.v2f_t2f(x2, y1, uv2.x, uv2.y);
+        sgl.v2f_t2f(x2, y2, uv2.x, uv1.y);
+        sgl.v2f_t2f(x1, y2, uv1.x, uv1.y);
     };
+    sgl.end();
     sgl.draw_layer(sg, 0);
 };
     sdtx.draw_layer(0);
     sg.end_pass();
     sg.commit();
+}
+
+approx_root :: fn(n: i64) i64 = {
+    x := n.float().sqrt().int();
+    @if(x * x == n, x, x + 1)
 }
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
@@ -490,7 +534,7 @@ fn open_from_file(state: *State, path: Str, buf: []u8) void = {
 // so need to remember the old flags and just toggle the bits. 
 // - stored outside memory so don't forget state if game writes to it
 // - update even when screen!=.Game so don't forget if toggle menu then release key
-set_key_masks :: fn(event: *Sapp.Event, mouse_pressed: *u8, key_pressed: *Array(u8, 3)) void #once = {
+set_key_masks :: fn(event: *Sapp.Event, mouse_pressed: *u8, key_pressed: *Array(u8, 4)) void #once = {
     #use(Wasm4);
     if @is(event.type, .MOUSE_DOWN, .MOUSE_UP) {
         o := mouse_pressed[];
@@ -502,7 +546,7 @@ set_key_masks :: fn(event: *Sapp.Event, mouse_pressed: *u8, key_pressed: *Array(
         mouse_pressed[] = o;
     };
     if !event.key_repeat && @is(event.type, .KEY_DOWN, .KEY_UP) {
-        enumerate key_pressed { i, key_pressed |
+        enumerate key_pressed.items().slice(0, 3) { i, key_pressed |
             o := key_pressed[];
             range(0, 8) { j |
                 o = o.bit_xor(@if(event.key_code == keymap[i][j], flag[j], 0));
@@ -521,9 +565,12 @@ set_key_masks :: fn(event: *Sapp.Event, mouse_pressed: *u8, key_pressed: *Array(
     flag :: @const_slice(W4_BUTTON_X_[], W4_BUTTON_Z_[], W4_BUTTON_X_[], W4_BUTTON_Z_[], W4_BUTTON_LEFT_[], W4_BUTTON_RIGHT_[], W4_BUTTON_UP_[], W4_BUTTON_DOWN_[]);
 }
 
+fn memory(game: *Game) *Wasm4.Memory = bit_cast_unchecked(*u8, *Wasm4.Memory, game.memory.ptr)
+fn disk_path(cart: *Cart) Str = @tfmt("%.disk", cart.name);
+
 MenuItem :: @enum(Continue, SaveState, LoadState, ExportDisk, ImportDisk, ClearDisk, ResetCart, ScreenShot, Gallery);
 fn run_menu_item(state: *State, it: MenuItem) void = {
-    disk_path := @tfmt("%.disk", state.game.cart.name);
+    disk_path := state.game.cart&.disk_path();
     state_path := @tfmt("%.dump", state.game.cart.name);
     disk := state.game.disk&;
     @match(it) {
@@ -552,15 +599,8 @@ fn run_menu_item(state: *State, it: MenuItem) void = {
             };
         }
         fn ImportDisk() => {
-            data := read_entire_file(temp(), disk_path) || return();
-            @if(data.len < 2) return();
-            size := data&.pop_type(u16)[];
-            @if(data.len < size.zext() || size > 1024) return();
+            try_load_disk(state.game.disk&, disk_path) || return();
             @eprintln("ImportDisk(%)", disk_path);
-            data = data.slice(0, size.zext());
-            disk.size = size;
-            ::Array(u8, 1024);
-            disk.data&.items().slice(0, data.len).copy_from(data);
         }
         fn ClearDisk() => {
             disk.size = 0;
@@ -572,8 +612,7 @@ fn run_menu_item(state: *State, it: MenuItem) void = {
             return();
         }
         fn ScreenShot() => {
-            memory := bit_cast_unchecked(*u8, *Wasm4.Memory, state.game.memory.ptr);
-            ppm := screenshot(memory);
+            ppm := screenshot_ppm(state.game&.memory());
             path := "target/a.ppm";
             make_dirs_or_crash("target");
             // TODO: yield_file if GRAPHICS_TARGET_WEB
@@ -584,12 +623,33 @@ fn run_menu_item(state: *State, it: MenuItem) void = {
     state.screen = .Game; 
 }
 
-screenshot :: fn(memory: *Wasm4.Memory) []u8 = {
+try_load_disk :: fn(disk: *Wasm4.w4_Disk, disk_path: Str) bool = {
+    data := read_entire_file(temp(), disk_path) || return(false);
+    @if(data.len < 2) return(false);
+    size := data&.pop_type(u16)[];
+    @if(data.len < size.zext() || size > 1024) return(false);
+    data = data.slice(0, size.zext());
+    disk.size = size;
+    ::Array(u8, 1024);
+    disk.data&.items().slice(0, data.len).copy_from(data);
+    true
+}
+
+ screenshot_ppm :: fn(memory: *Wasm4.Memory) []u8 = {
     ::Array(u8, 6400);
     w := W.cast().int();
     // one extra byte of capacity because i over reserve for the unused byte of the palette
     out := @ref u8.list(16 + w*w*3, temp());
     @fmt(out, "P6 % % 255\n", w, w);
+    iter_framebuffer memory { i, c |
+        out.reserve_type(u32)[] = c;
+        out.len -= 1;
+    };
+    out.items()
+}
+
+iter_framebuffer :: fn(memory: *Wasm4.Memory, $body: @Fn(i: i64, colour: u32) void) void = {
+    w := W.cast().int();
     range(0, w) { y |
         range(0, w) { x |
             i := y*w+x;
@@ -597,11 +657,10 @@ screenshot :: fn(memory: *Wasm4.Memory) []u8 = {
             byte: i64 = memory.framebuffer&[i / 4].zext();
             bits := byte.shift_right_logical(i.mod(4)*2).bit_and(0b11);
             c := memory.palette&[bits];
-            out.reserve_type(u32)[] = c.byte_swap().shift_right_logical(8);
-            out.len -= 1;
+            c := c.byte_swap().shift_right_logical(8);
+            body(i, c);
         };
     };
-    out.items()
 }
 
 // TODO: this doesn't work if they mutated a table (but neither does the official one)
@@ -687,15 +746,23 @@ Exports :: @struct {
     tone :: WrapI4 Wasm4.w4_runtimeTone;
     diskr :: WrapPI Wasm4.w4_runtimeDiskr;
     diskw :: WrapPI Wasm4.w4_runtimeDiskw;
-    trace :: fn(g: *Game, a: u32) void = 
+    trace :: fn(g: *Game, a: u32) void = {
+        @if(g.silence_trace) return();
         Wasm4'w4_runtimeTrace(g.memory.index(a.zext()));
-    traceUtf8 :: WrapPI Wasm4.w4_runtimeTraceUtf8;
+    };
+    traceUtf8 :: fn(g: *Game, a: u32, b: i32) void = {
+        @if(g.silence_trace) return();
+        WrapPI(Wasm4.w4_runtimeTraceUtf8)(g, a, b);
+    };
     traceUtf16 :: fn(g: *Game, a: u32, b: u32) void = {
+        @if(g.silence_trace) return();
         buf := g.memory&.items().subslice(a.zext(), b.zext());
         runtimeTraceUtf16(u16.reinterpret_bytes(buf));
     };
-    tracef :: fn(g: *Game, a: u32, b: u32) void = 
+    tracef :: fn(g: *Game, a: u32, b: u32) void = {
+        @if(g.silence_trace) return();
         Wasm4'w4_runtimeTracef(g.memory.index(a.zext()), bit_cast_unchecked(*u8, rawptr, g.memory.index(b.zext())));
+    };
 };
 WrapPI :: fn($fid: FuncId) FuncId = (fn(g: *Game, a: u32, b: i32) = 
     fid(g.memory.index(a.zext()), b));
@@ -1024,3 +1091,53 @@ ResetCart: (r)
 ScreenShot: write target/a.ppm
 
 """;
+
+Atlas :: @struct {
+    buf: []u32;
+    width: i64;
+    current_row_height: i64;
+    x: i64;
+    y: i64;
+};
+
+// enough room for `cap`, `size`x`size` squares
+new_atlas :: fn(a: Alloc, cap: i64, size: i64) Atlas = {
+    n := approx_root(cap);
+    buf := a.alloc_zeroed(u32, n*n * size*size);
+    (buf = buf, current_row_height = 0, x = 0, y = 0, width = n * size)
+}
+
+fn push(self: *Atlas, img: []u32, width: i64, height: i64) Ty(Vec2, Vec2) = {
+    @debug_assert_eq(img.len, width * height, "Atlas.push bad dimensions");
+    self_height := self.buf.len / self.width;
+    if self.x + width > self.width {
+        self.x = 0;
+        self.y += self.current_row_height;
+        self.current_row_height = 0;
+    };
+    self.current_row_height = max(self.current_row_height, height);
+    @assert(self.y + height <= self_height && self.x + width <= self.width, "Atlas.push image too large for capacity");
+    
+    F :: fn(x) => x.float().cast();
+    scale := vec2(self.width.F(), self_height.F());
+    uv1 := vec2(self.x.F(), self.y.F()) / scale;
+    uv2 := uv1 + vec2(width.F(), height.F()) / scale;
+    range(0, height) { y |
+        dest := self.buf.subslice((self.y + y) * self.width + self.x, width);
+        src := img.subslice(y * width, width);
+        dest.copy_from(src);
+    };
+    self.x += width;
+    (uv1, uv2)
+}
+
+fn build(self: *Atlas, sg: *Sg.Self) Sg.Image = {
+    height := self.buf.len / self.width;
+    d := zeroed(Sg.ImageData);
+    d.subimage&[0]&[0] = self.buf.interpret_as_bytes();
+    sg.make(
+        width = self.width.intcast(), height = height.intcast(),
+        pixel_format = .RGBA8,
+        data = d,
+    )
+}

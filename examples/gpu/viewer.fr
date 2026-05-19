@@ -31,17 +31,21 @@ load_texture_from_file :: fn(sg: *Sg.Self, path: Str) Result(Ty(Sg.Image, i64, i
     load_texture_from_data(sg, in)
 };
 
+stbi_load :: fn(in: []u8) Result(Ty([]u8, i32, i32), Str) = {
+    (w: i32, h: i32, c: i32) := (0, 0, 4);
+    pixels := Stb'stbi_load_from_memory(in.ptr, in.len.intcast(), w&, h&, zeroed(*i32), c);
+    if pixels.is_null() {
+        // TODO: import_c support thread locals :FUCKED
+        s := Stb'stbi_failure_reason();
+        s: CStr = (ptr = bit_cast_unchecked(*i8, *u8, s));
+        return(Err = s.str());
+    };
+    (Ok = (pixels.slice(intcast(w*h*c)), w, h))
+}
+
 load_texture_from_data :: fn(sg: *Sg.Self, in: []u8) Result(Ty(Sg.Image, i64, i64), Str) = {
     data, width, height := @if(FEAT_PNG, {
-        (w: i32, h: i32, c: i32) := (0, 0, 4);
-        pixels := Stb'stbi_load_from_memory(in.ptr, in.len.intcast(), w&, h&, zeroed(*i32), c);
-        if pixels.is_null() {
-            // TODO: import_c support thread locals :FUCKED
-            s := Stb'stbi_failure_reason();
-            s: CStr = (ptr = bit_cast_unchecked(*i8, *u8, s));
-            return(Err = s.str());
-        };
-        (pixels.slice(intcast(w*h*c)), w, h)
+        @try(stbi_load(in)) return
     }, {
         // https://netpbm.sourceforge.net/doc/ppm.html
         ppm := @try(read_ppm_header(in)) return;

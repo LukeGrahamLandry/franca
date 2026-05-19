@@ -1,4 +1,7 @@
-
+- all the casting is a bit unreasonable. 
+  i tend to favour i64/f64 in the cast fns i write so if you want ex. f32->i32 it might be multiple hops. 
+  i could just write out more conversions (backend has the ops for more) but it gets annoying to think of unique names or add @as to complex expressions. 
+- auto size chess board to fit screen. default window to square. 
 - (@/graphics/easy.fr/build_for_graphics and wasm4/cli/assets/templates/franca/wasm4.fr/build)
   i like the style where the user program targeting a specific environment 
   has a driver stub that imports something generic because it makes programs 
@@ -7,14 +10,10 @@
   most changes to the main program file won't affect the driver code. 
   (ex. for wasm4 it makes the minimium feedback loop 160ms instead of 60ms).
 - add to wasm4 cli?
-  - get better at importing files not in the franca root folder
-  - update the commit hash in wasm4.fr
   - have the driver work in web demo and yield_file
   - should add it here so can autotest if i break something
   - add to docs? `site/src/components/MultiLanguageCode.js`
-  - sane error message if you try to use StaticTls
-  - guess_library_path 
-    - follow if try_get_executable_path is a symlink
+- guess_library_path: follow if try_get_executable_path is a symlink
 - allow list imports with import_c/include. well designed libs like stb,wuffs,wasm4 will have a very sane short list 
   and it doesn't do anything anyway because c isn't memory safe but there's no reason to make it easy. 
 - catch the mistake of calling destroy_compiler on the one from current_compiler_context
