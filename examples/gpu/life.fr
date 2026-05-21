@@ -1,0 +1,160 @@
+// https://en.wikipedia.org/wiki/Conway%27s_Game_of_Life
+// TODO: https://en.wikipedia.org/wiki/Hashlife
+
+State :: @struct {
+    WIDTH :: 512; HEIGHT :: 512;
+    pipe: Sg.Pipeline;
+    frame: Sg.Buffer;
+    uni: Shaders.Uni;
+    dirty: bool;
+    // double buffered so 2 bits per cell (adjacent instead of two arrays because locality is good)
+    // TODO: time if the locality is worth it even tho means syncing twice as much to gpu buffer. 
+    frame_data: []u32;
+    paused: bool;
+};
+
+W :: 512;
+
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    state.resize(sapp);
+    @assert(!(query_current_arch() == .x86_64 && query_current_os() == .macos), "TODO: old metal doesn't like non-const u32 buffer");
+    state.pipe = sg.make(
+        shader = sg.make(choose_shader_impl(SOKOL_BACKEND, Shaders)),
+    );
+    state.uni.width = W;
+    state.uni.scale = 1.0;
+    n := int(cast(state.uni.width));
+    state.frame_data = general_allocator().alloc_zeroed(u32, n*n * 2/32);
+    state.frame = sg.make(
+        usage = .DYNAMIC,
+        size = state.frame_data.len * 4,
+    );
+    state.dirty = true;
+}
+
+Shaders :: @struct {
+    OutV :: @struct(pos: Vec4 #position);
+    vs   :: fn(i: u32 #vertex_id) OutV = (pos = @vec(Easy'six_vertex_full_square(i), 0.0, 1.0));
+    OutF :: @struct(colour: Vec4 #colour);
+    fs   :: fn(
+        in: OutV #input,
+        uni: Uni #uniform(0), 
+        frame: Buf(u32) #buffer(0),
+    ) Shaders.OutF = {
+        p := in.pos / uni.scale;
+        p := @swizzle p.xy;
+        p := p / uni.screen;
+        @if(p.x >= 1 || p.y >= 1 || p.x < 0 || p.y < 0) return(colour = vec4(0.0, 0.0, 0.0, 1.0));
+        p := p * vec2(uni.width);
+        x := @swizzle p.x;
+        y := @swizzle p.y;
+        
+        pixel_i := (floor(y)*uni.width + floor(x));
+        slot := frame[f32_to_u32(pixel_i) / 16];
+        i := zext(f32_to_u32(pixel_i).mod(16)*2 + uni.parity);
+        c := slot.shift_right_logical(i).bit_and(1);
+        (colour = @vec(vec3(u32_to_f32(c)), 1.0))
+    };
+    Uni :: @struct {
+        pos: Vec2;  // TODO: use this to pan
+        screen: Vec2;
+        scale: f32;
+        parity: u32;  // bool
+        width: f32;
+    };
+};
+
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    if !state.paused {
+        state.tick();
+    };
+    @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
+
+    Easy'glue_begin_pass(sapp, sg, zeroed Sg.PassAction);
+    sg.update_buffer(state.frame, state.frame_data.interpret_as_bytes());
+    
+    bind := zeroed Sg.Bindings;
+    bind.storage_buffers&[0] = state.frame;
+    sg.apply_pipeline(state.pipe);
+    ::[]Shaders.Uni;
+    sg.apply_uniforms(0, state.uni&.slice(1).interpret_as_bytes());
+    sg.apply_bindings(bind&);
+    draw(sg = sg, base = 0, elements = 6, instances = 1);
+    sg.end_pass();
+    sg.commit();
+}
+
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    if  event.type == .MOUSE_DOWN || (event.type == .MOUSE_MOVE && event.modifiers.get(.left_mouse) != 0)  {
+        mouse := vec2(event.mouse_x, event.mouse_y);
+        mouse := (mouse / state.uni.screen);
+        @if(mouse.x < 0 || mouse.y < 0 || mouse.x >= 1 || mouse.y >= 1) return();
+        mouse := mouse * vec2(state.uni.width);
+        pixel_i := (floor(mouse.y) * state.uni.width + floor(mouse.x)).cast().int();
+        slot := state.frame_data[pixel_i / 16]&;
+        i := pixel_i.umod(16)*2 + state.uni.parity.zext();
+        slot[] = slot[].bit_or(1.shift_left(i));
+        state.dirty = true;
+    };
+
+    @match(event.type) {
+        fn RESIZED() => {
+            state.resize(sapp);
+        }
+        fn KEY_DOWN() => {
+            @match(event.key_code) {
+                fn S() => state.tick();
+                fn SPACE() => { state.paused = !state.paused; }
+                @default => ();
+            };
+        };
+        @default => ();
+    };
+}
+
+fn tick(state: *State) void = {
+    state.dirty = true;
+    w := state.uni.width.cast().int();
+    new_parity := state.uni.parity.bit_xor(1);
+    range(0, w) { y |
+        range(0, w) { x |
+            n := P(x-1,y+1)+P(x,y+1)+P(x+1,y+1)
+                +P(x-1,y)+P(x+1,y)
+                +P(x-1,y-1)+P(x,y-1)+P(x+1,y-1);
+            live := P(x, y) == 1;
+            new := (live && (n == 2 || n == 3)) || (!live && n == 3);
+            
+            pixel_i := (y * w + x);
+            slot := state.frame_data[pixel_i / 16]&;
+            i := pixel_i.umod(16)*2 + new_parity.zext();
+            slot[] = slot[]
+                .bit_and(1.shift_left(i).bit_not())
+                .bit_or(int(new).trunc().shift_left(i));
+        };
+    };
+    
+    state.uni.parity = new_parity;
+    P :: fn(x: i64, y: i64) u32 => {
+        w := state.uni.width.cast().int();
+        @if(x < 0 || y < 0 || x >= w || y >= w) local_return(0); 
+        pixel_i := (y * w + x);
+        slot := state.frame_data[pixel_i / 16]&;
+        i := pixel_i.umod(16)*2 + state.uni.parity.zext();
+        slot[].shift_right_logical(i).bit_and(1)
+    };
+}
+
+fn resize(state: *State, sapp: *Sapp.Self) void = {
+    state.uni.screen = vec2(sapp.width().float().cast(), sapp.height().float().cast());
+    state.dirty = true;
+}
+
+main :: fn() void = Easy'start(State);
+driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
+#use("@/graphics/lib.fr");
+
+fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    sg.destroy(state.frame);
+    general_allocator().dealloc(u32, state.frame_data);
+    sg.destroy(state.pipe);
+}
