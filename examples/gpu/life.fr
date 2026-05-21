@@ -1,5 +1,14 @@
 // https://en.wikipedia.org/wiki/Conway%27s_Game_of_Life
+// https://conwaylife.com/patterns/all.zip
 // TODO: https://en.wikipedia.org/wiki/Hashlife
+// TODO: keep cells square if window is rectangle
+
+HELP :: """
+right click+drag: draw cells. scroll: zoom. click+drag: pan. 
+space: play/pause. s: step. 
+c: center view. r: kill all cells. 
+cli/dragndrop: load .rle file
+""";
 
 State :: @struct {
     WIDTH :: 512; HEIGHT :: 512;
@@ -11,25 +20,30 @@ State :: @struct {
     // TODO: time if the locality is worth it even tho means syncing twice as much to gpu buffer. 
     frame_data: []u32;
     paused: bool;
+    sg: *Sg.Self;
 };
 
-W :: 512;
+MIN_W :: 512;
+MAX_W :: 1.shift_left(16);
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
-    state.resize(sapp);
+    sapp.desc.enable_dragndrop = true;
+    state.sg = sg;
+    state.resize_screen(sapp);
     @assert(!(query_current_arch() == .x86_64 && query_current_os() == .macos), "TODO: old metal doesn't like non-const u32 buffer");
     state.pipe = sg.make(
         shader = sg.make(choose_shader_impl(SOKOL_BACKEND, Shaders)),
     );
-    state.uni.width = W;
     state.uni.scale = 1.0;
-    n := int(cast(state.uni.width));
-    state.frame_data = general_allocator().alloc_zeroed(u32, n*n * 2/32);
-    state.frame = sg.make(
-        usage = .DYNAMIC,
-        size = state.frame_data.len * 4,
-    );
-    state.dirty = true;
+    sapp.set_window_title("Life (space: (un)pause, right click: draw, scroll: zoom)");
+    state.paused = true;
+    
+    for cli_args() { it |
+        path := it.str();
+        @if(path.ends_with(".rle")) load_rle(state, sg, path);
+    };
+    
+    @if(state.frame_data.len == 0) state.resize_canvas(sg, MIN_W, MIN_W);
 }
 
 Shaders :: @struct {
@@ -41,26 +55,28 @@ Shaders :: @struct {
         uni: Uni #uniform(0), 
         frame: Buf(u32) #buffer(0),
     ) Shaders.OutF = {
-        p := in.pos / uni.scale;
+        p := in.pos;
         p := @swizzle p.xy;
-        p := p / uni.screen;
-        @if(p.x >= 1 || p.y >= 1 || p.x < 0 || p.y < 0) return(colour = vec4(0.0, 0.0, 0.0, 1.0));
-        p := p * vec2(uni.width);
+        p := (p / uni.screen * uni.scale + uni.pos);
+        @if(p.x >= 1 || p.y >= 1 || p.x < 0 || p.y < 0) 
+            return(colour = @vec(vec3(0.05), 1.0));
+        p := p * uni.canvas;
         x := @swizzle p.x;
         y := @swizzle p.y;
         
-        pixel_i := (floor(y)*uni.width + floor(x));
+        width := @swizzle uni.canvas.x;
+        pixel_i := (floor(y)*width + floor(x));
         slot := frame[f32_to_u32(pixel_i) / 16];
         i := zext(f32_to_u32(pixel_i).mod(16)*2 + uni.parity);
         c := slot.shift_right_logical(i).bit_and(1);
         (colour = @vec(vec3(u32_to_f32(c)), 1.0))
     };
     Uni :: @struct {
-        pos: Vec2;  // TODO: use this to pan
-        screen: Vec2;
+        pos: Vec2;
+        screen: Vec2;  // how many pixels
+        canvas: Vec2;  // how many cells
         scale: f32;
         parity: u32;  // bool
-        width: f32;
     };
 };
 
@@ -85,12 +101,22 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 }
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
-    if  event.type == .MOUSE_DOWN || (event.type == .MOUSE_MOVE && event.modifiers.get(.left_mouse) != 0)  {
+    if event.type == .MOUSE_MOVE && event.modifiers.get(.left_mouse) != 0 {  // pan
+        speed := -state.uni.scale;
+        delta := vec2(event.mouse_dx, event.mouse_dy) / state.uni.screen;
+        state.uni.pos += delta * vec2(speed);
+        state.dirty = true;
+        return();
+    };
+    
+    a := event.type == .MOUSE_DOWN && event.mouse_button == .RIGHT;
+    b := event.type == .MOUSE_MOVE && event.modifiers.get(.right_mouse) != 0;
+    if a || b {  // draw
         mouse := vec2(event.mouse_x, event.mouse_y);
-        mouse := (mouse / state.uni.screen);
+        mouse := (mouse / state.uni.screen * state.uni.scale) + state.uni.pos;
         @if(mouse.x < 0 || mouse.y < 0 || mouse.x >= 1 || mouse.y >= 1) return();
-        mouse := mouse * vec2(state.uni.width);
-        pixel_i := (floor(mouse.y) * state.uni.width + floor(mouse.x)).cast().int();
+        mouse := mouse * state.uni.canvas;
+        pixel_i := (floor(mouse.y) * state.uni.canvas.x + floor(mouse.x)).cast().int();
         slot := state.frame_data[pixel_i / 16]&;
         i := pixel_i.umod(16)*2 + state.uni.parity.zext();
         slot[] = slot[].bit_or(1.shift_left(i));
@@ -99,54 +125,195 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
 
     @match(event.type) {
         fn RESIZED() => {
-            state.resize(sapp);
+            state.resize_screen(sapp);
         }
         fn KEY_DOWN() => {
             @match(event.key_code) {
                 fn S() => state.tick();
                 fn SPACE() => { state.paused = !state.paused; }
-                @default => ();
+                fn C() => { state.uni.scale = 1; state.uni.pos = vec2(0); }
+                fn R() => { state.frame_data.set_zeroed(); }
+                @default => return();
             };
         };
-        @default => ();
+        fn MOUSE_SCROLL() => {  // zoom
+            delta := (event.scroll_y) * state.uni.scale / (-100.0);
+            (lo: f32, hi: f32) := (0.01, 10000);
+            delta := clamp(state.uni.scale + delta, lo, hi) - state.uni.scale;
+            
+            pos := vec2(event.mouse_x, event.mouse_y);
+            pos := (pos / state.uni.screen);
+            pos0 := pos * vec2(state.uni.scale);
+            pos1 := pos * vec2(state.uni.scale + delta);
+            state.uni.pos -= (pos1 - pos0);
+            state.uni.scale += delta;
+        }
+        fn FILES_DROPPED() => for event.drop { path |
+            state.load_rle(state.sg, path);
+        };
+        @default => return();
     };
+    state.dirty = true;
 }
 
 fn tick(state: *State) void = {
     state.dirty = true;
-    w := state.uni.width.cast().int();
+    w := state.uni.canvas.x.cast().int();
+    h := state.uni.canvas.y.cast().int();
     new_parity := state.uni.parity.bit_xor(1);
     range(0, w) { y |
         range(0, w) { x |
             n := P(x-1,y+1)+P(x,y+1)+P(x+1,y+1)
-                +P(x-1,y)+P(x+1,y)
+                +P(x-1,y+0)         +P(x+1,y+0)
                 +P(x-1,y-1)+P(x,y-1)+P(x+1,y-1);
             live := P(x, y) == 1;
             new := (live && (n == 2 || n == 3)) || (!live && n == 3);
-            
-            pixel_i := (y * w + x);
-            slot := state.frame_data[pixel_i / 16]&;
-            i := pixel_i.umod(16)*2 + new_parity.zext();
-            slot[] = slot[]
-                .bit_and(1.shift_left(i).bit_not())
-                .bit_or(int(new).trunc().shift_left(i));
+            set_pixel(state.frame_data, x, y, w, new, new_parity);
         };
     };
     
     state.uni.parity = new_parity;
     P :: fn(x: i64, y: i64) u32 => {
-        w := state.uni.width.cast().int();
-        @if(x < 0 || y < 0 || x >= w || y >= w) local_return(0); 
-        pixel_i := (y * w + x);
-        slot := state.frame_data[pixel_i / 16]&;
-        i := pixel_i.umod(16)*2 + state.uni.parity.zext();
+        @if(x < 0 || y < 0 || x >= w || y >= h) local_return(0); 
+        slot, i := slice_pixel(state.frame_data, x, y, w, state.uni.parity);
         slot[].shift_right_logical(i).bit_and(1)
     };
 }
 
-fn resize(state: *State, sapp: *Sapp.Self) void = {
+fn resize_screen(state: *State, sapp: *Sapp.Self) void = {
     state.uni.screen = vec2(sapp.width().float().cast(), sapp.height().float().cast());
     state.dirty = true;
+}
+
+fn resize_canvas(state: *State, sg: *Sg.Self, x: i64, y: i64) void = {
+    state.uni.canvas = vec2(x.float().cast(), y.float().cast());
+    @assert(x > 0 && y > 0 && int(cast(state.uni.canvas.x)) == x && int(cast(state.uni.canvas.y)) == y, "invalid canvas size: %x%", x, y);
+    a := general_allocator();
+    a.dealloc(u32, state.frame_data);
+    state.frame_data = a.alloc_zeroed(u32, x*y * 2/32);
+    @if(state.frame.id != 0) sg.destroy(state.frame);
+    state.frame = sg.make(
+        usage = .DYNAMIC,
+        size = state.frame_data.len * 4,
+    );
+    state.dirty = true;
+}
+
+slice_pixel :: fn(frame_data: []u32, x: i64, y: i64, w: i64, parity: u32) Ty(*u32, i64) #inline = {
+    pixel_i := (y * w + x);
+    a, b := pixel_i.udiv_mod(16);
+    slot := frame_data[a]&;
+    i := b*2 + parity.zext();
+    (slot, i)
+}
+
+set_pixel :: fn(frame_data: []u32, x: i64, y: i64, w: i64, new: bool, new_parity: u32) void #inline = {
+    slot, i := slice_pixel(frame_data, x, y, w, new_parity);
+    slot[] = slot[]
+        .bit_and(1.shift_left(i).bit_not())
+        .bit_or(int(new).trunc().shift_left(i));
+}
+
+load_rle :: fn(state: *State, sg: *Sg.Self, path: Str) void = {
+    @match(load_rle_raw(state, sg, path)) {
+        fn Ok() => { state.paused = state.uni.canvas.x > 10000 || state.uni.canvas.y > 10000; };
+        fn Err(msg) => {
+            @eprintln("[%] %", path, msg);
+        };
+    }
+}
+
+load_rle_raw :: fn(state: *State, sg: *Sg.Self, path: Str) Result(void, Str) = {
+    #use("@/lib/sys/fs.fr");
+    need_resize := false;
+    err :: fn(s) => return(Err = s);
+    in := read_entire_file(temp(), path) || err("read failed");
+    while => in.starts_with("#") {
+        in = in.rest((in.index_of_slice("\n") || (in.len - 1)) + 1);
+    };
+    eat :: fn(s) => if in.starts_with(s) {
+        in = in.rest(s.len);
+    } else {
+        err(@tfmt("expected (%) but found (%)", s, in.slice(0, min(in.len, s.len))));
+    };
+    eat("x = ");
+    eatN :: fn() => {
+        n, end := convert_number(in, 10, dec_digit);
+        @if(end.len == in.len) err(@tfmt("expected integer but found (%)", in.slice(0, 1)));
+        in = end;
+        n
+    };
+    width := eatN();
+    eat(", y = ");
+    height := eatN();
+    eat(", rule = ");
+    @if(in[0].ascii_to_lower() != "b".ascii()) err("expected (b) rule");
+    in = in.rest(1);
+    B := eatN();
+    eat("/");
+    @if(in[0].ascii_to_lower() != "s".ascii()) err("expected (s) rule");
+    in = in.rest(1);
+    S := eatN();
+    in = in.rest((in.index_of_slice("\n") || (in.len - 1)) + 1);
+    
+    @if(width > MAX_W || height > MAX_W) err(@tfmt("TODO: giant canvas (%x%)", width, height));
+    
+    need_resize := width > state.uni.canvas.x.cast().int() || height > state.uni.canvas.y.cast().int();
+    if need_resize {
+        state.resize_canvas(sg, max(MIN_W, width), max(MIN_W, height));
+    };
+    w := state.uni.canvas.x.cast().int();
+    
+    x0, y0 := ((w - width) / 2, (state.uni.canvas.y.cast().int() - height) / 2);
+    x, y := (x0, y0);
+    // flip so parse error later doesn't affect the canvas if didn't need to resize (if resized, error will lose old cells but stay black without reclearing)
+    new_parity := state.uni.parity.bit_xor(1);  
+    
+    if !need_resize {  // :SLOW
+        range(0, state.uni.canvas.y.cast().int()) { y |
+            range(0, state.uni.canvas.x.cast().int()) { x |
+                set_pixel(state.frame_data, x, y, w, false, new_parity);
+            };
+        };
+    };
+    
+    loop {
+        continue :: local_return;
+        @if(in == "") err("truncated");
+        if in.starts_with("#") {
+            in = in.rest(in.index_of_slice("\n") || in.len);
+            continue();
+        };
+        if in.starts_with("\r") || in.starts_with("\n") {
+            in = in.rest(1);
+            continue();
+        };
+        if in.starts_with("!") {
+            state.uni.parity = new_parity;
+            return(.Ok);
+        };
+        
+        n := @if(in[0] == "o".ascii() || in[0] == "b".ascii() || in[0] == "$".ascii(), 1, eatN());
+        value := @switch(in[0]) {
+            @case("o".ascii()) => true;
+            @case("b".ascii()) => false;
+            @case("$".ascii()) => {
+                in = in.rest(1);
+                y += n;
+                x = x0;
+                continue();
+            };
+            @default => err(@tfmt("expected (o)/(b), found (%)", in.slice(0, 1)));
+        };
+        in = in.rest(1);
+        @if(x + n > x0 + width) err("expected $ to end row");
+        @if(y >= y0 + height) err("too many rows");
+        
+        range(x, x + n) { x |
+            set_pixel(state.frame_data, x, y, w, value, new_parity);
+        };
+        x += n;
+    };
 }
 
 main :: fn() void = Easy'start(State);

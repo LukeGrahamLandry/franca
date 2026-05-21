@@ -12,14 +12,15 @@ export const add_events = (canvas, send) => {
         e.preventDefault();
     });
     
+    const button = (e) => { const b = [0, 2, 1][e.button]; return b === undefined ? 255 : b; };
     event("mousedown", (e) => {
-        send("mouse_event", I, 4, e.button, e.offsetX, e.offsetY, 0.0, 0.0);
+        send("mouse_event", I, 4, button(e), e.offsetX, e.offsetY, 0.0, 0.0);
     });
     event("mouseup", (e) => {
-        send("mouse_event", I, 5, e.button, e.offsetX, e.offsetY, 0.0, 0.0);
+        send("mouse_event", I, 5, button(e), e.offsetX, e.offsetY, 0.0, 0.0);
     });
     event("mousemove", (e) => {
-       send("mouse_event", I, 7, e.button, e.offsetX, e.offsetY, e.movementX, e.movementY);
+       send("mouse_event", I, 7, button(e), e.offsetX, e.offsetY, e.movementX, e.movementY);
     });
     // TODO: you're not supposed to use keyCode anymore. 
     //      for now i just want to get something on the screen. 

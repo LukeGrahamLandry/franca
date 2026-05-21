@@ -1,4 +1,15 @@
 
+## (May 21)
+
+new example: life
+- basic version: fixed size bit set updated on cpu. no need to be drawing triangles, read it from shader. 
+  - locality is good so each cell is a pair of bits and next generation is stored one bit over and then swap. 
+  - confused myself with where to `*2` for that. 
+- draw and zoom. 
+- from googling "life turing machine": https://copy.sh/life/examples/universalturingmachine.rle
+  did a parser for that format. https://conwaylife.com/wiki/Run_Length_Encoded
+- web: fix right click
+
 ## (May 20)
 
 release resources so tests/gpu.fr can do more. add wasm4 to it. 
