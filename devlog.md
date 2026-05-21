@@ -1,4 +1,8 @@
 
+## (May 20)
+
+release resources so tests/gpu.fr can do more. add wasm4 to it. 
+
 ##
 
 use atlas for logos. before i wasflipping by rotating but that flips the whole texture which moves the 

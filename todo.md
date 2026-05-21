@@ -1,3 +1,8 @@
+- add to website
+  - gallary that shows thumbnails and lets you pick a program to run
+  - prebuild them for ^ so its fast if you don't modify
+  - "see inside" button that opens the current playground view (like scratch)
+  - be able to edit multiple source files and save changes on refresh? annoying because then need to repack the archive. 
 - all the casting is a bit unreasonable. 
   i tend to favour i64/f64 in the cast fns i write so if you want ex. f32->i32 it might be multiple hops. 
   i could just write out more conversions (backend has the ops for more) but it gets annoying to think of unique names or add @as to complex expressions. 

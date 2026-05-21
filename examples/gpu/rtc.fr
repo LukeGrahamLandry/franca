@@ -211,11 +211,14 @@ State :: @struct {
     HIGH_DPI :: true;
     pipe: Sg.Pipeline;
     dirty: bool;
+    buffers: Array(Sg.Buffer, 3);
+    uni: Uniforms;
+};
+
+World :: @struct {
     shapes: []Shape;
     materials: []Material;
     lights: []Light;
-    buffers: Array(Sg.Buffer, 3);
-    uni: Uniforms;
 };
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -226,16 +229,17 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     state.uni.field_of_view = PI / 3.0;
     state.uni&.resize(sapp.width().float().cast(), sapp.height().float().cast());
-    state.load_world();
-    state.init_buffers(sg);
+    world := state.load_world();
+    state.init_buffers(sg, world);
     state.dirty = true;
 }
 
-fn load_world(state: *State) void = {
+fn load_world(state: *State) World = {
     a := temp();  // for now only needed while init-ing
     m := state.uni.transform_inverse&;
     identity(m);
     translate(m, vec3(0.0, 0.0, 5.0));  // get out of the sphere so we can see it 
+    state := @zeroed World;
     state.shapes = a.alloc_zeroed(Shape, 1);
     identity(state.shapes&[0].transform_inverse&);
     state.materials = a.alloc_zeroed(Material, 1);
@@ -247,20 +251,17 @@ fn load_world(state: *State) void = {
     m.shininess = 200;
     state.lights = a.alloc_zeroed(Light, 1);
     state.lights[0] = (position = vec4(-10.0, -10.0, 10.0, 1.0), intensity = vec4(1.0, 1.0, 1.0, 1.0));
+    state
 }
 
-fn init_buffers(state: *State, sg: *Sg.Self) void = {
-    state.buffers&[0] = sg.make(
-        data = state.shapes.interpret_as_bytes(),
+fn init_buffers(state: *State, sg: *Sg.Self, world: World) void = {
+    state.buffers = (
+        sg.make(data = world.shapes.interpret_as_bytes()),
+        sg.make(data = world.materials.interpret_as_bytes()),
+        sg.make(data = world.lights.interpret_as_bytes()),
     );
-    state.buffers&[1] = sg.make(
-        data = state.materials.interpret_as_bytes(),
-    );
-    state.buffers&[2] = sg.make(
-        data = state.lights.interpret_as_bytes(),
-    );
-    state.uni.shape_count = state.shapes.len.trunc();
-    state.uni.light_count = state.lights.len.trunc();
+    state.uni.shape_count = world.shapes.len.trunc();
+    state.uni.light_count = world.lights.len.trunc();
 }
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
@@ -287,6 +288,11 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sg.end_pass();
     sg.commit();
 };
+
+fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    sg.destroy(state.pipe);
+    for state.buffers& { it | sg.destroy(it); };
+}
 
 #use("@/graphics/lib.fr");
 main :: fn() void = Easy'start(State);

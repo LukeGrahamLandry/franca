@@ -32,6 +32,7 @@ tests :: filter_tests @const_slice(@as(TestCase)
             t.drag(delta = vec2(-40, 20));
         };
         t.scroll(y = -500);
+        t.drag(delta = vec2(160, -80));
         t.frame();
     }),
     ("@/examples/gpu/stackie.fr", 5, fn(t) = {
@@ -63,14 +64,53 @@ tests :: filter_tests @const_slice(@as(TestCase)
         t.click(at = vec2(184, 222));
         t.frame();
         t.key(press = .SPACE);  // show fen
+        range(0, 2) { _ | t.key(press = .RIGHT); };  // show attack bitboards
         t.frame();
+        range(0, 2) { _ | t.key(press = .LEFT); };
         t.key(press = .P);  // toggle ugly
         t.frame();
     }), 
-    ("@/examples/gpu/viewer.fr", 3, fn(t) = {
+    ("@/tests/external/wasm4.fr", 5, fn(t) = {
+        Click :: fn(p) => {
+            t.click(at = p);
+            t.drag(delta = vec2(1));
+            t.app.frame();
+            t.click(at = p);
+            t.frame();
+        };
         t.frame();
-        // if run with all the tests this will be prospero. if run twice in a row it will be recursive output of the gpu test. 
-        t.paste(text = "target/a.ppm");
+        Click(vec2(1, 380));    // mandle
+        
+        t.key(press = .ENTER);  // pause
+        t.frame();
+        t.key(press = .UP);
+        t.key(press = .UP);
+        t.key(press = .ENTER);  // screenshot (writes target/a.ppm for viewer test)
+        
+        t.drag(delta = vec2(200, 0), button = .INVALID);
+        t.hold(press = .X);            // julia
+        t.app.frame();                 // ^
+        t.hold(press = .X, up = true); // ^ 
+        t.frame();
+        
+        t.key(press = .ENTER);
+        t.key(press = .UP);
+        t.key(press = .ENTER);  // gallery
+        Click(vec2(1, 450));    // tetris
+    }),
+    ("@/examples/gpu/viewer.fr", 4, fn(t) = {
+        prospero := @run {
+            ok, out, _ := exec_and_catch(get_executable_path(temp()), @slice("examples/prospero.fr"), ast_alloc());
+            @assert(ok, "prospero");
+            out.items()
+        };
+        path := "target/a.ppm";
+        
+        t.frame();
+        t.paste(text = path);
+        t.frame();
+        write_entire_file_or_crash(path, prospero);
+        t.key(press = .R);
         t.frame();
         t.key(press = .SPACE);  // show title
         t.drag(delta = vec2(40, 40));
@@ -161,7 +201,9 @@ main :: fn() void = {
         (it._2)(t);
         @debug_assert(sg.valid, "don't deinit the Sg instance");
         out_index = t.out_index;
-        // TODO: release gpu resources (and remove commit listeners)
+        
+        app'desc'cleanup_cb(app.desc.user_data);
+        // TODO
         //temp().reset(mark);
     };
     #use("@/lib/sys/fs.fr");
@@ -201,6 +243,10 @@ init_headless_app :: fn($path: Str, sg: *Sg.Self, at: Sg.Attachments, W: i64, H:
     app.desc.event_cb = fn(it, e) = {
         it := Instance.ptr_from_raw(it);
         it.user.on_event(it.app, e);
+    };
+    app.desc.cleanup_cb = fn(it) = {
+        it := Instance.ptr_from_raw(it);
+        it.user.on_cleanup(it.app, it.sg);
     };
     Instance :: @struct(sg: *Sg.Self, app: *Sapp.Self, user: *UserData);
     app.desc.user_data = Instance.raw_from_ptr(instance);
@@ -267,12 +313,12 @@ fn drag(t: *Test, a: @struct(delta: Vec2, button := Sapp.Mousebutton.LEFT)) void
     t := t.app;
     e := t.init_event(.MOUSE_DOWN);
     e.mouse_button = a.button;
-    t.call_event(e);
+    @if(a.button != .INVALID) t.call_event(e);
     e.mouse_button = a.button;
     t.mouse.dx = a.delta.x; 
     t.mouse.dy = a.delta.y;
-    t.mouse.x += e.mouse_dx;  
-    t.mouse.y += e.mouse_dy;
+    t.mouse.x += t.mouse.dx;  
+    t.mouse.y += t.mouse.dy;
     e := t.init_event(.MOUSE_MOVE);
     @if(a.button == .LEFT) e.modifiers&.set(.left_mouse, 1);
     @if(a.button == .RIGHT) e.modifiers&.set(.right_mouse, 1);
@@ -281,7 +327,7 @@ fn drag(t: *Test, a: @struct(delta: Vec2, button := Sapp.Mousebutton.LEFT)) void
     t.mouse.dy = 0;
     e := t.init_event(.MOUSE_UP);
     e.mouse_button = a.button;
-    t.call_event(e);
+    @if(a.button != .INVALID) t.call_event(e);
 }
 
 fn scroll(t: *Test, a: @struct(x: f32 = 0, y: f32 = 0)) void = {
@@ -299,12 +345,20 @@ fn keys(t: *Test, a: @struct(text: Str)) void = {
 }
 
 fn key(t: *Test, a: @struct(press: Sapp.Keycode, ctrl := false)) void = {
+    t.hold(press = a.press, ctrl = a.ctrl, up = false);
+    t.hold(press = a.press, ctrl = a.ctrl, up = true);
+}
+
+fn hold(t: *Test, a: @struct(press: Sapp.Keycode, up := false, ctrl := false)) void = {
     code := a.press;
     t := t.app;
+if !a.up {
     e := t.init_event(.KEY_DOWN);
     @if(a.ctrl) e.modifiers&.set(.control, 1);
     e.key_code = code;
     t.call_event(e);
+};
+if a.up {
     c := @as(u16) code;
     if c >= 32 && c < 127 {
         e := t.init_event(.CHAR);
@@ -316,6 +370,7 @@ fn key(t: *Test, a: @struct(press: Sapp.Keycode, ctrl := false)) void = {
     @if(a.ctrl) e.modifiers&.set(.control, 1);
     e.key_code = code;
     t.call_event(e);
+};
 }
 
 fn paste(t: *Test, a: @struct(text: Str)) void = {
