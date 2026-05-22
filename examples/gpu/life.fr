@@ -1,6 +1,7 @@
 // https://en.wikipedia.org/wiki/Conway%27s_Game_of_Life
+// https://en.wikipedia.org/wiki/Hashlife
+// - https://www.dev-mind.blog/hashlife (has very nice pictures)
 // https://conwaylife.com/patterns/all.zip
-// TODO: https://en.wikipedia.org/wiki/Hashlife
 // TODO: keep cells square if window is rectangle
 
 HELP :: """
@@ -8,6 +9,7 @@ right click+drag: draw cells. scroll: zoom. click+drag: pan.
 space: play/pause. s: step. 
 c: center view. r: kill all cells. 
 cli/dragndrop: load .rle file
+t: test quadtree<->bitset round trip
 """;
 
 State :: @struct {
@@ -21,12 +23,15 @@ State :: @struct {
     frame_data: []u32;
     paused: bool;
     sg: *Sg.Self;
+    memo: Memo;
 };
 
 MIN_W :: 512;
 MAX_W :: 1.shift_left(16);
+@run @assert(MIN_W.count_ones() == 1 && MAX_W.count_ones() == 1, "need powers of two");
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    state.memo = new_memo(general_allocator());
     sapp.desc.enable_dragndrop = true;
     state.sg = sg;
     state.resize_screen(sapp);
@@ -133,6 +138,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 fn SPACE() => { state.paused = !state.paused; }
                 fn C() => { state.uni.scale = 1; state.uni.pos = vec2(0); }
                 fn R() => { state.frame_data.set_zeroed(); }
+                fn T() => test_quadtree_roundtrip(state);
                 @default => return();
             };
         };
@@ -156,27 +162,41 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     state.dirty = true;
 }
 
+test_quadtree_roundtrip :: fn(state: *State) void = {
+    zero_half(state, state.uni.parity.bit_xor(1));
+    prev := state.frame_data.shallow_copy(temp());
+    state.compress();
+    @println("unique nodes = %", state.memo.buf&[state.memo.buf_i].len);
+    state.frame_data.set_zeroed();
+    state.decompress();
+    @assert(prev == state.frame_data, "failed test_quadtree_roundtrip");
+}
+
+fn int(it: Vec2) Ty(i64, i64) = (it.x.cast().int(), it.y.cast().int());
+
 fn tick(state: *State) void = {
     state.dirty = true;
-    w := state.uni.canvas.x.cast().int();
-    h := state.uni.canvas.y.cast().int();
+    w, h := state.uni.canvas.int();
     new_parity := state.uni.parity.bit_xor(1);
-    range(0, w) { y |
+    do_life(w, h, P, fn(x, y, new) => set_pixel(state.frame_data, x, y, w, new, new_parity));
+    state.uni.parity = new_parity;
+    P :: fn(x: i64, y: i64) u32 => {
+        @if(x < 0 || y < 0 || x >= w || y >= h) local_return(0); 
+        slot, i := slice_pixel(state.frame_data, x, y, w, state.uni.parity);
+        slot[].shift_right_logical(i).bit_and(1)
+    };
+}
+
+do_life :: fn(w: i64, h: i64, $P: @Fn(x: i64, y: i64) u32 #duplicated, $yield: @Fn(x: i64, y: i64, value: bool) void) void = {
+    range(0, h) { y |
         range(0, w) { x |
             n := P(x-1,y+1)+P(x,y+1)+P(x+1,y+1)
                 +P(x-1,y+0)         +P(x+1,y+0)
                 +P(x-1,y-1)+P(x,y-1)+P(x+1,y-1);
             live := P(x, y) == 1;
             new := (live && (n == 2 || n == 3)) || (!live && n == 3);
-            set_pixel(state.frame_data, x, y, w, new, new_parity);
+            yield(x, y, new);
         };
-    };
-    
-    state.uni.parity = new_parity;
-    P :: fn(x: i64, y: i64) u32 => {
-        @if(x < 0 || y < 0 || x >= w || y >= h) local_return(0); 
-        slot, i := slice_pixel(state.frame_data, x, y, w, state.uni.parity);
-        slot[].shift_right_logical(i).bit_and(1)
     };
 }
 
@@ -223,6 +243,128 @@ load_rle :: fn(state: *State, sg: *Sg.Self, path: Str) void = {
     }
 }
 
+// the most important thing is that the Node doesn't know its position in the grid so it can be reused. 
+// for base case, node.children[_]=memo.void_node& and node.hash is the cell data for base_case_w wide square. 
+Node :: @rec @struct {
+    children: Array(*Node, 4);   // TODO: these could be u32 index?
+    hash: u64;
+};
+
+base_case_w :: 2;  // TODO: profile different sizes: 2/4/8
+Memo :: @struct {
+    table: []*Node;
+    buf: Array(RawList(Node), 2);
+    buf_i: i64;
+    root: *Node;
+    void_node: Node;
+};
+
+new_memo :: fn(a: Alloc) Memo = {
+    self := zeroed(Memo);
+    n := 17;
+    each self.buf& { it |
+        it[] = init(a, 1.shift_left(n));
+    };
+    self.table = a.alloc_zeroed(*Node, 1.shift_left(n));
+    self
+}
+
+fn push(self: *Memo, node: Node) *Node = {
+    if !identical(node.children&[0], self.void_node&) {
+        node.hash = 0;
+        for node.children& { it |
+            node.hash = node.hash.bit_xor(it.hash);
+            node.hash *= 15120273018600372767;
+        };
+    };  // else: node.hash is bit set of cells
+    @run @assert(base_case_w*base_case_w <= 64 && base_case_w.up_pow2() == base_case_w);
+    
+    mask := self.table.len - 1;
+    i := node.hash.bitcast().bit_and(mask);
+    j := 0;    
+    loop {
+        @assert_lt(j, self.table.len, "TODO: table full");
+        n := self.table[i]&;
+        if n[].is_null() {
+            buf := self.buf&.index(self.buf_i);
+            @assert_lt(buf.len, buf.cap, "TODO: resize and copy starting at root to gc");
+            buf.push(node, panicking_allocator);
+            n[] = buf.index(buf.len - 1);
+            return n[];
+        };
+        if n.hash == node.hash 
+        && identical(n.children&[0], node.children&[0])
+        && identical(n.children&[1], node.children&[1])
+        && identical(n.children&[2], node.children&[2])
+        && identical(n.children&[3], node.children&[3]) {
+            return n[];
+        };
+        i = (i + 1).bit_and(mask);
+        j += 1;
+    };
+}
+
+fn compress(state: *State) void = {  // frame -> memo
+    N :: @static_mut 0;
+    N[] = 0;
+    state.memo.root = recur(state, vec2(0), state.uni.canvas);
+    @println("nodes pushed = %", N[]);
+    recur :: fn(state: *State, pos: Vec2, size: Vec2) *Node = {
+        // TODO: this needs to be a gc root somehow so the children get remapped if case run out of slots in a recursive call
+        node := zeroed Node;
+        if size.x.cast().int() == base_case_w {
+            each node.children& { it | it[] = state.memo.void_node&; };
+            
+            x, y := pos.int();
+            j := 0;
+            w := state.uni.canvas.x.cast().int();
+            range(y, y + base_case_w) { y |
+                range(x, x + base_case_w) { x |
+                    slot, i := slice_pixel(state.frame_data, x, y, w, state.uni.parity);
+                    value := slot[].shift_right_logical(i).bit_and(1);
+                    node.hash = node.hash.bit_or(value.zext().shift_left(j).bitcast());
+                    j += 1;
+                };
+            };
+        } else {
+            size /= 2;
+            enumerate node.children& { i, it |
+                it[] = recur(state, pos + size*direction[i], size);
+            };
+        };
+        
+        N[] += 1;
+        state.memo&.push(node)
+    };
+}
+
+fn decompress(state: *State) void = {  // memo -> frame
+    recur(state, state.memo.root, vec2(0), state.uni.canvas);
+    recur :: fn(state: *State, node: *Node, pos: Vec2, size: Vec2) void = {
+        if identical(node.children&[0], state.memo.void_node&) {
+            @debug_assert_eq(size.x.cast().int(), base_case_w);
+            x, y := pos.int();
+            w := state.uni.canvas.x.cast().int();
+            j := 0;
+            range(y, y + base_case_w) { y |
+                range(x, x + base_case_w) { x |
+                    value := node.hash.bit_and(1.shift_left(j)) != 0;
+                    set_pixel(state.frame_data, x, y, w, value, state.uni.parity);
+                    j += 1;
+                };
+            };
+            return();
+        };
+        
+        size /= 2;
+        enumerate node.children& { i, it |
+            recur(state, it[], pos + size*direction[i], size);
+        };
+    };
+}
+
+direction :: @const_slice(vec2(0), vec2(1, 0), vec2(1, 1), vec2(0, 1));
+
 load_rle_raw :: fn(state: *State, sg: *Sg.Self, path: Str) Result(void, Str) = {
     #use("@/lib/sys/fs.fr");
     need_resize := false;
@@ -260,21 +402,21 @@ load_rle_raw :: fn(state: *State, sg: *Sg.Self, path: Str) Result(void, Str) = {
     
     need_resize := width > state.uni.canvas.x.cast().int() || height > state.uni.canvas.y.cast().int();
     if need_resize {
-        state.resize_canvas(sg, max(MIN_W, width), max(MIN_W, height));
+        // make it a power of two for quadtree
+        w := max(height, width).max(MIN_W);
+        w := w.up_pow2();
+        state.resize_canvas(sg, w, w);
     };
-    w := state.uni.canvas.x.cast().int();
+    w, h := state.uni.canvas.int();
     
-    x0, y0 := ((w - width) / 2, (state.uni.canvas.y.cast().int() - height) / 2);
+    x0, y0 := ((w - width) / 2, (h - height) / 2);
     x, y := (x0, y0);
     // flip so parse error later doesn't affect the canvas if didn't need to resize (if resized, error will lose old cells but stay black without reclearing)
     new_parity := state.uni.parity.bit_xor(1);  
     
-    if !need_resize {  // :SLOW
-        range(0, state.uni.canvas.y.cast().int()) { y |
-            range(0, state.uni.canvas.x.cast().int()) { x |
-                set_pixel(state.frame_data, x, y, w, false, new_parity);
-            };
-        };
+    if !need_resize {
+        // because can skip lines :SLOW could just do it when skip. or if always do this, never need to write zeros in the loop below
+        zero_half(state, new_parity);
     };
     
     loop {
@@ -314,6 +456,22 @@ load_rle_raw :: fn(state: *State, sg: *Sg.Self, path: Str) Result(void, Str) = {
         };
         x += n;
     };
+}
+
+zero_half :: fn(state: *State, new_parity: u32) void = {
+    mask: u32 = 0b10101010.zext();
+    mask = mask.shift_left(8).bit_or(mask);
+    mask = mask.shift_left(16).bit_or(mask);
+    mask = mask.rotate_left(new_parity.zext());
+    
+    each state.frame_data { slot |
+        slot[] = slot[].bit_and(mask);
+    };
+} 
+
+up_pow2 :: fn(w: i64) i64 = {
+    n := 63 - w.leading_zeros();
+    @if(1.shift_left(n) == w, w, 1.shift_left(n + 1))
 }
 
 main :: fn() void = Easy'start(State);

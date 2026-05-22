@@ -8,7 +8,11 @@ new example: life
 - draw and zoom. 
 - from googling "life turing machine": https://copy.sh/life/examples/universalturingmachine.rle
   did a parser for that format. https://conwaylife.com/wiki/Run_Length_Encoded
+  so now i can load things that are much to big to run the current way
+    so now i can load things that are much to big to run the current way. 
 - web: fix right click
+- to start with, just convert back and forth between the bit set and the quad tree. 
+  seems to work. (ex. Infinite glider hotel; nodes pushed = 349525, unique nodes = 607)
 
 ## (May 20)
 
