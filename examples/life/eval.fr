@@ -1,0 +1,333 @@
+
+do_life :: fn(w: i64, h: i64, $P: @Fn(x: i64, y: i64) u32 #duplicated, $yield: @Fn(x: i64, y: i64, value: bool) void) void = {
+    range(0, h) { y |
+        range(0, w) { x |
+            n := P(x-1,y+1)+P(x,y+1)+P(x+1,y+1)
+                +P(x-1,y+0)         +P(x+1,y+0)
+                +P(x-1,y-1)+P(x,y-1)+P(x+1,y-1);
+            live := P(x, y) == 1;
+            new := (live && (n == 2 || n == 3)) || (!live && n == 3);
+            yield(x, y, new);
+        };
+    };
+}
+
+// the most important thing is that the Node doesn't know its position in the grid so it can be reused. 
+// for base case, node.children[_]=memo.void_node& and node.hash is the cell data for base_case_w wide square. 
+Node :: @rec @struct {
+    children: Array(*Node, 4);   // TODO: these could be u32 index?
+    next := zeroed(*Node);
+    hash: u64 = 0;
+};
+
+base_case_w :: 2;  // TODO: profile different sizes: 2/4/8
+Memo :: @struct {
+    table: []*Node;
+    buf: Array(RawList(Node), 2);
+    buf_i: i64;
+    root: *Node;
+    void_node: Node;
+    size: i64;
+};
+
+new_memo :: fn(a: Alloc) Memo = {
+    self := zeroed(Memo);
+    n := 17;
+    each self.buf& { it |
+        it[] = init(a, 1.shift_left(n));
+    };
+    self.table = a.alloc_zeroed(*Node, 1.shift_left(n));
+    // note: can't push here because `void_node` moves when returned
+    self
+}
+
+fn drop(memo: *Memo, a: Alloc) void = {
+    for memo.buf& { it | drop(it&, a); };
+    a.dealloc(*Node, memo.table);
+}
+
+fn push(self: *Memo, node: Node) *Node = {
+    if !identical(node.children&[0], self.void_node&) {
+        node.hash = 0;
+        for node.children& { it |
+            node.hash = node.hash.bit_xor(it.hash) + 1;
+            node.hash *= 15120273018600372767;
+        };
+    };  // else: node.hash is bit set of cells
+    @run @assert(base_case_w*base_case_w <= 64 && base_case_w.up_pow2() == base_case_w);
+    
+    mask := self.table.len - 1;
+    i := node.hash.bitcast().bit_and(mask);
+    j := 0;    
+    loop {
+        @assert_lt(j, self.table.len, "TODO: table full");
+        n := self.table[i]&;
+        if n[].is_null() {
+            buf := self.buf&.index(self.buf_i);
+            @assert_lt(buf.len, buf.cap, "TODO: resize and copy starting at root to gc");
+            buf.push(node, panicking_allocator);
+            n[] = buf.index(buf.len - 1);
+            return n[];
+        };
+        if n.hash == node.hash 
+        && identical(n.children&[0], node.children&[0])
+        && identical(n.children&[1], node.children&[1])
+        && identical(n.children&[2], node.children&[2])
+        && identical(n.children&[3], node.children&[3]) {
+            return n[];
+        };
+        i = (i + 1).bit_and(mask);
+        j += 1;
+    };
+}
+
+fn eval(memo: *Memo) void = {
+    // an extra level of quadtree where the old root node is just surrounded by dead cells. 
+    // ex. top left of old root becomes bottom right of the new root's top left node. children are clockwise.
+    size := memo.size;
+    invert :: @const_slice(2, 3, 0, 1);
+    empty := memo.empty_node(size/2);  // :SLOW
+    children := zeroed Array(*Node, 4);
+    range(0, 4) { i |
+        n: Node = (children = (empty,empty,empty,empty));
+        n.children&[invert[i]] = memo.root.children&[i];
+        children&[i] = memo.push(n);
+    };
+    wrapped_root := memo.push(children = children);
+    
+    memo.root = eval_center(memo, wrapped_root, size*2);
+}
+
+// the grinch's heart shrank to half sizes that day
+fn eval_center(memo: *Memo, node: *Node, size: i64) *Node = {
+    @debug_assert(!identical(node.children&[0], memo.void_node&));
+    memoized(node, fn(it) => it.next&) { node |
+        ::if(*Node);
+        if size == base_case_w * 2 {
+            center_base_case(memo, node, size)
+        } else {
+            eval_center_split_merge(memo, node, size)
+        }
+    }
+};
+
+// TODO: rn this steps 2 generations in each recursive call so 2^(~depth) per eval(). 
+//       should have an option to just make the center node without the second eval if just want to single step. 
+// from one node, can eval a centered node with half side length. 
+// to eval the whole node, need to eval from parents, multiple smaller squares. 
+// to cover the whole node, need to reorganize children 
+// (into new nodes that aren't aligned to the original quad tree). 
+fn eval_center_split_merge(memo: *Memo, node: *Node, size: i64) *Node = {
+    // children are clickwise starting at top left (but grandchildren are sorta a spiral)
+    grandchildren :: fn(node: *Node) Array(*Node, 16) #inline = {
+        n := zeroed Array(*Node, 16);
+        enumerate node.children& { i, node |
+            enumerate node.children& { j, it |
+                n&[i*4 + j] = it[];
+            };
+        };
+        n
+    };
+    // you have to draw the picture to think about where the a,b,c,d numbers come from
+    // https://www.dev-mind.blog/wp-content/uploads/2020/05/center_node_assembly-1143x2048.png
+    join :: fn(n,a,b,c,d) => memo.push(children = (n[a], n[b], n[c], n[d]));
+    
+    n1 := @ref grandchildren(node);
+    // right to left, top to bottom
+    n2 := @ref @as(Array(*Node, 9)) (
+        node.children&[0],
+        n1.join(1,4,7,2),        // up
+        node.children&[1],
+        n1.join(3,2,13,12),      // left
+        n1.join(2,7,8,13),       // center
+        n1.join(7,6,9,8),        // right
+        node.children&[3],
+        n1.join(13,8,11,14),     // down
+        node.children&[2],
+    );
+    
+    size /= 2;
+    eval_centers :: fn(in) => {
+        out := zeroed (Array(*Node, size_of(@type in[])/8));
+        range(0, in.len()) { i |
+            out&[i] = eval_center(memo, in[i], size);
+        };
+        out
+    };
+    
+    n3 := @ref eval_centers(n2);
+    n4 := @ref @as(Array(*Node, 4)) (  // clockwise
+        n3.join(0,1,4,3), // 0,0
+        n3.join(1,2,5,4), // 1,0
+        n3.join(4,5,8,7), // 1,1
+        n3.join(3,4,7,6), // 1,0
+    );
+    n5 := eval_centers(n4);
+    memo.push(children = n5)
+};
+
+// feels like maybe there'd be a more elegant bitwise way to do this
+// but speed doesn't matter because it only runs once per layout and then is memoized. 
+fn center_base_case(memo: *Memo, node: *Node, size: i64) *Node = {
+    // need to be able to access neighbours so stop one level before base case size. output is one whole base level. 
+    @debug_assert(identical(node.children&[0].children&[0], memo.void_node&));
+    i :: fn(x,y) => y*base_case_w+x;
+    new: u64 = 0;
+    size := vec2(size.float().cast());
+    base := size / 4;  // corner of output square in node's coordinates
+    quad_size := size/2;
+    do_life(base_case_w, base_case_w, fn(x, y) => {
+        parent_local_pos := base + vec2(x.float().cast(), y.float().cast());
+        child_i := -1;
+        enumerate direction { i, dir |
+            top_left := dir[] * quad_size;
+            bottom_right := top_left + quad_size;
+            hit := parent_local_pos.x >= top_left.x && parent_local_pos.y >= top_left.y && parent_local_pos.x < bottom_right.x && parent_local_pos.y < bottom_right.y;
+            if hit {
+                @debug_assert_eq(child_i, -1, "multiple hits");
+                child_i = i;  
+            }
+        };
+        @debug_assert_ne(child_i, -1, "no hits");
+        child_top_left := direction[child_i] * quad_size;
+        child_local_pos := parent_local_pos - child_top_left;
+        xx, yy := child_local_pos.int();
+        child := node.children&[child_i];
+        child.hash.shift_right_logical(i(xx,yy)).bit_and(1).trunc()
+    }, fn(x, y, value) => {
+        new = new.bit_or(value.int().shift_left(i(x,y)).bitcast());
+    });
+    
+    memo.base_node(new)
+}
+
+memoized :: fn(old: *Node, $field: @Fn(it: *Node) **Node, $step: @Fn(it: *Node) *Node) *Node = {
+    next := field(old);
+    if !next[].is_null() {
+        return next[];
+    };
+    new := step(old);
+    next[] = new;
+    new
+}
+
+fn base_node(memo: *Memo, bits: u64) *Node = {
+    node := zeroed Node;
+    node.hash = bits;
+    each node.children& { it | it[] = memo.void_node&; };
+    memo.push(node)
+}
+
+fn empty_node(memo: *Memo, size: i64) *Node = {
+    if size == base_case_w {
+        return memo.base_node(0);
+    };
+    n := memo.empty_node(size/2);
+    memo.push(children = (n,n,n,n))
+}
+
+fn compress(flat: *BitBoard, memo: *Memo) void = {  // frame -> memo
+    memo.root = recur(flat, memo, vec2(0), flat.size);
+    memo.size = flat.size;
+    recur :: fn(flat: *BitBoard, memo: *Memo, pos: Vec2, size: i64) *Node = {
+        // TODO: this needs to be a gc root somehow so the children get remapped if case run out of slots in a recursive call
+        node := zeroed Node;
+        if size == base_case_w {
+            each node.children& { it | it[] = memo.void_node&; };
+            
+            x, y := pos.int();
+            j := 0;
+            range(y, y + base_case_w) { y |
+                range(x, x + base_case_w) { x |
+                    value := flat.get(x, y);
+                    node.hash = node.hash.bit_or(value.zext().shift_left(j).bitcast());
+                    j += 1;
+                };
+            };
+        } else {
+            size /= 2;
+            vsize := vec2(size.float().cast());
+            enumerate node.children& { i, it |
+                it[] = recur(flat, memo, pos + vsize*direction[i], size);
+            };
+        };
+        memo.push(node)
+    };
+}
+
+fn decompress(flat: *BitBoard, memo: *Memo) void = {  // memo -> frame
+    recur(flat, memo, memo.root, vec2(0), flat.size);
+    recur :: fn(flat: *BitBoard, memo: *Memo, node: *Node, pos: Vec2, size: i64) void = {
+        if identical(node.children&[0], memo.void_node&) {
+            @debug_assert_eq(size, base_case_w);
+            x, y := pos.int();
+            j := 0;
+            range(y, y + base_case_w) { y |
+                range(x, x + base_case_w) { x |
+                    value := node.hash.bit_and(1.shift_left(j)) != 0;
+                    flat.set(x, y, value);
+                    j += 1;
+                };
+            };
+            return();
+        };
+        
+        size /= 2;
+        vsize := vec2(size.float().cast());
+        enumerate node.children& { i, it |
+            recur(flat, memo, it[], pos + vsize*direction[i], size);
+        };
+    };
+}
+
+direction :: @const_slice(vec2(0), vec2(1, 0), vec2(1, 1), vec2(0, 1));
+
+BitGame :: @struct(boards: Array(BitBoard, 2), parity: bool);
+
+empty_bit_game :: fn(a: Alloc, w: i64) BitGame = 
+    (boards = (empty_bitboard(a, w), empty_bitboard(a, w)), parity = false); 
+fn get(self: *BitGame) *BitBoard = 
+    self.boards&[self.parity.int()]&;
+fn drop(self: *BitGame, a: Alloc) void = 
+    for self.boards& { it | a.dealloc(u32, it.bits); it.bits.len = 0; };
+
+fn eval(self: *BitGame) void = {
+    eval(self.boards&[self.parity.not().int()]&, self.get());
+    self.parity = !self.parity;
+}
+
+BitBoard :: @struct(bits: []u32, size: i64);
+
+empty_bitboard :: fn(a: Alloc, w: i64) BitBoard = 
+    (bits = a.alloc_zeroed(u32, w*w/32), size = w);
+
+fn get(it: *BitBoard, x: i64, y: i64) u32 = {
+    I := y * it.size + x;
+    s, i := I.udiv_mod(32);
+    it.bits[s].shift_right_logical(i).bit_and(1)
+}
+
+fn set(it: *BitBoard, x: i64, y: i64, new: bool) void = {
+    I := y * it.size + x;
+    s, i := I.udiv_mod(32);
+    slot := it.bits[s]&;
+    slot[] = slot[]
+        .bit_and(1.shift_left(i).bit_not())
+        .bit_or(int(new).trunc().shift_left(i));
+}
+
+fn eval(new: *BitBoard, old: *BitBoard) void = {
+    w := old.size;
+    do_life(w, w, P, fn(x, y, val) => new.set(x, y, val));
+    P :: fn(x: i64, y: i64) u32 => {
+        oob := x < 0 || y < 0 || x >= w || y >= w;
+        @if(oob, 0, old.get(x, y))
+    };
+}
+
+up_pow2 :: fn(w: i64) i64 = {
+    n := 63 - w.leading_zeros();
+    @if(1.shift_left(n) == w, w, 1.shift_left(n + 1))
+}
+
+#use("@/graphics/vec.fr");

@@ -1,0 +1,87 @@
+
+read_rle :: fn(a: Alloc, path: Str, MIN_W: i64, MAX_W: i64) Result(BitBoard, Str) = {
+    #use("@/lib/sys/fs.fr");
+    need_resize := false;
+    out := zeroed BitBoard;
+    err :: fn(s) => {
+        a.dealloc(u32, out.bits);
+        return(Err = s);
+    };
+    in := read_entire_file(temp(), path) || err("read failed");
+    while => in.starts_with("#") {
+        in = in.rest((in.index_of_slice("\n") || (in.len - 1)) + 1);
+    };
+    eat :: fn(s) => if in.starts_with(s) {
+        in = in.rest(s.len);
+    } else {
+        err(@tfmt("expected (%) but found (%)", s, in.slice(0, min(in.len, s.len))));
+    };
+    eat("x = ");
+    eatN :: fn() => {
+        n, end := convert_number(in, 10, dec_digit);
+        @if(end.len == in.len) err(@tfmt("expected integer but found (%)", in.slice(0, 1)));
+        in = end;
+        n
+    };
+    width := eatN();
+    eat(", y = ");
+    height := eatN();
+    eat(", rule = ");
+    @if(in[0].ascii_to_lower() != "b".ascii()) err("expected (b) rule");
+    in = in.rest(1);
+    B := eatN();
+    eat("/");
+    @if(in[0].ascii_to_lower() != "s".ascii()) err("expected (s) rule");
+    in = in.rest(1);
+    S := eatN();
+    in = in.rest((in.index_of_slice("\n") || (in.len - 1)) + 1);
+    
+    @if(width > MAX_W || height > MAX_W) err(@tfmt("TODO: giant canvas (%x%)", width, height));
+    
+    // make it a power of two for quadtree
+    w := max(height, width).max(MIN_W);
+    w := w.up_pow2();
+    out = empty_bitboard(a, w); 
+    
+    x0, y0 := ((w - width) / 2, (w - height) / 2);
+    x, y := (x0, y0);
+    
+    loop {
+        continue :: local_return;
+        @if(in == "") err("truncated");
+        if in.starts_with("#") {
+            in = in.rest(in.index_of_slice("\n") || in.len);
+            continue();
+        };
+        if in.starts_with("\r") || in.starts_with("\n") {
+            in = in.rest(1);
+            continue();
+        };
+        if in.starts_with("!") {
+            return(Ok = out);
+        };
+        
+        n := @if(in[0] == "o".ascii() || in[0] == "b".ascii() || in[0] == "$".ascii(), 1, eatN());
+        value := @switch(in[0]) {
+            @case("o".ascii()) => true;
+            @case("b".ascii()) => false;
+            @case("$".ascii()) => {
+                in = in.rest(1);
+                y += n;
+                x = x0;
+                continue();
+            };
+            @default => err(@tfmt("expected (o)/(b), found (%)", in.slice(0, 1)));
+        };
+        in = in.rest(1);
+        @if(x + n > x0 + width) err("expected $ to end row");
+        @if(y >= y0 + height) err("too many rows");
+        
+        range(x, x + n) { x |
+            out&.set(x, y, value);
+        };
+        x += n;
+    };
+}
+
+#use("@/examples/life/eval.fr");

@@ -1,0 +1,241 @@
+
+HELP :: """
+right click+drag: draw cells. scroll: zoom. click+drag: pan. 
+space: play/pause. s: step. 
+c: center view. r: kill all cells. 
+cli/dragndrop: load .rle file
+f: toggle hashlife <-> brute force eval
+""";
+
+State :: @struct {
+    WIDTH :: 512; HEIGHT :: 512;
+    pipe: Sg.Pipeline;
+    frame: Sg.Buffer;
+    uni: Shaders.Uni;
+    dirty: bool;
+    flat: BitGame;
+    paused: bool;
+    use_hashlife: bool;
+    did_draw_warning: bool;
+    sg: *Sg.Self;
+    memo: Memo;
+};
+
+MIN_W :: 1.shift_left(8);
+MAX_W :: 1.shift_left(16);
+@run @assert(MIN_W.count_ones() == 1 && MAX_W.count_ones() == 1, "need powers of two");
+
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    state.memo = new_memo(general_allocator());
+    sapp.desc.enable_dragndrop = true;
+    state.sg = sg;
+    state.resize_screen(sapp);
+    @assert(!(query_current_arch() == .x86_64 && query_current_os() == .macos), "TODO: old metal doesn't like non-const u32 buffer");
+    state.pipe = sg.make(
+        shader = sg.make(choose_shader_impl(SOKOL_BACKEND, Shaders)),
+    );
+    state.uni.scale = 1.0;
+    sapp.set_window_title("Life (space: (un)pause, right click: draw, scroll: zoom)");
+    state.paused = true;
+    
+    for cli_args() { it |
+        path := it.str();
+        @if(path.ends_with(".rle")) load_rle(state, sg, path);
+        @if(path == "-h" || path.contains("help")) print(HELP);
+    };
+    
+    @if(state.flat&.get()[].size == 0) state.resize_canvas(sg, MIN_W, MIN_W);
+}
+
+Shaders :: @struct {
+    OutV :: @struct(pos: Vec4 #position);
+    vs   :: fn(i: u32 #vertex_id) OutV = (pos = @vec(Easy'six_vertex_full_square(i), 0.0, 1.0));
+    OutF :: @struct(colour: Vec4 #colour);
+    fs   :: fn(
+        in: OutV #input,
+        uni: Uni #uniform(0), 
+        frame: Buf(u32) #buffer(0),
+    ) Shaders.OutF = {
+        p := in.pos;
+        p := @swizzle p.xy;
+        p := (p / uni.screen * uni.scale + uni.pos);
+        @if(p.x >= 1 || p.y >= 1 || p.x < 0 || p.y < 0) 
+            return(colour = @vec(vec3(0.05), 1.0));
+        p := p * uni.canvas;
+        x := @swizzle p.x;
+        y := @swizzle p.y;
+        
+        width := @swizzle uni.canvas.x;
+        pixel_i := (floor(y)*width + floor(x));
+        slot := frame[f32_to_u32(pixel_i) / 32];
+        i := zext(f32_to_u32(pixel_i).mod(32));
+        c := slot.shift_right_logical(i).bit_and(1);
+        (colour = @vec(vec3(u32_to_f32(c)), 1.0))
+    };
+    Uni :: @struct {
+        pos: Vec2;
+        screen: Vec2;  // how many pixels
+        canvas: Vec2;  // how many cells
+        scale: f32;
+    };
+};
+
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    if !state.paused {
+        state.tick();
+    };
+    @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
+
+    Easy'glue_begin_pass(sapp, sg, zeroed Sg.PassAction);
+    sg.update_buffer(state.frame, state.flat&.get()[].bits.interpret_as_bytes());
+    
+    bind := zeroed Sg.Bindings;
+    bind.storage_buffers&[0] = state.frame;
+    sg.apply_pipeline(state.pipe);
+    ::[]Shaders.Uni;
+    sg.apply_uniforms(0, state.uni&.slice(1).interpret_as_bytes());
+    sg.apply_bindings(bind&);
+    draw(sg = sg, base = 0, elements = 6, instances = 1);
+    sg.end_pass();
+    sg.commit();
+}
+
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    if event.type == .MOUSE_MOVE && event.modifiers.get(.left_mouse) != 0 {  // pan
+        speed := -state.uni.scale;
+        delta := vec2(event.mouse_dx, event.mouse_dy) / state.uni.screen;
+        state.uni.pos += delta * vec2(speed);
+        state.dirty = true;
+        return();
+    };
+    
+    a := event.type == .MOUSE_DOWN && event.mouse_button == .RIGHT;
+    b := event.type == .MOUSE_MOVE && event.modifiers.get(.right_mouse) != 0;
+    if a || b {  // draw
+        if state.use_hashlife {
+            @if(!state.did_draw_warning) @eprintln("TODO: can't draw when in hashlife mode (press f to toggle)");
+            state.did_draw_warning = true;
+            return();
+        };
+        mouse := vec2(event.mouse_x, event.mouse_y);
+        mouse := (mouse / state.uni.screen * state.uni.scale) + state.uni.pos;
+        @if(mouse.x < 0 || mouse.y < 0 || mouse.x >= 1 || mouse.y >= 1) return();
+        mouse := mouse * state.uni.canvas;
+        pos := vec2(floor(mouse.x), floor(mouse.y));
+        x, y := pos.int();
+        state.flat&.get().set(x, y, true);
+        state.dirty = true;
+        return();
+    };
+
+    @match(event.type) {
+        fn RESIZED() => {
+            state.resize_screen(sapp);
+        }
+        fn KEY_DOWN() => {
+            @match(event.key_code) {
+                fn S() => state.tick();
+                fn SPACE() => { state.paused = !state.paused; }
+                fn C() => { state.uni.scale = 1; state.uni.pos = vec2(0); }
+                fn R() => { 
+                    if state.use_hashlife {
+                        state.memo.root = state.memo&.empty_node(state.uni.canvas.x.cast().int());
+                    } else {
+                        state.flat&.get()[].bits.set_zeroed();
+                    };
+                }
+                fn F() => { 
+                    state.use_hashlife = !state.use_hashlife;
+                    @if(state.use_hashlife, state.compress(), state.decompress());
+                };
+                fn H() => @if(!event.key_repeat) print(HELP);
+                @default => return();
+            };
+        };
+        fn MOUSE_SCROLL() => {  // zoom
+            delta := (event.scroll_y) * state.uni.scale / (-100.0);
+            (lo: f32, hi: f32) := (0.01, 10000);
+            delta := clamp(state.uni.scale + delta, lo, hi) - state.uni.scale;
+            
+            pos := vec2(event.mouse_x, event.mouse_y);
+            pos := (pos / state.uni.screen);
+            pos0 := pos * vec2(state.uni.scale);
+            pos1 := pos * vec2(state.uni.scale + delta);
+            state.uni.pos -= (pos1 - pos0);
+            state.uni.scale += delta;
+        }
+        fn FILES_DROPPED() => for event.drop { path |
+            state.load_rle(state.sg, path);
+        };
+        @default => return();
+    };
+    state.dirty = true;
+}
+
+fn resize_screen(state: *State, sapp: *Sapp.Self) void = {
+    state.uni.screen = vec2(sapp.width().float().cast(), sapp.height().float().cast());
+    state.dirty = true;
+}
+
+fn decompress(state: *State) void = {  // frame -> memo
+    decompress(state.flat&.get(), state.memo&);
+}
+
+fn compress(state: *State) void = {  // frame -> memo
+    compress(state.flat&.get(), state.memo&);
+}
+
+fn resize_canvas(state: *State, sg: *Sg.Self, x: i64, y: i64) void = {
+    a := general_allocator();
+    @debug_assert(x == y, "not allowing nonsquare anymore");
+    state.uni.canvas = vec2(x.float().cast(), y.float().cast());
+    @assert(x > 0 && y > 0 && int(cast(state.uni.canvas.x)) == x && int(cast(state.uni.canvas.y)) == y, "invalid canvas size: %x%", x, y);
+    drop(state.flat&, a);
+    state.flat = empty_bit_game(a, x);
+    @if(state.frame.id != 0) sg.destroy(state.frame);
+    state.frame = sg.make(
+        usage = .DYNAMIC,
+        size = state.flat&.get()[].bits.len * 4,
+    );
+    state.dirty = true;
+}
+
+fn tick(state: *State) void = {
+    state.dirty = true;
+    if state.use_hashlife {
+        state.memo&.eval();
+        state.decompress();
+    } else {
+        state.flat&.eval();
+    };
+}
+
+load_rle :: fn(state: *State, sg: *Sg.Self, path: Str) void = {
+    // TODO: split the parsing of size from data so can resize first and write into the thing directly
+    @match(Patterns'read_rle(temp(), path, MIN_W, MAX_W)) {
+        fn Ok(it) => { 
+            state.resize_canvas(sg, it.size, it.size);
+            state.flat&.get()[].bits.copy_from(it.bits);
+            state.paused = state.uni.canvas.x > 10000 || state.uni.canvas.y > 10000;
+        };
+        fn Err(msg) => {
+            @eprintln("[%] %", path, msg);
+        };
+    }
+}
+
+main :: fn() void = Easy'start(State);
+driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
+#use("@/graphics/lib.fr");
+fn int(it: Vec2) Ty(i64, i64) = (it.x.cast().int(), it.y.cast().int());
+
+fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    sg.destroy(state.frame);
+    sg.destroy(state.pipe);
+    a := general_allocator();
+    drop(state.flat&, a);
+    drop(state.memo&, a);
+}
+
+#use("@/examples/life/eval.fr");
+Patterns :: import("@/examples/life/pattern.fr");
