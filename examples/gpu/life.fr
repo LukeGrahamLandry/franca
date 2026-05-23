@@ -1,8 +1,32 @@
-// https://en.wikipedia.org/wiki/Conway%27s_Game_of_Life
-// https://en.wikipedia.org/wiki/Hashlife
+// 
+// Life: grid of cells that live or die based on its neighbours. 
+// - https://en.wikipedia.org/wiki/Conway%27s_Game_of_Life
+// Hashlife: quadtree + deduplicate + memoize = fast eval because many patterns are repetitive 
+// - https://en.wikipedia.org/wiki/Hashlife
+// - Exploiting Regularities in Large Cellular Spaces, Bill Gosper
+//   (original paper but i'm dumb and can't read things that aren't code)
 // - https://www.dev-mind.blog/hashlife (has very nice pictures)
-// https://conwaylife.com/patterns/all.zip
+// Interesting starting layouts
+// - https://conwaylife.com/patterns/all.zip
+//
+// TODO: hashlife eval is UNFINISHED
+// - garbage collection (be careful about nodes on the stack while recursing)
+// - control what happens at the edges (wrap/die/infinite)
+//
+// TODO: edge behaviour doesn't match between hashlife and normal. 
+//       normal: edges are treated as dead but you can't write in to them so you can get stuck.
+//       hashlife: bit boarder is added and then discarded so you can go off the screen and disappear. 
+// TODO: need an option to step one generation
+// 
 // TODO: keep cells square if window is rectangle
+// TODO: each frame only decompress the area that's actually in view? 
+// TODO: put eval on other threads
+// TODO: experiment with eval in compute shader
+// TODO: allow draw while in hashlife mode
+// TODO: need to split the frame_data bits / simulation part from the State / gui part (memo already is)
+// TODO: write .rle files
+// TODO: cli to step generations without the gui
+// TODO: little program that generates the visualisation for indices in eval_center_split_merge. 
 
 HELP :: """
 right click+drag: draw cells. scroll: zoom. click+drag: pan. 
@@ -10,6 +34,7 @@ space: play/pause. s: step.
 c: center view. r: kill all cells. 
 cli/dragndrop: load .rle file
 t: test quadtree<->bitset round trip
+f: toggle hashlife <-> brute force eval
 """;
 
 State :: @struct {
@@ -22,11 +47,12 @@ State :: @struct {
     // TODO: time if the locality is worth it even tho means syncing twice as much to gpu buffer. 
     frame_data: []u32;
     paused: bool;
+    use_hashlife: bool;
     sg: *Sg.Self;
     memo: Memo;
 };
 
-MIN_W :: 512;
+MIN_W :: 1.shift_left(8);
 MAX_W :: 1.shift_left(16);
 @run @assert(MIN_W.count_ones() == 1 && MAX_W.count_ones() == 1, "need powers of two");
 
@@ -46,6 +72,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     for cli_args() { it |
         path := it.str();
         @if(path.ends_with(".rle")) load_rle(state, sg, path);
+        @if(path == "-h" || path.contains("help")) print(HELP);
     };
     
     @if(state.frame_data.len == 0) state.resize_canvas(sg, MIN_W, MIN_W);
@@ -139,6 +166,11 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 fn C() => { state.uni.scale = 1; state.uni.pos = vec2(0); }
                 fn R() => { state.frame_data.set_zeroed(); }
                 fn T() => test_quadtree_roundtrip(state);
+                fn F() => { 
+                    state.use_hashlife = !state.use_hashlife;
+                    @if(state.use_hashlife, state.compress(), state.decompress());
+                };
+                fn H() => @if(!event.key_repeat) print(HELP);
                 @default => return();
             };
         };
@@ -176,6 +208,14 @@ fn int(it: Vec2) Ty(i64, i64) = (it.x.cast().int(), it.y.cast().int());
 
 fn tick(state: *State) void = {
     state.dirty = true;
+    if state.use_hashlife {
+        tick_fast(state);
+    } else {
+        tick_slow(state);
+    };
+}
+
+fn tick_slow(state: *State) void = {
     w, h := state.uni.canvas.int();
     new_parity := state.uni.parity.bit_xor(1);
     do_life(w, h, P, fn(x, y, new) => set_pixel(state.frame_data, x, y, w, new, new_parity));
@@ -247,10 +287,12 @@ load_rle :: fn(state: *State, sg: *Sg.Self, path: Str) void = {
 // for base case, node.children[_]=memo.void_node& and node.hash is the cell data for base_case_w wide square. 
 Node :: @rec @struct {
     children: Array(*Node, 4);   // TODO: these could be u32 index?
-    hash: u64;
+    // TODO: store generation index offset so the merging works in a sane way?
+    next := zeroed(*Node);
+    hash: u64 = 0;
 };
 
-base_case_w :: 2;  // TODO: profile different sizes: 2/4/8
+base_case_w :: 4;  // TODO: profile different sizes: 2/4/8
 Memo :: @struct {
     table: []*Node;
     buf: Array(RawList(Node), 2);
@@ -266,6 +308,7 @@ new_memo :: fn(a: Alloc) Memo = {
         it[] = init(a, 1.shift_left(n));
     };
     self.table = a.alloc_zeroed(*Node, 1.shift_left(n));
+    // note: can't push here because `void_node` moves when returned
     self
 }
 
@@ -273,7 +316,7 @@ fn push(self: *Memo, node: Node) *Node = {
     if !identical(node.children&[0], self.void_node&) {
         node.hash = 0;
         for node.children& { it |
-            node.hash = node.hash.bit_xor(it.hash);
+            node.hash = node.hash.bit_xor(it.hash) + 1;
             node.hash *= 15120273018600372767;
         };
     };  // else: node.hash is bit set of cells
@@ -302,6 +345,157 @@ fn push(self: *Memo, node: Node) *Node = {
         i = (i + 1).bit_and(mask);
         j += 1;
     };
+}
+
+// TODO: no need for size to be two numbers now that it's always square
+
+fn tick_fast(state: *State) void = {
+    state.memo&.eval(state.uni.canvas);
+    state.decompress();
+}
+
+fn eval(memo: *Memo, size: Vec2) void = {
+    // an extra level of quadtree where the old root node is just surrounded by dead cells. 
+    // ex. top left of old root becomes bottom right of the new root's top left node. children are clockwise.
+    invert :: @const_slice(2, 3, 0, 1);
+    empty := memo.empty_node(size/2);  // :SLOW
+    children := zeroed Array(*Node, 4);
+    range(0, 4) { i |
+        n: Node = (children = (empty,empty,empty,empty));
+        n.children&[invert[i]] = memo.root.children&[i];
+        children&[i] = memo.push(n);
+    };
+    wrapped_root := memo.push(children = children);
+    
+    memo.root = eval_center(memo, wrapped_root, size*2);
+}
+
+// the grinch's heart shrank to half sizes that day
+fn eval_center(memo: *Memo, node: *Node, size: Vec2) *Node = {
+    @debug_assert(!identical(node.children&[0], memo.void_node&));
+    memoized(node, fn(it) => it.next&) { node |
+        ::if(*Node);
+        if size.x == base_case_w.float().cast() * 2 {
+            center_base_case(memo, node, size)
+        } else {
+            eval_center_split_merge(memo, node, size)
+        }
+    }
+};
+
+// TODO: rn this steps 2 generations in each recursive call so 2^(~depth) per eval(). 
+//       should have an option to just make the center node without the second eval if just want to single step. 
+// from one node, can eval a centered node with half side length. 
+// to eval the whole node, need to eval from parents, multiple smaller squares. 
+// to cover the whole node, need to reorganize children 
+// (into new nodes that aren't aligned to the original quad tree). 
+fn eval_center_split_merge(memo: *Memo, node: *Node, size: Vec2) *Node = {
+    // children are clickwise starting at top left (but grandchildren are sorta a spiral)
+    grandchildren :: fn(node: *Node) Array(*Node, 16) #inline = {
+        n := zeroed Array(*Node, 16);
+        enumerate node.children& { i, node |
+            enumerate node.children& { j, it |
+                n&[i*4 + j] = it[];
+            };
+        };
+        n
+    };
+    // you have to draw the picture to think about where the a,b,c,d numbers come from
+    // https://www.dev-mind.blog/wp-content/uploads/2020/05/center_node_assembly-1143x2048.png
+    join :: fn(n,a,b,c,d) => memo.push(children = (n[a], n[b], n[c], n[d]));
+    
+    n1 := @ref grandchildren(node);
+    // right to left, top to bottom
+    n2 := @ref @as(Array(*Node, 9)) (
+        node.children&[0],
+        n1.join(1,4,7,2),        // up
+        node.children&[1],
+        n1.join(3,2,13,12),      // left
+        n1.join(2,7,8,13),       // center
+        n1.join(7,6,9,8),        // right
+        node.children&[3],
+        n1.join(13,8,11,14),     // down
+        node.children&[2],
+    );
+    
+    size /= 2;
+    eval_centers :: fn(in) => {
+        out := zeroed (Array(*Node, size_of(@type in[])/8));
+        range(0, in.len()) { i |
+            out&[i] = eval_center(memo, in[i], size);
+        };
+        out
+    };
+    
+    n3 := @ref eval_centers(n2);
+    n4 := @ref @as(Array(*Node, 4)) (  // clockwise
+        n3.join(0,1,4,3), // 0,0
+        n3.join(1,2,5,4), // 1,0
+        n3.join(4,5,8,7), // 1,1
+        n3.join(3,4,7,6), // 1,0
+    );
+    n5 := eval_centers(n4);
+    memo.push(children = n5)
+};
+
+// feels like maybe there'd be a more elegant bitwise way to do this
+// but speed doesn't matter because it only runs once per layout and then is memoized. 
+fn center_base_case(memo: *Memo, node: *Node, size: Vec2) *Node = {
+    // need to be able to access neighbours so stop one level before base case size. output is one whole base level. 
+    @debug_assert(identical(node.children&[0].children&[0], memo.void_node&));
+    i :: fn(x,y) => y*base_case_w+x;
+    new: u64 = 0;
+    base := size / 4;  // corner of output square in node's coordinates
+    quad_size := size/2;
+    do_life(base_case_w, base_case_w, fn(x, y) => {
+        parent_local_pos := base + vec2(x.float().cast(), y.float().cast());
+        child_i := -1;
+        enumerate direction { i, dir |
+            top_left := dir[] * quad_size;
+            bottom_right := top_left + quad_size;
+            hit := parent_local_pos.x >= top_left.x && parent_local_pos.y >= top_left.y && parent_local_pos.x < bottom_right.x && parent_local_pos.y < bottom_right.y;
+            if hit {
+                @debug_assert_eq(child_i, -1, "multiple hits");
+                child_i = i;  
+            }
+        };
+        @debug_assert_ne(child_i, -1, "no hits");
+        child_top_left := direction[child_i] * quad_size;
+        child_local_pos := parent_local_pos - child_top_left;
+        xx, yy := child_local_pos.int();
+        child := node.children&[child_i];
+        child.hash.shift_right_logical(i(xx,yy)).bit_and(1).trunc()
+    }, fn(x, y, value) => {
+        new = new.bit_or(value.int().shift_left(i(x,y)).bitcast());
+    });
+    
+    //@println("BASE; % -> %", node.hash, new);
+    memo.base_node(new)
+}
+
+memoized :: fn(old: *Node, $field: @Fn(it: *Node) **Node, $step: @Fn(it: *Node) *Node) *Node = {
+    next := field(old);
+    if !next[].is_null() {
+        return next[];
+    };
+    new := step(old);
+    next[] = new;
+    new
+}
+
+fn base_node(memo: *Memo, bits: u64) *Node = {
+    node := zeroed Node;
+    node.hash = bits;
+    each node.children& { it | it[] = memo.void_node&; };
+    memo.push(node)
+}
+
+fn empty_node(memo: *Memo, size: Vec2) *Node = {
+    if size.x.cast().int() == base_case_w {
+        return memo.base_node(0);
+    };
+    n := memo.empty_node(size/2);
+    memo.push(children = (n,n,n,n))
 }
 
 fn compress(state: *State) void = {  // frame -> memo

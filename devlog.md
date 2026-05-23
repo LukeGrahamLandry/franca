@@ -1,4 +1,35 @@
 
+## (May 23)
+
+hashlife
+- im clearly doing at least the top level part wrong 
+  because it doesn't just shink if i do that and grow canvas size without the real eval. so not a good sign. 
+  ooo, i fucked up the directions, at first i was thinking it of clockwise 
+  but i did the root expanding like left->right,top->bottom. so now that stays steady. 
+- new problem is that eval doesn't change anything. bad sign that base_case_w=2 it disappears instead. 
+  same ordering mistake in all the merging. had to write the numbers on the picture.
+- lol i thought infinite glider hotel was wrong because the big chunks zoom off 
+  but that's what's supposed to happen its just stepping one at a time is too slow to get that far. 
+  https://copy.sh/life/?pattern=infinitegliderhotel&step=128 (note: that website's buttons don't show in firefox)
+  - even knowing what the trick was i didn't quite apretiate that it was two steps per level of recursion
+    so its 2^N generations per tick, not two. so it's like really really faster.
+
+## (May 22)
+
+hashlife
+- to start with, just convert back and forth between the bit set and the quad tree. 
+  seems to work. (ex. Infinite glider hotel; nodes pushed = 349525, unique nodes = 607)
+- eval: intuatively it's oh just recurse but since you need neighbours, one node isn't enough info to step itself. 
+  - the base case where you take 4 nodes and make 1 new for where the center overlaps 
+    is a bit of coordinate system hell but achivable. maybe i've made it over complicated by trying to 
+    store multiple cells per base node in a bit set. 
+    - what i have now is it shrinks and throws away half the cells every time. 
+      kinda works but real slow. but now memoizing the eval makes it less slow so that's promising. 
+      doesn't mean much yet because it's not at all life. 
+- i've got something that really feels like it should work. 
+  once i stop trying to read the words and just look at the pictures and think about how the nodes need to overlap it makes sense. 
+  at the top level need to add empty nodes around it.
+
 ## (May 21)
 
 new example: life
@@ -11,8 +42,6 @@ new example: life
   so now i can load things that are much to big to run the current way
     so now i can load things that are much to big to run the current way. 
 - web: fix right click
-- to start with, just convert back and forth between the bit set and the quad tree. 
-  seems to work. (ex. Infinite glider hotel; nodes pushed = 349525, unique nodes = 607)
 
 ## (May 20)
 
