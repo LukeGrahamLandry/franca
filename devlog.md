@@ -18,6 +18,8 @@ hashlife
   - forgot to update node.next in collect_garbage
   - after memoized call node.next is set and that has to be stored in roots so it can move in the work call. 
   - push() reuse tombstone table slots of garbage nodes
+  - no point void_node being a special value
+  - pass `**Node` when recursing so don't have to re-root at every level. most of the time it's already in an output array. 
 
 ## (May 22)
 

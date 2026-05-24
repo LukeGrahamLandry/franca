@@ -9,7 +9,6 @@ Hashlife: quadtree + deduplicate + memoize = fast eval because many patterns are
 Interesting starting layouts
 - https://conwaylife.com/patterns/all.zip
 
-TODO: Memo garbage collection (be careful about nodes on the stack while recursing)
 TODO: control what happens at the edges (wrap/die/infinite)
 TODO: edge behaviour doesn't match between hashlife and normal. 
       normal: edges are treated as dead but you can't write in to them so you can get stuck.
