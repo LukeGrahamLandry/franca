@@ -14,6 +14,11 @@ hashlife
   - even knowing what the trick was i didn't quite apretiate that it was two steps per level of recursion
     so its 2^N generations per tick, not two. so it's like really really faster.
 
+- moving gc. shadow stack for roots.
+  - forgot to update node.next in collect_garbage
+  - after memoized call node.next is set and that has to be stored in roots so it can move in the work call. 
+  - push() reuse tombstone table slots of garbage nodes
+
 ## (May 22)
 
 hashlife
