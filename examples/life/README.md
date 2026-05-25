@@ -17,8 +17,8 @@ TODO: edge behaviour doesn't match between hashlife and normal.
       normal: edges are treated as dead but you can't write in to them so you can get stuck.
       hashlife: bit boarder is added and then discarded so you can go off the screen and disappear. 
 TODO: control how many generations are stepped when doing hashlife
-TODO: keep cells square if window is rectangle
 TODO: put eval on other threads
+      then can allow moving the shader params to give a slight sense of progress while waiting to update the frame if its slow. 
 TODO: experiment with eval in compute shader
 TODO: allow draw while in hashlife mode
 TODO: write .rle and .mc files
@@ -29,3 +29,8 @@ TODO: add some tests
   - round trip compress/decompress
   - round trip rle/mc pattern
   - run a small pattern in normal and in hashlife and makes sure they match
+TODO: bring back smooth movement when zoomed in by putting part of pos in the shader
+TODO: speed up compress() (for loading .rle to hashlife)
+TODO: fix pos jump when enabling use_hashlife
+TODO: maybe remove non-hashlife from the ui and just keep the eval for test
+  

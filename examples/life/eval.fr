@@ -1,6 +1,6 @@
 //
 // UNSAFE
-//  the Memo data structure uses a copying garbage collection, 
+//  the Memo data structure uses copying garbage collection, 
 //  you can't hold a *Node without laundering it 
 //  through gc_roots across any call to gc_reserve. 
 //
@@ -113,7 +113,7 @@ fn gc_table_insert(self: *Memo, node: *Node) void = {
   };
 }
 
-fn eval(memo: *Memo) void = {
+fn zero_fill_grow_root(memo: *Memo) *Node = {
     // an extra level of quadtree where the old root node is just surrounded by dead cells. 
     // ex. top left of old root becomes bottom right of the new root's top left node. children are clockwise.
     size := memo.size;
@@ -127,16 +127,17 @@ fn eval(memo: *Memo) void = {
         n.children&[invert[i]] = memo.root.children&[i];
         children&[i] = memo.push(n);
     };
-    wrapped_root := memo.push(children = children);
-    
+    memo.push(children = children)
+}
+
+fn eval(memo: *Memo) void = {
+    wrapped_root := memo.zero_fill_grow_root();
+    size := memo.size;
     root_one(memo, wrapped_root) { wrapped_root |
         memo.gc_roots&.reserve((size*2).trailing_zeros() * 2);
         memo.root = eval_center(memo, wrapped_root, size*2);
     };
 }
-
-fn eq(a: **Node, b: **Node) bool = identical(a[], b[]);
-fn hash(h: *TrivialHasher, a: **Node) void = hash(h, a.hash&);
 
 // the grinch's heart shrank to half sizes that day
 // UNSAFE: `node` must be rooted and gc_roots must have reserved enough capacity for all the levels of recursion
@@ -147,7 +148,7 @@ fn eval_center(memo: *Memo, node: **Node, size: i64) *Node = {
     };
     ::if(*Node);
     new := if size == base_case_w * 2 {
-        center_base_case(memo, node, size)
+        center_base_case(memo, node)
     } else {
         eval_center_split_merge(memo, node, size)
     };
@@ -221,7 +222,8 @@ fn eval_center_split_merge(memo: *Memo, node: **Node, size: i64) *Node = {
 // feels like maybe there'd be a more elegant bitwise way to do this
 // but speed doesn't matter because it only runs once per layout and then is memoized. 
 // UNSAFE: `node` must be rooted
-fn center_base_case(memo: *Memo, node: **Node, size: i64) *Node = {
+fn center_base_case(memo: *Memo, node: **Node) *Node = {
+    size := base_case_w * 2;
     memo.gc_reserve(size*size + 1);
     // need to be able to access neighbours so stop one level before base case size. output is one whole base level. 
     @debug_assert(is_null(node.children&[0].children&[0]), "center_base_case too deep");
@@ -372,65 +374,55 @@ fn compress(flat: *BitBoard, memo: *Memo) void = {  // frame -> memo
     };
 }
 
-#use("@/lib/collections/map.fr");
 fn decompress(flat: *BitBoard, memo: *Memo) void = {  // memo -> frame
-    map: HashMap(*Node, Vec2) = init(temp());
     decompress_recur(@ref @as(Decomp) (
-        flat = flat, memo = memo, map = map&,
-        cell_scale = base_case_w/2, 
+        flat = flat, memo = memo,
+        view_start = vec2(0), 
+        view_end = vec2(memo.size.float().cast()),
+        pixels_per_cell = 1,
     ), memo.root, vec2(0), memo.size);
 }
 
 Decomp :: @struct {
     flat: *BitBoard;
     memo: *Memo;
-    cell_scale: i64;
-    map: *HashMap(*Node, Vec2);
+    view_start: Vec2; 
+    view_end: Vec2;
+    pixels_per_cell: f32;
 };
 
 decompress_recur :: fn(self: *Decomp, node: *Node, pos: Vec2, size: i64) void = {
         @debug_assert(self.memo.buf&[self.memo.buf_i].items().contains_address(node), "tree node outside arena (%)", fmt_hex(node));
-        if size == self.cell_scale {
-            x, y := (pos / self.cell_scale.float().cast()).int();
-            //max_population := size * size;
-            //ratio := node.population.zext().float() / max_population.float();
-            //new := ratio >= 0.5;
-            new := node.population != 0;
-            self.flat.set(x, y, new);
+        @if(node.population == 0) return();
+        
+        v0, v1, n0, n1 := (self.view_start, self.view_end, pos, pos + vec2(size.float().cast()));
+        no_overlap := v0.x > n1.x || n0.x > v1.x || v0.y > n1.y || n0.y > v1.y;
+        if no_overlap {
             return();
         };
         
-        if size == base_case_w {
-            @debug_assert(node.children&[0].is_null(), "decompress void_node child at wrong depth");
-            x, y := pos.int();
-            j := 0;
-            range(y, y + base_case_w) { y |
-                range(x, x + base_case_w) { x |
-                    value := node.hash.bit_and(1.shift_left(j)) != 0;
-                    self.flat.set(x, y, value);
-                    j += 1;
+        node_pixels := size.float().cast() * self.pixels_per_cell;
+        if size == base_case_w || node_pixels/2 < 1 {
+            @debug_assert(size != base_case_w || node.children&[0].is_null(), "decompress void_node child at wrong depth");
+            s := self.flat.size.float().cast();
+            start := (pos - self.view_start) * vec2(self.pixels_per_cell);
+            end := start + vec2(node_pixels);
+            start := floor clamp(start, vec2(0), vec2(s));
+            end := floor clamp(end, vec2(0), vec2(s));
+            range(start.y.cast().int(), end.y.cast().int()) { y |
+                range(start.x.cast().int(), end.x.cast().int()) { x |
+                    if size == base_case_w {
+                        cell := (vec2(x.float().cast(), y.float().cast()) - start) / self.pixels_per_cell;
+                        cx, cy := cell.int();
+                        j := cy*base_case_w + cx;
+                        value := node.hash.bit_and(1.shift_left(j)) != 0;
+                        if value {
+                            self.flat.set(x, y, true);
+                        };
+                    } else {
+                        self.flat.set(x, y, node.population != 0);
+                    };
                 };
-            };
-            return();
-        };
-        
-        bit_size := size;
-        if self.cell_scale >= base_case_w {
-            bit_size /= self.cell_scale;
-        };
-        @if(bit_size >= 32)
-        if self.map.get(node) { old_pos |
-            if self.cell_scale >= base_case_w {
-                pos /= self.cell_scale.float().cast();
-                old_pos /= self.cell_scale.float().cast();
-            };
-            nx, ny := pos.int();
-            ox, oy := old_pos.int();
-            @debug_assert(ox.umod(32) == 0 && nx.umod(32) == 0 && bit_size.umod(32) == 0 && self.flat.size.umod(32) == 0);
-            range(0, bit_size) { dy |
-                src := self.flat.bits.subslice(((oy+dy)*self.flat.size + ox)/32, bit_size/32);
-                dest := self.flat.bits.subslice(((ny+dy)*self.flat.size + nx)/32, bit_size/32);
-                dest.copy_from(src);
             };
             return();
         };
@@ -439,10 +431,6 @@ decompress_recur :: fn(self: *Decomp, node: *Node, pos: Vec2, size: i64) void = 
         vsize := vec2(size.float().cast());
         enumerate node.children& { i, it |
             self.decompress_recur(it[], pos + vsize*direction[i], size);
-        };
-        
-        if size >= 32 {
-            self.map.insert(node, pos);
         };
 };
 

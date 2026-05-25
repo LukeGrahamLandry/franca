@@ -1,4 +1,14 @@
 
+## (May 25)
+
+- probably bad for my bit buffer size to be at all related to game size. 
+  made since when eval was on that form and could just send it to gpu, 
+  but now maybe more explicit rastorizing when decompressing. 
+  would be nice to be able to output images without gpu anyway. 
+  maybe only allowing scale by powers of two is more sane so pixels can stay sharp. 
+  then can also scale down the frame buffer instead so its one per pixel or one per cell, 
+  whatever's smaller and never have to fill in a cell's square manually. 
+
 ## (May 24)
 
 life: a big source of slow is the decompressing. (using universalturingmachine pattern)
