@@ -1,4 +1,25 @@
 
+## (May 24)
+
+life: a big source of slow is the decompressing. (using universalturingmachine pattern)
+- switched to only decompressing the frame at the smallest node that covers the whole thing. 
+  then some coordinate wierdness to fix the rendering. 
+- also experimented with stopping early and having one frame bit represent multiple cells. meh.
+- cache that by node as well so can just copy from elsewhere in the frame. 
+  and then only do that when >32 bits so can copy words at a time instead of unpacking and repacking bits. 
+  helped a lot. like 3600ms->800ms->150ms.
+- now its fast enough to play with why the pixels look stretched.
+  only looks right once culled at depth 3. 
+  - but even then there's extra junk pixels which i think is a different problem?
+    yeah, copying a past decompressed line wasn't steping enough. 
+    not immediatly obvious because the most reused part is all black. found by clearing the buffer to 1s (white) first. 
+- pass the view square into decompress_recur so don't bother writing when node and view don't overlap.
+  actually that can't work because of the caching pixels. even if this quad not in view its parent might be and want to save that. 
+  so can choose one optimisation but not both. 
+- after the first time it gcs it gets totally stuck trying to rebuild the cache. 
+  over side hash table so less collisions. old way was it would be using all the slots before gc 
+  so then when rebuilding there's be a lot of tombstones so every push would take longer.
+
 ## (May 23)
 
 hashlife

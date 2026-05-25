@@ -12,6 +12,8 @@ State :: @struct {
     pipe: Sg.Pipeline;
     frame: Sg.Buffer;
     uni: Shaders.Uni;
+    view: Shaders.Uni;
+    cell_scale: i64;
     dirty: bool;
     flat: BitGame;
     paused: bool;
@@ -19,21 +21,25 @@ State :: @struct {
     did_draw_warning: bool;
     sg: *Sg.Self;
     memo: Memo;
+    decompress_cache: HashMap(*Node, Vec2);
 };
 
-MIN_W :: 1.shift_left(8);
+MIN_W :: 1.shift_left(10);
 MAX_W :: 1.shift_left(16);
 @run @assert(MIN_W.count_ones() == 1 && MAX_W.count_ones() == 1, "need powers of two");
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     new_memo(state.memo&, general_allocator());
+    state.decompress_cache = init(general_allocator());
     sapp.desc.enable_dragndrop = true;
+    sapp.desc.enable_clipboard = true;
     state.sg = sg;
     state.resize_screen(sapp);
     @assert(!(query_current_arch() == .x86_64 && query_current_os() == .macos), "TODO: old metal doesn't like non-const u32 buffer");
     state.pipe = sg.make(
         shader = sg.make(choose_shader_impl(SOKOL_BACKEND, Shaders)),
     );
+    state.cell_scale = base_case_w / 2;
     state.uni.scale = 1.0;
     sapp.set_window_title("Life (space: (un)pause, right click: draw, scroll: zoom)");
     state.paused = true;
@@ -77,13 +83,22 @@ Shaders :: @struct {
         screen: Vec2;  // how many pixels
         canvas: Vec2;  // how many cells
         scale: f32;
+        _: f32 = 0;
     };
 };
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     if !state.paused {
         state.tick();
-    };
+    } else {
+        @if(state.dirty)
+        if state.use_hashlife {
+            // :SLOW
+            state.view = find_view_area(state.flat&.get(), state.memo&, state.uni&, state.cell_scale, state.decompress_cache&);
+        } else {
+            state.view = state.uni;
+        };
+    }
     @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
 
     Easy'glue_begin_pass(sapp, sg, zeroed Sg.PassAction);
@@ -93,13 +108,14 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     bind.storage_buffers&[0] = state.frame;
     sg.apply_pipeline(state.pipe);
     ::[]Shaders.Uni;
-    sg.apply_uniforms(0, state.uni&.slice(1).interpret_as_bytes());
+    sg.apply_uniforms(0, state.view&.slice(1).interpret_as_bytes());
     sg.apply_bindings(bind&);
     draw(sg = sg, base = 0, elements = 6, instances = 1);
     sg.end_pass();
     sg.commit();
 }
 
+// TODO: scale/pan need to fix for cell_scale but it's kinda meh so might get rid of it
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     if event.type == .MOUSE_MOVE && event.modifiers.get(.left_mouse) != 0 {  // pan
         speed := -state.uni.scale;
@@ -150,12 +166,19 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                     @if(state.use_hashlife, state.compress(), state.decompress());
                 };
                 fn H() => @if(!event.key_repeat) print(HELP);
+                fn EQUAL() => {
+                    state.cell_scale *= 2;
+                }
+                fn MINUS() => {
+                    @if(state.cell_scale <= base_case_w / 2) return();
+                    state.cell_scale /= 2;
+                }
                 @default => return();
             };
         };
         fn MOUSE_SCROLL() => {  // zoom
             delta := (event.scroll_y) * state.uni.scale / (-100.0);
-            (lo: f32, hi: f32) := (0.01, 10000);
+            (lo: f32, hi: f32) := (0.0001, 10000);
             delta := clamp(state.uni.scale + delta, lo, hi) - state.uni.scale;
             
             pos := vec2(event.mouse_x, event.mouse_y);
@@ -168,9 +191,87 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         fn FILES_DROPPED() => for event.drop { path |
             state.load_rle(state.sg, path);
         };
+        // TODO: PASTED => load_rle content not path
         @default => return();
     };
     state.dirty = true;
+}
+
+// given the pos,scale,screen of the view port,
+// - choose a node that covers the whole area 
+// - choose a cell scale that doesn't waste pixels
+// - write that node to the frame buffer
+// - remap the global pos/scale relative to the view area for the shader
+
+find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *Shaders.Uni, cell_scale: i64, map: *HashMap(*Node, Vec2)) Shaders.Uni = {
+    @debug_assert(uni.canvas.x == uni.canvas.y && uni.canvas.x.cast().int() == memo.size);
+    view_size := uni.canvas * uni.scale;
+    real_start := uni.pos * uni.canvas;
+    view_end := clamp(real_start + view_size, vec2(0), uni.canvas);
+    view_start := clamp(real_start, vec2(0), uni.canvas);
+    
+    // find the smallest node that covers the view area
+    node := memo.root;
+    node_pos := vec2(0);
+    node_size := vec2(memo.size.float().cast());
+    depth := 0;
+    dowhile {
+        continue :: local_return;
+        s := node_size/2;
+        enumerate node.children& { i, child |
+            p := node_pos + s*direction[i];
+            end := p + s + vec2(0.001);
+            if hit_square(view_start, p, end) && hit_square(view_end, p, end) {
+                node = child[];
+                node_pos = p;
+                node_size = s;
+                depth += 1;
+                continue(true);
+            };
+        };
+        
+        // TODO: can make new nodes that aren't aligned to the original quadtree if you're right on a border. 
+        //       ex. try the nine that eval_center_split_merge would make by regrouping grandchildren?
+        
+        false
+    };
+    
+    
+    //scale := 1;
+    //cells_per_pixel := node_size.x * uni.scale / max(uni.screen.x, uni.screen.y);
+    //while => cells_per_pixel > 1 {
+    //    scale *= 1;
+    //};
+    
+    // TODO: don't re-decompress every frame if eval is paused and visible node didn't change. 
+    
+    // the frame buffer only needs to access that one node
+    dest.size = memo.size.shift_right_logical(depth);  // stride when writing pixels
+    extra_scale: f32 = 1.0;
+    if cell_scale >= base_case_w {
+        dest.size /= cell_scale;
+        extra_scale = cell_scale.float().cast();
+    };
+    @debug_assert_le(dest.size*dest.size/32, dest.bits.len);
+    
+    @println("depth=%; %,% -> %,%", depth, view_start.x, view_start.y, view_end.x, view_end.y);
+    decompress_recur(@ref @as(Decomp) (
+        flat = dest, memo = memo, map = map, 
+        cell_scale = cell_scale,
+        view_start = view_start - node_pos,
+        view_end = view_end,
+    ), node, vec2(0), node_size.x.cast().int());
+    map.clear();
+    
+    // shader parameters need to be in the coordinate system of the new node
+    canvas := node_size / extra_scale;
+    @debug_assert_eq(canvas.x.cast().int(), dest.size);
+    (
+        pos = (real_start - node_pos) / canvas,
+        scale = uni.scale * 1.shift_left(depth).float().cast(),
+        canvas = canvas,
+        screen = uni.screen,
+    )
 }
 
 fn resize_screen(state: *State, sapp: *Sapp.Self) void = {
@@ -179,7 +280,10 @@ fn resize_screen(state: *State, sapp: *Sapp.Self) void = {
 }
 
 fn decompress(state: *State) void = {  // frame -> memo
-    decompress(state.flat&.get(), state.memo&);
+    dest := state.flat&.get();
+    dest.size = state.memo.size;
+    @debug_assert_le(dest.size*dest.size/32, dest.bits.len);
+    decompress(dest, state.memo&);
 }
 
 fn compress(state: *State) void = {  // frame -> memo
@@ -205,9 +309,10 @@ fn tick(state: *State) void = {
     state.dirty = true;
     if state.use_hashlife {
         state.memo&.eval();
-        state.decompress();
+        state.view = find_view_area(state.flat&.get(), state.memo&, state.uni&, state.cell_scale, state.decompress_cache&);
     } else {
         state.flat&.eval();
+        state.view = state.uni;
     };
 }
 
@@ -236,6 +341,7 @@ fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     a := general_allocator();
     drop(state.flat&, a);
     drop(state.memo&);
+    drop(state.decompress_cache&);
 }
 
 #use("@/examples/life/eval.fr");
