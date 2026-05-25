@@ -3,7 +3,7 @@ HELP :: """
 right click+drag: draw cells. scroll: zoom. click+drag: pan. 
 space: play/pause. s: step. 
 c: center view. r: kill all cells. 
-cli/dragndrop: load .rle file
+cli/dragndrop/paste: load (.rle),(.mc) pattern
 f: toggle hashlife <-> brute force eval
 """;
 
@@ -46,7 +46,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     for cli_args() { it |
         path := it.str();
-        @if(path.ends_with(".rle")) load_rle(state, sg, path);
+        @if(path.ends_with(".rle") || path.ends_with(".mc")) load_pattern(state, sg, path);
         @if(path == "-h" || path.contains("help")) print(HELP);
     };
     
@@ -83,7 +83,7 @@ Shaders :: @struct {
         screen: Vec2;  // how many pixels
         canvas: Vec2;  // how many cells
         scale: f32;
-        _: f32 = 0;
+        pad: f32 = 0;
     };
 };
 
@@ -102,7 +102,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
 
     Easy'glue_begin_pass(sapp, sg, zeroed Sg.PassAction);
-    sg.update_buffer(state.frame, state.flat&.get()[].bits.interpret_as_bytes());
+    src := state.flat&.get();
+    sg.update_buffer(state.frame, src.bits.slice(0, src.size*src.size/32).interpret_as_bytes());
     
     bind := zeroed Sg.Bindings;
     bind.storage_buffers&[0] = state.frame;
@@ -189,9 +190,16 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             state.uni.scale += delta;
         }
         fn FILES_DROPPED() => for event.drop { path |
-            state.load_rle(state.sg, path);
+            state.load_pattern(state.sg, path);
         };
-        // TODO: PASTED => load_rle content not path
+        fn CLIPBOARD_PASTED() => {
+            if event.pasted.len < 1024 && (event.pasted.ends_with(".mc") || event.pasted.ends_with(".rle")) {
+                state.load_pattern(state.sg, event.pasted);
+            } else {
+                load_pattern_bytes(state, state.sg, event.pasted)
+                    .or(fn(msg) => @eprintln("<paste> %", msg));
+            };
+        }
         @default => return();
     };
     state.dirty = true;
@@ -258,8 +266,6 @@ find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *Shaders.Uni, cell_scale
     decompress_recur(@ref @as(Decomp) (
         flat = dest, memo = memo, map = map, 
         cell_scale = cell_scale,
-        view_start = view_start - node_pos,
-        view_end = view_end,
     ), node, vec2(0), node_size.x.cast().int());
     map.clear();
     
@@ -316,18 +322,35 @@ fn tick(state: *State) void = {
     };
 }
 
-load_rle :: fn(state: *State, sg: *Sg.Self, path: Str) void = {
+load_pattern :: fn(state: *State, sg: *Sg.Self, path: Str) void = {
+    #use("@/lib/sys/fs.fr");
+    in := read_entire_file(temp(), path) || {
+        @eprintln("[%] failed read", path);
+        return();
+    };
+    load_pattern_bytes(state, sg, in)
+        .or(fn(msg) => @eprintln("[%] %", path, msg));
+}
+
+load_pattern_bytes :: fn(state: *State, sg: *Sg.Self, in: Str) Result(void, Str) = {
+    if in.starts_with("[M2]") {
+        node, size := @try(Patterns'read_mc(state.memo&, in)) return;
+        state.memo.root = node;
+        state.memo.size = size; 
+        state.resize_canvas(sg, size, size);
+        state.use_hashlife = true;
+        return(.Ok);
+    };
+    
     // TODO: split the parsing of size from data so can resize first and write into the thing directly
-    @match(Patterns'read_rle(temp(), path, MIN_W, MAX_W)) {
-        fn Ok(it) => { 
+    it := @try(Patterns'read_rle(temp(), in, MIN_W, MAX_W)) return;
             state.resize_canvas(sg, it.size, it.size);
             state.flat&.get()[].bits.copy_from(it.bits);
             state.paused = state.uni.canvas.x > 10000 || state.uni.canvas.y > 10000;
-        };
-        fn Err(msg) => {
-            @eprintln("[%] %", path, msg);
-        };
-    }
+    if state.use_hashlife {
+        state.compress();
+    };
+    .Ok
 }
 
 main :: fn() void = Easy'start(State);

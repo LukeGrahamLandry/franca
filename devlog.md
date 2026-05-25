@@ -18,7 +18,11 @@ life: a big source of slow is the decompressing. (using universalturingmachine p
   so can choose one optimisation but not both. 
 - after the first time it gcs it gets totally stuck trying to rebuild the cache. 
   over side hash table so less collisions. old way was it would be using all the slots before gc 
-  so then when rebuilding there's be a lot of tombstones so every push would take longer.
+  so then when rebuilding there's be a lot of tombstones so every push would take longer. 
+  no more tombstones, just zero the whole table and reinsert live nodes as they're moved.
+- pleasingly doubling space in gc buf much more than doubles 
+  time between pauses but barely affects pause time because most of that is proprotionial to live set. 
+- .mc file loader opens up a world of much larger patterns
 
 ## (May 23)
 

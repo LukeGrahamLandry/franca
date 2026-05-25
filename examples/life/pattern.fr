@@ -1,13 +1,11 @@
 
-read_rle :: fn(a: Alloc, path: Str, MIN_W: i64, MAX_W: i64) Result(BitBoard, Str) = {
-    #use("@/lib/sys/fs.fr");
+read_rle :: fn(a: Alloc, in: Str, MIN_W: i64, MAX_W: i64) Result(BitBoard, Str) = {
     need_resize := false;
     out := zeroed BitBoard;
     err :: fn(s) => {
         a.dealloc(u32, out.bits);
         return(Err = s);
     };
-    in := read_entire_file(temp(), path) || err("read failed");
     while => in.starts_with("#") {
         in = in.rest((in.index_of_slice("\n") || (in.len - 1)) + 1);
     };
@@ -82,6 +80,132 @@ read_rle :: fn(a: Alloc, path: Str, MIN_W: i64, MAX_W: i64) Result(BitBoard, Str
         };
         x += n;
     };
+}
+
+// macrocell: https://golly.sourceforge.io/Help/formats.html#mc
+read_mc :: fn(memo: *Memo, in: Str) Result(Ty(*Node, i64), Str) = {
+    line := 1;
+    err :: fn(s) => {
+        return(Err = @tfmt("% (on line %)", s, line));
+    };
+    eat :: fn(s) => if in.starts_with(s) {
+        in = in.rest(s.len);
+    } else {
+        err(@tfmt("expected (%) but found (%)", s, in.slice(0, min(in.len, s.len))));
+    };
+    eat("[M2] (");
+    while => !in.starts_with("\n") {
+        @if(in == "") err("truncated");
+        in = in.rest(1);
+    };
+    eat("\n"); line += 1;
+    while => in.starts_with("#") {
+        in = in.rest((in.index_of_slice("\n") || (in.len - 1)) + 1); line += 1;
+    };
+    @if(in == "") err("truncated");
+    
+    memo.collect_garbage();
+    buf := memo.buf&[memo.buf_i]&;
+    start := buf.len;
+    
+    // sadly people have files with duplicate nodes so can't just use an offset into `buf` for file indices.
+    // (and need to add extra nodes anyway if base_case_w != 8)
+    // (if try to change it back need to also put back empty_node(big number) at the beginning)
+    indices := @ref u32.list(in.len / 10, temp());
+    indices.push(0xFFFFFFFF);  // [0] is sentinal for empty node
+    @debug_assert_le(buf.cap, indices[0].zext());
+    // bad tree shape can crash later in eval/decompress so keep track and error gracefully here.
+    sizes := @ref u8.list(in.len / 10, temp());
+    sizes.push(0xFF);
+    
+    while => in != "" {
+        @if(buf.len >= buf.cap) err("too many nodes (todo: grow arena)");
+        
+        if !in[0].is_ascii_digit() {  // base node
+            h: u64 = 0;
+            i := 0;
+            n := 8;
+            while => in[0] != "\n".ascii() {
+                @switch(in[0]) {
+                    @case(".".ascii()) => { i += 1; n -= 1; };
+                    @case("$".ascii()) => { i += n; n = 8 };
+                    @case("*".ascii()) => { h = h.bit_or(1.shift_left(i)); i += 1; n -= 1; };
+                    @default => err("invalid char in base node");
+                };
+                @if(n < 0 || i > 64) err("expected 8x8 base node");
+                in = in.rest(1);
+            };
+            node := @switch(base_case_w) {
+                @case(8) => memo.base_node(h);
+                @case(4) => pushW(memo, h, vec2(0));
+                @case(2) => {
+                    children := @ref @zeroed Array(*Node, 4);
+                    enumerate direction { i, dir |
+                        children[i] = pushW(memo, h, dir[] * 4);
+                    };
+                    memo.push(children = children[])
+                };
+                @default => unreachable();
+            };
+            indices.push(ptr_diff(buf.ptr, node).trunc());
+            sizes.push(8.trailing_zeros().trunc());
+            pushW :: fn(memo: *Memo, h: u64, off: Vec2) *Node = {
+                children := @ref @zeroed Array(*Node, 4);
+                enumerate direction { i, dir |
+                    x, y := (off + dir[].mul(base_case_w.float().cast())).int();
+                    h2: u64 = 0;
+                    j := 0;
+                    range(y, y + base_case_w) { y |
+                        range(x, x + base_case_w) { x |
+                            value := h.bit_and(1.shift_left(y*8 + x)) != 0;
+                            h2 = h2.bit_or(int(value).bitcast().shift_left(j));
+                            j += 1;
+                        };
+                    };
+                    children[i] = memo.base_node(h2);
+                };
+                memo.push(children = children[])
+            };
+        } else {  // tree node
+            size_log2 := eatN();
+            @if(size_log2 > 32) err("node too wide");
+            out := @ref @zeroed Array(i64, 4);
+            each out { it |
+                eat(" ");
+                it[] = eatN();
+            };  
+            out.items().swap(2, 3);  // i want them clockwise
+            
+            children := @ref @zeroed Array(*Node, 4);
+            child_size := 1.shift_left(size_log2) / 2;
+            range(0, 4) { i |
+                if out[i] == 0 {
+                    children[i] = memo.empty_node(child_size);
+                } else {
+                    @if(out[i] >= indices.len) err("bad node index");
+                    children[i] = buf[indices[out[i]].zext()]&;
+                    @if(1.shift_left(sizes[out[i]].zext()) != child_size) err("inconsistant tree depth");
+                };
+            };
+            
+            node := memo.push(children = children[]);
+            indices.push(ptr_diff(buf.ptr, node).trunc());
+            sizes.push(size_log2.trunc());
+        };
+        @if(in != "") eat("\n"); line += 1;
+    };
+    
+    eatN :: fn() => {
+        n, end := convert_number(in, 10, dec_digit);
+        @if(end.len == in.len) err(@tfmt("expected integer but found (%)", in.slice(0, 1)));
+        in = end;
+        n
+    };
+    
+    root := buf[indices[indices.len - 1].zext()]&;
+    size := 1.shift_left(sizes[sizes.len - 1].zext());
+    @eprintln("loaded % nodes. canvas size = %.", buf.len - start, size);
+    (Ok = (root, size))
 }
 
 #use("@/examples/life/eval.fr");
