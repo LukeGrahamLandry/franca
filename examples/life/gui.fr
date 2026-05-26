@@ -1,11 +1,13 @@
 
 HELP :: """
-right click+drag: draw cells. scroll: zoom. click+drag: pan. 
+h: toggle stats/pattern info
+scroll: zoom. left click+drag: pan. 
+right click: draw cells (shift: delete). 
 space: play/pause. s: step. 
 c: center view. r: kill all cells. 
 cli/dragndrop/paste: load (.rle),(.mc) pattern
 f: toggle fast eval
-h: toggle stats/pattern info
+g: grow canvas
 """;
 
 State :: @struct {
@@ -27,7 +29,8 @@ State :: @struct {
     debug: Str;  // temp()
 };
 
-MIN_W :: 1.shift_left(10);
+// TODO: remove these? they're bad for computing scale. 
+MIN_W :: base_case_w;
 MAX_W :: 1.shift_left(16);
 @run @assert(MIN_W.count_ones() == 1 && MAX_W.count_ones() == 1, "need powers of two");
 
@@ -46,7 +49,6 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.uni.scale = 1.0;
     sapp.set_window_title("Life (press h for help)");
     state.paused = true;
-    state.fast_eval = true;
     
     for cli_args() { it |
         path := it.str();
@@ -62,6 +64,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         state.resize_canvas(sg, MIN_W, MIN_W);
         state.memo.root = state.memo&.empty_node(MIN_W);
         state.memo.size = MIN_W;
+        state.show_info = true;
     };
 }
 
@@ -76,6 +79,7 @@ Shaders :: @struct {
     ) Shaders.OutF = {
         p := in.pos;
         p := @swizzle p.xy;
+        p += uni.pos;
             p /= uni.scale;
             // TODO: colour outside the box
         x := @swizzle p.x;
@@ -86,7 +90,12 @@ Shaders :: @struct {
         slot := frame[f32_to_u32(pixel_i) / 32];
         i := zext(f32_to_u32(pixel_i).mod(32));
         c := slot.shift_right_logical(i).bit_and(1);
-        (colour = @vec(vec3(u32_to_f32(c)), 1.0))
+        c := u32_to_f32(c);
+        if x < 0 || y < 0 || x >= width || y >= width {
+            // TODO: this is showing where it's broken because of fractional_cell. need one extra
+            c = 0.1;
+        };
+        (colour = @vec(vec3(c), 1.0))
     };
     Uni :: @struct {
         pos: Vec2;
@@ -112,7 +121,9 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 
     Easy'glue_begin_pass(sapp, sg, zeroed Sg.PassAction);
     src := state.flat&;
-    sg.update_buffer(state.frame, src.bits.slice(0, src.size*src.size/32).interpret_as_bytes());
+    s := (src.size / state.view.scale.cast().int());
+    s := (s*s/32).max(1).min(src.bits.len);
+    sg.update_buffer(state.frame, src.bits.slice(0, s).interpret_as_bytes());
     
     bind := zeroed Sg.Bindings;
     bind.storage_buffers&[0] = state.frame;
@@ -127,29 +138,28 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 }
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    ratio := state.uni.canvas.x / state.uni.screen.x;
+    if ratio < 1 {
+        ratio = 1;
+    };
     if event.type == .MOUSE_MOVE && event.modifiers.get(.left_mouse) != 0 {  // pan
-        speed := -state.uni.scale;
-        delta := vec2(event.mouse_dx, event.mouse_dy) / state.uni.screen;
-        state.uni.pos += delta * vec2(speed);
+        delta := -vec2(event.mouse_dx, event.mouse_dy) / ratio;
+        delta /= state.uni.scale;
+        state.uni.pos += delta;
         state.dirty = true;
         return();
     };
     
-@if(false) { // TODO: i need to change how the coordinates work anyway
     a := event.type == .MOUSE_DOWN && event.mouse_button == .RIGHT;
     b := event.type == .MOUSE_MOVE && event.modifiers.get(.right_mouse) != 0;
     if a || b {  // draw
-        mouse := vec2(event.mouse_x, event.mouse_y);
-        mouse := (mouse / state.uni.screen * state.uni.scale) + state.uni.pos;
-        @if(mouse.x < 0 || mouse.y < 0 || mouse.x >= 1 || mouse.y >= 1) return();
-        mouse := mouse * state.uni.canvas;
-        pos := vec2(floor(mouse.x), floor(mouse.y));
-        x, y := pos.int();
-        state.flat&.get().set(x, y, true);
+        // TODO: draw a line if moved the mouse multiple cells in one frame. 
+        mouse_rel := vec2(event.mouse_x, event.mouse_y) / ratio / state.uni.scale;
+        pos := state.uni.pos + mouse_rel + vec2(1);
+        state.memo&.set_pixel(pos, event.modifiers.get(.shift) == 0);
         state.dirty = true;
         return();
     };
-};
 
     @match(event.type) {
         fn RESIZED() => {
@@ -161,7 +171,6 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 fn SPACE() => { state.paused = !state.paused; }
                 fn C() => state.recenter();
                 fn R() => { 
-                        state.memo&.gc_reserve(state.memo.size.trailing_zeros());
                         state.memo.root = state.memo&.empty_node(state.memo.size);
                         state.pattern&.clear();
                 }
@@ -174,22 +183,26 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 fn G() => {
                     state.memo.root = state.memo&.zero_fill_grow_root();
                     state.memo.size *= 2;
-                    state.uni.scale *= 2;  // TODO: fix pos
-                    state.uni.canvas *= 2;
+                    state.resize_canvas(state.sg, state.memo.size, state.memo.size);
+                    state.recenter();
                     // TODO: after this pan speed is messed up too. 
                 }
                 @default => return();
             };
         };
         fn MOUSE_SCROLL() => {  // zoom
-            @if(state.scroll_delay > 0) return();
-            delta := @if(event.scroll_y > 0, -state.uni.scale / 2, state.uni.scale);
+            @if(state.scroll_delay > 0 && event.scroll_y != 0) return();
+            delta := @if(event.scroll_y < 0, -state.uni.scale / 2, state.uni.scale);
             
-            pos := vec2(event.mouse_x, event.mouse_y);
-            pos := (pos / state.uni.screen);
-            pos0 := pos * vec2(state.uni.scale);
-            pos1 := pos * vec2(state.uni.scale + delta);
+            @if(event.scroll_y > 0 && state.uni.scale >= state.uni.screen.x/ratio) return();    // one cell = whole screen
+            @if(event.scroll_y < 0 && state.uni.scale <= 1/state.uni.canvas.x/ratio) return();  // one pixel = whole canvas
+            
+            if event.modifiers.get(.control) == 0 {
+            pos := vec2(event.mouse_x, event.mouse_y) / ratio;
+            pos0 := pos / state.uni.scale;
+            pos1 := pos / (state.uni.scale + delta);
             state.uni.pos -= (pos1 - pos0);
+            };
             state.uni.scale += delta;
             state.scroll_delay = 10;
         }
@@ -212,25 +225,27 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
 find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *Shaders.Uni, debug: *Str) Shaders.Uni = {
     msg := @ref u8.list(temp());
     @debug_assert(uni.canvas.x == uni.canvas.y && uni.canvas.x.cast().int() == memo.size);
-    // TODO: this is way too big
-    view_size := uni.canvas * uni.scale;
-    real_start := uni.pos * uni.screen; // .canvas
+    
+    ratio := uni.canvas.x / uni.screen.x;
+    if ratio < 1 {
+        ratio /= ratio;
+    };
+    view_size := uni.screen / uni.scale / ratio;
+    real_start := uni.pos;
     view_end := clamp(real_start + view_size, vec2(0), uni.canvas);
     view_start := clamp(real_start, vec2(0), uni.canvas);
     
-    // TODO: i don't feel like this is working as well as it could be.
     // find the smallest node that covers the view area
     node := memo.root;
     node_pos := vec2(0);
     node_size := vec2(memo.size.float().cast());
     depth := 0;
-    @fmt(msg, "size: %,%; %,% => %,%\n", view_size.x, view_size.y, view_start.x, view_start.y, view_end.x, view_end.y);
     dowhile {
         continue :: local_return;
         s := node_size/2;
         enumerate node.children& { i, child |
             p := node_pos + s*direction[i];
-            end := p + s + vec2(0.001);
+            end := p + s + vec2(0.1);
             
             if hit_square(view_start, p, end) && hit_square(view_end, p, end) {
                 node = child[];
@@ -246,12 +261,12 @@ find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *Shaders.Uni, debug: *St
         false
     };
     
+    @fmt(msg, "depth=%; view=[(%,%), (%,%)];\n", depth, view_start.x, view_start.y, view_end.x, view_end.y);
     vs, ve := (real_start - node_pos, real_start + view_size - node_pos);
-    pixels_per_cell := dest.size.float().cast() / max(ve.x - vs.x, ve.y - vs.y);
-    @fmt(msg, "depth=%; %,% -> %,%; ppc x100=%; (pos=%,% scale=%)\n", depth, vs.x, vs.y, ve.x, ve.y, pixels_per_cell * 100, uni.pos.x, uni.pos.y, uni.scale);
+    pixels_per_cell := max(uni.screen.x, uni.screen.y) / max(view_size.x, view_size.y);
     
     // this avoids needing to fill big boxes when you zoom in. 
-    // downside is no smooth panning (TODO: could move part of the pos to the shader tho). 
+    // downside is sub-cell smooth panning is more complicated. `fractional_cell` gets added back in the shader. 
     shader_scale: f32 = 1;
     while => pixels_per_cell / 2 >= 1 {
         pixels_per_cell /= 2;
@@ -261,7 +276,6 @@ find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *Shaders.Uni, debug: *St
     ss := shader_scale.cast().int();
     dest.size /= ss;  
     dest.bits.len /= ss;
-    // TODO: still wastefully update_buffer the whole thing
     
     dest.bits.set_zeroed();
     decompress_recur(@ref @as(Decomp) (
@@ -276,11 +290,15 @@ find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *Shaders.Uni, debug: *St
     
     debug[] = msg.items();
     
+    // TODO: fractional scaling in shader too
+    //       (need to update scroll event to keep track as well)
+    // TODO: fractional_cell doesn't work on the boarder. need one more pixel in the buffer. 
+    fractional_cell := uni.pos - floor(uni.pos);
     (
-        pos = vec2(0),
+        pos = fractional_cell * shader_scale,
         scale = shader_scale,
         canvas = vec2(dest.size.float().cast() / shader_scale),
-        screen = uni.screen,
+        screen = vec2(0),
     )
 }
 
@@ -299,10 +317,10 @@ fn resize_canvas(state: *State, sg: *Sg.Self, x: i64, y: i64) void = {
 
 fn maybe_resize_buffer(state: *State) void = {
     state.dirty = true;
-    size, sg, a := (state.memo.size, state.sg, general_allocator());
+    sg, a := (state.sg, general_allocator());
     w, h := state.uni.screen.int();
-    n := size.max(w).max(h);
-    @if(n < state.flat.size) return();
+    n := max(w, h);  // doesn't depend on state.memo.size because just writing pixels not all cells.
+    @if(n <= state.flat.size) return();
     a.dealloc(u32, state.flat.bits);
     state.flat = empty_bitboard(a, n);
     @if(state.frame.id != 0) sg.destroy(state.frame);
@@ -350,10 +368,45 @@ load_pattern_bytes :: fn(state: *State, sg: *Sg.Self, in: Str) Result(void, Str)
 fn recenter(state: *State) void = {
     // try to fit the whole thing on the screen
     screen := min(state.uni.screen.x, state.uni.screen.y);
-    scale := (state.memo.size.float().cast() / screen);
-    scale := scale.cast().int().up_pow2().float().cast();  // ehhh
-    state.uni.scale = scale;
+    ratio := state.uni.canvas.x / screen;
+    if ratio > 1 {
+        state.uni.scale = 1/ratio/ratio;
+    } else {
+        state.uni.scale = 1/ratio;
+    };
+    //scale := scale.cast().int().up_pow2().float().cast();  // ehhh
     state.uni.pos = vec2(0);
+}
+
+set_pixel :: fn(memo: *Memo, pos: Vec2, value: bool) bool = {
+    size := memo.size.float().cast();
+    @if(!hit_square(pos, vec2(0), vec2(size))) return(false);
+    memo.gc_reserve(memo.size.trailing_zeros());
+    memo.root = recur(memo, memo.root, size, vec2(0), pos, value);
+    return true;
+    
+    // nodes are immutable because interned/reused.
+    // to change a pixel need to rebuild the chain from root to base. 
+    recur :: fn(memo: *Memo, node: *Node, size: f32, node_pos: Vec2, pos: Vec2, value: bool) *Node = {
+        if size == base_case_w.float().cast() {
+            x, y := (pos - node_pos).int();
+            i := y*base_case_w+x;
+            h := node.hash
+                .bit_and(1.shift_left(i).bit_not())
+                .bit_or(int(value).bitcast().shift_left(i));
+            return memo.base_node(h);
+        };
+        size /= 2;
+        range(0, 4) { i |
+            p := node_pos + direction[i]*size;
+            if hit_square(pos, p, p + vec2(size)) {
+                c := node.children;
+                c&[i] = recur(memo, c&[i], size, p, pos, value);
+                return memo.push(children = c);
+            };
+        };
+        unreachable()
+    };
 }
 
 fn show_error(state: *State, msg: Str) void = {
@@ -373,10 +426,11 @@ fn maybe_show_info(state: *State, sapp: *Sapp.Self) void = {
     msg := @ref u8.list(temp());
     @fmt(msg, "size=%; gc=(%/%); population=%;\n", memo.size, buf.len, buf.cap, memo.root.population);
     @fmt(msg, "screen=(%,%); scale=", uni.screen.x, uni.screen.y);
-    s := 1/uni.scale;
+    s := uni.scale;
     @if(s >= 1, @fmt(msg, "%x", s), @fmt(msg, "1/%", 1/s));
     @fmt(msg, "; pos=(%,%);\n", uni.pos.x, uni.pos.y);
-    @fmt(msg, "paused=%; fast=%;\n", state.paused, state.fast_eval);
+    stable := !state.memo.root.next.is_null() && state.memo.root.next_fast == state.fast_eval;
+    @fmt(msg, "paused=%; fast=%; stable=%;\n", state.paused, state.fast_eval, stable);
     msg.push_all(state.debug);
     @fmt(msg, "\n");
     sdtx.put(msg.items());

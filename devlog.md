@@ -2,6 +2,11 @@
 ## (May 26) life
 
 - don't need gui for flat/naive eval anymore. show stats and pattern comment on screen. 
+- change coordinate system so pos is just in cells. 
+  - fix view_size and pixels_per_cell calc, now faster becuase not drawing as much. 
+  - not great that im just changing shit until it looks right. i don't understand why i have to invert ratio sometimes. 
+  - experiment: partial cell position in shader. the edge is trash tho. 
+- bring back draw. this time into the quadtree. 
 
 ## (May 25) life
 

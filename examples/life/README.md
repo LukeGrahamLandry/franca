@@ -13,15 +13,11 @@ This program can load RunLengthEncoded (.rle) and Macrocell (.mc) pattern files.
 - https://conwaylife.com/patterns/all.zip
 
 TODO: infinite canvas
-TODO: edge behaviour doesn't match between hashlife and normal. 
-      normal: edges are treated as dead but you can't write in to them so you can get stuck.
-      hashlife: bit boarder is added and then discarded so you can go off the screen and disappear. 
 TODO: control how many generations are stepped when doing hashlife
       instead of just fast=true/false, toggle it at each recursion level to get any power of two step size. 
 TODO: put eval on other threads
       then can allow moving the shader params to give a slight sense of progress while waiting to update the frame if its slow. 
 TODO: experiment with eval in compute shader
-TODO: allow draw while in hashlife mode
 TODO: write .rle and .mc files
 TODO: cli to step generations without the gui
 TODO: pattern gallery
@@ -33,6 +29,8 @@ TODO: add some tests
 TODO: bring back smooth movement when zoomed in by putting part of pos in the shader
 TODO: speed up compress() (for loading .rle to hashlife)
 TODO: a thing to generate big patterns from one life-in-life cell
+TODO: fix the dead cell on the edge for fractional move
+TODO: non power of two scale in shader
 
 TODO: program that generates this visualisation
 ![indices in eval_center_split_merge](https://lukegrahamlandry.ca/assets/hashlife.jpg)
