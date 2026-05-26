@@ -29,10 +29,10 @@ TODO: add some tests
   - round trip compress/decompress
   - round trip rle/mc pattern
   - run a small pattern in normal and in hashlife and makes sure they match
+  - move non-hashlife eval out of eval.fr into test
 TODO: bring back smooth movement when zoomed in by putting part of pos in the shader
 TODO: speed up compress() (for loading .rle to hashlife)
-TODO: fix pos jump when enabling use_hashlife
-TODO: maybe remove non-hashlife from the ui and just keep the eval for test
+TODO: a thing to generate big patterns from one life-in-life cell
 
 TODO: program that generates this visualisation
 ![indices in eval_center_split_merge](https://lukegrahamlandry.ca/assets/hashlife.jpg)

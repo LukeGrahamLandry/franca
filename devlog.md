@@ -1,5 +1,9 @@
 
-## (May 25)
+## (May 26) life
+
+- don't need gui for flat/naive eval anymore. show stats and pattern comment on screen. 
+
+## (May 25) life
 
 - probably bad for my bit buffer size to be at all related to game size. 
   made since when eval was on that form and could just send it to gpu, 
@@ -16,6 +20,7 @@
   - the level where children are base nodes so grandchildren are null needs extra work to rearrange the bit sets. 
   - when toggling fast mode, need to invalidate the cached node.next pointers. 
 - compress() check for size=32 blocks of zeros. metagalaxy.rle samples: 14346 -> 3227. 
+  similarly in read_rle, don't set each bit if its zero: 2304 -> 203
 
 ## (May 24)
 

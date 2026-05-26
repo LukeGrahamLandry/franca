@@ -4,25 +4,27 @@ right click+drag: draw cells. scroll: zoom. click+drag: pan.
 space: play/pause. s: step. 
 c: center view. r: kill all cells. 
 cli/dragndrop/paste: load (.rle),(.mc) pattern
-f: toggle hashlife <-> brute force eval
+f: toggle fast eval
+h: toggle stats/pattern info
 """;
 
 State :: @struct {
     WIDTH :: 512; HEIGHT :: 512;
     pipe: Sg.Pipeline;
     frame: Sg.Buffer;
-    pixels: BitBoard;
     uni: Shaders.Uni;
     view: Shaders.Uni;
     dirty: bool;
-    flat: BitGame;
+    flat: BitBoard;
     paused: bool;
-    use_hashlife: bool;
     fast_eval: bool;  // multiple steps per hashlife recursion
-    did_draw_warning: bool;
+    show_info: bool;
     sg: *Sg.Self;
     memo: Memo;
     scroll_delay: i64;
+    text: Sdtx.Self;
+    pattern: List(u8);
+    debug: Str;  // temp()
 };
 
 MIN_W :: 1.shift_left(10);
@@ -30,17 +32,19 @@ MAX_W :: 1.shift_left(16);
 @run @assert(MIN_W.count_ones() == 1 && MAX_W.count_ones() == 1, "need powers of two");
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    a := general_allocator();
     new_memo(state.memo&, general_allocator());
     sapp.desc.enable_dragndrop = true;
     sapp.desc.enable_clipboard = true;
     state.sg = sg;
+    state.pattern = list(a);
     state.resize_screen(sapp);
     @assert(!(query_current_arch() == .x86_64 && query_current_os() == .macos), "TODO: old metal doesn't like non-const u32 buffer");
     state.pipe = sg.make(
         shader = sg.make(choose_shader_impl(SOKOL_BACKEND, Shaders)),
     );
     state.uni.scale = 1.0;
-    sapp.set_window_title("Life (space: (un)pause, right click: draw, scroll: zoom)");
+    sapp.set_window_title("Life (press h for help)");
     state.paused = true;
     state.fast_eval = true;
     
@@ -50,7 +54,15 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         @if(path == "-h" || path.contains("help")) print(HELP);
     };
     
-    @if(state.flat&.get()[].size == 0) state.resize_canvas(sg, MIN_W, MIN_W);
+    @if(state.flat.size == 0) state.resize_canvas(sg, MIN_W, MIN_W);
+    
+    state.text&.setup(sg = sg, allocator = a, fonts = @slice(Sdtx.font.cpc));
+    
+    if state.memo.root.is_null() {
+        state.resize_canvas(sg, MIN_W, MIN_W);
+        state.memo.root = state.memo&.empty_node(MIN_W);
+        state.memo.size = MIN_W;
+    };
 }
 
 Shaders :: @struct {
@@ -64,15 +76,8 @@ Shaders :: @struct {
     ) Shaders.OutF = {
         p := in.pos;
         p := @swizzle p.xy;
-        if uni.pixels == 0 {
-            p = (p / uni.screen * uni.scale + uni.pos);
-            @if(p.x >= 1 || p.y >= 1 || p.x < 0 || p.y < 0) 
-                return(colour = @vec(vec3(0.05), 1.0));
-            p = p * uni.canvas;
-        } else {
             p /= uni.scale;
             // TODO: colour outside the box
-        };
         x := @swizzle p.x;
         y := @swizzle p.y;
         
@@ -88,7 +93,7 @@ Shaders :: @struct {
         screen: Vec2;  // how many pixels
         canvas: Vec2;  // how many cells
         scale: f32;
-        pixels: i32;
+        pad: f32 = 0;
     };
 };
 
@@ -98,17 +103,15 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         state.tick();
     } else {
         @if(state.dirty)
-        if state.use_hashlife {
+        {
             // :SLOW
-            state.view = find_view_area(state.flat&.get(), state.memo&, state.uni&);
-        } else {
-            state.view = state.uni;
+            state.view = find_view_area(state.flat&, state.memo&, state.uni&, state.debug&);
         };
     }
     @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
 
     Easy'glue_begin_pass(sapp, sg, zeroed Sg.PassAction);
-    src := state.flat&.get();
+    src := state.flat&;
     sg.update_buffer(state.frame, src.bits.slice(0, src.size*src.size/32).interpret_as_bytes());
     
     bind := zeroed Sg.Bindings;
@@ -118,7 +121,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sg.apply_uniforms(0, state.view&.slice(1).interpret_as_bytes());
     sg.apply_bindings(bind&);
     draw(sg = sg, base = 0, elements = 6, instances = 1);
-    sg.end_pass();
+    state.maybe_show_info(sapp);
+    sg.end_pass();    
     sg.commit();
 }
 
@@ -131,14 +135,10 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         return();
     };
     
+@if(false) { // TODO: i need to change how the coordinates work anyway
     a := event.type == .MOUSE_DOWN && event.mouse_button == .RIGHT;
     b := event.type == .MOUSE_MOVE && event.modifiers.get(.right_mouse) != 0;
     if a || b {  // draw
-        if state.use_hashlife {
-            @if(!state.did_draw_warning) @eprintln("TODO: can't draw when in hashlife mode (press f to toggle)");
-            state.did_draw_warning = true;
-            return();
-        };
         mouse := vec2(event.mouse_x, event.mouse_y);
         mouse := (mouse / state.uni.screen * state.uni.scale) + state.uni.pos;
         @if(mouse.x < 0 || mouse.y < 0 || mouse.x >= 1 || mouse.y >= 1) return();
@@ -149,6 +149,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         state.dirty = true;
         return();
     };
+};
 
     @match(event.type) {
         fn RESIZED() => {
@@ -158,32 +159,25 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             @match(event.key_code) {
                 fn S() => state.tick();
                 fn SPACE() => { state.paused = !state.paused; }
-                fn C() => { state.uni.scale = 1; state.uni.pos = vec2(0); }
+                fn C() => state.recenter();
                 fn R() => { 
-                    if state.use_hashlife {
                         state.memo&.gc_reserve(state.memo.size.trailing_zeros());
                         state.memo.root = state.memo&.empty_node(state.memo.size);
-                    } else {
-                        state.flat&.get()[].bits.set_zeroed();
-                    };
+                        state.pattern&.clear();
                 }
+                fn H() => @if(!event.key_repeat) { state.show_info = !state.show_info; }
                 fn F() => { 
-                    state.use_hashlife = !state.use_hashlife;
-                    @if(state.use_hashlife, state.compress(), state.decompress());
-                    @println("use_hashlife=%", state.use_hashlife);
-                };
-                fn W() => { 
                     state.fast_eval = !state.fast_eval;
-                    @println("fast_eval=%", state.fast_eval);
                     // TODO: also allow old next pointers to be gc-ed (rn they're just ignored in eval)
                 };
-                fn G() => if state.use_hashlife {
+                // TODO: just auto expand as needed so it's like infinite board. 
+                fn G() => {
                     state.memo.root = state.memo&.zero_fill_grow_root();
                     state.memo.size *= 2;
                     state.uni.scale *= 2;  // TODO: fix pos
                     state.uni.canvas *= 2;
+                    // TODO: after this pan speed is messed up too. 
                 }
-                fn H() => @if(!event.key_repeat) print(HELP);
                 @default => return();
             };
         };
@@ -207,7 +201,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 state.load_pattern(state.sg, event.pasted);
             } else {
                 load_pattern_bytes(state, state.sg, event.pasted)
-                    .or(fn(msg) => @eprintln("<paste> %", msg));
+                    .or(fn(msg) => state.show_error(@tfmt("<paste>\n%", msg)));
             };
         }
         @default => return();
@@ -215,8 +209,10 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     state.dirty = true;
 }
 
-find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *Shaders.Uni) Shaders.Uni = {
+find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *Shaders.Uni, debug: *Str) Shaders.Uni = {
+    msg := @ref u8.list(temp());
     @debug_assert(uni.canvas.x == uni.canvas.y && uni.canvas.x.cast().int() == memo.size);
+    // TODO: this is way too big
     view_size := uni.canvas * uni.scale;
     real_start := uni.pos * uni.screen; // .canvas
     view_end := clamp(real_start + view_size, vec2(0), uni.canvas);
@@ -228,30 +224,31 @@ find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *Shaders.Uni) Shaders.Un
     node_pos := vec2(0);
     node_size := vec2(memo.size.float().cast());
     depth := 0;
+    @fmt(msg, "size: %,%; %,% => %,%\n", view_size.x, view_size.y, view_start.x, view_start.y, view_end.x, view_end.y);
     dowhile {
         continue :: local_return;
         s := node_size/2;
         enumerate node.children& { i, child |
             p := node_pos + s*direction[i];
             end := p + s + vec2(0.001);
+            
             if hit_square(view_start, p, end) && hit_square(view_end, p, end) {
                 node = child[];
                 node_pos = p;
                 node_size = s;
                 depth += 1;
-                continue(true);
+                continue(!node.children&[0].is_null());
             };
         };
         
         // TODO: can make new nodes that aren't aligned to the original quadtree if you're right on a border. 
         //       ex. try the nine that eval_center_split_merge would make by regrouping grandchildren?
-        
         false
     };
     
     vs, ve := (real_start - node_pos, real_start + view_size - node_pos);
     pixels_per_cell := dest.size.float().cast() / max(ve.x - vs.x, ve.y - vs.y);
-    @println("depth=%; %,% -> %,%; ppc x100=%", depth, vs.x, vs.y, ve.x, ve.y, pixels_per_cell * 100);
+    @fmt(msg, "depth=%; %,% -> %,%; ppc x100=%; (pos=%,% scale=%)\n", depth, vs.x, vs.y, ve.x, ve.y, pixels_per_cell * 100, uni.pos.x, uni.pos.y, uni.scale);
     
     // this avoids needing to fill big boxes when you zoom in. 
     // downside is no smooth panning (TODO: could move part of the pos to the shader tho). 
@@ -277,91 +274,119 @@ find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *Shaders.Uni) Shaders.Un
     dest.size *= ss;
     dest.bits.len *= ss;
     
+    debug[] = msg.items();
+    
     (
         pos = vec2(0),
         scale = shader_scale,
         canvas = vec2(dest.size.float().cast() / shader_scale),
         screen = uni.screen,
-        pixels = 1,
     )
 }
 
 fn resize_screen(state: *State, sapp: *Sapp.Self) void = {
     state.uni.screen = vec2(sapp.width().float().cast(), sapp.height().float().cast());
-    state.dirty = true;
-    a := general_allocator();
-    n := max(sapp.width(), sapp.height()).up_pow2();
-    a.dealloc(u32, state.pixels.bits);
-    state.pixels = empty_bitboard(a, n);
+    state.maybe_resize_buffer();
 }
 
-fn decompress(state: *State) void = {  // frame -> memo
-    dest := state.flat&.get();
-    dest.size = state.memo.size;
-    @debug_assert_le(dest.size*dest.size/32, dest.bits.len);
-    decompress(dest, state.memo&);
-}
-
-fn compress(state: *State) void = {  // frame -> memo
-    compress(state.flat&.get(), state.memo&);
-}
-
+// TODO: pan position is messed up after this if non-square
 fn resize_canvas(state: *State, sg: *Sg.Self, x: i64, y: i64) void = {
-    a := general_allocator();
     @debug_assert(x == y, "not allowing nonsquare anymore");
     state.uni.canvas = vec2(x.float().cast(), y.float().cast());
     @assert(x > 0 && y > 0 && int(cast(state.uni.canvas.x)) == x && int(cast(state.uni.canvas.y)) == y, "invalid canvas size: %x%", x, y);
-    drop(state.flat&, a);
-    state.flat = empty_bit_game(a, x);
+    state.maybe_resize_buffer();
+}
+
+fn maybe_resize_buffer(state: *State) void = {
+    state.dirty = true;
+    size, sg, a := (state.memo.size, state.sg, general_allocator());
+    w, h := state.uni.screen.int();
+    n := size.max(w).max(h);
+    @if(n < state.flat.size) return();
+    a.dealloc(u32, state.flat.bits);
+    state.flat = empty_bitboard(a, n);
     @if(state.frame.id != 0) sg.destroy(state.frame);
     state.frame = sg.make(
         usage = .DYNAMIC,
-        size = state.flat&.get()[].bits.len * 4,
+        size = state.flat.bits.len * 4,
     );
-    state.dirty = true;
 }
 
 fn tick(state: *State) void = {
     state.dirty = true;
-    if state.use_hashlife {
-        state.memo&.eval(state.fast_eval);
-        state.view = find_view_area(state.flat&.get(), state.memo&, state.uni&);
-    } else {
-        state.flat&.eval();
-        state.view = state.uni;
-    };
+    state.memo&.eval(state.fast_eval);
+    state.view = find_view_area(state.flat&, state.memo&, state.uni&, state.debug&);
 }
 
 load_pattern :: fn(state: *State, sg: *Sg.Self, path: Str) void = {
     #use("@/lib/sys/fs.fr");
     in := read_entire_file(temp(), path) || {
-        @eprintln("[%] failed read", path);
+        state.show_error(@tfmt("[%]\nfailed read", path));
         return();
     };
     load_pattern_bytes(state, sg, in)
-        .or(fn(msg) => @eprintln("[%] %", path, msg));
+        .or(fn(msg) => state.show_error(@tfmt("[%]\n%", path, msg)));
 }
 
 load_pattern_bytes :: fn(state: *State, sg: *Sg.Self, in: Str) Result(void, Str) = {
+    state.pattern&.clear();
     if in.starts_with("[M2]") {
-        node, size := @try(Patterns'read_mc(state.memo&, in)) return;
+        node, size, header := @try(Patterns'read_mc(state.memo&, in)) return;
+        state.pattern&.push_all(header);
         state.memo.root = node;
         state.memo.size = size; 
-        state.resize_canvas(sg, size, size);
-        state.use_hashlife = true;
-        return(.Ok);
+    } else {
+        it, header := @try(Patterns'read_rle(temp(), in, MIN_W, MAX_W)) return;
+        state.pattern&.push_all(header);
+        compress(it&, state.memo&);
     };
     
-    // TODO: split the parsing of size from data so can resize first and write into the thing directly
-    it := @try(Patterns'read_rle(temp(), in, MIN_W, MAX_W)) return;
-            state.resize_canvas(sg, it.size, it.size);
-            state.flat&.get()[].bits.copy_from(it.bits);
-            state.paused = state.uni.canvas.x > 10000 || state.uni.canvas.y > 10000;
-    if state.use_hashlife {
-        state.compress();
-    };
+    size := state.memo.size;
+    state.resize_canvas(sg, size, size);
+    state.recenter();
     .Ok
 }
+
+fn recenter(state: *State) void = {
+    // try to fit the whole thing on the screen
+    screen := min(state.uni.screen.x, state.uni.screen.y);
+    scale := (state.memo.size.float().cast() / screen);
+    scale := scale.cast().int().up_pow2().float().cast();  // ehhh
+    state.uni.scale = scale;
+    state.uni.pos = vec2(0);
+}
+
+fn show_error(state: *State, msg: Str) void = {
+    eprintln(msg);
+    state.pattern&.clear();
+    @fmt(state.pattern&, "ERROR\n%\n", msg);
+    state.show_info = true;
+}
+
+fn maybe_show_info(state: *State, sapp: *Sapp.Self) void = {
+    @if(!state.show_info) return();
+    sdtx := state.text.default_context&;
+    sdtx.canvas(sapp, 1);
+    
+    sdtx.color = pack_rgba(50, 255, 255, 255);
+    memo := state.memo&; buf := memo.buf&[memo.buf_i]&; uni := state.uni&;
+    msg := @ref u8.list(temp());
+    @fmt(msg, "size=%; gc=(%/%); population=%;\n", memo.size, buf.len, buf.cap, memo.root.population);
+    @fmt(msg, "screen=(%,%); scale=", uni.screen.x, uni.screen.y);
+    s := 1/uni.scale;
+    @if(s >= 1, @fmt(msg, "%x", s), @fmt(msg, "1/%", 1/s));
+    @fmt(msg, "; pos=(%,%);\n", uni.pos.x, uni.pos.y);
+    @fmt(msg, "paused=%; fast=%;\n", state.paused, state.fast_eval);
+    msg.push_all(state.debug);
+    @fmt(msg, "\n");
+    sdtx.put(msg.items());
+    sdtx.color = pack_rgba(255, 255, 0, 255);
+    sdtx.put(state.pattern.items());
+    sdtx.color = pack_rgba(150, 150, 150, 255);
+    sdtx.put(HELP);
+    
+    sdtx.draw_layer(0);
+};
 
 main :: fn() void = Easy'start(State);
 driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
@@ -369,12 +394,13 @@ driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @sour
 fn int(it: Vec2) Ty(i64, i64) = (it.x.cast().int(), it.y.cast().int());
 
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    state.text&.shutdown();
     sg.destroy(state.frame);
     sg.destroy(state.pipe);
     a := general_allocator();
-    drop(state.flat&, a);
+    a.dealloc(u32, state.flat.bits);
     drop(state.memo&);
-    a.dealloc(u32, state.pixels.bits);
+    drop(state.pattern&);
 }
 
 #use("@/examples/life/eval.fr");
