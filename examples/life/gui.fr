@@ -30,7 +30,7 @@ State :: @struct {
 };
 
 // TODO: remove these? they're bad for computing scale. 
-MIN_W :: base_case_w;
+MIN_W :: base_case_w*2;
 MAX_W :: 1.shift_left(16);
 @run @assert(MIN_W.count_ones() == 1 && MAX_W.count_ones() == 1, "need powers of two");
 
@@ -60,7 +60,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     state.text&.setup(sg = sg, allocator = a, fonts = @slice(Sdtx.font.cpc));
     
-    if state.memo.root.is_null() {
+    if state.memo.root.id == 0 {
         state.resize_canvas(sg, MIN_W, MIN_W);
         state.memo.root = state.memo&.empty_node(MIN_W);
         state.memo.size = MIN_W;
@@ -243,7 +243,7 @@ find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *Shaders.Uni, debug: *St
     dowhile {
         continue :: local_return;
         s := node_size/2;
-        enumerate node.children& { i, child |
+        enumerate memo.get(node)[].children& { i, child |
             p := node_pos + s*direction[i];
             end := p + s + vec2(0.1);
             
@@ -252,7 +252,7 @@ find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *Shaders.Uni, debug: *St
                 node_pos = p;
                 node_size = s;
                 depth += 1;
-                continue(!node.children&[0].is_null());
+                continue(memo.get(node)[].children&[0].id != 0);
             };
         };
         
@@ -387,11 +387,11 @@ set_pixel :: fn(memo: *Memo, pos: Vec2, value: bool) bool = {
     
     // nodes are immutable because interned/reused.
     // to change a pixel need to rebuild the chain from root to base. 
-    recur :: fn(memo: *Memo, node: *Node, size: f32, node_pos: Vec2, pos: Vec2, value: bool) *Node = {
+    recur :: fn(memo: *Memo, node: NodeId, size: f32, node_pos: Vec2, pos: Vec2, value: bool) NodeId = {
         if size == base_case_w.float().cast() {
             x, y := (pos - node_pos).int();
             i := y*base_case_w+x;
-            h := node.hash
+            h := memo.get(node).base_children()
                 .bit_and(1.shift_left(i).bit_not())
                 .bit_or(int(value).bitcast().shift_left(i));
             return memo.base_node(h);
@@ -400,7 +400,7 @@ set_pixel :: fn(memo: *Memo, pos: Vec2, value: bool) bool = {
         range(0, 4) { i |
             p := node_pos + direction[i]*size;
             if hit_square(pos, p, p + vec2(size)) {
-                c := node.children;
+                c := memo.get(node)[].children;
                 c&[i] = recur(memo, c&[i], size, p, pos, value);
                 return memo.push(children = c);
             };
@@ -424,12 +424,13 @@ fn maybe_show_info(state: *State, sapp: *Sapp.Self) void = {
     sdtx.color = pack_rgba(50, 255, 255, 255);
     memo := state.memo&; buf := memo.buf&[memo.buf_i]&; uni := state.uni&;
     msg := @ref u8.list(temp());
-    @fmt(msg, "size=%; gc=(%/%); population=%;\n", memo.size, buf.len, buf.cap, memo.root.population);
+    root := memo.get(memo.root);
+    @fmt(msg, "size=%; gc=(%/%); population=%;\n", memo.size, buf.len, buf.cap, root.population);
     @fmt(msg, "screen=(%,%); scale=", uni.screen.x, uni.screen.y);
     s := uni.scale;
     @if(s >= 1, @fmt(msg, "%x", s), @fmt(msg, "1/%", 1/s));
     @fmt(msg, "; pos=(%,%);\n", uni.pos.x, uni.pos.y);
-    stable := !state.memo.root.next.is_null() && state.memo.root.next_fast == state.fast_eval;
+    stable := root.next.id != 0 && root.next_fast == state.fast_eval;
     @fmt(msg, "paused=%; fast=%; stable=%;\n", state.paused, state.fast_eval, stable);
     msg.push_all(state.debug);
     @fmt(msg, "\n");

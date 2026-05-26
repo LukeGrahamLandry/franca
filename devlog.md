@@ -7,6 +7,10 @@
   - not great that im just changing shit until it looks right. i don't understand why i have to invert ratio sometimes. 
   - experiment: partial cell position in shader. the edge is trash tho. 
 - bring back draw. this time into the quadtree. 
+- since gc_roots are unique anyway, i don't need to be able to check which buf a pointer is in
+  and node.children can just be u32 indices. don't need to store hash, compute from children ids. 
+  but now need to pack the bit set for base nodes somehwere else. latter two children slots 
+  which leaves first two to be a sentinal so you know its a base node. put forward in its own array. 
 
 ## (May 25) life
 

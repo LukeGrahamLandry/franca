@@ -1,7 +1,7 @@
 //
 // UNSAFE
 //  the Memo data structure uses copying garbage collection, 
-//  you can't hold a *Node without laundering it 
+//  you can't hold a *Node or NodeId without laundering it 
 //  through gc_roots across any call to gc_reserve. 
 //
 
@@ -19,76 +19,95 @@ do_life :: fn(w: i64, h: i64, $P: @Fn(x: i64, y: i64) u32 #duplicated, $yield: @
 }
 
 // the most important thing is that the Node doesn't know its position in the grid so it can be reused. 
-// for base case, node.children[_]=0 and node.hash is the cell data for base_case_w wide square. 
 Node :: @rec @struct {
-    children: Array(*Node, 4);   // TODO: these could be u32 index?
-    next := zeroed(*Node);
-    hash: u64 = 0;
-    forward: u32 = 0;
+    children: Array(NodeId, 4);
+    next := zeroed(NodeId);  // memoized eval_center()
     population: u32 = 0;
-    next_fast := false;  // :SLOW 1 bit costs 8 bytes (but when i want to allolw more different speeds, this will need more bits)
+    next_fast := false;  // :SLOW 1 bit costs 4 bytes (but when i want to allow more different speeds, this will need more bits)
 };
+
+// index in memo.active_buf.
+// id=0 is reserved so zeroed(Array(NodeId)) still works as uninit when being filled in a loop.
+// id=0 is also is also used for children[0,1] of base nodes ([2,3] have bit set of cells).  
+// since arrays are filled in order, collect_garbage can stop on 0 in a gc_root and not treat the base bits as indices. 
+NodeId :: @struct(id: u32);  
 
 base_case_w :: 2;  // TODO: profile different sizes: 2/4/8
 Memo :: @struct {
-    table: []*Node;  // hash table with masked node.hash (the flat/linear probing kind not the linked list buckets kind)
+    active_buf: *RawList(Node);  // memo.buf&[buf_i]&... can't hurt
+    table: []NodeId;  // hash table with masked node.hash() (the flat/linear probing kind not the linked list buckets kind)
     buf: Array(RawList(Node), 2);
     buf_i: i64;
-    root: *Node;
+    root: NodeId;
     size: i64;
-    gc_roots: List([]*Node);
+    // these addresses (not ids) must be unique so collect_garbage doesn't try to process an id that's already been moved. 
+    gc_roots: List([]NodeId);
+    // parallel to buf but only need one side at a time and only while running collect_garbage so don't waste locality of buf when doing actual work. 
+    gc_forward: []NodeId;  
     a: Alloc;
 };
 
 new_memo :: fn(self: *Memo, a: Alloc) void = {
     self[] = zeroed(Memo);
-    n := 24;
+    n := 25;
     self.buf&[0] = init(a, 1.shift_left(n));
-    self.table = a.alloc_zeroed(*Node, 1.shift_left(n + 2));
-    @eprintln("buf=%mb x2; table=%mb", self.buf&[0].cap * size_of(Node) / 1024 / 1024, self.table.len * 8 / 1024 / 1024);
+    self.active_buf = self.buf&[0]&;
+    self.gc_forward = a.alloc_uninit(NodeId, self.buf&[0].cap);
+    self.table = a.alloc_zeroed(NodeId, 1.shift_left(n + 2));
+    @eprintln("buf=%mb x2; table=%mb", self.buf&[0].cap * size_of(Node) / 1024 / 1024, self.table.len * size_of(NodeId) / 1024 / 1024);
     self.gc_roots = list(1, a);
     self.gc_roots&.push(self.root&.slice(1));
     self.a = a;
+    self.buf&[0]&.push(junk_node, panicking_allocator);
 }
 
 fn drop(memo: *Memo) void = {
     a := memo.a;
     for memo.buf& { it | drop(it&, a); };
-    a.dealloc(*Node, memo.table);
+    a.dealloc(NodeId, memo.table);
+    a.dealloc(NodeId, memo.gc_forward);
     memo.gc_roots&.drop();
 }
 
-fn push(self: *Memo, node: Node) *Node = {
-    if !node.children&[0].is_null() {
-        @debug_assert(node.hash == 0 && node.population == 0);
-        for node.children& { it |
-            node.hash = node.hash.bit_xor(it.hash) + 1;
-            node.hash *= 15120273018600372767;
-            node.population += it.population;
-        };
-    };  // else: node.hash is bit set of cells
+fn hash(node: *Node) i64 #inline = {
+    hash: u64 = 0;
+    for node.children& { it |
+        hash = hash.bit_xor(it.id.zext().bitcast()) + 1;
+        hash *= 15120273018600372767;
+    };
+    hash.bitcast()
+}
+
+fn get(memo: *Memo, node: NodeId) *Node #inline = {
+    @debug_assert(node.id != 0, "get null node");
+    memo.active_buf.index(node.id.zext())
+}
+
+fn push(self: *Memo, node: Node) NodeId = {
     @run @assert(base_case_w*base_case_w <= 64 && base_case_w.up_pow2() == base_case_w);
-    
     mask := self.table.len - 1;
-    i := node.hash.bitcast().bit_and(mask);
+    i := node&.hash().bit_and(mask);
     j := 0;    
     loop {
         n := self.table[i]&;
         @debug_assert(j != self.table.len);
-        if n[].is_null() {
-            buf := self.buf&.index(self.buf_i);
-            @debug_assert_lt(buf.len, buf.cap, "TODO: resize and copy starting at root to gc");
-            buf.push(node, panicking_allocator);
+        if n.id == 0 {
+            buf := self.active_buf;
+            @if(node.children&[0].id != 0) for node.children& { it |
+                node.population += self.get(it)[].population;
+            };
+            buf.push_assume_capacity(node);
+            n[] = (id = buf.len.trunc() - 1);
             
-            n[] = buf.index(buf.len - 1);
             return n[];
         };
         
-        if n.hash == node.hash 
-        && identical(n.children&[0], node.children&[0])
-        && identical(n.children&[1], node.children&[1])
-        && identical(n.children&[2], node.children&[2])
-        && identical(n.children&[3], node.children&[3]) 
+        it := self.get(n[]);
+        a, b := (it.children&, node.children&);
+        if a[0].id == b[0].id
+        && a[1].id == b[1].id
+        && a[2].id == b[2].id
+        && a[3].id == b[3].id
         {
             return n[];
         };
@@ -98,15 +117,15 @@ fn push(self: *Memo, node: Node) *Node = {
 }
 
 // UNSAFE: node must be unique
-fn gc_table_insert(self: *Memo, node: *Node) void = {
+fn gc_table_insert(self: *Memo, nid: NodeId, node: *Node) void = {
   mask := self.table.len - 1;
-  i := node.hash.bitcast().bit_and(mask);
+  i := node.hash().bit_and(mask);
   j := 0;    
   loop {
       n := self.table[i]&;
       @debug_assert(j != self.table.len);
-      if n[].is_null() {
-          n[] = node;
+      if n.id == 0 {
+          n[] = nid;
           return();
       };
       i = (i + 1).bit_and(mask);
@@ -114,18 +133,19 @@ fn gc_table_insert(self: *Memo, node: *Node) void = {
   };
 }
 
-fn zero_fill_grow_root(memo: *Memo) *Node = {
+fn zero_fill_grow_root(memo: *Memo) NodeId = {
     // an extra level of quadtree where the old root node is just surrounded by dead cells. 
     // ex. top left of old root becomes bottom right of the new root's top left node. children are clockwise.
     size := memo.size;
     invert :: @const_slice(2, 3, 0, 1);
     memo.gc_reserve(size.trailing_zeros() + 5);
     empty := memo.empty_node(size/2);  // :SLOW
-    children := zeroed Array(*Node, 4);
-    
+    children := zeroed Array(NodeId, 4);
+    root := memo.get(memo.root)[].children&;
+    @debug_assert(root[0].id != 0, "TODO: allow zero_fill_grow_root when only two layers");
     range(0, 4) { i |
         n: Node = (children = (empty,empty,empty,empty));
-        n.children&[invert[i]] = memo.root.children&[i];
+        n.children&[invert[i]] = root[i];
         children&[i] = memo.push(n);
     };
     memo.push(children = children)
@@ -136,24 +156,25 @@ fn eval(memo: *Memo, fast: bool) void = {
     size := memo.size;
     root_one(memo, wrapped_root) { wrapped_root |
         memo.gc_roots&.reserve((size*2).trailing_zeros() * 2);
-        prev := memo.root.population;
         memo.root = eval_center(memo, wrapped_root, size*2, fast);
     };
 }
 
 // the grinch's heart shrank to half sizes that day
 // UNSAFE: `node` must be rooted and gc_roots must have reserved enough capacity for all the levels of recursion
-fn eval_center(memo: *Memo, node: **Node, size: i64, fast: bool) *Node = {
-    @debug_assert(!is_null(node.children&[0]), "eval_center too low");
-    if !node.next.is_null() && node.next_fast == fast {
+fn eval_center(memo: *Memo, n: *NodeId, size: i64, fast: bool) NodeId = {
+    node := memo.get(n[]);
+    @debug_assert(node.children&[0].id != 0, "eval_center too low");
+    if node.next.id != 0 && node.next_fast == fast {
         return node.next;
     };
-    ::if(*Node);
+    ::if(NodeId);
     new := if size == base_case_w * 2 {
-        center_base_case(memo, node)
+        center_base_case(memo, n)
     } else {
-        eval_center_split_merge(memo, node, size, fast)
+        eval_center_split_merge(memo, n, size, fast)
     };
+    node := memo.get(n[]);
     node.next = new;
     node.next_fast = fast;
     new
@@ -164,12 +185,13 @@ fn eval_center(memo: *Memo, node: **Node, size: i64, fast: bool) *Node = {
 // to cover the whole node, need to reorganize children 
 // (into new nodes that aren't aligned to the original quad tree). 
 // UNSAFE: `node` must be rooted
-fn eval_center_split_merge(memo: *Memo, node: **Node, size: i64, fast: bool) *Node = {
+fn eval_center_split_merge(memo: *Memo, node: *NodeId, size: i64, fast: bool) NodeId = {
     // children are clickwise starting at top left (but grandchildren are sorta a spiral)
-    N :: fn(T: Type) #fold = size_of(Deref(T))/8;
-    grandchildren :: fn(children: ~T) *Array(*Node, N(T)*4) #inline/*semantic*/ #where = {
-        n := @ref @zeroed Array(*Node, N(T)*4);
+    N :: fn(T: Type) #fold = size_of(Deref(T))/size_of(NodeId);
+    grandchildren :: fn(children: ~T) *Array(NodeId, N(T)*4) #inline/*semantic*/ #where => {
+        n := @ref @zeroed Array(NodeId, N(T)*4);
         enumerate children { i, node |
+            node := memo.get(node[]);
             enumerate node.children& { j, it |
                 n[i*4 + j] = it[];
             };
@@ -181,10 +203,11 @@ fn eval_center_split_merge(memo: *Memo, node: **Node, size: i64, fast: bool) *No
     join :: fn(n,a,b,c,d) => memo.push(children = (n[a], n[b], n[c], n[d]));
     
     memo.gc_reserve(5);
+    node := memo.get(node[]);
     n1 := grandchildren(node.children&);
     
     // right to left, top to bottom
-    n2 := @ref @as(Array(*Node, 9)) (
+    n2 := @ref @as(Array(NodeId, 9)) (
         node.children&[0],
         n1.join(1,4,7,2),        // up
         node.children&[1],
@@ -198,8 +221,8 @@ fn eval_center_split_merge(memo: *Memo, node: **Node, size: i64, fast: bool) *No
     n1 := ();  // not rooted
     
     size /= 2;
-    pin_for_eval :: fn(in, n, $eval: @Fn(**Node) *Node) => {
-        out := @ref @zeroed (Array(*Node, size_of(@type in[])/8));
+    pin_for_eval :: fn(in, n, $eval: @Fn(*NodeId) NodeId) => {
+        out := @ref @zeroed (Array(NodeId, size_of(@type in[])/size_of(NodeId)));
         memo.gc_roots&.push_assume_capacity(out.items());
         memo.gc_roots&.push_assume_capacity(in.items());
         range(0, in.len()) { i |
@@ -216,7 +239,7 @@ fn eval_center_split_merge(memo: *Memo, node: **Node, size: i64, fast: bool) *No
     
     if !fast && size != base_case_w * 2 {
         n6 := grandchildren(n3);
-        n7 := @ref @as(Array(*Node, 4)) (  // clockwise
+        n7 := @ref @as(Array(NodeId, 4)) (  // clockwise
             n6.join( 2, 7,16,13), // 0,0
             n6.join( 6,11,20,17), // 1,0
             n6.join(18,23,32,29), // 1,1
@@ -225,7 +248,7 @@ fn eval_center_split_merge(memo: *Memo, node: **Node, size: i64, fast: bool) *No
         return memo.push(children = n7[]);
     };
     
-    n4 := @ref @as(Array(*Node, 4)) (  // clockwise
+    n4 := @ref @as(Array(NodeId, 4)) (  // clockwise
         n3.join(0,1,4,3), // 0,0
         n3.join(1,2,5,4), // 1,0
         n3.join(4,5,8,7), // 1,1
@@ -234,7 +257,7 @@ fn eval_center_split_merge(memo: *Memo, node: **Node, size: i64, fast: bool) *No
     
     if !fast {  
         // grandchildren are base nodes so can't just rearrange pointers, need to mix the bit sets in _.hash.
-        n8 := pin_for_eval(n4, 1, fn(node) => 
+        n8 := pin_for_eval(n4, 1, fn(node: *NodeId) NodeId => 
             get_center_base_case_no_eval(memo, node));
         return memo.push(children = n8[]);
     };
@@ -245,21 +268,21 @@ fn eval_center_split_merge(memo: *Memo, node: **Node, size: i64, fast: bool) *No
 };
 
 // need to be able to access neighbours so stop one level before base case size. output is one whole base level. 
-fn center_base_case(memo: *Memo, node: **Node) *Node = {
+fn center_base_case(memo: *Memo, node: *NodeId) NodeId = {
     build_center_base_node(memo, node) { h |
         do_life(base_case_w, base_case_w, fn(x, y) => {
-            get_bit_from_base_children(node, x, y).int().trunc()
+            get_bit_from_base_children(memo, node, x, y).int().trunc()
         }, fn(x, y, value) => {
             set_base_bit(h, x, y, value);
         });
     }
 }
 
-fn get_center_base_case_no_eval(memo: *Memo, node: **Node) *Node = {
+fn get_center_base_case_no_eval(memo: *Memo, node: *NodeId) NodeId = {
     build_center_base_node(memo, node) { h |
         range(0, base_case_w) { y |
             range(0, base_case_w) { x |
-                value := get_bit_from_base_children(node, x, y);
+                value := get_bit_from_base_children(memo, node, x, y);
                 set_base_bit(h, x, y, value);
             };
         };
@@ -267,11 +290,9 @@ fn get_center_base_case_no_eval(memo: *Memo, node: **Node) *Node = {
 }
 
 // UNSAFE: `node` must be rooted
-fn build_center_base_node(memo: *Memo, node: **Node, $body: @Fn(h: *u64) void) *Node = {
+fn build_center_base_node(memo: *Memo, node: *NodeId, $body: @Fn(h: *u64) void) NodeId = {
     size := base_case_w * 2;
     memo.gc_reserve(size*size + 1);
-    @debug_assert(is_null(node.children&[0].children&[0]), "center_base_case too deep");
-    @debug_assert(memo.buf&[memo.buf_i]&.items().contains_address(node[]), "out of arena");
     new: u64 = 0;
     body(new&);
     memo.base_node(new)
@@ -283,7 +304,9 @@ fn build_center_base_node(memo: *Memo, node: **Node, $body: @Fn(h: *u64) void) *
 // x,y is in coordinate system of (the center square of node). 
 // info about that center square is split between the bit set in each node.children.hash, 
 // so need to dispatch to the right child based on which quadrent of the center x,y is in. 
-get_bit_from_base_children :: fn(node: **Node, x: i64, y: i64) bool = {
+get_bit_from_base_children :: fn(memo: *Memo, node: *NodeId, x: i64, y: i64) bool = {
+    node := memo.get(node[]);
+    @debug_assert(node.children&[0].id != 0);
     size := base_case_w * 2;
     size := vec2(size.float().cast());
     base := size / 4;  // corner of output square in node's coordinates
@@ -295,9 +318,9 @@ get_bit_from_base_children :: fn(node: **Node, x: i64, y: i64) bool = {
         if hit_square(parent_local_pos, top_left, bottom_right) {
             child_local_pos := parent_local_pos - top_left;
             xx, yy := child_local_pos.int();
-            child := node.children&[child_i];
+            child := memo.get(node.children&[child_i]);
             i := yy*base_case_w+xx;
-            value := child.hash.shift_right_logical(i).bit_and(1) == 1;
+            value := child.base_children().shift_right_logical(i).bit_and(1) == 1;
             return value;
         }
     };
@@ -312,14 +335,17 @@ set_base_bit :: fn(h: *u64, x: i64, y: i64, value: bool) void = {
 hit_square :: fn(pos: Vec2, top_left: Vec2, bottom_right: Vec2) bool = 
     pos.x >= top_left.x && pos.y >= top_left.y && pos.x < bottom_right.x && pos.y < bottom_right.y;
 
-fn base_node(memo: *Memo, bits: u64) *Node = {
+fn base_node(memo: *Memo, bits: u64) NodeId = {
     node := zeroed Node;
-    node.hash = bits;
+    node.children&[2] = (id = bits.bitcast().trunc());
+    if base_case_w == 8 {
+        node.children&[3] = (id = bits.shift_right_logical(32).bitcast().trunc());
+    };
     node.population = bits.count_ones();
     memo.push(node)
 }
 
-fn empty_node(memo: *Memo, size: i64) *Node = {
+fn empty_node(memo: *Memo, size: i64) NodeId = {
     memo.gc_reserve(size.trailing_zeros());
     s, n := (base_case_w, memo.base_node(0));
     while => s < size {
@@ -329,8 +355,8 @@ fn empty_node(memo: *Memo, size: i64) *Node = {
     n
 }
 
-// moves any live (reachable from gc_roots) nodes to the other memo.buf and updates pointers. 
-// null is a valid value in gc_roots: (childen of base node) or (partial array being filled in a loop). 
+// moves any live (reachable from gc_roots) nodes to the other memo.buf and updates references. 
+// id=0 is a valid value in gc_roots: (childen of base node) or (partial array being filled in a loop). 
 fn collect_garbage(memo: *Memo) void = {
     new_buf_i := memo.buf_i.bit_xor(1);
     to_space, from_space := (memo.buf&[new_buf_i]&, memo.buf&[memo.buf_i]&);
@@ -338,24 +364,31 @@ fn collect_garbage(memo: *Memo) void = {
     if to_space.cap < from_space.cap {
         to_space.reserve(from_space.cap, memo.a);
     };
+    to_space.push(junk_node, panicking_allocator);
+    memo.gc_forward.slice(0, from_space.len).set_zeroed();
     memo.table.set_zeroed();
-    for memo.gc_roots& { it |
-        recur(memo, it, to_space, from_space);
+    enumerate memo.gc_roots& { i, it |
+        @debug_assert(!from_space.items().interpret_as_bytes().contains_address(bit_cast_unchecked(*NodeId, *u8, it.ptr)), "interned node child as root is redundant (and will get indices confused)");
+        @debug_assert(!memo.gc_roots&.items().slice(0, i).contains(fn(jt) => it[].contains_address(jt.ptr) || jt[].contains_address(it.ptr)), "non unique gc_root (will get indices confused)");
+        recur(memo, it[], to_space);
     };
-    recur :: fn(memo: *Memo, it: []*Node, to_space: *RawList(Node), from_space: *RawList(Node)) void = {
+    recur :: fn(memo: *Memo, it: []NodeId, to_space: *RawList(Node)) void = {
         each it { it |
-            if from_space.items().contains_address(it[]) {
-                if it.forward != 0 {
-                    it[] = to_space.index(it.forward.zext() - 1);
-                } else {
-                    to_space.push(it[][], panicking_allocator);
-                    it.forward = to_space.len.trunc();
-                    it[] = to_space.index(it.forward.zext() - 1);
-                    it.forward = 0;
-                    recur(memo, it.children&.items(), to_space, from_space);
-                    memo.gc_table_insert(it[]);
-                    recur(memo, it.next&.slice(1), to_space, from_space);
-                };
+            @if(it.id == 0) return(); // the rest are 0 or base node cells
+            
+            forward := memo.gc_forward[it.id.zext()]&;
+            if forward.id != 0 {
+                it[] = forward[];
+            } else {
+                node := memo.get(it[]);  // from_space
+                i := to_space.len;
+                to_space.push_assume_capacity(node[]);
+                node := to_space[i]&;
+                forward[] = (id = i.trunc());
+                it[] = forward[];
+                recur(memo, node.children&.items(), to_space);
+                memo.gc_table_insert(it[], node);
+                recur(memo, node.next&.slice(1), to_space);
             };
         };
     };
@@ -363,31 +396,20 @@ fn collect_garbage(memo: *Memo) void = {
     @eprintln("GC: % -> %", from_space.len, to_space.len);
     from_space.clear();
     memo.buf_i = new_buf_i;
-    
-    @if(@run safety_check_enabled(.DebugAssertions)) {
-    check :: fn(it: *Node) => {
-        @debug_assert(it.is_null() || {
-            to_space.items().contains_address(it) && {
-                it.next.is_null() || to_space.items().contains_address(it.next)
-            }
-        }, "unmoved child")
-    };
-    for(to_space, fn(it) => for(it.children&, check));
-    for(memo.gc_roots, fn(it) => for(it, check));
-    };
+    memo.active_buf = to_space;
 }
 
 fn gc_reserve(memo: *Memo, n: i64) void #inline = {
-    b := memo.buf&[memo.buf_i]&;
+    b := memo.active_buf;
     @if(b.len + n <= b.cap) return();
     memo.collect_garbage();
-    b := memo.buf&[memo.buf_i]&;
+    b := memo.active_buf;
     // TODO: resize. annoying thing is there might technically never too big a live set but you're slow because keep doing redundant work by clearing the cache. 
     //                    plus have to resize and rehash the table.
     @debug_assert(b.len + n <= b.cap, "too many live nodes");
 }
 
-fn root_one(memo: *Memo, node: *Node, $body: @Fn(node: **Node) void) void = {
+fn root_one(memo: *Memo, node: NodeId, $body: @Fn(node: *NodeId) void) void = {
     root_count := memo.gc_roots.len;
     node := @ref node;
     memo.gc_roots&.push(node.slice(1));
@@ -400,7 +422,7 @@ fn compress(flat: *BitBoard, memo: *Memo) void = {  // frame -> memo
     memo.gc_roots&.reserve(flat.size.trailing_zeros());
     memo.root = recur(flat, memo, vec2(0), flat.size);
     memo.size = flat.size;
-    recur :: fn(flat: *BitBoard, memo: *Memo, pos: Vec2, size: i64) *Node = {
+    recur :: fn(flat: *BitBoard, memo: *Memo, pos: Vec2, size: i64) NodeId = {
         if size == 32 {  // handle large empty blocks more efficiently
             break :: local_return;
             x, y := pos.int();
@@ -455,8 +477,8 @@ Decomp :: @struct {
     pixels_per_cell: f32;
 };
 
-decompress_recur :: fn(self: *Decomp, node: *Node, pos: Vec2, size: i64) void = {
-        @debug_assert(self.memo.buf&[self.memo.buf_i].items().contains_address(node), "tree node outside arena (%)", fmt_hex(node));
+decompress_recur :: fn(self: *Decomp, node: NodeId, pos: Vec2, size: i64) void = {
+        node := self.memo.get(node);
         @if(node.population == 0) return();
         
         v0, v1, n0, n1 := (self.view_start, self.view_end, pos, pos + vec2(size.float().cast()));
@@ -467,7 +489,7 @@ decompress_recur :: fn(self: *Decomp, node: *Node, pos: Vec2, size: i64) void = 
         
         node_pixels := size.float().cast() * self.pixels_per_cell;
         if size == base_case_w || node_pixels/2 < 1 {
-            @debug_assert(size != base_case_w || node.children&[0].is_null(), "decompress void_node child at wrong depth");
+            @debug_assert(size != base_case_w || node.children&[0].id == 0, "decompress void_node child at wrong depth");
             s := self.flat.size.float().cast();
             start := (pos - self.view_start) * vec2(self.pixels_per_cell);
             end := start + vec2(node_pixels);
@@ -479,7 +501,7 @@ decompress_recur :: fn(self: *Decomp, node: *Node, pos: Vec2, size: i64) void = 
                         cell := (vec2(x.float().cast(), y.float().cast()) - start) / self.pixels_per_cell;
                         cx, cy := cell.int();
                         j := cy*base_case_w + cx;
-                        value := node.hash.bit_and(1.shift_left(j)) != 0;
+                        value := node.base_children().bit_and(1.shift_left(j)) != 0;
                         if value {
                             self.flat.set(x, y, true);
                         };
@@ -491,12 +513,21 @@ decompress_recur :: fn(self: *Decomp, node: *Node, pos: Vec2, size: i64) void = 
             return();
         };
         
+        
+        @debug_assert(node.children&[0].id != 0);
         size /= 2;
         vsize := vec2(size.float().cast());
         enumerate node.children& { i, it |
             self.decompress_recur(it[], pos + vsize*direction[i], size);
         };
 };
+
+fn base_children(node: *Node) u64 = {
+    @debug_assert(node.children&[0].id == 0);
+    a: u64 = node.children&[2].id.zext().bitcast();
+    b: u64 = @if(base_case_w == 8, node.children&[3].id.zext().bitcast(), 0);
+    a.bit_or(b.shift_left(32))
+}
 
 direction :: @const_slice(vec2(0), vec2(1, 0), vec2(1, 1), vec2(0, 1));
 
@@ -542,6 +573,8 @@ fn eval(new: *BitBoard, old: *BitBoard) void = {
         @if(oob, 0, old.get(x, y))
     };
 }
+
+junk_node: Node : (children=((id=0xFFFFFFFF),(id=0xFFFFFFFF),(id=0xFFFFFFFF),(id=0xFFFFFFFF)),next=(id=0xFFFFFFFF));
 
 up_pow2 :: fn(w: i64) i64 = {
     n := 63 - w.leading_zeros();

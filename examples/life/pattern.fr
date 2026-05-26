@@ -86,7 +86,7 @@ read_rle :: fn(a: Alloc, in: Str, MIN_W: i64, MAX_W: i64) Result(Ty(BitBoard, St
 }
 
 // macrocell: https://golly.sourceforge.io/Help/formats.html#mc
-read_mc :: fn(memo: *Memo, in: Str) Result(Ty(*Node, i64, Str), Str) = {
+read_mc :: fn(memo: *Memo, in: Str) Result(Ty(NodeId, i64, Str), Str) = {
     full_input := in;
     line := 1;
     err :: fn(s) => {
@@ -116,9 +116,8 @@ read_mc :: fn(memo: *Memo, in: Str) Result(Ty(*Node, i64, Str), Str) = {
     // sadly people have files with duplicate nodes so can't just use an offset into `buf` for file indices.
     // (and need to add extra nodes anyway if base_case_w != 8)
     // (if try to change it back need to also put back empty_node(big number) at the beginning)
-    indices := @ref u32.list(in.len / 10, temp());
-    indices.push(0xFFFFFFFF);  // [0] is sentinal for empty node
-    @debug_assert_le(buf.cap, indices[0].zext());
+    indices := @ref NodeId.list(in.len / 10, temp());
+    indices.push(id = 0xFFFFFFFF);  // [0] is sentinal for empty node
     // bad tree shape can crash later in eval/decompress so keep track and error gracefully here.
     sizes := @ref u8.list(in.len / 10, temp());
     sizes.push(0xFF);
@@ -144,7 +143,7 @@ read_mc :: fn(memo: *Memo, in: Str) Result(Ty(*Node, i64, Str), Str) = {
                 @case(8) => memo.base_node(h);
                 @case(4) => pushW(memo, h, vec2(0));
                 @case(2) => {
-                    children := @ref @zeroed Array(*Node, 4);
+                    children := @ref @zeroed Array(NodeId, 4);
                     enumerate direction { i, dir |
                         children[i] = pushW(memo, h, dir[] * 4);
                     };
@@ -152,10 +151,10 @@ read_mc :: fn(memo: *Memo, in: Str) Result(Ty(*Node, i64, Str), Str) = {
                 };
                 @default => unreachable();
             };
-            indices.push(ptr_diff(buf.ptr, node).trunc());
+            indices.push(node);
             sizes.push(8.trailing_zeros().trunc());
-            pushW :: fn(memo: *Memo, h: u64, off: Vec2) *Node = {
-                children := @ref @zeroed Array(*Node, 4);
+            pushW :: fn(memo: *Memo, h: u64, off: Vec2) NodeId = {
+                children := @ref @zeroed Array(NodeId, 4);
                 enumerate direction { i, dir |
                     x, y := (off + dir[].mul(base_case_w.float().cast())).int();
                     h2: u64 = 0;
@@ -181,20 +180,20 @@ read_mc :: fn(memo: *Memo, in: Str) Result(Ty(*Node, i64, Str), Str) = {
             };  
             out.items().swap(2, 3);  // i want them clockwise
             
-            children := @ref @zeroed Array(*Node, 4);
+            children := @ref @zeroed Array(NodeId, 4);
             child_size := 1.shift_left(size_log2) / 2;
             range(0, 4) { i |
                 if out[i] == 0 {
                     children[i] = memo.empty_node(child_size);
                 } else {
                     @if(out[i] >= indices.len) err("bad node index");
-                    children[i] = buf[indices[out[i]].zext()]&;
+                    children[i] = indices[out[i]];
                     @if(1.shift_left(sizes[out[i]].zext()) != child_size) err("inconsistant tree depth");
                 };
             };
             
             node := memo.push(children = children[]);
-            indices.push(ptr_diff(buf.ptr, node).trunc());
+            indices.push(node);
             sizes.push(size_log2.trunc());
         };
         @if(in != "") eat("\n"); line += 1;
@@ -207,7 +206,7 @@ read_mc :: fn(memo: *Memo, in: Str) Result(Ty(*Node, i64, Str), Str) = {
         n
     };
     
-    root := buf[indices[indices.len - 1].zext()]&;
+    root := indices[indices.len - 1];
     size := 1.shift_left(sizes[sizes.len - 1].zext());
     @eprintln("loaded % nodes. canvas size = %.", buf.len - start, size);
     (Ok = (root, size, header))
