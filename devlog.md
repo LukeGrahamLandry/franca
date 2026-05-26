@@ -7,7 +7,15 @@
   would be nice to be able to output images without gpu anyway. 
   maybe only allowing scale by powers of two is more sane so pixels can stay sharp. 
   then can also scale down the frame buffer instead so its one per pixel or one per cell, 
-  whatever's smaller and never have to fill in a cell's square manually. 
+  whatever's smaller and never have to fill in a cell's square manually.
+
+---
+
+- hashlife one step at a time
+  - need to get center of a node without calling eval_centers
+  - the level where children are base nodes so grandchildren are null needs extra work to rearrange the bit sets. 
+  - when toggling fast mode, need to invalidate the cached node.next pointers. 
+- compress() check for size=32 blocks of zeros. metagalaxy.rle samples: 14346 -> 3227. 
 
 ## (May 24)
 

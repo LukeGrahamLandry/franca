@@ -18,6 +18,7 @@ State :: @struct {
     flat: BitGame;
     paused: bool;
     use_hashlife: bool;
+    fast_eval: bool;  // multiple steps per hashlife recursion
     did_draw_warning: bool;
     sg: *Sg.Self;
     memo: Memo;
@@ -41,6 +42,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.uni.scale = 1.0;
     sapp.set_window_title("Life (space: (un)pause, right click: draw, scroll: zoom)");
     state.paused = true;
+    state.fast_eval = true;
     
     for cli_args() { it |
         path := it.str();
@@ -168,6 +170,12 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 fn F() => { 
                     state.use_hashlife = !state.use_hashlife;
                     @if(state.use_hashlife, state.compress(), state.decompress());
+                    @println("use_hashlife=%", state.use_hashlife);
+                };
+                fn W() => { 
+                    state.fast_eval = !state.fast_eval;
+                    @println("fast_eval=%", state.fast_eval);
+                    // TODO: also allow old next pointers to be gc-ed (rn they're just ignored in eval)
                 };
                 fn G() => if state.use_hashlife {
                     state.memo.root = state.memo&.zero_fill_grow_root();
@@ -316,7 +324,7 @@ fn resize_canvas(state: *State, sg: *Sg.Self, x: i64, y: i64) void = {
 fn tick(state: *State) void = {
     state.dirty = true;
     if state.use_hashlife {
-        state.memo&.eval();
+        state.memo&.eval(state.fast_eval);
         state.view = find_view_area(state.flat&.get(), state.memo&, state.uni&);
     } else {
         state.flat&.eval();

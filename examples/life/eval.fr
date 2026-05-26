@@ -26,6 +26,7 @@ Node :: @rec @struct {
     hash: u64 = 0;
     forward: u32 = 0;
     population: u32 = 0;
+    next_fast := false;  // :SLOW 1 bit costs 8 bytes (but when i want to allolw more different speeds, this will need more bits)
 };
 
 base_case_w :: 2;  // TODO: profile different sizes: 2/4/8
@@ -130,56 +131,58 @@ fn zero_fill_grow_root(memo: *Memo) *Node = {
     memo.push(children = children)
 }
 
-fn eval(memo: *Memo) void = {
+fn eval(memo: *Memo, fast: bool) void = {
     wrapped_root := memo.zero_fill_grow_root();
     size := memo.size;
     root_one(memo, wrapped_root) { wrapped_root |
         memo.gc_roots&.reserve((size*2).trailing_zeros() * 2);
-        memo.root = eval_center(memo, wrapped_root, size*2);
+        prev := memo.root.population;
+        memo.root = eval_center(memo, wrapped_root, size*2, fast);
+        @eprintln("eval; population: % -> %; ", prev, memo.root.population);
     };
 }
 
 // the grinch's heart shrank to half sizes that day
 // UNSAFE: `node` must be rooted and gc_roots must have reserved enough capacity for all the levels of recursion
-fn eval_center(memo: *Memo, node: **Node, size: i64) *Node = {
+fn eval_center(memo: *Memo, node: **Node, size: i64, fast: bool) *Node = {
     @debug_assert(!is_null(node.children&[0]), "eval_center too low");
-    if !node.next.is_null() {
+    if !node.next.is_null() && node.next_fast == fast {
         return node.next;
     };
     ::if(*Node);
     new := if size == base_case_w * 2 {
         center_base_case(memo, node)
     } else {
-        eval_center_split_merge(memo, node, size)
+        eval_center_split_merge(memo, node, size, fast)
     };
     node.next = new;
+    node.next_fast = fast;
     new
 };
 
-// TODO: rn this steps 2 generations in each recursive call so 2^(~depth) per eval(). 
-//       should have an option to just make the center node without the second eval if just want to single step. 
 // from one node, can eval a centered node with half side length. 
 // to eval the whole node, need to eval from parents, multiple smaller squares. 
 // to cover the whole node, need to reorganize children 
 // (into new nodes that aren't aligned to the original quad tree). 
 // UNSAFE: `node` must be rooted
-fn eval_center_split_merge(memo: *Memo, node: **Node, size: i64) *Node = {
+fn eval_center_split_merge(memo: *Memo, node: **Node, size: i64, fast: bool) *Node = {
     // children are clickwise starting at top left (but grandchildren are sorta a spiral)
-    grandchildren :: fn(node: *Node) Array(*Node, 16) #inline = {
-        n := zeroed Array(*Node, 16);
-        enumerate node.children& { i, node |
+    N :: fn(T: Type) #fold = size_of(Deref(T))/8;
+    grandchildren :: fn(children: ~T) *Array(*Node, N(T)*4) #inline/*semantic*/ #where = {
+        n := @ref @zeroed Array(*Node, N(T)*4);
+        enumerate children { i, node |
             enumerate node.children& { j, it |
-                n&[i*4 + j] = it[];
+                n[i*4 + j] = it[];
             };
         };
         n
     };
     // you have to draw the picture to think about where the a,b,c,d numbers come from
-    // https://www.dev-mind.blog/wp-content/uploads/2020/05/center_node_assembly-1143x2048.png
+    // https://lukegrahamlandry.ca/assets/hashlife.jpg
     join :: fn(n,a,b,c,d) => memo.push(children = (n[a], n[b], n[c], n[d]));
     
     memo.gc_reserve(5);
-    n1 := @ref grandchildren(node[]);
+    n1 := grandchildren(node.children&);
     
     // right to left, top to bottom
     n2 := @ref @as(Array(*Node, 9)) (
@@ -196,65 +199,116 @@ fn eval_center_split_merge(memo: *Memo, node: **Node, size: i64) *Node = {
     n1 := ();  // not rooted
     
     size /= 2;
-    eval_centers :: fn(in, n) => {
+    pin_for_eval :: fn(in, n, $eval: @Fn(**Node) *Node) => {
         out := @ref @zeroed (Array(*Node, size_of(@type in[])/8));
         memo.gc_roots&.push_assume_capacity(out.items());
         memo.gc_roots&.push_assume_capacity(in.items());
         range(0, in.len()) { i |
-            out[i] = eval_center(memo, in[i]&, size);
+            out[i] = eval(in[i]&);
         };
         memo.gc_reserve(n);
         memo.gc_roots.len -= 2;
         out
     };
+    eval_centers :: fn(in, n) => pin_for_eval(in, n, fn(node) => 
+        eval_center(memo, node, size, fast));
     
-    n3 := eval_centers(n2, 4);
+    n3 := eval_centers(n2, 5);
+    
+    if !fast && size != base_case_w * 2 {
+        n6 := grandchildren(n3);
+        n7 := @ref @as(Array(*Node, 4)) (  // clockwise
+            n6.join( 2, 7,16,13), // 0,0
+            n6.join( 6,11,20,17), // 1,0
+            n6.join(18,23,32,29), // 1,1
+            n6.join(14,19,28,25), // 1,0
+        );
+        return memo.push(children = n7[]);
+    };
+    
     n4 := @ref @as(Array(*Node, 4)) (  // clockwise
         n3.join(0,1,4,3), // 0,0
         n3.join(1,2,5,4), // 1,0
         n3.join(4,5,8,7), // 1,1
         n3.join(3,4,7,6), // 1,0
     );
+    
+    if !fast {  
+        // grandchildren are base nodes so can't just rearrange pointers, need to mix the bit sets in _.hash.
+        n8 := pin_for_eval(n4, 1, fn(node) => 
+            get_center_base_case_no_eval(memo, node));
+        return memo.push(children = n8[]);
+    };
+    
+    // when fast=true: eval_centers twice per recursion so skip 2^depth generations. 
     n5 := eval_centers(n4, 1);
     memo.push(children = n5[])
 };
 
-// feels like maybe there'd be a more elegant bitwise way to do this
-// but speed doesn't matter because it only runs once per layout and then is memoized. 
-// UNSAFE: `node` must be rooted
+// need to be able to access neighbours so stop one level before base case size. output is one whole base level. 
 fn center_base_case(memo: *Memo, node: **Node) *Node = {
+    build_center_base_node(memo, node) { h |
+        do_life(base_case_w, base_case_w, fn(x, y) => {
+            get_bit_from_base_children(node, x, y).int().trunc()
+        }, fn(x, y, value) => {
+            set_base_bit(h, x, y, value);
+        });
+    }
+}
+
+fn get_center_base_case_no_eval(memo: *Memo, node: **Node) *Node = {
+    build_center_base_node(memo, node) { h |
+        range(0, base_case_w) { y |
+            range(0, base_case_w) { x |
+                value := get_bit_from_base_children(node, x, y);
+                set_base_bit(h, x, y, value);
+            };
+        };
+    }
+}
+
+// UNSAFE: `node` must be rooted
+fn build_center_base_node(memo: *Memo, node: **Node, $body: @Fn(h: *u64) void) *Node = {
     size := base_case_w * 2;
     memo.gc_reserve(size*size + 1);
-    // need to be able to access neighbours so stop one level before base case size. output is one whole base level. 
     @debug_assert(is_null(node.children&[0].children&[0]), "center_base_case too deep");
     @debug_assert(memo.buf&[memo.buf_i]&.items().contains_address(node[]), "out of arena");
-    i :: fn(x,y) => y*base_case_w+x;
     new: u64 = 0;
+    body(new&);
+    memo.base_node(new)
+}
+
+// :SLOW feels like maybe there'd be a more elegant bitwise way to do this.
+//
+// node.children are base nodes (grandchildren(node)=null). 
+// x,y is in coordinate system of (the center square of node). 
+// info about that center square is split between the bit set in each node.children.hash, 
+// so need to dispatch to the right child based on which quadrent of the center x,y is in. 
+get_bit_from_base_children :: fn(node: **Node, x: i64, y: i64) bool = {
+    size := base_case_w * 2;
     size := vec2(size.float().cast());
     base := size / 4;  // corner of output square in node's coordinates
     quad_size := size/2;
-    do_life(base_case_w, base_case_w, fn(x, y) => {
-        parent_local_pos := base + vec2(x.float().cast(), y.float().cast());
-        child_i := -1;
-        enumerate direction { i, dir |
-            top_left := dir[] * quad_size;
-            bottom_right := top_left + quad_size;
-            if hit_square(parent_local_pos, top_left, bottom_right) {
-                @debug_assert_eq(child_i, -1, "multiple hits");
-                child_i = i;  
-            }
-        };
-        @debug_assert_ne(child_i, -1, "no hits");
-        child_top_left := direction[child_i] * quad_size;
-        child_local_pos := parent_local_pos - child_top_left;
-        xx, yy := child_local_pos.int();
-        child := node.children&[child_i];
-        child.hash.shift_right_logical(i(xx,yy)).bit_and(1).trunc()
-    }, fn(x, y, value) => {
-        new = new.bit_or(value.int().shift_left(i(x,y)).bitcast());
-    });
-    
-    memo.base_node(new)
+    parent_local_pos := base + vec2(x.float().cast(), y.float().cast());
+    enumerate direction { child_i, dir |
+        top_left := dir[] * quad_size;
+        bottom_right := top_left + quad_size;
+        if hit_square(parent_local_pos, top_left, bottom_right) {
+            child_top_left := direction[child_i] * quad_size;
+            child_local_pos := parent_local_pos - child_top_left;
+            xx, yy := child_local_pos.int();
+            child := node.children&[child_i];
+            i := yy*base_case_w+xx;
+            value := child.hash.shift_right_logical(i).bit_and(1) == 1;
+            return value;
+        }
+    };
+    panic("no hits");
+}
+
+set_base_bit :: fn(h: *u64, x: i64, y: i64, value: bool) void = {
+    i := y*base_case_w+x;
+    h[] = h[].bit_or(value.int().shift_left(i).bitcast());
 }
 
 hit_square :: fn(pos: Vec2, top_left: Vec2, bottom_right: Vec2) bool = 
@@ -348,6 +402,17 @@ fn compress(flat: *BitBoard, memo: *Memo) void = {  // frame -> memo
     memo.root = recur(flat, memo, vec2(0), flat.size);
     memo.size = flat.size;
     recur :: fn(flat: *BitBoard, memo: *Memo, pos: Vec2, size: i64) *Node = {
+        if size == 32 {  // handle large empty blocks more efficiently
+            break :: local_return;
+            x, y := pos.int();
+            @debug_assert(x.mod(32) == 0 && y.mod(32) == 0);
+            range(y, y + 32) { y |
+                @if(flat.bits[(y*flat.size + x).udiv(32)] != 0) break();
+            };
+            memo.gc_reserve(32.trailing_zeros());
+            return memo.empty_node(32);
+        };
+    
         if size == base_case_w {
             x, y := pos.int();
             j := 0;
