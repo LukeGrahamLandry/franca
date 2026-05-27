@@ -45,6 +45,7 @@ Memo :: @struct {
     // parallel to buf but only need one side at a time and only while running collect_garbage so don't waste locality of buf when doing actual work. 
     gc_forward: []NodeId;  
     a: Alloc;
+    empty_node_cache: Array(NodeId, 64);  // weak
 };
 
 new_memo :: fn(self: *Memo, a: Alloc) void = {
@@ -346,6 +347,15 @@ fn base_node(memo: *Memo, bits: u64) NodeId = {
 }
 
 fn empty_node(memo: *Memo, size: i64) NodeId = {
+    @debug_assert(size.count_ones() == 1, "empty_node non power of two");
+    slot := memo.empty_node_cache&[size.trailing_zeros()]&;
+    if slot.id == 0 {
+        slot[] = empty_node_cold(memo, size);
+    };
+    slot[]
+}
+
+fn empty_node_cold(memo: *Memo, size: i64) NodeId = {
     memo.gc_reserve(size.trailing_zeros());
     s, n := (base_case_w, memo.base_node(0));
     while => s < size {
@@ -358,6 +368,7 @@ fn empty_node(memo: *Memo, size: i64) NodeId = {
 // moves any live (reachable from gc_roots) nodes to the other memo.buf and updates references. 
 // id=0 is a valid value in gc_roots: (childen of base node) or (partial array being filled in a loop). 
 fn collect_garbage(memo: *Memo) void = {
+    memo.empty_node_cache&.items().set_zeroed();
     new_buf_i := memo.buf_i.bit_xor(1);
     to_space, from_space := (memo.buf&[new_buf_i]&, memo.buf&[memo.buf_i]&);
     @debug_assert_eq(to_space.len, 0);
@@ -419,44 +430,58 @@ fn root_one(memo: *Memo, node: NodeId, $body: @Fn(node: *NodeId) void) void = {
 }
 
 fn compress(flat: *BitBoard, memo: *Memo) void = {  // frame -> memo
+    positions := collect_positions(flat);
     memo.gc_roots&.reserve(flat.size.trailing_zeros());
-    memo.root = recur(flat, memo, vec2(0), flat.size);
+    memo.root = zeroed(NodeId);  // allow gc-ing the old one
+    memo.root = recur(memo, positions, flat.size.float().cast(), vec2(0));
     memo.size = flat.size;
-    recur :: fn(flat: *BitBoard, memo: *Memo, pos: Vec2, size: i64) NodeId = {
-        if size == 32 {  // handle large empty blocks more efficiently
-            break :: local_return;
-            x, y := pos.int();
-            @debug_assert(x.mod(32) == 0 && y.mod(32) == 0);
-            range(y, y + 32) { y |
-                @if(flat.bits[(y*flat.size + x).udiv(32)] != 0) break();
-            };
-            memo.gc_reserve(32.trailing_zeros());
-            return memo.empty_node(32);
-        };
+    recur :: fn(memo: *Memo, p: []Vec2, size: f32, node_pos: Vec2) NodeId = {
+        @if(p.len == 0) return(memo.empty_node(size.cast().int()));
     
-        if size == base_case_w {
-            x, y := pos.int();
-            j := 0;
+        if size == base_case_w.float().cast() {
             h: u64 = 0;
-            range(y, y + base_case_w) { y |
-                range(x, x + base_case_w) { x |
-                    value := flat.get(x, y);
-                    h = h.bit_or(value.zext().shift_left(j).bitcast());
-                    j += 1;
-                };
-            };
-            return memo.base_node(h);
-        };
-            node := zeroed Node;
-            size /= 2;
-            vsize := vec2(size.float().cast());
-            memo.gc_roots&.push_assume_capacity(node.children&.items());
-            enumerate node.children& { i, it |
-                it[] = recur(flat, memo, pos + vsize*direction[i], size);
+            for p { pos |
+                x, y := (pos - node_pos).int();
+                set_base_bit(h&, x, y, true);
             };
             memo.gc_reserve(1);
-            memo.gc_roots.len -= 1;
-        memo.push(node)
+            return memo.base_node(h);
+        };
+        
+        size /= 2;
+        p := partition(p, node_pos + vec2(size));
+        
+        c := @ref @zeroed Array(NodeId, 4);
+        memo.gc_roots&.push_assume_capacity(c.items());
+        range(0, 4) { i |
+            pos := node_pos + direction[i]*size;
+            c[i] = recur(memo, p&[i], size, pos);
+        };
+        memo.gc_reserve(1);
+        memo.gc_roots.len -= 1;
+        memo.push(children = c[])
+    };
+    
+    collect_positions :: fn(flat: *BitBoard) []Vec2 = {
+        p := Vec2.list(flat.size*flat.size/150, temp());
+        bits := i64.reinterpret_bytes(flat.bits.interpret_as_bytes());
+        import("@/lib/collections/bit_set.fr")'for_bits(bits) { i |
+            y, x := i.udiv_mod(flat.size);
+            pos := vec2(x.float().cast(), y.float().cast());
+            p&.push(pos);
+        };
+        p.items()
+    };
+    
+    partition :: fn(p: []Vec2, middle: Vec2) Array([]Vec2, 4) = {
+        split :: fn(p, $cond) => {
+            n := Sort'partition_unordered(Vec2, p, cond);
+            (p.slice(0, n), p.rest(n))
+        };
+        left, right := split(p, fn(it) => it.x < middle.x);
+        ul, dl := split(left, fn(it) => it.y < middle.y);
+        ur, dr := split(right, fn(it) => it.y < middle.y);
+        (ul, ur, dr, dl)  // clockwise
     };
 }
 

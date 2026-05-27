@@ -1,4 +1,14 @@
 
+## (May 27)
+
+- rle loading is far too slow. maybe i should assume sparse and just keep list of pixels. 
+  metagalaxy.rle is 6553483/1073741824 = 0.61%. 
+  list of positions calling set_pixel is trash, builds a bunch of junk nodes. 
+  recursing and and checking all the positions just at base node works but is slower than original obviously. 
+  but now sort the posistions so recurse on a smaller list each time and can bail on empty nodes. 
+  samples: 4023 -> 1295. cache empty_node: -> 1119. 
+  read_rle: don't call starts_with(one char) so much: 201 -> 110. 
+
 ## (May 26) life
 
 - don't need gui for flat/naive eval anymore. show stats and pattern comment on screen. 
