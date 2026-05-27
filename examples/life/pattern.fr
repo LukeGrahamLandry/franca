@@ -16,11 +16,11 @@ read_rle :: fn(a: Alloc, in: Str, MIN_W: i64, MAX_W: i64) Result(Ty(BitBoard, St
         err(@tfmt("expected (%) but found (%)", s, in.slice(0, min(in.len, s.len))));
     };
     eat("x = ");
-    eatN :: fn() => {
+    eatN :: fn() i32 => {
         n, end := convert_number(in, 10, dec_digit);
         @if(end.len == in.len) err(@tfmt("expected integer but found (%)", in.slice(0, 1)));
         in = end;
-        n
+        @as(i32) n.trunc()  // TODO: bounds
     };
     width := eatN();
     eat(", y = ");
@@ -36,10 +36,12 @@ read_rle :: fn(a: Alloc, in: Str, MIN_W: i64, MAX_W: i64) Result(Ty(BitBoard, St
     in = in.rest((in.index_of_slice("\n") || (in.len - 1)) + 1);
     header := full_input.slice(0, full_input.len - in.len);
     
+    MAX_W: i32 = MAX_W.trunc();
     @if(width > MAX_W || height > MAX_W) err(@tfmt("TODO: giant canvas (%x%)", width, height));
     
+    MIN_W: i32 = MIN_W.trunc();
     // make it a power of two for quadtree
-    w := max(height, width).max(MIN_W);
+    w: i32 = max(height, width).max(MIN_W);
     w := w.up_pow2();
     out = empty_bitboard(a, w); 
     
@@ -62,7 +64,7 @@ read_rle :: fn(a: Alloc, in: Str, MIN_W: i64, MAX_W: i64) Result(Ty(BitBoard, St
             return(Ok = (out, header));
         };
         
-        n := @if(c == "o".ascii() || c == "b".ascii() || c == "$".ascii(), 1, eatN());
+        n: i32 = @if(c == "o".ascii() || c == "b".ascii() || c == "$".ascii(), 1, eatN());
         value := @switch(in[0]) {
             @case("o".ascii()) => true;
             @case("b".ascii()) => false;
@@ -79,15 +81,15 @@ read_rle :: fn(a: Alloc, in: Str, MIN_W: i64, MAX_W: i64) Result(Ty(BitBoard, St
         @if(y >= y0 + height) err("too many rows");
         
         @if(value) 
-        range(x, x + n) { x |
-            out&.set(x, y, value);
+        range(x.zext(), zext(x + n)) { x |
+            out&.set(x, y.zext(), value);
         };
         x += n;
     };
 }
 
 // macrocell: https://golly.sourceforge.io/Help/formats.html#mc
-read_mc :: fn(memo: *Memo, in: Str) Result(Ty(NodeId, i64, Str), Str) = {
+read_mc :: fn(memo: *Memo, in: Str) Result(Ty(NodeId, i32, Str), Str) = {
     full_input := in;
     line := 1;
     err :: fn(s) => {
@@ -142,7 +144,7 @@ read_mc :: fn(memo: *Memo, in: Str) Result(Ty(NodeId, i64, Str), Str) = {
             };
             node := @switch(base_case_w) {
                 @case(8) => memo.base_node(h);
-                @case(4) => pushW(memo, h, vec2(0));
+                @case(4) => pushW(memo, h, v2(0));
                 @case(2) => {
                     children := @ref @zeroed Array(NodeId, 4);
                     enumerate direction { i, dir |
@@ -154,10 +156,10 @@ read_mc :: fn(memo: *Memo, in: Str) Result(Ty(NodeId, i64, Str), Str) = {
             };
             indices.push(node);
             sizes.push(8.trailing_zeros().trunc());
-            pushW :: fn(memo: *Memo, h: u64, off: Vec2) NodeId = {
+            pushW :: fn(memo: *Memo, h: u64, off: V2) NodeId = {
                 children := @ref @zeroed Array(NodeId, 4);
                 enumerate direction { i, dir |
-                    x, y := (off + dir[].mul(base_case_w.float().cast())).int();
+                    x, y := (off + dir[]*base_case_w).int();
                     h2: u64 = 0;
                     j := 0;
                     range(y, y + base_case_w) { y |
@@ -182,7 +184,7 @@ read_mc :: fn(memo: *Memo, in: Str) Result(Ty(NodeId, i64, Str), Str) = {
             out.items().swap(2, 3);  // i want them clockwise
             
             children := @ref @zeroed Array(NodeId, 4);
-            child_size := 1.shift_left(size_log2) / 2;
+            child_size: i32 = 1.shift_left(size_log2) / 2;
             range(0, 4) { i |
                 if out[i] == 0 {
                     children[i] = memo.empty_node(child_size);
@@ -208,7 +210,7 @@ read_mc :: fn(memo: *Memo, in: Str) Result(Ty(NodeId, i64, Str), Str) = {
     };
     
     root := indices[indices.len - 1];
-    size := 1.shift_left(sizes[sizes.len - 1].zext());
+    size: i32 = 1.shift_left(sizes[sizes.len - 1].zext());
     @eprintln("loaded % nodes. canvas size = %.", buf.len - start, size);
     (Ok = (root, size, header))
 }

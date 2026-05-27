@@ -31,7 +31,7 @@ State :: @struct {
 
 // TODO: remove these? they're bad for computing scale. 
 MIN_W :: base_case_w*2;
-MAX_W :: 1.shift_left(16);
+MAX_W :: @as(u32) 1.shift_left(16);
 @run @assert(MIN_W.count_ones() == 1 && MAX_W.count_ones() == 1, "need powers of two");
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -121,7 +121,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 
     Easy'glue_begin_pass(sapp, sg, zeroed Sg.PassAction);
     src := state.flat&;
-    s := (src.size / state.view.scale.cast().int());
+    s := (src.size.zext() / state.view.scale.cast().int());
     s := (s*s/32).max(1).min(src.bits.len);
     sg.update_buffer(state.frame, src.bits.slice(0, s).interpret_as_bytes());
     
@@ -156,7 +156,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         // TODO: draw a line if moved the mouse multiple cells in one frame. 
         mouse_rel := vec2(event.mouse_x, event.mouse_y) / ratio / state.uni.scale;
         pos := state.uni.pos + mouse_rel + vec2(1);
-        state.memo&.set_pixel(pos, event.modifiers.get(.shift) == 0);
+        state.memo&.set_pixel(v2(pos), event.modifiers.get(.shift) == 0);
         state.dirty = true;
         return();
     };
@@ -204,7 +204,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             state.uni.pos -= (pos1 - pos0);
             };
             state.uni.scale += delta;
-            state.scroll_delay = 10;
+            state.scroll_delay = 5;
         }
         fn FILES_DROPPED() => for event.drop { path |
             state.load_pattern(state.sg, path);
@@ -224,28 +224,29 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
 
 find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *Shaders.Uni, debug: *Str) Shaders.Uni = {
     msg := @ref u8.list(temp());
-    @debug_assert(uni.canvas.x == uni.canvas.y && uni.canvas.x.cast().int() == memo.size);
+    @debug_assert(uni.canvas.x == uni.canvas.y && uni.canvas.x.cast().int() == memo.size.zext());
     
     ratio := uni.canvas.x / uni.screen.x;
     if ratio < 1 {
         ratio /= ratio;
     };
-    view_size := uni.screen / uni.scale / ratio;
-    real_start := uni.pos;
-    view_end := clamp(real_start + view_size, vec2(0), uni.canvas);
-    view_start := clamp(real_start, vec2(0), uni.canvas);
+    view_size := v2(uni.screen / uni.scale / ratio);
+    real_start := v2(uni.pos);
+    view_end := clamp(real_start + view_size, v2(0), v2 uni.canvas);
+    view_start := clamp(real_start, v2(0), v2 uni.canvas);
+    
     
     // find the smallest node that covers the view area
     node := memo.root;
-    node_pos := vec2(0);
-    node_size := vec2(memo.size.float().cast());
+    node_pos := v2(0);
+    node_size := v2(memo.size);
     depth := 0;
     dowhile {
         continue :: local_return;
         s := node_size/2;
         enumerate memo.get(node)[].children& { i, child |
             p := node_pos + s*direction[i];
-            end := p + s + vec2(0.1);
+            end := p + s;
             
             if hit_square(view_start, p, end) && hit_square(view_end, p, end) {
                 node = child[];
@@ -263,7 +264,7 @@ find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *Shaders.Uni, debug: *St
     
     @fmt(msg, "depth=%; view=[(%,%), (%,%)];\n", depth, view_start.x, view_start.y, view_end.x, view_end.y);
     vs, ve := (real_start - node_pos, real_start + view_size - node_pos);
-    pixels_per_cell := max(uni.screen.x, uni.screen.y) / max(view_size.x, view_size.y);
+    pixels_per_cell := max(uni.screen.x, uni.screen.y) / max(view_size.x, view_size.y).zext().float().cast();
     
     // this avoids needing to fill big boxes when you zoom in. 
     // downside is sub-cell smooth panning is more complicated. `fractional_cell` gets added back in the shader. 
@@ -274,7 +275,7 @@ find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *Shaders.Uni, debug: *St
     };
     // smaller stride for locality + zero less
     ss := shader_scale.cast().int();
-    dest.size /= ss;  
+    dest.size /= ss.trunc();  
     dest.bits.len /= ss;
     
     dest.bits.set_zeroed();
@@ -283,9 +284,9 @@ find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *Shaders.Uni, debug: *St
         view_start = vs,
         view_end = ve,
         pixels_per_cell = pixels_per_cell,
-    ), node, vec2(0), node_size.x.cast().int());
+    ), node, v2(0), node_size.x);
     
-    dest.size *= ss;
+    dest.size *= ss.trunc();
     dest.bits.len *= ss;
     
     debug[] = msg.items();
@@ -297,7 +298,7 @@ find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *Shaders.Uni, debug: *St
     (
         pos = fractional_cell * shader_scale,
         scale = shader_scale,
-        canvas = vec2(dest.size.float().cast() / shader_scale),
+        canvas = vec2(dest.size.intcast().float().cast() / shader_scale),
         screen = vec2(0),
     )
 }
@@ -308,10 +309,10 @@ fn resize_screen(state: *State, sapp: *Sapp.Self) void = {
 }
 
 // TODO: pan position is messed up after this if non-square
-fn resize_canvas(state: *State, sg: *Sg.Self, x: i64, y: i64) void = {
+fn resize_canvas(state: *State, sg: *Sg.Self, x: i32, y: i32) void = {
     @debug_assert(x == y, "not allowing nonsquare anymore");
-    state.uni.canvas = vec2(x.float().cast(), y.float().cast());
-    @assert(x > 0 && y > 0 && int(cast(state.uni.canvas.x)) == x && int(cast(state.uni.canvas.y)) == y, "invalid canvas size: %x%", x, y);
+    state.uni.canvas = vec2(x.zext().float().cast(), y.zext().float().cast());
+    @assert(x > 0 && y > 0 && int(cast(state.uni.canvas.x)).trunc() == x && int(cast(state.uni.canvas.y)).trunc() == y, "invalid canvas size: %x%", x, y);
     state.maybe_resize_buffer();
 }
 
@@ -319,7 +320,7 @@ fn maybe_resize_buffer(state: *State) void = {
     state.dirty = true;
     sg, a := (state.sg, general_allocator());
     w, h := state.uni.screen.int();
-    n := max(w, h);  // doesn't depend on state.memo.size because just writing pixels not all cells.
+    n: i32 = max(w, h).trunc();  // doesn't depend on state.memo.size because just writing pixels not all cells.
     @if(n <= state.flat.size) return();
     a.dealloc(u32, state.flat.bits);
     state.flat = empty_bitboard(a, n);
@@ -329,6 +330,8 @@ fn maybe_resize_buffer(state: *State) void = {
         size = state.flat.bits.len * 4,
     );
 }
+
+fn size(flat: *BitBoard) i64 = flat.size.zext();
 
 fn tick(state: *State) void = {
     state.dirty = true;
@@ -378,17 +381,17 @@ fn recenter(state: *State) void = {
     state.uni.pos = vec2(0);
 }
 
-set_pixel :: fn(memo: *Memo, pos: Vec2, value: bool) bool = {
-    size := memo.size.float().cast();
-    @if(!hit_square(pos, vec2(0), vec2(size))) return(false);
+set_pixel :: fn(memo: *Memo, pos: V2, value: bool) bool = {
+    size := memo.size;
+    @if(!hit_square(pos, v2(0), v2(size))) return(false);
     memo.gc_reserve(memo.size.trailing_zeros());
-    memo.root = recur(memo, memo.root, size, vec2(0), pos, value);
+    memo.root = recur(memo, memo.root, size, v2(0), pos, value);
     return true;
     
     // nodes are immutable because interned/reused.
     // to change a pixel need to rebuild the chain from root to base. 
-    recur :: fn(memo: *Memo, node: NodeId, size: f32, node_pos: Vec2, pos: Vec2, value: bool) NodeId = {
-        if size == base_case_w.float().cast() {
+    recur :: fn(memo: *Memo, node: NodeId, size: i32, node_pos: V2, pos: V2, value: bool) NodeId = {
+        if size == base_case_w {
             x, y := (pos - node_pos).int();
             i := y*base_case_w+x;
             h := memo.get(node).base_children()
@@ -399,7 +402,7 @@ set_pixel :: fn(memo: *Memo, pos: Vec2, value: bool) bool = {
         size /= 2;
         range(0, 4) { i |
             p := node_pos + direction[i]*size;
-            if hit_square(pos, p, p + vec2(size)) {
+            if hit_square(pos, p, p + v2(size)) {
                 c := memo.get(node)[].children;
                 c&[i] = recur(memo, c&[i], size, p, pos, value);
                 return memo.push(children = c);

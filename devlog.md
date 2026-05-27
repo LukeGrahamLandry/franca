@@ -8,6 +8,8 @@
   but now sort the posistions so recurse on a smaller list each time and can bail on empty nodes. 
   samples: 4023 -> 1295. cache empty_node: -> 1119. 
   read_rle: don't call starts_with(one char) so much: 201 -> 110. 
+- so much casting is super annoying. use u32 instead of f32 for size/pos. actually view_start can be negative so need i32. 
+  surprisingly also made compress faster: 1021 -> 739. 
 
 ## (May 26) life
 
