@@ -10,6 +10,15 @@
   read_rle: don't call starts_with(one char) so much: 201 -> 110. 
 - so much casting is super annoying. use u32 instead of f32 for size/pos. actually view_start can be negative so need i32. 
   surprisingly also made compress faster: 1021 -> 739. 
+- i want smooth scaling. keeping the scale used for texture as a power of two so its always 
+  a crispy integer number of texture pixels per cell (or inverse) feels most sane. 
+  texture for one power of two up and the shader can sample from that with the extra scale. 
+  - spent far too long being confused because not confident about math
+    when the problem was just that i wasn't update_buffer enough so was reading junk. what helped 
+    notice was debug mode to set other colour channels just by on texture coordinate so can see where you are.
+  - also helps with the extra pixel for smooth movement (because now oversized most of the time) 
+  - oops too small a starting number in my dumb iteration to find a power of two when you zoom out a lot. ditto for loading TetrisOTCAMP.mc. 
+- using f64 for the ui pos/scale for as long as possible fixes jitters with large sizes
 
 ## (May 26) life
 

@@ -1,7 +1,8 @@
 
 HELP :: """
 h: toggle stats/pattern info
-scroll: zoom. left click+drag: pan. 
+scroll: zoom. -/+: zoom 50%/2x
+left click+drag: pan. 
 right click: draw cells (shift: delete). 
 space: play/pause. s: step. 
 c: center view. r: kill all cells. 
@@ -14,7 +15,14 @@ State :: @struct {
     WIDTH :: 512; HEIGHT :: 512;
     pipe: Sg.Pipeline;
     frame: Sg.Buffer;
-    uni: Shaders.Uni;
+    // these being f64 prevents with high zoom movement desyncing. 
+    // ex. add empty border until size=2^27 and then zoom all the way in an try to move around. 
+    uni: @struct {
+        pos: Vec(f64, 2);
+        canvas: Vec(f64, 2);
+        screen: Vec(f64, 2);
+        scale: f64;
+    };
     view: Shaders.Uni;
     dirty: bool;
     flat: BitBoard;
@@ -23,7 +31,6 @@ State :: @struct {
     show_info: bool;
     sg: *Sg.Self;
     memo: Memo;
-    scroll_delay: i64;
     text: Sdtx.Self;
     pattern: List(u8);
     debug: Str;  // temp()
@@ -56,18 +63,19 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         @if(path == "-h" || path.contains("help")) print(HELP);
     };
     
-    @if(state.flat.size == 0) state.resize_canvas(sg, MIN_W, MIN_W);
+    @if(state.flat.size == 0) state.resize_canvas(sg, MIN_W);
     
     state.text&.setup(sg = sg, allocator = a, fonts = @slice(Sdtx.font.cpc));
     
     if state.memo.root.id == 0 {
-        state.resize_canvas(sg, MIN_W, MIN_W);
+        state.resize_canvas(sg, MIN_W);
         state.memo.root = state.memo&.empty_node(MIN_W);
-        state.memo.size = MIN_W;
         state.show_info = true;
     };
 }
 
+debug_texture_coordinates :: false;
+debug_cell_size :: false;
 Shaders :: @struct {
     OutV :: @struct(pos: Vec4 #position);
     vs   :: fn(i: u32 #vertex_id) OutV = (pos = @vec(Easy'six_vertex_full_square(i), 0.0, 1.0));
@@ -78,72 +86,82 @@ Shaders :: @struct {
         frame: Buf(u32) #buffer(0),
     ) Shaders.OutF = {
         p := in.pos;
+        
+        // TODO: shouldn't need the outer set of parens :compiler
+        if ((@swizzle p.y) < uni.text_height) {
+            // solid colour so it's easier to read the text
+            return(colour = @vec(vec3(0.05), 1.0));
+        };
+        
         p := @swizzle p.xy;
         p += uni.pos;
-            p /= uni.scale;
-            // TODO: colour outside the box
+        p /= uni.scale;
         x := @swizzle p.x;
         y := @swizzle p.y;
         
-        width := @swizzle uni.canvas.x;
-        pixel_i := (floor(y)*width + floor(x));
-        slot := frame[f32_to_u32(pixel_i) / 32];
-        i := zext(f32_to_u32(pixel_i).mod(32));
+        width := uni.width;
+        pixel_i := f32_to_u32(floor(y)*width + floor(x));
+        if debug_cell_size {
+            w := f32_to_u32(width);
+            @if(pixel_i == 0) return(colour = @vec(1.0, 0.0, 0.0, 1.0));
+            @if(pixel_i == w+1) return(colour = @vec(0.0, 1.0, 0.0, 1.0));
+            @if(pixel_i == (w+1)*w/2) return(colour = @vec(0.0, 0.0, 1.0, 1.0));
+        };
+        slot := frame[pixel_i / 32];
+        i := zext(pixel_i.mod(32));
         c := slot.shift_right_logical(i).bit_and(1);
         c := u32_to_f32(c);
         if x < 0 || y < 0 || x >= width || y >= width {
             // TODO: this is showing where it's broken because of fractional_cell. need one extra
-            c = 0.1;
+            //       mostly fixed by oversizing for smooth zoom but not sometimes not?> 
+            return(colour = @vec(vec3(0.1), 1.0));
+        };
+        if debug_texture_coordinates {
+            return(colour = @vec(c, y/width, x/width, 1.0));
         };
         (colour = @vec(vec3(c), 1.0))
     };
     Uni :: @struct {
         pos: Vec2;
-        screen: Vec2;  // how many pixels
-        canvas: Vec2;  // how many cells
+        width: f32;  // stride of the texture in cells
         scale: f32;
+        text_height: f32 = 0;
         pad: f32 = 0;
     };
 };
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
-    state.scroll_delay -= 1;
     if !state.paused {
         state.tick();
-    } else {
-        @if(state.dirty)
-        {
-            // :SLOW
-            state.view = find_view_area(state.flat&, state.memo&, state.uni&, state.debug&);
-        };
-    }
+    };
     @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
-
+    state.view = find_view_area(state.flat&, state.memo&, state.uni&, state.debug&);
+    
     Easy'glue_begin_pass(sapp, sg, zeroed Sg.PassAction);
     src := state.flat&;
     s := (src.size.zext() / state.view.scale.cast().int());
-    s := (s*s/32).max(1).min(src.bits.len);
+    s := (s*s/32 * (@if(SMOOTH_SCALE, 2, 1))).max(1).min(src.bits.len);
     sg.update_buffer(state.frame, src.bits.slice(0, s).interpret_as_bytes());
     
     bind := zeroed Sg.Bindings;
     bind.storage_buffers&[0] = state.frame;
     sg.apply_pipeline(state.pipe);
     ::[]Shaders.Uni;
+    state.view.text_height = state.maybe_show_info(sapp);
     sg.apply_uniforms(0, state.view&.slice(1).interpret_as_bytes());
     sg.apply_bindings(bind&);
     draw(sg = sg, base = 0, elements = 6, instances = 1);
-    state.maybe_show_info(sapp);
+    
+    @if(state.show_info) state.text.default_context&.draw_layer(0);
     sg.end_pass();    
     sg.commit();
 }
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
-    ratio := state.uni.canvas.x / state.uni.screen.x;
-    if ratio < 1 {
-        ratio = 1;
-    };
+    mouse := vec(@slice(event.mouse_x.cast(), event.mouse_y.cast()));
+    
     if event.type == .MOUSE_MOVE && event.modifiers.get(.left_mouse) != 0 {  // pan
-        delta := -vec2(event.mouse_dx, event.mouse_dy) / ratio;
+        delta := -vec(@slice(event.mouse_dx.cast(), event.mouse_dy.cast()));
         delta /= state.uni.scale;
         state.uni.pos += delta;
         state.dirty = true;
@@ -153,10 +171,10 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     a := event.type == .MOUSE_DOWN && event.mouse_button == .RIGHT;
     b := event.type == .MOUSE_MOVE && event.modifiers.get(.right_mouse) != 0;
     if a || b {  // draw
+        mouse_rel := mouse / state.uni.scale;
+        pos := state.uni.pos + mouse_rel;
         // TODO: draw a line if moved the mouse multiple cells in one frame. 
-        mouse_rel := vec2(event.mouse_x, event.mouse_y) / ratio / state.uni.scale;
-        pos := state.uni.pos + mouse_rel + vec2(1);
-        state.memo&.set_pixel(v2(pos), event.modifiers.get(.shift) == 0);
+        state.memo&.set_pixel(v2(pos.x.int(), pos.y.int()), event.modifiers.get(.shift) == 0);
         state.dirty = true;
         return();
     };
@@ -182,29 +200,25 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 // TODO: just auto expand as needed so it's like infinite board. 
                 fn G() => {
                     state.memo.root = state.memo&.zero_fill_grow_root();
-                    state.memo.size *= 2;
-                    state.resize_canvas(state.sg, state.memo.size, state.memo.size);
+                    state.resize_canvas(state.sg, state.memo.size * 2);
                     state.recenter();
-                    // TODO: after this pan speed is messed up too. 
                 }
+                fn MINUS() => apply_zoom(-state.uni.scale / 2);
+                fn EQUAL() => apply_zoom(state.uni.scale);
                 @default => return();
             };
         };
         fn MOUSE_SCROLL() => {  // zoom
-            @if(state.scroll_delay > 0 && event.scroll_y != 0) return();
             delta := @if(event.scroll_y < 0, -state.uni.scale / 2, state.uni.scale);
-            
-            @if(event.scroll_y > 0 && state.uni.scale >= state.uni.screen.x/ratio) return();    // one cell = whole screen
-            @if(event.scroll_y < 0 && state.uni.scale <= 1/state.uni.canvas.x/ratio) return();  // one pixel = whole canvas
-            
-            if event.modifiers.get(.control) == 0 {
-            pos := vec2(event.mouse_x, event.mouse_y) / ratio;
-            pos0 := pos / state.uni.scale;
-            pos1 := pos / (state.uni.scale + delta);
-            state.uni.pos -= (pos1 - pos0);
+            if SMOOTH_SCALE {
+                delta = event.scroll_y.cast() * state.uni.scale / 50.0;
+                delta = clamp(delta, -state.uni.scale / 2, state.uni.scale);
             };
-            state.uni.scale += delta;
-            state.scroll_delay = 5;
+            
+            N :: @as(f64)32;  // TODO: more zoom than this and the fractional_pixel zone is visible :HACK
+            @if(event.scroll_y > 0 && state.uni.scale >= state.uni.screen.x /N) return();    // N cell = whole screen
+            @if(event.scroll_y < 0 && state.uni.scale <= 1/state.uni.canvas.x) return();  // one pixel = whole canvas
+            apply_zoom(delta);
         }
         fn FILES_DROPPED() => for event.drop { path |
             state.load_pattern(state.sg, path);
@@ -219,22 +233,38 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         }
         @default => return();
     };
+    apply_zoom :: fn(delta: f64) => {
+        if event.modifiers.get(.control) == 0 {
+            pos := mouse;
+            pos0 := pos / state.uni.scale;
+            pos1 := pos / (state.uni.scale + delta);
+            state.uni.pos -= (pos1 - pos0);
+        };
+        state.uni.scale += delta;
+    };
+    
     state.dirty = true;
 }
 
-find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *Shaders.Uni, debug: *Str) Shaders.Uni = {
+SMOOTH_SCALE :: true;
+SMOOTH_MOVE :: true;
+find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *FieldType(State, .uni), debug: *Str) Shaders.Uni = {
     msg := @ref u8.list(temp());
-    @debug_assert(uni.canvas.x == uni.canvas.y && uni.canvas.x.cast().int() == memo.size.zext());
+    @debug_assert(uni.canvas.x == uni.canvas.y && uni.canvas.x.int() == memo.size.zext());
+
+    // want an integer cells<->texture pixels conversion factor so decompress() can always write crisp data. 
+    // the canvas is a power of two so make this one too. 
+    uni_scale: f64 = 1/16777216.0/16777216.0;
+    while => uni_scale * 2 <= uni.scale {
+        uni_scale *= 2;
+    }; 
+    extra_shader_scale := uni.scale / uni_scale;
+    // TODO: now fractional_pixel is showing up on the left when zoomed out a lot
     
-    ratio := uni.canvas.x / uni.screen.x;
-    if ratio < 1 {
-        ratio /= ratio;
-    };
-    view_size := v2(uni.screen / uni.scale / ratio);
+    view_size := v2(uni.screen / uni_scale);
     real_start := v2(uni.pos);
     view_end := clamp(real_start + view_size, v2(0), v2 uni.canvas);
     view_start := clamp(real_start, v2(0), v2 uni.canvas);
-    
     
     // find the smallest node that covers the view area
     node := memo.root;
@@ -256,34 +286,32 @@ find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *Shaders.Uni, debug: *St
                 continue(memo.get(node)[].children&[0].id != 0);
             };
         };
-        
-        // TODO: can make new nodes that aren't aligned to the original quadtree if you're right on a border. 
-        //       ex. try the nine that eval_center_split_merge would make by regrouping grandchildren?
         false
     };
     
     @fmt(msg, "depth=%; view=[(%,%), (%,%)];\n", depth, view_start.x, view_start.y, view_end.x, view_end.y);
     vs, ve := (real_start - node_pos, real_start + view_size - node_pos);
-    pixels_per_cell := max(uni.screen.x, uni.screen.y) / max(view_size.x, view_size.y).zext().float().cast();
+    pixels_per_cell := max(uni.screen.x, uni.screen.y) / max(view_size.x, view_size.y).zext().float();
     
     // this avoids needing to fill big boxes when you zoom in. 
     // downside is sub-cell smooth panning is more complicated. `fractional_cell` gets added back in the shader. 
-    shader_scale: f32 = 1;
+    shader_scale := 1.0;
     while => pixels_per_cell / 2 >= 1 {
         pixels_per_cell /= 2;
         shader_scale *= 2;
     };
     // smaller stride for locality + zero less
-    ss := shader_scale.cast().int();
+    ss := shader_scale.int();
     dest.size /= ss.trunc();  
     dest.bits.len /= ss;
+    @fmt(msg, "tex=%;\n", dest.size);
     
     dest.bits.set_zeroed();
     decompress_recur(@ref @as(Decomp) (
         flat = dest, memo = memo,
         view_start = vs,
         view_end = ve,
-        pixels_per_cell = pixels_per_cell,
+        pixels_per_cell = pixels_per_cell.cast(),
     ), node, v2(0), node_size.x);
     
     dest.size *= ss.trunc();
@@ -295,31 +323,32 @@ find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *Shaders.Uni, debug: *St
     //       (need to update scroll event to keep track as well)
     // TODO: fractional_cell doesn't work on the boarder. need one more pixel in the buffer. 
     fractional_cell := uni.pos - floor(uni.pos);
+    @if(!SMOOTH_MOVE) { fractional_cell = splat(0); };
+    shader_pos := fractional_cell * shader_scale * extra_shader_scale;
+    // delay casting down to f32 until the scale has been split into components that will be in a reasonable range. 
     (
-        pos = fractional_cell * shader_scale,
-        scale = shader_scale,
-        canvas = vec2(dest.size.intcast().float().cast() / shader_scale),
-        screen = vec2(0),
+        pos = vec2(shader_pos.x.cast(), shader_pos.y.cast()),
+        scale = cast(shader_scale * extra_shader_scale),
+        width = cast(dest.size.intcast().float() / shader_scale),
     )
 }
 
 fn resize_screen(state: *State, sapp: *Sapp.Self) void = {
-    state.uni.screen = vec2(sapp.width().float().cast(), sapp.height().float().cast());
+    state.uni.screen = vec(@slice(sapp.width().float(), sapp.height().float()));
     state.maybe_resize_buffer();
 }
 
-// TODO: pan position is messed up after this if non-square
-fn resize_canvas(state: *State, sg: *Sg.Self, x: i32, y: i32) void = {
-    @debug_assert(x == y, "not allowing nonsquare anymore");
-    state.uni.canvas = vec2(x.zext().float().cast(), y.zext().float().cast());
-    @assert(x > 0 && y > 0 && int(cast(state.uni.canvas.x)).trunc() == x && int(cast(state.uni.canvas.y)).trunc() == y, "invalid canvas size: %x%", x, y);
+fn resize_canvas(state: *State, sg: *Sg.Self, size: i32) void = {
+    state.memo.size = size;
+    state.uni.canvas = splat(size.zext().float());
+    @assert(size > 0 && size.count_ones() == 1);
     state.maybe_resize_buffer();
 }
 
 fn maybe_resize_buffer(state: *State) void = {
     state.dirty = true;
     sg, a := (state.sg, general_allocator());
-    w, h := state.uni.screen.int();
+    w, h := (state.uni.screen.x.int(), state.uni.screen.y.int());
     n: i32 = max(w, h).trunc();  // doesn't depend on state.memo.size because just writing pixels not all cells.
     @if(n <= state.flat.size) return();
     a.dealloc(u32, state.flat.bits);
@@ -336,7 +365,10 @@ fn size(flat: *BitBoard) i64 = flat.size.zext();
 fn tick(state: *State) void = {
     state.dirty = true;
     state.memo&.eval(state.fast_eval);
-    state.view = find_view_area(state.flat&, state.memo&, state.uni&, state.debug&);
+    
+    if false { // :compilerbug ??? some insane overload set ordering or something? this is very bad...? !!!!!!!!!
+        decompress(zeroed(*BitBoard), zeroed(*Memo));  // coconut.jpg
+    };
 }
 
 load_pattern :: fn(state: *State, sg: *Sg.Self, path: Str) void = {
@@ -362,8 +394,7 @@ load_pattern_bytes :: fn(state: *State, sg: *Sg.Self, in: Str) Result(void, Str)
         compress(it&, state.memo&);
     };
     
-    size := state.memo.size;
-    state.resize_canvas(sg, size, size);
+    state.resize_canvas(sg, state.memo.size);
     state.recenter();
     .Ok
 }
@@ -371,14 +402,8 @@ load_pattern_bytes :: fn(state: *State, sg: *Sg.Self, in: Str) Result(void, Str)
 fn recenter(state: *State) void = {
     // try to fit the whole thing on the screen
     screen := min(state.uni.screen.x, state.uni.screen.y);
-    ratio := state.uni.canvas.x / screen;
-    if ratio > 1 {
-        state.uni.scale = 1/ratio/ratio;
-    } else {
-        state.uni.scale = 1/ratio;
-    };
-    //scale := scale.cast().int().up_pow2().float().cast();  // ehhh
-    state.uni.pos = vec2(0);
+    state.uni.scale = screen / state.uni.canvas.x;
+    state.uni.pos = zeroed(Vec(f64, 2));
 }
 
 set_pixel :: fn(memo: *Memo, pos: V2, value: bool) bool = {
@@ -419,8 +444,8 @@ fn show_error(state: *State, msg: Str) void = {
     state.show_info = true;
 }
 
-fn maybe_show_info(state: *State, sapp: *Sapp.Self) void = {
-    @if(!state.show_info) return();
+fn maybe_show_info(state: *State, sapp: *Sapp.Self) f32 = {
+    @if(!state.show_info) return(0);
     sdtx := state.text.default_context&;
     sdtx.canvas(sapp, 1);
     
@@ -443,7 +468,7 @@ fn maybe_show_info(state: *State, sapp: *Sapp.Self) void = {
     sdtx.color = pack_rgba(150, 150, 150, 255);
     sdtx.put(HELP);
     
-    sdtx.draw_layer(0);
+    (sdtx.glyph_size.y * sapp.height().float().cast()) * sdtx.pos.y
 };
 
 main :: fn() void = Easy'start(State);

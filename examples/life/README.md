@@ -26,11 +26,9 @@ TODO: add some tests
   - round trip rle/mc pattern
   - run a small pattern in normal and in hashlife and makes sure they match
   - move non-hashlife eval out of eval.fr into test
-TODO: bring back smooth movement when zoomed in by putting part of pos in the shader
 TODO: speed up compress() (for loading .rle to hashlife)
 TODO: a thing to generate big patterns from one life-in-life cell
-TODO: fix the dead cell on the edge for fractional move
-TODO: non power of two scale in shader
+TODO: fix the rare missing pixel on the edge for fractional movement
 
 TODO: program that generates this visualisation
 ![indices in eval_center_split_merge](https://lukegrahamlandry.ca/assets/hashlife.jpg)
