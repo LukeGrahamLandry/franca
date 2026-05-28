@@ -1,5 +1,21 @@
+// quadtree <-> (bitset, .rle, .mc)
 
-read_rle :: fn(a: Alloc, in: Str, MIN_W: i64, MAX_W: i64) Result(Ty(BitBoard, Str), Str) = {
+Loaded :: @struct(node: NodeId, size: i32, comment: Str);
+read :: fn(memo: *Memo, in: Str) Result(Loaded, Str) = {
+    // if you copy out of text it's easy to accidently get an extra blank lines so don't be too strict.
+    while => in != "" && in[0].is_ascii_whitespace() {
+        in = in.rest(1);
+    };
+
+    if in.starts_with("[M2]") {
+        return read_mc(memo, in);
+    };
+    it, _, header := @try(read_rle(temp(), in, MIN_W, MAX_W)) return;
+    node := compress(it&, memo);
+    (Ok = (node = node, size = it.size, comment = header))
+};
+
+read_rle :: fn(a: Alloc, in: Str, MIN_W: i64, MAX_W: i64) Result(Ty(BitBoard, V2, Str), Str) = {
     full_input := in;
     need_resize := false;
     out := zeroed BitBoard;
@@ -10,34 +26,29 @@ read_rle :: fn(a: Alloc, in: Str, MIN_W: i64, MAX_W: i64) Result(Ty(BitBoard, St
     while => in.starts_with("#") {
         in = in.rest((in.index_of_slice("\n") || (in.len - 1)) + 1);
     };
+    whitespace :: fn() => while => in != "" && in[0].is_ascii_whitespace() {| in = in.rest(1); };
     eat :: fn(s) => if in.starts_with(s) {
         in = in.rest(s.len);
     } else {
         err(@tfmt("expected (%) but found (%)", s, in.slice(0, min(in.len, s.len))));
     };
-    eat("x = ");
     eatN :: fn() i32 => {
         n, end := convert_number(in, 10, dec_digit);
         @if(end.len == in.len) err(@tfmt("expected integer but found (%)", in.slice(0, 1)));
         in = end;
         @as(i32) n.trunc()  // TODO: bounds
     };
+    whitespace();eat("x");whitespace();eat("=");whitespace();
     width := eatN();
-    eat(", y = ");
+    whitespace();eat(",");whitespace();eat("y");whitespace();eat("=");whitespace();
     height := eatN();
-    eat(", rule = ");
-    @if(in[0].ascii_to_lower() != "b".ascii()) err("expected (b) rule");
-    in = in.rest(1);
-    B := eatN();
-    eat("/");
-    @if(in[0].ascii_to_lower() != "s".ascii()) err("expected (s) rule");
-    in = in.rest(1);
-    S := eatN();
+    // , rule = b3/s23
     in = in.rest((in.index_of_slice("\n") || (in.len - 1)) + 1);
     header := full_input.slice(0, full_input.len - in.len);
     
     MAX_W: i32 = MAX_W.trunc();
     @if(width > MAX_W || height > MAX_W) err(@tfmt("TODO: giant canvas (%x%)", width, height));
+    size := v2(width, height);
     
     MIN_W: i32 = MIN_W.trunc();
     // make it a power of two for quadtree
@@ -61,7 +72,7 @@ read_rle :: fn(a: Alloc, in: Str, MIN_W: i64, MAX_W: i64) Result(Ty(BitBoard, St
             continue();
         };
         if c == "!".ascii() {
-            return(Ok = (out, header));
+            return(Ok = (out, size, header));
         };
         
         n: i32 = @if(c == "o".ascii() || c == "b".ascii() || c == "$".ascii(), 1, eatN());
@@ -74,7 +85,7 @@ read_rle :: fn(a: Alloc, in: Str, MIN_W: i64, MAX_W: i64) Result(Ty(BitBoard, St
                 x = x0;
                 continue();
             };
-            @default => err(@tfmt("expected (o)/(b), found (%)", in.slice(0, 1)));
+            @default => err(@tfmt("expected one of (ob$), found (%). not a two state pattern?", in.slice(0, 1)));
         };
         in = in.rest(1);
         @if(x + n > x0 + width) err("expected $ to end row");
@@ -89,7 +100,7 @@ read_rle :: fn(a: Alloc, in: Str, MIN_W: i64, MAX_W: i64) Result(Ty(BitBoard, St
 }
 
 // macrocell: https://golly.sourceforge.io/Help/formats.html#mc
-read_mc :: fn(memo: *Memo, in: Str) Result(Ty(NodeId, i32, Str), Str) = {
+read_mc :: fn(memo: *Memo, in: Str) Result(Loaded, Str) = {
     full_input := in;
     line := 1;
     err :: fn(s) => {
@@ -109,12 +120,8 @@ read_mc :: fn(memo: *Memo, in: Str) Result(Ty(NodeId, i32, Str), Str) = {
     while => in.starts_with("#") {
         in = in.rest((in.index_of_slice("\n") || (in.len - 1)) + 1); line += 1;
     };
-    @if(in == "") err("truncated");
     header := full_input.slice(0, full_input.len - in.len);
-    
-    memo.collect_garbage();
-    buf := memo.buf&[memo.buf_i]&;
-    start := buf.len;
+    @if(in == "") return(Ok = (size = 8, node = memo.empty_node(8), comment = header));
     
     // sadly people have files with duplicate nodes so can't just use an offset into `buf` for file indices.
     // (and need to add extra nodes anyway if base_case_w != 8)
@@ -125,55 +132,41 @@ read_mc :: fn(memo: *Memo, in: Str) Result(Ty(NodeId, i32, Str), Str) = {
     sizes := @ref u8.list(in.len / 10, temp());
     sizes.push(0xFF);
     
+    // wasteful if base_case_w=8 but avoids special case for the others and this format loads instantly anyway. 
+    scratch := @ref empty_bitboard(temp(), 8);
     while => in != "" {
-        @if(buf.len >= buf.cap) err("too many nodes (todo: grow arena)");
+        N :: max(16+4+1, 1);
+        if memo.active_buf.len + N > memo.active_buf.cap {
+            memo.gc_roots&.push(indices.items().rest(1));
+            memo.collect_garbage();
+            memo.gc_roots&.pop();
+            if memo.active_buf.len + N > memo.active_buf.cap {
+                err("too many nodes (todo: grow arena)");
+            };
+        };
         
         if !in[0].is_ascii_digit() {  // base node
-            h: u64 = 0;
             i := 0;
             n := 8;
-            while => in[0] != "\n".ascii() {
+            while => in.len > 0 && in[0] != "\n".ascii() {
                 @switch(in[0]) {
                     @case(".".ascii()) => { i += 1; n -= 1; };
                     @case("$".ascii()) => { i += n; n = 8 };
-                    @case("*".ascii()) => { h = h.bit_or(1.shift_left(i)); i += 1; n -= 1; };
+                    @case("*".ascii()) => { 
+                        y, x := i.udiv_mod(8);
+                        i += 1; n -= 1; 
+                        scratch.set(x, y, true);
+                    };
                     @case("\r".ascii()) => ();
                     @default => err("invalid char in base node");
                 };
                 @if(n < 0 || i > 64) err("expected 8x8 base node");
                 in = in.rest(1);
             };
-            node := @switch(base_case_w) {
-                @case(8) => memo.base_node(h);
-                @case(4) => pushW(memo, h, v2(0));
-                @case(2) => {
-                    children := @ref @zeroed Array(NodeId, 4);
-                    enumerate direction { i, dir |
-                        children[i] = pushW(memo, h, dir[] * 4);
-                    };
-                    memo.push(children = children[])
-                };
-                @default => unreachable();
-            };
+            node := compress(scratch, memo);  
+            scratch.bits.set_zeroed();
             indices.push(node);
             sizes.push(8.trailing_zeros().trunc());
-            pushW :: fn(memo: *Memo, h: u64, off: V2) NodeId = {
-                children := @ref @zeroed Array(NodeId, 4);
-                enumerate direction { i, dir |
-                    x, y := (off + dir[]*base_case_w).int();
-                    h2: u64 = 0;
-                    j := 0;
-                    range(y, y + base_case_w) { y |
-                        range(x, x + base_case_w) { x |
-                            value := h.bit_and(1.shift_left(y*8 + x)) != 0;
-                            h2 = h2.bit_or(int(value).bitcast().shift_left(j));
-                            j += 1;
-                        };
-                    };
-                    children[i] = memo.base_node(h2);
-                };
-                memo.push(children = children[])
-            };
         } else {  // tree node
             size_log2 := eatN();
             @if(size_log2 > 32) err("node too wide");
@@ -215,8 +208,261 @@ read_mc :: fn(memo: *Memo, in: Str) Result(Ty(NodeId, i32, Str), Str) = {
     
     root := indices[indices.len - 1];
     size: i32 = 1.shift_left(sizes[sizes.len - 1].zext());
-    @eprintln("loaded % nodes. canvas size = %.", buf.len - start, size);
-    (Ok = (root, size, header))
+    (Ok = (node = root, size = size, comment = header))
+}
+
+::AutoEq(NodeId);
+::AutoHash(NodeId, TrivialHasher);
+
+write_mc :: fn(out: *List(u8), memo: *Memo, node: NodeId, size: i32) void = {
+    #use("@/lib/collections/map.fr");
+    self := @anon_literal(
+        _ = out, _ = memo, 
+        // can't just use node.id as the line numbers because they have to be declared 
+        // before use (plus there might be multiple patterns stored in the *Memo)
+        map = @as(HashMap(NodeId, u32)) init(temp()), 
+        scratch = empty_bitboard(temp(), 8),
+    );
+    @fmt(out, "[M2] (franca.lukegrahamlandry.ca)\n");
+    @debug_assert_eq(size.count_ones(), 1, "size must be a power of two");
+    
+    // idk if i should bother. this makes it remember the size even of empty patterns. 
+    if memo.get(node)[].population == 0 {
+        @if(size <= 8) return(@fmt(out, "$$$$$$$$\n"));
+        return @fmt(out, "% 0 0 0 0\n", size.trailing_zeros());
+    };
+    
+    _ := recur(self&, node, size);
+    recur :: fn(self: *@type self, node: NodeId, size: i32) u32 = {
+        n := self.memo.get(node);
+        @if(n.population == 0) return(0);
+        if self.map&.get(node) { it | return it; }; 
+        o := self.out;
+        if size <= 8 {
+            self.scratch.bits.set_zeroed();
+            decompress(self.scratch&, self.memo, node, size);
+            
+            pop := 0;
+            range(0, 8) { y |
+                range(0, 8) { x |
+                    value := self.scratch&.get(x.intcast(), y.intcast()) == 1;
+                    pop += int(value);
+                    o.push(@if(value, "*".ascii(), ".".ascii()));
+                };
+                o.trim(".");
+                @fmt(o, "$");
+            };
+            @fmt(o, "\n");
+            @debug_assert_eq(pop, n.population.zext(), "population miscalculated??");
+        } else {
+            c := @ref @zeroed Array(u32, 4);
+            enumerate n.children& { i, it |
+                c[i] = self.recur(it[], size/2);
+            };
+            c.items().swap(2, 3);
+            @fmt(o, "% % % % %\n", size.trailing_zeros(), c[0], c[1], c[2], c[3]);
+        };
+        
+        id: u32 = self.map.raw.len_including_tombstones.trunc() + 1;
+        self.map&.insert(node, id);
+        id
+    };
+    trim :: fn(o: *List(u8), s: []u8) void = 
+        while => o.items().ends_with(s) {
+            o.len -= 1; 
+        };
+}
+
+fn write_rle();
+fn write_rle(out: *List(u8), memo: *Memo, node: NodeId, size: i32) void = {
+    in := empty_bitboard(temp(), size);
+    decompress(in&, memo, node, size);
+    write_rle(out, in&, v2(size));
+}
+
+fn write_rle(out: *List(u8), in: *BitBoard, size: V2) void = {
+    @fmt(out, "x = %, y = %, rule = b3/s23\n", size.x, size.y);
+    n := 0;
+    char := " ".ascii();
+    line_start := out.len;
+    emit :: fn($s) => if char == s.ascii() {
+        n += 1;
+    } else {
+        @if(n > 1) @fmt(out, "%", n);
+        @if(n != 0) out.push(char);
+        char = s.ascii();
+        n = 1;
+    };
+    range(0, size.y.intcast()) { y |
+        all_zero := true;
+        range(0, size.x.intcast()) { x |
+            value := in.get(x.intcast(), y.intcast()) == 1;
+            if all_zero {  // empty rows are implied by multiple $
+                if value {
+                    all_zero = false;
+                    if x != 0 {
+                        emit("b");
+                        n += x - 1;  // rest of the zeros
+                    };
+                    emit("o");
+                }
+            } else {
+                @if(value, emit("o"), emit("b"));
+            };
+            
+            if out.len - line_start >= 70 {
+                out.push_all("\n");
+                line_start = out.len;
+            };
+        };
+        emit("$");
+    };
+    emit("!");
+    emit(" ");
+}
+
+compress :: fn(flat: *BitBoard, memo: *Memo) NodeId = {  // frame -> memo
+    mark := temp().mark();
+    positions := collect_positions(flat);
+    memo.gc_roots&.reserve(flat.size.trailing_zeros().zext());
+    node := recur(memo, positions, flat.size, v2(0));
+    temp().reset(mark);
+    return node;
+    recur :: fn(memo: *Memo, p: []V2, size: i32, node_pos: V2) NodeId = {
+        @if(p.len == 0) return(memo.empty_node(size));
+    
+        if size == base_case_w {
+            h: u64 = 0;
+            for p { pos |
+                x, y := (pos - node_pos).int();
+                set_base_bit(h&, x, y, true);
+            };
+            memo.gc_reserve(1);
+            return memo.base_node(h);
+        };
+        
+        size /= 2;
+        p := partition(p, node_pos + v2(size));
+        
+        c := @ref @zeroed Array(NodeId, 4);
+        memo.gc_roots&.push_assume_capacity(c.items());
+        range(0, 4) { i |
+            pos := node_pos + direction[i]*size;
+            c[i] = recur(memo, p&[i], size, pos);
+        };
+        memo.gc_reserve(1);
+        memo.gc_roots.len -= 1;
+        memo.push(children = c[])
+    };
+    
+    collect_positions :: fn(flat: *BitBoard) []V2 = {
+        p := V2.list(zext(flat.size*flat.size/150), temp());
+        bits := i64.reinterpret_bytes(flat.bits.interpret_as_bytes());
+        import("@/lib/collections/bit_set.fr")'for_bits(bits) { i |
+            y, x := i.udiv_mod(flat.size.zext());
+            p&.push(v2(x, y));
+        };
+        p.items()
+    };
+    
+    partition :: fn(p: []V2, middle: V2) Array([]V2, 4) = {
+        split :: fn(p, $cond) => {
+            n := Sort'partition_unordered(V2, p, cond);
+            (p.slice(0, n), p.rest(n))
+        };
+        left, right := split(p, fn(it) => it.x < middle.x);
+        ul, dl := split(left, fn(it) => it.y < middle.y);
+        ur, dr := split(right, fn(it) => it.y < middle.y);
+        (ul, ur, dr, dl)  // clockwise
+    };
+}
+
+decompress :: fn(flat: *BitBoard, memo: *Memo, node: NodeId, size: i32) void = {
+    decompress_recur(@ref @as(Decomp) (
+        flat = flat, memo = memo,
+        view_start = v2(0), 
+        view_end = v2(size),
+        pixels_per_cell = 1,
+    ), node, v2(0), size);
+}
+
+Decomp :: @struct {
+    flat: *BitBoard;
+    memo: *Memo;
+    view_start: V2; 
+    view_end: V2;
+    pixels_per_cell: f32;
+};
+
+decompress_recur :: fn(self: *Decomp, node: NodeId, pos: V2, size: i32) void = {
+    node := self.memo.get(node);
+    @if(node.population == 0) return();
+    
+    v0, v1, n0, n1 := (self.view_start, self.view_end, pos, pos + v2(size));
+    no_overlap := v0.x > n1.x || n0.x > v1.x || v0.y > n1.y || n0.y > v1.y;
+    if no_overlap {
+        return();
+    };
+    
+    node_pixels := size.zext().float().cast() * self.pixels_per_cell;
+    
+    if size == base_case_w || node_pixels/2 < 1 {
+        @debug_assert(size != base_case_w || node.children&[0].id == 0, "decompress void_node child at wrong depth");
+        s := self.flat.size.zext().float().cast();
+        start := ((pos - self.view_start).float() * vec2(self.pixels_per_cell));
+        end := start + vec2(node_pixels);
+        start := v2 clamp(start, vec2(0), vec2(s));
+        // :compilerbug :FUCKED FUCKED FUCKED without the @inline
+        // ENABLE_ELIDE_SLOTS ENABLE_ELIDE_SLOTS ENABLE_ELIDE_SLOTS ENABLE_ELIDE_SLOTS ENABLE_ELIDE_SLOTS
+        // ENABLE_ELIDE_SLOTS ENABLE_ELIDE_SLOTS ENABLE_ELIDE_SLOTS ENABLE_ELIDE_SLOTS ENABLE_ELIDE_SLOTS
+        // FIX ME FIX ME FIX ME FIX ME
+        end := v2 @inline clamp(end, vec2(0), vec2(s));
+        range(start.y.zext(), end.y.zext()) { y |
+            range(start.x.zext(), end.x.zext()) { x |
+                if size == base_case_w {
+                    cell := v2((v2(x, y) - start).float() / self.pixels_per_cell);
+                    cx, cy := cell.int();
+                    j := cy*base_case_w + cx;
+                    value := node.base_children().bit_and(1.shift_left(j)) != 0;
+                    if value {
+                        self.flat.set(x, y, true);
+                    };
+                } else {
+                    self.flat.set(x, y, node.population != 0);
+                };
+            };
+        };
+        return();
+    };
+    
+    @debug_assert(node.children&[0].id != 0);
+    size /= 2;
+    ::direction;
+    enumerate node.children& { i, it |
+        self.decompress_recur(it[], pos + direction[i] * size, size);
+    };
+};
+
+BitBoard :: @struct(bits: []u32, size: i32);
+
+empty_bitboard :: fn(a: Alloc, w: i32) BitBoard = {
+    W: i64 = w.zext();  // area might not fit in 31 bits
+    (bits = a.alloc_zeroed(u32, (W*W).ualign_to(32)/32), size = w)
+}
+
+fn get(it: *BitBoard, x: i32, y: i32) u32 = {
+    I := y * it.size + x;
+    s, i := I.intcast().udiv_mod(32);
+    it.bits[s].shift_right_logical(i).bit_and(1)
+}
+
+fn set(it: *BitBoard, x: i64, y: i64, new: bool) void = {
+    I := y * it.size.zext() + x;
+    s, i := I.udiv_mod(32);
+    slot := it.bits[s]&;
+    slot[] = slot[]
+        .bit_and(1.shift_left(i).bit_not())
+        .bit_or(int(new).trunc().shift_left(i));
 }
 
 #use("@/examples/life/eval.fr");

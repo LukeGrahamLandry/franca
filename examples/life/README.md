@@ -18,14 +18,10 @@ TODO: control how many generations are stepped when doing hashlife
 TODO: put eval on other threads
       then can allow moving the shader params to give a slight sense of progress while waiting to update the frame if its slow. 
 TODO: experiment with eval in compute shader
-TODO: write .rle and .mc files
 TODO: cli to step generations without the gui
 TODO: pattern gallery
 TODO: add some tests
-  - round trip compress/decompress
-  - round trip rle/mc pattern
   - run a small pattern in normal and in hashlife and makes sure they match
-  - move non-hashlife eval out of eval.fr into test
 TODO: speed up compress() (for loading .rle to hashlife)
 TODO: a thing to generate big patterns from one life-in-life cell
 TODO: fix the rare missing pixel on the edge for fractional movement

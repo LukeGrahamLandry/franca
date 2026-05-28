@@ -1,14 +1,15 @@
 
 HELP :: """
-h: toggle stats/pattern info
+h: toggle this stats/help/pattern info
 scroll: zoom. -/+: zoom 50%/2x
 left click+drag: pan. 
 right click: draw cells (shift: delete). 
 space: play/pause. s: step. 
-c: center view. r: kill all cells. 
+a: center view. r: kill all cells. 
 cli/dragndrop/paste: load (.rle),(.mc) pattern
 f: toggle fast eval
 g: grow canvas
+c: copy pattern as (.mc). b: copy pattern as (.rle). 
 """;
 
 State :: @struct {
@@ -25,7 +26,7 @@ State :: @struct {
     };
     view: Shaders.Uni;
     dirty: bool;
-    flat: BitBoard;
+    flat: Patterns.BitBoard;
     paused: bool;
     fast_eval: bool;  // multiple steps per hashlife recursion
     show_info: bool;
@@ -35,11 +36,6 @@ State :: @struct {
     pattern: List(u8);
     debug: Str;  // temp()
 };
-
-// TODO: remove these? they're bad for computing scale. 
-MIN_W :: base_case_w*2;
-MAX_W :: @as(u32) 1.shift_left(16);
-@run @assert(MIN_W.count_ones() == 1 && MAX_W.count_ones() == 1, "need powers of two");
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     a := general_allocator();
@@ -187,7 +183,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             @match(event.key_code) {
                 fn S() => state.tick();
                 fn SPACE() => { state.paused = !state.paused; }
-                fn C() => state.recenter();
+                fn A() => state.recenter();
                 fn R() => { 
                         state.memo.root = state.memo&.empty_node(state.memo.size);
                         state.pattern&.clear();
@@ -199,12 +195,14 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 };
                 // TODO: just auto expand as needed so it's like infinite board. 
                 fn G() => {
-                    state.memo.root = state.memo&.zero_fill_grow_root();
+                    state.memo.root = state.memo&.zero_fill_grow(state.memo.root&, state.memo.size);
                     state.resize_canvas(state.sg, state.memo.size * 2);
                     state.recenter();
                 }
                 fn MINUS() => apply_zoom(-state.uni.scale / 2);
                 fn EQUAL() => apply_zoom(state.uni.scale);
+                fn C() => write(Patterns'write_mc);
+                fn B() => write(Patterns'write_rle);
                 @default => return();
             };
         };
@@ -242,13 +240,20 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         };
         state.uni.scale += delta;
     };
+    write :: fn($write) => {
+        out := u8.list(temp());
+        write(out&, state.memo&, state.memo.root, state.memo.size);
+        @println("copied % bytes", out.len);
+        sapp.set_clipboard_string(out.items());
+        return();
+    };
     
     state.dirty = true;
 }
 
 SMOOTH_SCALE :: true;
 SMOOTH_MOVE :: true;
-find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *FieldType(State, .uni), debug: *Str) Shaders.Uni = {
+find_view_area :: fn(dest: *Patterns.BitBoard, memo: *Memo, uni: *FieldType(State, .uni), debug: *Str) Shaders.Uni = {
     msg := @ref u8.list(temp());
     @debug_assert(uni.canvas.x == uni.canvas.y && uni.canvas.x.int() == memo.size.zext());
 
@@ -307,7 +312,7 @@ find_view_area :: fn(dest: *BitBoard, memo: *Memo, uni: *FieldType(State, .uni),
     @fmt(msg, "tex=%;\n", dest.size);
     
     dest.bits.set_zeroed();
-    decompress_recur(@ref @as(Decomp) (
+    Patterns'decompress_recur(@ref @as(Patterns.Decomp) (
         flat = dest, memo = memo,
         view_start = vs,
         view_end = ve,
@@ -352,7 +357,7 @@ fn maybe_resize_buffer(state: *State) void = {
     n: i32 = max(w, h).trunc();  // doesn't depend on state.memo.size because just writing pixels not all cells.
     @if(n <= state.flat.size) return();
     a.dealloc(u32, state.flat.bits);
-    state.flat = empty_bitboard(a, n);
+    state.flat = Patterns'empty_bitboard(a, n);
     @if(state.frame.id != 0) sg.destroy(state.frame);
     state.frame = sg.make(
         usage = .DYNAMIC,
@@ -360,15 +365,9 @@ fn maybe_resize_buffer(state: *State) void = {
     );
 }
 
-fn size(flat: *BitBoard) i64 = flat.size.zext();
-
 fn tick(state: *State) void = {
     state.dirty = true;
     state.memo&.eval(state.fast_eval);
-    
-    if false { // :compilerbug ??? some insane overload set ordering or something? this is very bad...? !!!!!!!!!
-        decompress(zeroed(*BitBoard), zeroed(*Memo));  // coconut.jpg
-    };
 }
 
 load_pattern :: fn(state: *State, sg: *Sg.Self, path: Str) void = {
@@ -382,18 +381,11 @@ load_pattern :: fn(state: *State, sg: *Sg.Self, path: Str) void = {
 }
 
 load_pattern_bytes :: fn(state: *State, sg: *Sg.Self, in: Str) Result(void, Str) = {
+    it := @try(Patterns'read(state.memo&, in)) return;
+    state.memo.root = it.node;
+    state.memo.size = it.size; 
     state.pattern&.clear();
-    if in.starts_with("[M2]") {
-        node, size, header := @try(Patterns'read_mc(state.memo&, in)) return;
-        state.pattern&.push_all(header);
-        state.memo.root = node;
-        state.memo.size = size; 
-    } else {
-        it, header := @try(Patterns'read_rle(temp(), in, MIN_W, MAX_W)) return;
-        state.pattern&.push_all(header);
-        compress(it&, state.memo&);
-    };
-    
+    state.pattern&.push_all(it.comment);
     state.resize_canvas(sg, state.memo.size);
     state.recenter();
     .Ok

@@ -1,3 +1,10 @@
+
+- fix the bug in elide_abi_slots. there's one i knew about already hopefully its the same one that's breaking non-inlined clamp. 
+- the cpu vec.fr functions generate terrible ir. it gets fixed by the time it gets to asm
+  (because of elide slots) but they look big early so aren't inlinable. compare #log_ir("ih") to #log_ir("Rh"). 
+- i don't have a way to make an argument $const only if it happens to be constant at the callsite. 
+  - ex. index(Vec()) its fine to allow runtime index but almost every call its constant and could fold the bounds check earlier. 
+  - see "allow #fold on a single argument" below
 - add to website
   - gallary that shows thumbnails and lets you pick a program to run
   - prebuild them for ^ so its fast if you don't modify

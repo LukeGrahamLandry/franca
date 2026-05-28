@@ -1,4 +1,9 @@
 
+## (May 28)
+
+- writers for rle,mc. trivial roundtrip tests. 
+- use same scratch bitboard trick in read_mc. avoids special case for each base_node_w. 
+
 ## (May 27)
 
 - rle loading is far too slow. maybe i should assume sparse and just keep list of pixels. 

@@ -38,6 +38,7 @@ Memo :: @struct {
     table: []NodeId;  // hash table with masked node.hash() (the flat/linear probing kind not the linked list buckets kind)
     buf: Array(RawList(Node), 2);
     buf_i: i64;
+    // TODO: kinda don't want to bless one node so it's explicitly ok to have multiple patterns coexist. 
     root: NodeId;
     size: i32;
     // these addresses (not ids) must be unique so collect_garbage doesn't try to process an id that's already been moved. 
@@ -55,7 +56,7 @@ new_memo :: fn(self: *Memo, a: Alloc) void = {
     self.active_buf = self.buf&[0]&;
     self.gc_forward = a.alloc_uninit(NodeId, self.buf&[0].cap);
     self.table = a.alloc_zeroed(NodeId, 1.shift_left(n + 2));
-    @eprintln("buf=%mb x2; table=%mb", self.buf&[0].cap * size_of(Node) / 1024 / 1024, self.table.len * size_of(NodeId) / 1024 / 1024);
+    //@eprintln("buf=%mb x2; table=%mb", self.buf&[0].cap * size_of(Node) / 1024 / 1024, self.table.len * size_of(NodeId) / 1024 / 1024);
     self.gc_roots = list(1, a);
     self.gc_roots&.push(self.root&.slice(1));
     self.a = a;
@@ -85,7 +86,7 @@ fn get(memo: *Memo, node: NodeId) *Node #inline = {
 }
 
 fn push(self: *Memo, node: Node) NodeId = {
-    @run @assert(base_case_w*base_case_w <= 64 && base_case_w.up_pow2() == base_case_w);
+    @run @assert(base_case_w == 2 || base_case_w == 4 || base_case_w == 8);
     mask := self.table.len - 1;
     i := node&.hash().bit_and(mask);
     j := 0;    
@@ -134,15 +135,14 @@ fn gc_table_insert(self: *Memo, nid: NodeId, node: *Node) void = {
   };
 }
 
-fn zero_fill_grow_root(memo: *Memo) NodeId = {
+fn zero_fill_grow(memo: *Memo, root: *NodeId, size: i32) NodeId = {
     // an extra level of quadtree where the old root node is just surrounded by dead cells. 
     // ex. top left of old root becomes bottom right of the new root's top left node. children are clockwise.
-    size := memo.size;
     invert :: @const_slice(2, 3, 0, 1);
     memo.gc_reserve(size.trailing_zeros() + 5);
-    empty := memo.empty_node(size/2);  // :SLOW
+    empty := memo.empty_node(size/2);
     children := zeroed Array(NodeId, 4);
-    root := memo.get(memo.root)[].children&;
+    root := memo.get(root[])[].children&;
     @debug_assert(root[0].id != 0, "TODO: allow zero_fill_grow_root when only two layers");
     range(0, 4) { i |
         n: Node = (children = (empty,empty,empty,empty));
@@ -153,7 +153,7 @@ fn zero_fill_grow_root(memo: *Memo) NodeId = {
 }
 
 fn eval(memo: *Memo, fast: bool) void = {
-    wrapped_root := memo.zero_fill_grow_root();
+    wrapped_root := memo.zero_fill_grow(memo.root&, memo.size);
     size := memo.size;
     root_one(memo, wrapped_root) { wrapped_root |
         memo.gc_roots&.reserve((size*2).trailing_zeros().zext() * 2);
@@ -203,6 +203,7 @@ fn eval_center_split_merge(memo: *Memo, node: *NodeId, size: i32, fast: bool) No
     // https://lukegrahamlandry.ca/assets/hashlife.jpg
     join :: fn(n,a,b,c,d) => memo.push(children = (n[a], n[b], n[c], n[d]));
     
+    @debug_assert_gt(size, base_case_w);
     memo.gc_reserve(5);
     node := memo.get(node[]);
     n1 := grandchildren(node.children&);
@@ -430,123 +431,6 @@ fn root_one(memo: *Memo, node: NodeId, $body: @Fn(node: *NodeId) void) void = {
     @debug_assert_eq(root_count, memo.gc_roots.len);
 }
 
-fn compress(flat: *BitBoard, memo: *Memo) void = {  // frame -> memo
-    positions := collect_positions(flat);
-    memo.gc_roots&.reserve(flat.size.trailing_zeros().zext());
-    memo.root = zeroed(NodeId);  // allow gc-ing the old one
-    memo.root = recur(memo, positions, flat.size, v2(0));
-    memo.size = flat.size;
-    recur :: fn(memo: *Memo, p: []V2, size: i32, node_pos: V2) NodeId = {
-        @if(p.len == 0) return(memo.empty_node(size));
-    
-        if size == base_case_w {
-            h: u64 = 0;
-            for p { pos |
-                x, y := (pos - node_pos).int();
-                set_base_bit(h&, x, y, true);
-            };
-            memo.gc_reserve(1);
-            return memo.base_node(h);
-        };
-        
-        size /= 2;
-        p := partition(p, node_pos + v2(size));
-        
-        c := @ref @zeroed Array(NodeId, 4);
-        memo.gc_roots&.push_assume_capacity(c.items());
-        range(0, 4) { i |
-            pos := node_pos + direction[i]*size;
-            c[i] = recur(memo, p&[i], size, pos);
-        };
-        memo.gc_reserve(1);
-        memo.gc_roots.len -= 1;
-        memo.push(children = c[])
-    };
-    
-    collect_positions :: fn(flat: *BitBoard) []V2 = {
-        p := V2.list(zext(flat.size*flat.size/150), temp());
-        bits := i64.reinterpret_bytes(flat.bits.interpret_as_bytes());
-        import("@/lib/collections/bit_set.fr")'for_bits(bits) { i |
-            y, x := i.udiv_mod(flat.size.zext());
-            p&.push(v2(x, y));
-        };
-        p.items()
-    };
-    
-    partition :: fn(p: []V2, middle: V2) Array([]V2, 4) = {
-        split :: fn(p, $cond) => {
-            n := Sort'partition_unordered(V2, p, cond);
-            (p.slice(0, n), p.rest(n))
-        };
-        left, right := split(p, fn(it) => it.x < middle.x);
-        ul, dl := split(left, fn(it) => it.y < middle.y);
-        ur, dr := split(right, fn(it) => it.y < middle.y);
-        (ul, ur, dr, dl)  // clockwise
-    };
-}
-
-fn decompress(flat: *BitBoard, memo: *Memo) void = {  // memo -> frame
-    decompress_recur(@ref @as(Decomp) (
-        flat = flat, memo = memo,
-        view_start = v2(0), 
-        view_end = v2(memo.size),
-        pixels_per_cell = 1,
-    ), memo.root, v2(0), memo.size);
-}
-
-Decomp :: @struct {
-    flat: *BitBoard;
-    memo: *Memo;
-    view_start: V2; 
-    view_end: V2;
-    pixels_per_cell: f32;
-};
-
-decompress_recur :: fn(self: *Decomp, node: NodeId, pos: V2, size: i32) void = {
-        node := self.memo.get(node);
-        @if(node.population == 0) return();
-        
-        v0, v1, n0, n1 := (self.view_start, self.view_end, pos, pos + v2(size));
-        no_overlap := v0.x > n1.x || n0.x > v1.x || v0.y > n1.y || n0.y > v1.y;
-        if no_overlap {
-            return();
-        };
-        
-        node_pixels := size.zext().float().cast() * self.pixels_per_cell;
-        
-        if size == base_case_w || node_pixels/2 < 1 {
-            @debug_assert(size != base_case_w || node.children&[0].id == 0, "decompress void_node child at wrong depth");
-            s := self.flat.size.zext().float().cast();
-            start := ((pos - self.view_start).float() * vec2(self.pixels_per_cell));
-            end := start + vec2(node_pixels);
-            start := v2 clamp(start, vec2(0), vec2(s));
-            end := v2 clamp(end, vec2(0), vec2(s));
-            range(start.y.zext(), end.y.zext()) { y |
-                range(start.x.zext(), end.x.zext()) { x |
-                    if size == base_case_w {
-                        cell := v2((v2(x, y) - start).float() / self.pixels_per_cell);
-                        cx, cy := cell.int();
-                        j := cy*base_case_w + cx;
-                        value := node.base_children().bit_and(1.shift_left(j)) != 0;
-                        if value {
-                            self.flat.set(x, y, true);
-                        };
-                    } else {
-                        self.flat.set(x, y, node.population != 0);
-                    };
-                };
-            };
-            return();
-        };
-        
-        @debug_assert(node.children&[0].id != 0);
-        size /= 2;
-        ::direction;
-        enumerate node.children& { i, it |
-            self.decompress_recur(it[], pos + direction[i] * size, size);
-        };
-};
-
 fn base_children(node: *Node) u64 = {
     @debug_assert(node.children&[0].id == 0);
     a: u64 = node.children&[2].id.zext().bitcast();
@@ -556,49 +440,6 @@ fn base_children(node: *Node) u64 = {
 
 direction :: @const_slice(v2(0), v2(1, 0), v2(1, 1), v2(0, 1));
 
-BitGame :: @struct(boards: Array(BitBoard, 2), parity: bool);
-
-empty_bit_game :: fn(a: Alloc, w: i32) BitGame = 
-    (boards = (empty_bitboard(a, w), empty_bitboard(a, w)), parity = false); 
-fn get(self: *BitGame) *BitBoard = 
-    self.boards&[self.parity.int()]&;
-fn drop(self: *BitGame, a: Alloc) void = 
-    for self.boards& { it | a.dealloc(u32, it.bits); it.bits.len = 0; };
-
-fn eval(self: *BitGame) void = {
-    eval(self.boards&[self.parity.not().int()]&, self.get());
-    self.parity = !self.parity;
-}
-
-BitBoard :: @struct(bits: []u32, size: i32);
-
-empty_bitboard :: fn(a: Alloc, w: i32) BitBoard = 
-    (bits = a.alloc_zeroed(u32, zext(w*w)/32), size = w);
-
-fn get(it: *BitBoard, x: i32, y: i32) u32 = {
-    I := y * it.size + x;
-    s, i := I.udiv_mod(32);
-    it.bits[s].shift_right_logical(i).bit_and(1)
-}
-
-fn set(it: *BitBoard, x: i64, y: i64, new: bool) void = {
-    I := y * it.size.zext() + x;
-    s, i := I.udiv_mod(32);
-    slot := it.bits[s]&;
-    slot[] = slot[]
-        .bit_and(1.shift_left(i).bit_not())
-        .bit_or(int(new).trunc().shift_left(i));
-}
-
-fn eval(new: *BitBoard, old: *BitBoard) void = {
-    w := old.size;
-    do_life(w, w, P, fn(x, y, val) => new.set(x, y, val));
-    P :: fn(x: i64, y: i64) u32 => {
-        oob := x < 0 || y < 0 || x >= w || y >= w;
-        @if(oob, 0, old.get(x, y))
-    };
-}
-
 junk_node: Node : (children=((id=0xFFFFFFFF),(id=0xFFFFFFFF),(id=0xFFFFFFFF),(id=0xFFFFFFFF)),next=(id=0xFFFFFFFF));
 
 up_pow2 :: fn(w: i32) i32 = {
@@ -606,13 +447,9 @@ up_pow2 :: fn(w: i32) i32 = {
     @if(1.shift_left(n) == w, w, 1.shift_left(n + 1))
 }
 
-down_pow2 :: fn(w: i32) i32 = {
-    n := 63 - w.leading_zeros().zext();
-    @if(1.shift_left(n) == w, w, 1.shift_left(n - 1))
-}
-
 #use("@/graphics/vec.fr");
 V2 :: Vec(i32, 2); 
+fn v2();
 fn v2(a: i32, b: i32) V2 = (v = (a, b));
 fn v2(a: i64, b: i64) V2 = (v = (a.trunc(), b.trunc()));
 fn v2(a: i32) V2 = v2(a, a);
@@ -622,3 +459,8 @@ fn v2(a: Vec(f64, 2)) V2 = v2(a.x.int(), a.y.int());
 fn v2(a: f32) V2 = v2(a.cast().int());
 fn int(a: V2) Ty(i64, i64) = (a.x.intcast(), a.y.intcast());
 fn float(a: V2) Vec2 = (v = (a.x.intcast().float().cast(), a.y.intcast().float().cast()));
+
+// TODO: remove these? they're bad for computing scale. 
+MIN_W :: base_case_w*4;
+MAX_W :: @as(u32) 1.shift_left(16);
+//@run @assert(MIN_W.count_ones() == 1 && MAX_W.count_ones() == 1, "need powers of two");

@@ -1,0 +1,101 @@
+
+main :: fn() void = {
+    memo := zeroed Life.Memo; memo := memo&;
+    Life'new_memo(memo, general_allocator());
+    
+    lossless :: @const_slice(
+        "$$..*$...*$.***$$$$\n4 1 0 1 0\n",
+        "$$..*$...*$.***$$$$\n",
+    );
+    for lossless { in |
+        lossless_mrm(memo, in);
+    };
+    memo.lossy_rmr(  // smaller than a base node of macrocell format.
+        "x = 4, y = 4, rule = b3/s23\n4o$o2bo$4o$!",
+        "x = 8, y = 8, rule = b3/s23\n2$2b4o2b$2bo2bo2b$2b4o2b4$!",
+    );
+    
+    // https://conwaylife.com/patterns/all.zip expect some to fail because they're >2 state. 
+    @if(false) check_folder(memo, "../../Downloads/all");  
+    
+    // TODO: test some parse errors
+    drop(memo);
+}
+
+mc_header_line :: "[M2] (franca.lukegrahamlandry.ca)\n";
+lossless_mrm :: fn(memo: *Life.Memo, in: Str) void = {
+    out := @ref u8.list(temp());
+    in := @tfmt("%%", mc_header_line, in);
+    it := Patterns'read(memo, in).or(fn(it) => panic(it));
+    node := it.node;
+    it := Patterns'read(memo, in).or(fn(it) => panic(it));
+    @assert(node.id == it.node.id, "nodes weren't interned");
+    Patterns'write_mc(out, memo, it.node, it.size);
+    @assert_eq(in, out.items());
+    out.clear();
+    Patterns'write_rle(out, memo, it.node, it.size);
+    @assert(!out.items().starts_with("[M2]"), "that's cheating!");
+    it := Patterns'read(memo, out.items()).or(fn(it) => panic(it));
+    out.clear();
+    Patterns'write_mc(out, memo, it.node, it.size);
+    @assert_eq(in, out.items());
+    out.clear();
+};
+
+lossy_rmr :: fn(memo: *Life.Memo, in: Str, expect: Str) void = {
+    out := @ref u8.list(temp());
+    it := Patterns'read(memo, in).or(fn(it) => panic(it));
+    Patterns'write_mc(out, memo, it.node, it.size);
+    it := Patterns'read(memo, out.items()).or(fn(it) => panic(it));
+    out.clear();
+    Patterns'write_rle(out, memo, it.node, it.size);
+    @assert_eq(out.items(), expect);
+};
+
+check_folder :: fn(memo: *Life.Memo, path: Str) void = {
+    #use("@/examples/testing.fr");
+    files := collect_directory_ordered(path, temp(), temp())
+        || @panic("missing folder %", path);
+    total, errors := (0, 0);
+    for files { it |
+        name := it.name;
+        if name.ends_with(".mc") || name.ends_with(".rle") {
+            in := read_entire_file_or_crash(temp(), @tfmt("%/%", path, name));
+            total += 1;
+            @match(Patterns'read(memo, in)) {
+                fn Ok() => ();
+                fn Err(msg) => {
+                    @eprintln("[%] %", name, msg);
+                    errors += 1;
+                }
+            };
+        }
+    };
+    @println("[%] %/% files ok", path, total-errors, total);
+}
+
+fn eval(new: *Life.BitBoard, old: *Life.BitBoard) void = {
+    w := old.size;
+    do_life(w, w, P, fn(x, y, val) => new.set(x, y, val));
+    P :: fn(x: i64, y: i64) u32 => {
+        oob := x < 0 || y < 0 || x >= w || y >= w;
+        @if(oob, 0, old.get(x, y))
+    };
+}
+
+BitGame :: @struct(boards: Array(Patterns.BitBoard, 2), parity: bool);
+
+empty_bit_game :: fn(a: Alloc, w: i32) BitGame = 
+    (boards = (Patterns'empty_bitboard(a, w), Patterns'empty_bitboard(a, w)), parity = false); 
+fn get(self: *BitGame) *Patterns.BitBoard = 
+    self.boards&[self.parity.int()]&;
+fn drop(self: *BitGame, a: Alloc) void = 
+    for self.boards& { it | a.dealloc(u32, it.bits); it.bits.len = 0; };
+
+fn eval(self: *Life.BitGame) void = {
+    eval(self.boards&[self.parity.not().int()]&, self.get());
+    self.parity = !self.parity;
+}
+
+Life :: import("@/examples/life/eval.fr");
+Patterns :: import("@/examples/life/pattern.fr");
