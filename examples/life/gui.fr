@@ -7,9 +7,8 @@ right click: draw cells (shift: delete).
 space: play/pause. s: step. 
 a: center view. r: kill all cells. 
 cli/dragndrop/paste: load (.rle),(.mc) pattern
-f: toggle fast eval
-g: grow canvas
 c: copy pattern as (.mc). b: copy pattern as (.rle). 
+[/]: eval speed 50%/2x
 """;
 
 State :: @struct {
@@ -28,13 +27,13 @@ State :: @struct {
     dirty: bool;
     flat: Patterns.BitBoard;
     paused: bool;
-    fast_eval: bool;  // multiple steps per hashlife recursion
     show_info: bool;
     sg: *Sg.Self;
     memo: Memo;
     text: Sdtx.Self;
     pattern: List(u8);
     debug: Str;  // temp()
+    eval_speed: i32;
 };
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -52,6 +51,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.uni.scale = 1.0;
     sapp.set_window_title("Life (press h for help)");
     state.paused = true;
+    state.eval_speed = 1;
     
     for cli_args() { it |
         path := it.str();
@@ -189,20 +189,16 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                         state.pattern&.clear();
                 }
                 fn H() => @if(!event.key_repeat) { state.show_info = !state.show_info; }
-                fn F() => { 
-                    state.fast_eval = !state.fast_eval;
-                    // TODO: also allow old next pointers to be gc-ed (rn they're just ignored in eval)
-                };
-                // TODO: just auto expand as needed so it's like infinite board. 
-                fn G() => {
-                    state.memo.root = state.memo&.zero_fill_grow(state.memo.root&, state.memo.size);
-                    state.resize_canvas(state.sg, state.memo.size * 2);
-                    state.recenter();
-                }
                 fn MINUS() => apply_zoom(-state.uni.scale / 2);
                 fn EQUAL() => apply_zoom(state.uni.scale);
                 fn C() => write(Patterns'write_mc);
                 fn B() => write(Patterns'write_rle);
+                fn LEFT_BRACKET() => if state.eval_speed > 1 {
+                    state.eval_speed /= 2;
+                }
+                fn RIGHT_BRACKET() => if state.eval_speed < 1.shift_left(30) {
+                    state.eval_speed *= 2;
+                }
                 @default => return();
             };
         };
@@ -240,6 +236,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         };
         state.uni.scale += delta;
     };
+    // TODO: wtf is this putting a new line on the front
     write :: fn($write) => {
         out := u8.list(temp());
         write(out&, state.memo&, state.memo.root, state.memo.size);
@@ -367,7 +364,14 @@ fn maybe_resize_buffer(state: *State) void = {
 
 fn tick(state: *State) void = {
     state.dirty = true;
-    state.memo&.eval(state.fast_eval);
+    old_size := state.memo.size;
+    state.memo&.eval(state.eval_speed, true);
+    new_size := state.memo.size;
+    if old_size != new_size {
+        factor := (new_size / old_size).intcast().float();
+        state.uni.pos += state.uni.canvas / factor;
+        resize_canvas(state, state.sg, new_size);
+    };
 }
 
 load_pattern :: fn(state: *State, sg: *Sg.Self, path: Str) void = {
@@ -450,8 +454,9 @@ fn maybe_show_info(state: *State, sapp: *Sapp.Self) f32 = {
     s := uni.scale;
     @if(s >= 1, @fmt(msg, "%x", s), @fmt(msg, "1/%", 1/s));
     @fmt(msg, "; pos=(%,%);\n", uni.pos.x, uni.pos.y);
-    stable := root.next.id != 0 && root.next_fast == state.fast_eval;
-    @fmt(msg, "paused=%; fast=%; stable=%;\n", state.paused, state.fast_eval, stable);
+    // todo: stable is wrong if need to grow in eval to get more steps
+    stable := root.next.id != 0 && root.next_step == state.eval_speed;
+    @fmt(msg, "paused=%; steps=%; stable=%;\n", state.paused, state.eval_speed, stable);
     msg.push_all(state.debug);
     @fmt(msg, "\n");
     sdtx.put(msg.items());

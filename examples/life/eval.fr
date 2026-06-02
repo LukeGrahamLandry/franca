@@ -23,7 +23,7 @@ Node :: @rec @struct {
     children: Array(NodeId, 4);
     next := zeroed(NodeId);  // memoized eval_center()
     population: u32 = 0;
-    next_fast := false;  // :SLOW 1 bit costs 4 bytes (but when i want to allow more different speeds, this will need more bits)
+    next_step: i32 = 0;
 };
 
 // index in memo.active_buf.
@@ -32,7 +32,7 @@ Node :: @rec @struct {
 // since arrays are filled in order, collect_garbage can stop on 0 in a gc_root and not treat the base bits as indices. 
 NodeId :: @struct(id: u32);  
 
-base_case_w :i32: 0x00000002;  // TODO: profile different sizes: 2/4/8
+base_case_w :: @as(i32) 2;
 Memo :: @struct {
     active_buf: *RawList(Node);  // memo.buf&[buf_i]&... can't hurt
     table: []NodeId;  // hash table with masked node.hash() (the flat/linear probing kind not the linked list buckets kind)
@@ -135,10 +135,10 @@ fn gc_table_insert(self: *Memo, nid: NodeId, node: *Node) void = {
   };
 }
 
+invert :: @const_slice(2, 3, 0, 1);
 fn zero_fill_grow(memo: *Memo, root: *NodeId, size: i32) NodeId = {
     // an extra level of quadtree where the old root node is just surrounded by dead cells. 
     // ex. top left of old root becomes bottom right of the new root's top left node. children are clockwise.
-    invert :: @const_slice(2, 3, 0, 1);
     memo.gc_reserve(size.trailing_zeros() + 5);
     empty := memo.empty_node(size/2);
     children := zeroed Array(NodeId, 4);
@@ -152,32 +152,56 @@ fn zero_fill_grow(memo: *Memo, root: *NodeId, size: i32) NodeId = {
     memo.push(children = children)
 }
 
-fn eval(memo: *Memo, fast: bool) void = {
-    wrapped_root := memo.zero_fill_grow(memo.root&, memo.size);
+fn eval(memo: *Memo, step: i32, infinite: bool) void = {
     size := memo.size;
-    root_one(memo, wrapped_root) { wrapped_root |
-        memo.gc_roots&.reserve((size*2).trailing_zeros().zext() * 2);
-        memo.root = eval_center(memo, wrapped_root, size*2, fast);
+    @debug_assert_eq(step.count_ones(), 1, "can only step a power of two");
+    root_one(memo, memo.root) { node |
+        // need at least one size larger because can only eval the center so lose edges. 
+        // max step size is based on recursion depth of eval so might need to grow more. 
+        n := 0;
+        dowhile {
+            node[] = memo.zero_fill_grow(node, size);
+            size *= 2;
+            n += 1;
+            !(size/base_case_w > step) && size < 1.shift_left(30)
+        };
+        memo.gc_roots&.reserve(size.trailing_zeros().zext() * 2);
+        node[] = eval_center(memo, node, size, step);
+        size /= 2;
+        
+        if n == 1 && infinite && memo.border_has_population(node[]) && size < 1.shift_left(29) {
+            node[] = memo.zero_fill_grow(node, size);
+            size *= 2;
+        };
+        
+        while => n > 1 && (!infinite || !memo.border_has_population(node[])) {
+            node[] = memo.get_center_no_eval(node);
+            n -= 1;
+            size /= 2;
+        };
+        
+        memo.root = node[];
+        memo.size = size;  // if had to grow for infinite
     };
 }
 
 // the grinch's heart shrank to half sizes that day
 // UNSAFE: `node` must be rooted and gc_roots must have reserved enough capacity for all the levels of recursion
-fn eval_center(memo: *Memo, n: *NodeId, size: i32, fast: bool) NodeId = {
+fn eval_center(memo: *Memo, n: *NodeId, size: i32, step: i32) NodeId = {
     node := memo.get(n[]);
     @debug_assert(node.children&[0].id != 0, "eval_center too low");
-    if node.next.id != 0 && node.next_fast == fast {
+    if node.next.id != 0 && node.next_step == step {
         return node.next;
     };
     ::if(NodeId);
     new := if size == base_case_w * 2 {
         center_base_case(memo, n)
     } else {
-        eval_center_split_merge(memo, n, size, fast)
+        eval_center_split_merge(memo, n, size, step)
     };
     node := memo.get(n[]);
     node.next = new;
-    node.next_fast = fast;
+    node.next_step = step;
     new
 };
 
@@ -186,7 +210,7 @@ fn eval_center(memo: *Memo, n: *NodeId, size: i32, fast: bool) NodeId = {
 // to cover the whole node, need to reorganize children 
 // (into new nodes that aren't aligned to the original quad tree). 
 // UNSAFE: `node` must be rooted
-fn eval_center_split_merge(memo: *Memo, node: *NodeId, size: i32, fast: bool) NodeId = {
+fn eval_center_split_merge(memo: *Memo, node: *NodeId, size: i32, step: i32) NodeId = {
     // children are clickwise starting at top left (but grandchildren are sorta a spiral)
     N :: fn(T: Type) #fold = size_of(Deref(T))/size_of(NodeId);
     grandchildren :: fn(children: ~T) *Array(NodeId, N(T)*4) #inline/*semantic*/ #where => {
@@ -235,10 +259,11 @@ fn eval_center_split_merge(memo: *Memo, node: *NodeId, size: i32, fast: bool) No
         out
     };
     eval_centers :: fn(in, n: i32) => pin_for_eval(in, n, fn(node) => 
-        eval_center(memo, node, size, fast));
+        eval_center(memo, node, size, step));
     
     n3 := eval_centers(n2, 5);
     
+    fast := !(size/base_case_w > step);
     if !fast && size != base_case_w * 2 {
         n6 := grandchildren(n3);
         n7 := @ref @as(Array(NodeId, 4)) (  // clockwise
@@ -329,6 +354,7 @@ get_bit_from_base_children :: fn(memo: *Memo, node: *NodeId, x: i64, y: i64) boo
     panic("no hits");
 }
 
+// this doesn't clear if !value but i always start with h=0 so it's fine
 set_base_bit :: fn(h: *u64, x: i64, y: i64, value: bool) void = {
     i := y*base_case_w+x;
     h[] = h[].bit_or(value.int().shift_left(i).bitcast());
@@ -420,6 +446,33 @@ fn gc_reserve(memo: *Memo, n: i32) void #inline = {
     // TODO: resize. annoying thing is there might technically never too big a live set but you're slow because keep doing redundant work by clearing the cache. 
     //                    plus have to resize and rehash the table.
     @debug_assert(b.len + n <= b.cap, "too many live nodes");
+}
+
+fn get_center_no_eval(memo: *Memo, root: *NodeId) NodeId = {
+    memo.gc_reserve(1);
+    children := zeroed Array(NodeId, 4);
+    root := memo.get(root[]);
+    @debug_assert(root.children&[0].id != 0, "TODO: allow get_center_no_eval when only two layers");
+    range(0, 4) { i |
+        children&[i] = memo.get(root.children&[i])[].children&[invert[i]];
+    };
+    memo.push(children = children)
+}
+
+// for now just always grow at base and base+1, don't care enough to special case it. 
+fn border_has_population(memo: *Memo, root: NodeId) bool = {
+    @if(root.id == 0) return(true);
+    root := memo.get(root);
+    @if(root.children&[0].id == 0) return(true);
+    range(0, 4) { i |
+        c := memo.get(root.children&[i]);
+        range(0, 4) { j |
+            if j != invert[i] && memo.get(c.children&[j])[].population != 0 {
+                return true;
+            }
+        };
+    };
+    false
 }
 
 fn root_one(memo: *Memo, node: NodeId, $body: @Fn(node: *NodeId) void) void = {

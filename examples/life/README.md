@@ -12,9 +12,6 @@ Hashlife: quadtree + deduplicate + memoize = fast eval because many patterns are
 This program can load RunLengthEncoded (.rle) and Macrocell (.mc) pattern files. 
 - https://conwaylife.com/patterns/all.zip
 
-TODO: infinite canvas
-TODO: control how many generations are stepped when doing hashlife
-      instead of just fast=true/false, toggle it at each recursion level to get any power of two step size. 
 TODO: put eval on other threads
       then can allow moving the shader params to give a slight sense of progress while waiting to update the frame if its slow. 
 TODO: experiment with eval in compute shader
@@ -23,8 +20,9 @@ TODO: pattern gallery
 TODO: add some tests
   - run a small pattern in normal and in hashlife and makes sure they match
 TODO: speed up compress() (for loading .rle to hashlife)
-TODO: a thing to generate big patterns from one life-in-life cell
 TODO: fix the rare missing pixel on the edge for fractional movement
+TODO: the zoom is still kinda shaky?
+TODO: store size/step as log2 so can go farther? but then pos math is a problem. 
 
 TODO: program that generates this visualisation
 ![indices in eval_center_split_merge](https://lukegrahamlandry.ca/assets/hashlife.jpg)

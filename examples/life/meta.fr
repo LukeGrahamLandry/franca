@@ -1,0 +1,55 @@
+// https://conwaylife.com/wiki/OTCA_metapixel
+// this builds a life-in-life pattern. 
+// (target/cell_on.mc, target/cell_off.mc) are the 2048 wide tiles to use. 
+// the template cells are different than the steady state of an active pattern
+// (there are zigzag things in the corners that cancel each other out except at the edges). 
+// somewhere i found a big pattern set up right and copied out template cells in https://golly.sourceforge.io/webapp/golly.html 
+// it must have been this one https://blog.amandaghassaei.com/2020/05/01/the-recursive-universe/metacell.mc
+// TODO: understand how it actually works and build it up from smaller parts so this program is actually all the information needed. 
+
+main :: fn() void = {
+    #use("@/lib/sys/fs.fr");
+    memo := zeroed Memo; memo := memo&;
+    new_memo(memo, general_allocator());
+    
+    template :: fn(path: Str) => {
+        in := read_entire_file_or_crash(temp(), path);
+        it := read(memo, in).or(fn(it) => panic(it));
+        @debug_assert_eq(it.size, 2048);
+        it.node
+    };
+    on := template("target/cell_on.mc");
+    off := template("target/cell_off.mc");
+    
+    in := "x = 9, y = 9\n2bo2bobob$2obob3ob$bo6bo$2o5bob2$bo5b2o$o6bob$b3obob2o$bobo2bo!"; // Kok's galaxy
+    it := read(memo, in).or(fn(it) => panic(it));
+    in := @ref empty_bitboard(temp(), it.size);
+    decompress(in, memo, it.node, it.size);
+    
+    @assert(it.size.intcast()*2048 < MAX_i32, "TODO: too big");
+    
+    self := @anon_literal(_ = memo, _ = in, cell = @as(Array(NodeId, 2)) (off, on));
+    node := recur(self&, v2(0), in.size);
+    recur :: fn(self: *@type self, pos: V2, size: i32) NodeId = {
+        if size == 1 {
+            value := self.in.get(pos.x, pos.y) == 1;
+            return self.cell&[value.int()];
+        };
+        
+        c := @ref @zeroed Array(NodeId, 4);
+        range(0, 4) { i |
+            c[i] = recur(self, pos + direction[i]*size/2, size/2);
+        };
+        self.memo.push(children = c[])
+    }
+    
+    buf := @ref u8.list(temp());
+    node := zero_fill_grow(memo, node&, in.size*2048);   // needed because i don't do infinite canvas. edges die if no space around. 
+    write_mc(buf, memo, node, in.size*2048 * 2);
+    print(buf.items());
+    
+    drop(memo);
+}
+
+#use("@/examples/life/eval.fr");
+#use("@/examples/life/pattern.fr");

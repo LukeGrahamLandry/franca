@@ -1,4 +1,6 @@
 
+- `a :: @as(i32) 1l` isn't the same as `a: i32 : 1;` 
+  (the latter doesn't remember the type when you use it in a larger expression that would also work with i64). 
 - fix the bug in elide_abi_slots. there's one i knew about already hopefully its the same one that's breaking non-inlined clamp. 
 - the cpu vec.fr functions generate terrible ir. it gets fixed by the time it gets to asm
   (because of elide slots) but they look big early so aren't inlinable. compare #log_ir("ih") to #log_ir("Rh"). 

@@ -1,4 +1,19 @@
 
+## (Jun 2)
+
+- life: expand canvas when it gets near the border. 
+  can't do infinite because run out of precision in i32 positions but now goes longer before deleting cells. 
+
+## (May 29,30)
+
+- choosing step distance by titrating the number of levels with fast=true seems to work perfectly. 
+  each fast level doubles step distance so any power of two less than depth by doing that many fast ones 
+  and can increase depth by wrapping with more empty squares. 
+- experimented with generating meta-cell patterns. 
+  confusion about 2058 vs 2048, template ones needing the zigzags that disappear in the middle. 
+  i can't make the ones from the wiki work. even as .mc the templates are ~200kb. 
+  can't be a tight fit around the edges because i don't auto expand canvas. 
+
 ## (May 28)
 
 - writers for rle,mc. trivial roundtrip tests. 
