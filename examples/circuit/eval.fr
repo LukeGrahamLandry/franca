@@ -1,0 +1,177 @@
+
+main :: fn() void = {
+    world := @ref zeroed(World);
+    gate := init(world, "counter", temp(), false);
+    values := temp().alloc_zeroed(WireValue, 4);
+    values[0] = (byte = 10);
+    values[1] = (bit = true);
+    range(0, 10) { _ |
+        eval(
+            world, values, 
+            @slice(@as(WireId) (id = 3)), 
+            @slice(@as(WireId) (id = 0), (id = 1)), 
+            gate, 
+            0,
+        );
+        @debug_assert_eq(world.instance, world[gate].storage_count);
+        @debug_assert(!world.doing_pre_read);
+        @debug_assert_eq(world.scratch.len, 0);
+        world.instance = 0;
+        @println("%", values[3].byte);
+        values[1] = (bit = false);
+    };
+    //@println("result = % (expect %)", values[3].byte, @as(u8) 123.add(234));
+}
+
+fn init(world: *World, name: Str, a: Alloc, save_wire_values: bool) ComponentId = {
+    gate := defs.components.index_of(fn(it) => it.name == name).unwrap();
+    child := defs.components[gate]&;
+    wires := @if(save_wire_values, child.wire_sum, child.wire_depth);
+    world[] = (
+        components = defs.components,
+        scratch = from_capacity(a.alloc_uninit(WireValue, wires)),
+        instance = 0,
+        storage = a.alloc_zeroed(WireValue, child.storage_count),
+        doing_pre_read = false,
+        save_wire_values = save_wire_values,
+    );
+    (id = gate.trunc())
+}
+
+fn drop(world: *World, a: Alloc) void = {
+    world.scratch&.drop(a);
+    a.dealloc(WireValue, world.storage);
+    world[] = zeroed(World);
+}
+
+WireValue :: @struct {
+    value: (@union(bit: bool, byte: u8)) #use;
+};
+
+ComponentEval :: @struct {
+    ast: ComponentId;
+    wires: []WireValue;
+};
+
+World :: @struct {
+    components: []Component;
+    scratch: RawList(WireValue);
+    // each instance of a delay component needs a unique bit of storage. including when 
+    // nested inside other components. so reset this index for each top level eval call 
+    // and evaluation it never short circuits, an instance will always get the same slot. 
+    instance: i64;
+    storage: []WireValue;
+    // i evaluate the gates in order but output of a memory can be used before def. 
+    // so do a prepass where just read from storage into wire. 
+    doing_pre_read: bool;
+    // for visualization, don't unscratch so can show values of wires in nested gates. 
+    save_wire_values: bool;
+};
+
+fn eval(world: *World, parent: []WireValue, out: []WireId, in: []WireId, component: ComponentId, param: i64) void = {
+    c := world[component]&;
+    // can't just early return here on (doing_pre_read&&storage_count==0) 
+    // ex. memory8 needs to use make_byte to write its output. 
+    
+    if c.wire_count == 0 {
+        f := defs.primitives[component.id.zext()];
+        return f(world, parent, out, in, param);
+    };
+    
+    wires := world.scratch(c.wire_count);
+    inputs, outputs := (c.gates[0].outputs, c.gates[c.gates.len - 1].inputs);
+    @debug_assert_eq(inputs.len, in.len, "eval input arity %", c.name);
+    range(0, in.len) { i |
+        wires[inputs[i].id.zext()] = parent[in[i].id.zext()];
+    };
+    gates := c.gates.slice(1, c.gates.len - 1);
+    doing_pre_read, instance := (world.doing_pre_read, world.instance);
+    if c.storage_count != 0 {
+        world.doing_pre_read = true;
+        each gates { it |
+            world.eval(wires, it.outputs, it.inputs, it.kind, it.param);
+        };
+    };
+    if !doing_pre_read {
+        world.instance = instance;
+        world.doing_pre_read = false;
+        each gates { it |
+            world.eval(wires, it.outputs, it.inputs, it.kind, it.param);
+        };
+    };
+    world.doing_pre_read = doing_pre_read;
+    @debug_assert_eq(outputs.len, out.len, "eval output arity %", c.name);
+    range(0, out.len) { i |
+        parent[out[i].id.zext()] = wires[outputs[i].id.zext()];
+    };
+    
+    @if(false) if c.name == "counter" && !doing_pre_read {
+        enumerate wires { i, it |
+            @println("[%] %", i, it.byte);
+        };
+    };
+    
+    if !world.save_wire_values || doing_pre_read {
+        world.unscratch(wires);
+    };
+}
+
+primitives :: @struct {
+    nand :: fn(world, parent, out, in, param) = {
+        a, b := (parent[in[0].id.zext()].bit, parent[in[1].id.zext()].bit);
+        parent[out[0].id.zext()].bit = a.int().bit_and(b.int()) == 0;
+    };
+    input :: fn(world, parent, out, in, param) = panic("only one input allowed");
+    output :: fn(world, parent, out, in, param) = panic("only one output allowed");
+    byte_split :: fn(world, parent, out, in, param) = {
+        r := parent[in[0].id.zext()].byte;
+        range(0, 8) { i |
+            parent[out[i].id.zext()].bit = r.bit_and(1.shift_left(i)) != 0;
+        };
+    };
+    byte_make :: fn(world, parent, out, in, param) = {
+        r: u8 = 0;
+        range(0, 8) { i |
+            r = r.bit_or(parent[in[i].id.zext()].bit.int().shift_left(i).trunc());
+        };
+        parent[out[0].id.zext()].byte = r;
+    };
+    const :: fn(world, parent, out, in, param) = {
+        parent[out[0].id.zext()].bit = param == 1;
+    };
+    // TODO: detect same wire being written by multiple switches in the same tick
+    // TODO: default to off if none write
+    // TODO: detect use before all writes done
+    switch1 :: switch8;
+    switch8 :: fn(world, parent, out, in, param) = {
+        a, b := (parent[in[0].id.zext()], parent[in[1].id.zext()].bit);  // value, cond
+        if b {
+            parent[out[0].id.zext()] = a;
+        };
+    };
+    delay :: fn(world, parent, out, in, param) = {
+        @debug_assert_ult(world.instance, world.storage.len, "must preallocate storage_count");
+        slot := world.storage[world.instance]&;
+        parent[out[0].id.zext()] = slot[];
+        if !world.doing_pre_read {
+            slot[] = parent[in[0].id.zext()];
+        };
+        world.instance += 1;
+    };
+}
+
+fn scratch(world: *World, n: i64) []WireValue = {
+    @debug_assert_ule(world.scratch.len + n, world.scratch.cap, "must preallocate wire_depth");
+    world.scratch.len += n;
+    world.scratch.slice(world.scratch.len - n, world.scratch.len)
+}
+
+fn unscratch(world: *World, wires: []WireValue) void = {
+    @debug_assert(identical(world.scratch.items().end_pointer(), wires.end_pointer()), "scratch bad nesting");
+    world.scratch.len -= wires.len;
+}
+
+fn index(world: *World, i: ComponentId) *Component = world.components.index(i.id.zext()); 
+
+#use("@/examples/circuit/parse.fr");
+#use("@/lib/collections/map.fr");

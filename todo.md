@@ -1,4 +1,5 @@
 
+- make examples/web/serve.fr not slow as fuck
 - `a :: @as(i32) 1l` isn't the same as `a: i32 : 1;` 
   (the latter doesn't remember the type when you use it in a larger expression that would also work with i64). 
 - fix the bug in elide_abi_slots. there's one i knew about already hopefully its the same one that's breaking non-inlined clamp. 

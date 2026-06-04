@@ -1,0 +1,194 @@
+// TODO: instead of this, the defs could be functions you actually call once 
+//       that operate on symbolic graph nodes. that way you could use franca 
+//       loops and $const arg functions as macros for some of the repetitive 
+//       components (ie. all the 8 bit logic that just needs to split bytes and use 1 bit). 
+// TODO: if i don't do the symbolic thing ^, need to make this a more complicated recursive thing
+//       that allows nested expressions only used once to be unnamed wires.
+//       so you can do ex. `and :: @{ w0, w1 := input(); output(not(nand(w0, w1))); }`
+//       the extra lines don't make it more readable. if i do symbolic, get that for free. 
+// TODO: i do want this interpreter form for visualizing all the wire states
+//       but also compile the logic to actual code where wire slots are just variables 
+//       so they can be executed fast when a component isn't being rendered. 
+
+Component :: @struct {
+    name: Str;
+    gates: []Gate;
+    wire_count: i64;
+    storage_count: i64;
+    wire_depth: i64;  // recursive max wire_count of children
+    wire_sum: i64;    // like ^ but don't reset scratch for each child so can use it for visualization
+    Gate :: @struct {
+        kind: ComponentId;
+        inputs: []WireId;
+        outputs: []WireId;
+        param: i64;
+    };
+};
+ComponentId :: @struct(id: u32);
+WireId :: @struct(id: u32);
+GateId :: @struct(id: u32);
+
+defs :: @static {
+    #use("@/lib/collections/map.fr");
+    components := @ref Component.list(ast_alloc());
+    map: HashMap(Symbol, ComponentId) = init(temp());
+    
+    // TODO: can't import the file that is the top level scope like this. 
+    //       so can't have this work with a main function in both parse.fr and eval.fr. 
+    //Eval :: import("@/examples/circuit/eval.fr");
+    //S := Type.scope_of(Eval.primitives);
+    S := Type.scope_of(primitives);
+    F :: @FnPtr(world: */*Eval.*/World, parent: []/*Eval.*/WireValue, out: []WireId, in: []WireId, param: i64) void;
+    prims := @ref F.list(ast_alloc());
+    for get_constants(S) { name |
+        components.push(
+            name = name.str(), gates = empty(), 
+            wire_count = 0, wire_depth = 0, wire_sum = 0,
+            storage_count = int(name == sym("delay")),
+        );
+        map&.insert(name, (id = components.len.trunc() - 1));
+        f := F.get_constant(S, name)
+            || panic("");
+        prims.push(f);
+    };
+    
+    S := import("@/examples/circuit/defs.fr");
+    for get_constants(S) { name |
+        continue :: local_return;
+        it := FatExpr.get_constant(S, name) || continue();
+        gates := @ref Component.Gate.list(ast_alloc());
+        @ct_assert(it.expr&.is(.Block), it.loc, "expected block body");
+        block := it.expr.Block&;
+        defs: HashMap(WireId, ComponentId) = init(temp());
+        storage_count := 0;
+        wire_depth, wire_sum := (0, 0);
+        locations := Span.list(block.body.len, temp());
+        ::AutoHash(WireId, TrivialHasher); ::AutoEq(WireId);
+        
+        for block.body { it |
+            continue :: local_return;
+            in, out, kind := (@ref WireId.list(ast_alloc()), @ref WireId.list(ast_alloc()), @symbol none);
+            param := 0;
+            
+            do_value :: fn(expr: *FatExpr) void => {
+                @ct_assert(expr.expr&.is(.Call), expr.loc, "expected call expr");
+                call := expr.expr.Call&;
+                kind = call.f.ident()
+                    || compile_error("expected identifier (gate name)", call.f.loc);
+                
+                if kind == sym("const") {
+                    param = i64.const_eval(call.arg[]);
+                };
+                
+                @if(!call.arg.expr&.is(.Value))
+                each call.arg.items() { it |
+                    name := it.ident()
+                        || compile_error("expected identifier (wire id)", it.loc);
+                    in.push(to_wire_id(name, it.loc));
+                };
+            };
+            
+            to_wire_id :: fn(name: Symbol, loc: Span) WireId = {
+                name := name.str();
+                @ct_assert(name.starts_with("w") || name.starts_with("W"), loc, "expected wire name start with 'w'");
+                i, extra := convert_number(name.rest(1), 10, dec_digit);
+                @ct_assert(extra.len == 0, loc, "expected number after 'w' in wire name");
+                (id = i.trunc())
+            };
+            
+            @match(it.stmt&) {
+                fn Decl(it) => {
+                    out.push(to_wire_id(it[].ident().unwrap(), it.default.loc));
+                    do_value(it.default&);
+                }
+                fn DeclVarPattern(it) => {
+                    each it.binding.bindings { it |
+                        out.push(to_wire_id(it.ident().unwrap(), it.default.loc));
+                    };
+                    do_value(it.value&);
+                }
+                fn Eval(it) => do_value(it);
+                fn Noop() => continue();
+                @default => compile_error("bad stmt type", it.loc);
+            };
+            
+            kind := map&.get(kind)
+                || compile_error(@tfmt("undeclared component kind %", kind.str()), it.loc);
+            child := components[kind.id.zext()]&;
+            storage_count += child.storage_count;
+            wire_depth = max(wire_depth, child.wire_depth);
+            wire_sum += child.wire_sum;
+            
+            // todo: only allow if the eventual def component storage_count!=0
+            //for in { id |
+                //@ct_assert(defs&.get(id).is_some(), it.loc, "use before def: w%", id.id);
+            //};
+            for out { id |
+                prev := defs&.insert(id, kind);
+                if prev { prev |
+                    name0, name1 := (child.name, components[prev.id.zext()].name);
+                    switch := @const_slice("switch1", "switch8");
+                    ok := switch.contains(name0) && switch.contains(name1);
+                    @ct_assert(ok, it.loc, "multiple defs: w%", id.id);
+                };
+            };
+            
+            locations&.push(it.loc);
+            gates.push(kind = kind, inputs = in.items(), outputs = out.items(), param = param);
+        };
+        
+        @ct_assert(gates.len >= 2, it.loc, "must have at least input() and output()");
+        @ct_assert(components[gates[0].kind.id.zext()].name == "input", it.loc, "first gate must be input");
+        @ct_assert(components[gates[gates.len - 1].kind.id.zext()].name == "output", it.loc, "last gate must be output");
+
+        // can't check in the main loop because of memory
+        enumerate gates { i, it |
+            for it.inputs { id |
+                @ct_assert(defs&.get(id).is_some(), locations[i], "use undefined: w%", id.id);
+            };
+        };
+        
+        wire_count := 0;
+        each defs& { k, _ |
+            wire_count = max(wire_count, k.id.zext());
+        };
+        
+        components.push(
+            name = name.str(),
+            gates = gates.items(),
+            wire_count = wire_count + 1,
+            storage_count = storage_count,
+            wire_depth = wire_depth + wire_count + 1,
+            wire_sum = wire_sum + wire_count + 1,
+        );
+        map&.insert(name, (id = components.len.trunc() - 1));
+    };
+    @anon_literal(
+        components = components.items(),
+        primitives = prims.items(),
+    )
+}
+
+main :: fn() void = {
+    components := defs.components;
+    out := @ref u8.list(temp());
+    for components { it |
+        @fmt(out, "% :: @{\n", it.name);
+        for it.gates { it |
+            @fmt(out, "    ");
+            for it.outputs { it |
+                @fmt(out, "w%, ", it.id);
+            };
+            out.len -= 2 * int(out.items().ends_with(", "));
+            @if(it.outputs.len > 0) @fmt(out, " := ");
+            @fmt(out, "%(", components[it.kind.id.zext()].name);
+            for it.inputs { it |
+                @fmt(out, "w%, ", it.id);
+            };
+            out.len -= 2 * int(out.items().ends_with(", "));
+            @fmt(out, ");\n");
+        };
+        @fmt(out, "};\n");
+    };
+    println(out.items());
+}

@@ -1,8 +1,27 @@
 
+## (Jun 3)
+
+circuit
+- trying to debug mistakes by printing out wires at random recursion levels is a bit painful. 
+  made basic gui. just showing the graph as text again. 
+  keep all the wire values so can let you click in to
+  individual gates and see the inner wires on the previous tick. 
+
 ## (Jun 2)
 
 - life: expand canvas when it gets near the border. 
   can't do infinite because run out of precision in i32 positions but now goes longer before deleting cells. 
+
+playing Turing Complete inspired me to do a simulator for the cpu circuit made in that game. 
+- starting with i guess a shitty version of verilog for making the different gates. 
+  i could read my save files from the game but i don't care about spacial arrangement,
+  i just want it as a graph and i'd rather it be text that i can sanely commit. 
+- why bother with another parser, can just use syntax of my language and look at the ast nodes. 
+- interpreter for the stateless circuits is easy. require input order use-before-def and then can just iterate. 
+- the way im doing switches won't compose in nested components but its fine for now. 
+- components with memory is more complicated. need to keep track of location in the traversal. 
+  also now need to allow getting output before input is ready so memory eval needs to be 
+  split into two passes i guess. 
 
 ## (May 29,30)
 
