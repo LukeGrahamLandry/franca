@@ -1,4 +1,10 @@
 
+## (Jun 4)
+
+- finish overture (program memory, cond, instruction decoding). 
+  - good progress, now i have something that's too slow as an incentive to compile (writing the program by ticking 256 times at the start)
+- be less painful: allow discarding a gate output without naming it. show memory/register data together in gui. 
+
 ## (Jun 3)
 
 circuit

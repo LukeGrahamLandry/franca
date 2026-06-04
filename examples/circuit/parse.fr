@@ -17,6 +17,7 @@ Component :: @struct {
     storage_count: i64;
     wire_depth: i64;  // recursive max wire_count of children
     wire_sum: i64;    // like ^ but don't reset scratch for each child so can use it for visualization
+    gate_sum: i64;
     Gate :: @struct {
         kind: ComponentId;
         inputs: []WireId;
@@ -35,15 +36,14 @@ defs :: @static {
     
     // TODO: can't import the file that is the top level scope like this. 
     //       so can't have this work with a main function in both parse.fr and eval.fr. 
-    //Eval :: import("@/examples/circuit/eval.fr");
-    //S := Type.scope_of(Eval.primitives);
-    S := Type.scope_of(primitives);
-    F :: @FnPtr(world: */*Eval.*/World, parent: []/*Eval.*/WireValue, out: []WireId, in: []WireId, param: i64) void;
+    Eval :: import("@/examples/circuit/eval.fr");
+    S := Type.scope_of(Eval.primitives);
+    F :: @FnPtr(world: *Eval.World, parent: []Eval.WireValue, out: []WireId, in: []WireId, param: i64) void;
     prims := @ref F.list(ast_alloc());
     for get_constants(S) { name |
         components.push(
             name = name.str(), gates = empty(), 
-            wire_count = 0, wire_depth = 0, wire_sum = 0,
+            wire_count = 0, wire_depth = 0, wire_sum = 0, gate_sum = 1,
             storage_count = int(name == sym("delay")),
         );
         map&.insert(name, (id = components.len.trunc() - 1));
@@ -61,7 +61,7 @@ defs :: @static {
         block := it.expr.Block&;
         defs: HashMap(WireId, ComponentId) = init(temp());
         storage_count := 0;
-        wire_depth, wire_sum := (0, 0);
+        wire_depth, wire_sum, gate_sum := (0, 0, 0);
         locations := Span.list(block.body.len, temp());
         ::AutoHash(WireId, TrivialHasher); ::AutoEq(WireId);
         
@@ -90,6 +90,7 @@ defs :: @static {
             
             to_wire_id :: fn(name: Symbol, loc: Span) WireId = {
                 name := name.str();
+                @if(name == "_") return(NONE);
                 @ct_assert(name.starts_with("w") || name.starts_with("W"), loc, "expected wire name start with 'w'");
                 i, extra := convert_number(name.rest(1), 10, dec_digit);
                 @ct_assert(extra.len == 0, loc, "expected number after 'w' in wire name");
@@ -118,6 +119,9 @@ defs :: @static {
             storage_count += child.storage_count;
             wire_depth = max(wire_depth, child.wire_depth);
             wire_sum += child.wire_sum;
+            gate_sum += child.gate_sum;
+            
+            // TODO: check arity if not intrinsic
             
             // todo: only allow if the eventual def component storage_count!=0
             //for in { id |
@@ -125,6 +129,7 @@ defs :: @static {
             //};
             for out { id |
                 prev := defs&.insert(id, kind);
+                @if(!(id& == @ref NONE))
                 if prev { prev |
                     name0, name1 := (child.name, components[prev.id.zext()].name);
                     switch := @const_slice("switch1", "switch8");
@@ -144,30 +149,58 @@ defs :: @static {
         // can't check in the main loop because of memory
         enumerate gates { i, it |
             for it.inputs { id |
+                @ct_assert(!(id& == @ref NONE), locations[i], "'_' (discard) cannot be used as an input");
                 @ct_assert(defs&.get(id).is_some(), locations[i], "use undefined: w%", id.id);
             };
         };
         
         wire_count := 0;
+        had_placeholder := defs&.remove(NONE).is_some();
         each defs& { k, _ |
             wire_count = max(wire_count, k.id.zext());
+        };
+        wire_count += 1;
+        if had_placeholder {
+            each gates { it |
+                each it.outputs { it |
+                    if it == @ref NONE {
+                        it.id = wire_count.trunc();
+                    };
+                };
+            };
+            wire_count += 1;
         };
         
         components.push(
             name = name.str(),
             gates = gates.items(),
-            wire_count = wire_count + 1,
+            wire_count = wire_count,
             storage_count = storage_count,
-            wire_depth = wire_depth + wire_count + 1,
-            wire_sum = wire_sum + wire_count + 1,
+            wire_depth = wire_depth + wire_count,
+            wire_sum = wire_sum + wire_count,
+            gate_sum = gate_sum + gates.len,
         );
         map&.insert(name, (id = components.len.trunc() - 1));
     };
+    NONE :WireId: (id = 0xFFFFFFFF);
+    
     @anon_literal(
         components = components.items(),
         primitives = prims.items(),
     )
 }
+
+AsmOverture :: @struct {
+    reg :: @enum(u8) (reg0, reg1, reg2, reg3, reg4, reg5, io);
+    mov :: fn(dest: reg, src: reg) u8 = trunc(@or(src.raw().zext().shift_left(3), dest.raw().zext(), 0b10000000));
+    // reg3 = alu(reg1, reg2);
+    op :: fn(c: alu) u8 = trunc(@or(c.raw().zext(), 0b01000000));
+    alu :: @enum(u8) (or, nand, nor, and, add, sub);  
+    // if (cond(reg3)) ip = reg0;
+    jmp :: fn(c: cond) u8 = trunc(@or(c.raw().zext(), 0b11000000));
+    cond :: @enum(u8) (never, eq0, lt0, le0, always, ne0, ge0, gt0); 
+    // op tag for immediate is 0b00 so just use raw byte; reg0 = op;
+};
 
 main :: fn() void = {
     components := defs.components;

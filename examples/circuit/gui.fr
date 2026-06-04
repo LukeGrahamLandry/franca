@@ -3,7 +3,8 @@ HELP :: """
 left drag: move. scroll: zoom.
 right click: enter a gate.
 escape: exit to previous gate. 
-enter: evaluate one tick.
+enter: evaluate one tick. 
+space: toggle auto eval.
 """;
 
 State :: @struct {
@@ -21,23 +22,26 @@ State :: @struct {
     component_tree: List(Component.GateId);
     clicked: bool;
     want_eval: bool;
+    auto_eval: bool;
 };
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    @if(!state.auto_eval)
     @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
     world := state.world&;
     
-    if state.want_eval {
+    if state.want_eval || state.auto_eval {
         state.want_eval = false;
         world.instance = 0;
         world.scratch.len = 0;
-        values := temp().alloc_zeroed(WireValue, 4);
+        values := temp().alloc_zeroed(WireValue, 5);
         values[0] = (byte = 10);
         values[1] = (bit = false);
+        values[2] = (bit = true);
         eval(
             world, values, 
-            @slice(@as(WireId) (id = 3)), 
-            @slice(@as(WireId) (id = 0), (id = 1)), 
+            @slice(@as(WireId) (id = 3), (id = 4)), 
+            @slice(@as(WireId) (id = 0), (id = 1)), //, (id = 2)), 
             state.root_component, 
             0,
         );
@@ -69,6 +73,11 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         b := text_to_world_pos(vec2(0, 1));
         abs((b.y - a.y) * 4)
     };
+    width := {
+        a := text_to_world_pos(vec2(0, 0)); 
+        b := text_to_world_pos(vec2(1, 0));
+        abs((b.x - a.x) * 4)
+    };
     
     sdtx.color = pack_rgba(255, 255, 255, 255);
     sdtx.pos = world_to_text_pos(vec2(0, height));
@@ -82,13 +91,16 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         c = state.world&[c.gates[it.id.zext()].kind]&;
     };
     pos := vec2(0, 0);
-    yellow, grey := (pack_rgba(255, 255, 0, 255), pack_rgba(150, 150, 150, 255));
     wires := world.scratch.items().subslice(wire_offset, c.wire_count);
     
-    sdtx.put(@tfmt("% has % gates", c.name, c.gates.len));
+    sdtx.put(c.name);
     if c.gates.len == 0 {
         sdtx.pos = world_to_text_pos(vec2(0, 0));
-        sdtx.put("(intrinsic)");
+        sdtx.color = pack_rgba(255, 255, 0, 255);
+        sdtx.put("output(intrinsic(input()));");
+    } else {
+        sdtx.pos = world_to_text_pos(vec2(0, 2*height));
+        sdtx.put(@tfmt("(shallow=(gates=%,wires=%), recursive=(gates=%,wires=%,storage=%))", c.gates.len, c.wire_count, c.gate_sum, c.wire_sum, c.storage_count));
     };
     enumerate c.gates { i, it |
         hover := p.y < pos.y && p.y > pos.y - height && p.x > 0 && p.x < 100;
@@ -100,7 +112,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             value := wires[id.id.zext()].byte;
             sdtx.color = colour&[int(value != 0)];
             sdtx.put(@tfmt("w%", id.id));
-            sdtx.color = grey;
+            sdtx.color = pack_rgba(150, 150, 150, 255);
             sdtx.put(@tfmt("=% ", value));
         };
         for(it.outputs, show);
@@ -124,6 +136,28 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             state.dirty = true;
         };
     };
+    
+    memory := read_memory(state.world&, state.root_component);
+    out := @ref u8.list(8*3, temp());
+    pos := vec2(-15 * width, 2*height);
+    b := 1;
+    range(0, memory.len) { i |
+        sdtx.color = pack_rgba(255, 150, b*40, 255);
+        y, x := i.udiv_mod(16);
+        push_hex_byte(out, memory[i], true);
+        out.push_all(" ");
+        
+        if i == memory.len - 1 || x == 15 {
+            sdtx.pos = world_to_text_pos(pos);
+            sdtx.put(out.items());
+            out.clear();
+            pos.y -= height;
+        };
+        if x == 0 && y.umod(16) == 0 {
+            b += 1;
+        } 
+    };
+    
     state.clicked = false;
     Easy'glue_begin_pass(sapp, sg, (colors = ((
         load_action = .CLEAR,
@@ -138,12 +172,43 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.sg = sg; state.sapp = sapp;
     a := general_allocator();
     state.text&.setup(sg = sg, allocator = a, fonts = @slice(Sdtx.font.cpc));
-    state.root_component = init(state.world&, "counter", a, true);
+    state.root_component = init(state.world&, "overture", a, true);
     state.component_tree = list(a);
     state.dirty = true;
     state.scale = 1;
     state.pos = vec2(-0.9, 0.5);
     state.want_eval = true;
+    
+    // :SLOW
+    // load program
+    start := timestamp();
+    program := temp().alloc_zeroed(u8, 256);
+    #use(AsmOverture);
+    program[0] = mov(.reg1, .io);
+    program[1] = mov(.reg2, .io);
+    program[2] = op(.add);
+    program[3] = mov(.reg1, .reg3);
+    program[4] = 3;
+    program[5] = mov(.reg2, .reg0);
+    program[6] = op(.add);
+    program[7] = mov(.io, .reg3);
+    world := state.world&;
+    world.save_wire_values = false;
+    values := temp().alloc_zeroed(WireValue, 4);
+    range(0, 256) { i |
+        values[0] = (byte = program[i]);
+        values[1] = (bit = true);
+        eval(
+            world, values, 
+            @slice(@as(WireId) (id = 2), (id = 3)), 
+            @slice(@as(WireId) (id = 0), (id = 1)),
+            state.root_component, 
+            0,
+        );
+        world.instance = 0;
+    };
+    world.save_wire_values = true;
+    @println("256 ticks in %ms", timestamp() - start);
 }
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
@@ -174,6 +239,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             @match(event.key_code) {
                 fn ESCAPE() => { _ := state.component_tree&.pop(); }
                 fn ENTER() => { state.want_eval = true; }
+                fn SPACE() => { state.auto_eval = !state.auto_eval; }
                 @default => return();
             };
         }
@@ -185,6 +251,31 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     };
     state.dirty = true;
 }
+
+fn read_memory(world: *World, root_component: ComponentId) []u8 = {
+    out := u8.list(world.storage.len / 8, temp());
+    world.instance = 0;
+    recurse(out&, world, root_component);
+    world.instance = 0;
+    return out.items();
+    recurse :: fn(out: *List(u8), world: *World, c: ComponentId) void = {
+        c := world[c]&;
+        if c.name == "memory8" {
+            r: u8 = 0;
+            for world.storage.subslice(world.instance, 8) { it |
+                r = r.shift_right_logical(1);
+                r = r.bit_or(int(it.bit).shift_left(7).trunc());
+            };
+            out.push(r);
+            world.instance += 8;
+            return();
+        };
+        each c.gates { it |
+            recurse(out, world, it.kind);
+        };
+    };
+}
+
 
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.text&.shutdown();
