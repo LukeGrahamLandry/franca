@@ -165,10 +165,20 @@ defs :: @static {
                 each it.outputs { it |
                     if it == @ref NONE {
                         it.id = wire_count.trunc();
+                        // unique every time so you can see the difference in the gui. wasteful when !save_wire_values. 
+                        wire_count += 1;
                     };
                 };
             };
-            wire_count += 1;
+        };
+        
+        each gates { it |
+            each it.inputs { it |
+                _ := defs&.remove(it);
+            };
+        };
+        each defs& { k, _ |
+            @eprintln("[examples/circuit/parse.fr] %: w% is unused (replace with '_')", str(name), k.id);
         };
         
         components.push(
@@ -190,16 +200,64 @@ defs :: @static {
     )
 }
 
-AsmOverture :: @struct {
+AsmOverture :: @rec @struct {
     reg :: @enum(u8) (reg0, reg1, reg2, reg3, reg4, reg5, io);
-    mov :: fn(dest: reg, src: reg) u8 = trunc(@or(src.raw().zext().shift_left(3), dest.raw().zext(), 0b10000000));
+    fn mov(a: *AsmOverture, dest: reg, src: reg) void = {
+        it := @or(src.raw().zext().shift_left(3), dest.raw().zext(), 0b10000000);
+        a.code&.push(trunc(it));
+    }
     // reg3 = alu(reg1, reg2);
-    op :: fn(c: alu) u8 = trunc(@or(c.raw().zext(), 0b01000000));
+    fn op(a: *AsmOverture, c: alu) void = a.code&.push(trunc(@or(c.raw().zext(), 0b01000000)));
     alu :: @enum(u8) (or, nand, nor, and, add, sub);  
     // if (cond(reg3)) ip = reg0;
-    jmp :: fn(c: cond) u8 = trunc(@or(c.raw().zext(), 0b11000000));
+    fn jmp(a: *AsmOverture, c: cond) void = a.code&.push(trunc(@or(c.raw().zext(), 0b11000000)));
     cond :: @enum(u8) (never, eq0, lt0, le0, always, ne0, ge0, gt0); 
     // op tag for immediate is 0b00 so just use raw byte; reg0 = op;
+    fn imm(a: *AsmOverture, i: i64) void = {
+        @assert(i >= 0 && i < 64, "immediate % out of range", i);
+        a.code&.push(i.trunc());
+    }
+    
+    fn set_label(a: *AsmOverture, name: Str) void = {
+        it := a.labels&.get_or_insert(name, => (use = list(temp()), def = .None));
+        @assert(it.def.is_none(), "label % defined twice (%, %)", name, it.def.Some, a.code.len);
+        it.def = (Some = a.code.len);
+    }
+    
+    fn get_label(a: *AsmOverture, name: Str) void = {
+        it := a.labels&.get_or_insert(name, => (use = list(temp()), def = .None));
+        it.use&.push(a.code.len);
+        a.code&.push(0);
+    }
+    
+    start :: fn() AsmOverture = (code = list(256, temp()), labels = init(temp()));
+    fn end(a: *AsmOverture, out: Alloc) []u8 = {
+        each a.labels& { name, it |
+            def := it.def || @panic("undefined label %", name);
+            @assert(def < a.code.len && def < 64, "immediate out of range % for label %", def, name);
+            for it.use { off |
+                a.code[off] = def.trunc();
+            };
+        };
+        @assert_le(a.code.len, 256, "too much code");
+        a.code&.push_repeated(256 - a.code.len, 0);
+        a.code&.items().shallow_copy(out)
+    }
+    
+    code: List(u8);
+    labels: HashMap(Str, Label);
+    Label :: @struct(use: List(i64), def: ?i64);
+    
+    disassemble :: fn(out: *List(u8), byte: u8) void = {
+        hi, lo := (byte.shift_right_logical(3).bit_and(0b111), byte.bit_and(0b111));
+        @switch(byte.shift_right_logical(6)) {
+            @case(0b00) => @fmt(out, "imm r0 %", { push_hex_byte(out, byte, true); "" });
+            @case(0b01) => @fmt(out, "% r3 r1 r2", @as(alu) lo);
+            @case(0b10) => @fmt(out, "mov r% r%", lo, hi);
+            @case(0b11) => @fmt(out, "% r3", @as(cond) lo);
+            @default => unreachable();
+        };
+    };
 };
 
 main :: fn() void = {

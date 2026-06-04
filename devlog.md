@@ -4,6 +4,10 @@
 - finish overture (program memory, cond, instruction decoding). 
   - good progress, now i have something that's too slow as an incentive to compile (writing the program by ticking 256 times at the start)
 - be less painful: allow discarding a gate output without naming it. show memory/register data together in gui. 
+- assemble with labels so can write maze solver program
+- io/visualization for the maze
+- program doesdent workd... added disassembler to the ui for debuggin. found the one messed up wire. yay!
+
 
 ## (Jun 3)
 

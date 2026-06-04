@@ -5,6 +5,9 @@ right click: enter a gate.
 escape: exit to previous gate. 
 enter: evaluate one tick. 
 space: toggle auto eval.
+r: restart program. 
+c: reset scale/pos.
+[/]: slower/faster eval. 
 """;
 
 State :: @struct {
@@ -23,6 +26,9 @@ State :: @struct {
     clicked: bool;
     want_eval: bool;
     auto_eval: bool;
+    robot_pos: i64;
+    robot_direction: i64;
+    ticks_per_eval: i64;
 };
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -31,20 +37,57 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     world := state.world&;
     
     if state.want_eval || state.auto_eval {
+    range(0, @if(state.auto_eval, state.ticks_per_eval, 1)) { _ |
+        // TODO: factor out all the maze logic
+        deltas :: @const_slice((0, -1), (1, 0), (0, 1), (-1, 0));  // (up, right, down, left)
+        y, x := state.robot_pos.div_mod(maze_width);
+        dx, dy := deltas[state.robot_direction];
+        x += dx; y += dy;
+        look_pos := y*maze_width + x;
+        @debug_assert(look_pos >= 0 && look_pos < maze_width*maze_data.len(), "looking out of maze");
+        looking_at_wall := maze_data[y].bit_and(1.shift_left(maze_width - x - 1)) != 0;
+        input: u8 = @if_else {
+            @if(look_pos == 1) => 3;
+            @if(looking_at_wall) => 1;
+            @else => 0;
+        };
+
         state.want_eval = false;
         world.instance = 0;
         world.scratch.len = 0;
-        values := temp().alloc_zeroed(WireValue, 5);
-        values[0] = (byte = 10);
+        values := temp().alloc_zeroed(WireValue, 4);
+        values[0] = (byte = input);
         values[1] = (bit = false);
-        values[2] = (bit = true);
         eval(
             world, values, 
-            @slice(@as(WireId) (id = 3), (id = 4)), 
-            @slice(@as(WireId) (id = 0), (id = 1)), //, (id = 2)), 
+            @slice(@as(WireId) (id = 2), (id = 3)), 
+            @slice(@as(WireId) (id = 0), (id = 1)),
             state.root_component, 
             0,
         );
+        
+        // there should be a wall around but just to make sure:
+        not_looking_at_edge := x != 0 && x != maze_width - 1 && y != 0 && y != maze_data.len() - 1;
+        
+        @if(values[3].bit)
+        @switch(values[2].byte) {
+            @case(0) => {  // left
+                state.robot_direction = state.robot_direction.add(4).sub(1).umod(4);
+            };
+            @case(1) => if !looking_at_wall && not_looking_at_edge {  // move
+                state.robot_pos = look_pos;
+            };
+            @case(2) => { // right
+                state.robot_direction = state.robot_direction.add(1).umod(4);
+            };
+            @case(3) => (); // wait
+            @case(4) => {  // action
+                // TODO: open door
+            };
+            @case(5) => (); // shoot
+            @default => ();
+        };
+    };
     };
     
     app_w, app_h := (sapp.width().float().cast(), sapp.height().float().cast());
@@ -71,13 +114,17 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     height := {
         a := text_to_world_pos(vec2(0, 0)); 
         b := text_to_world_pos(vec2(0, 1));
-        abs((b.y - a.y) * 4)
+        abs((b.y - a.y) * 3)
     };
     width := {
         a := text_to_world_pos(vec2(0, 0)); 
         b := text_to_world_pos(vec2(1, 0));
-        abs((b.x - a.x) * 4)
+        abs((b.x - a.x))
     };
+    
+    sdtx.color = pack_rgba(0, 0, 0, 255);
+    sdtx.pos = world_to_text_pos(vec2(0, height*3));
+    sdtx.put(@tfmt("(paused=%, tick_rate=%)", !state.auto_eval, state.ticks_per_eval));
     
     sdtx.color = pack_rgba(255, 255, 255, 255);
     sdtx.pos = world_to_text_pos(vec2(0, height));
@@ -102,6 +149,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sdtx.pos = world_to_text_pos(vec2(0, 2*height));
         sdtx.put(@tfmt("(shallow=(gates=%,wires=%), recursive=(gates=%,wires=%,storage=%))", c.gates.len, c.wire_count, c.gate_sum, c.wire_sum, c.storage_count));
     };
+    out := @ref u8.list(2, temp());
     enumerate c.gates { i, it |
         hover := p.y < pos.y && p.y > pos.y - height && p.x > 0 && p.x < 100;
         sdtx.pos = world_to_text_pos(pos);
@@ -113,7 +161,11 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             sdtx.color = colour&[int(value != 0)];
             sdtx.put(@tfmt("w%", id.id));
             sdtx.color = pack_rgba(150, 150, 150, 255);
-            sdtx.put(@tfmt("=% ", value));
+            sdtx.put("=");
+            push_hex_byte(out, value, true);
+            sdtx.put(out.items());
+            out.clear();
+            sdtx.put(" ");
         };
         for(it.outputs, show);
         sdtx.color = base_colour;
@@ -137,26 +189,76 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         };
     };
     
+    // kinda hack: colours being useful relies on ordering in defs.fr: (program, ip, registers). 
+    ip_index := 256;
     memory := read_memory(state.world&, state.root_component);
-    out := @ref u8.list(8*3, temp());
-    pos := vec2(-15 * width, 2*height);
+    pos := vec2(-60 * width, 2*height);
     b := 1;
     range(0, memory.len) { i |
-        sdtx.color = pack_rgba(255, 150, b*40, 255);
         y, x := i.udiv_mod(16);
-        push_hex_byte(out, memory[i], true);
-        out.push_all(" ");
-        
-        if i == memory.len - 1 || x == 15 {
-            sdtx.pos = world_to_text_pos(pos);
-            sdtx.put(out.items());
-            out.clear();
-            pos.y -= height;
-        };
         if x == 0 && y.umod(16) == 0 {
             b += 1;
-        } 
+        };
+        sdtx.color = pack_rgba(255, 150, b*40, 255);
+        if memory.len > ip_index && i == memory[ip_index].zext() {
+            sdtx.color = pack_rgba(255, 0, 0, 255);
+        };
+        if i == ip_index {
+            sdtx.color = pack_rgba(255, 200, 200, 255);
+        };
+        push_hex_byte(out, memory[i], true);
+        sdtx.pos = world_to_text_pos(pos);
+        sdtx.put(out.items());
+        out.clear();
+        pos.x += width*3;
+        
+        if x == 15 {
+            pos.y -= height;
+            pos.x -= width * 16*3;
+        };
     };
+    
+    // TODO: let the component declare that it uses this disassembler
+    pos := vec2(-80 * width, 2*height);
+    end := min(memory.len, 256);
+    while => end > 0 && memory[end - 1] == 0 {
+        end -= 1;
+    };
+    range(0, end) { i |
+        sdtx.color = pack_rgba(255, 255, 255, 255);
+        if memory.len > ip_index && i == memory[ip_index].zext() {
+            sdtx.color = pack_rgba(255, 0, 0, 255);
+        };
+        sdtx.pos = world_to_text_pos(pos);
+        AsmOverture'disassemble(out, memory[i]);
+        sdtx.put(out.items());
+        out.clear();
+        pos.y -= width*2;
+    };
+    
+    robot_pos, robot_direction := (state.robot_pos, state.robot_direction);
+    maze_text := u8.list((maze_width + 1)*maze_data.len(), temp());
+    range(0, maze_width*maze_data.len()) { i |
+        y, x := i.div_mod(maze_width);
+        @if(x == 0) maze_text&.push_all("\n");
+        x = maze_width - x - 1;  // little endian bit literal
+        wall := maze_data[y].bit_and(1.shift_left(x)) != 0;
+        if i == 1 {
+            maze_text&.push_all("+");
+        } else {
+            if i == robot_pos {
+                // cpc font has arrows
+                maze_text&.push("\xF0\xF3\xF1\xF2".index(state.robot_direction)[]);
+            } else {
+                // could use \x8F which is solid
+                maze_text&.push_all(@if(wall, "@", " "));
+            };
+        };
+    };
+    sdtx.color = pack_rgba(@if(state.robot_pos == maze_width + 1, 255, 50), 200, 150, 255);
+    sdtx.origin = world_to_text_pos(vec2(-38 * width, (maze_data.len().float().cast())*width*2 + height*3));
+    sdtx.pos = vec2(0);
+    sdtx.put(maze_text.items());
     
     state.clicked = false;
     Easy'glue_begin_pass(sapp, sg, (colors = ((
@@ -175,26 +277,30 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.root_component = init(state.world&, "overture", a, true);
     state.component_tree = list(a);
     state.dirty = true;
-    state.scale = 1;
-    state.pos = vec2(-0.9, 0.5);
-    state.want_eval = true;
+    state.ticks_per_eval = 1;
+    state.recenter();
+    state.reset();
+}
+
+fn recenter(state: *State) void = {
+    state.scale = 1/2;
+    state.pos = vec2(0, 0.5);
+}
+
+fn reset(state: *State) void = {
+    state.robot_pos = maze_width * (maze_data.len() - 1) - 2;
+    state.robot_direction = 0;
     
     // :SLOW
     // load program
     start := timestamp();
-    program := temp().alloc_zeroed(u8, 256);
-    #use(AsmOverture);
-    program[0] = mov(.reg1, .io);
-    program[1] = mov(.reg2, .io);
-    program[2] = op(.add);
-    program[3] = mov(.reg1, .reg3);
-    program[4] = 3;
-    program[5] = mov(.reg2, .reg0);
-    program[6] = op(.add);
-    program[7] = mov(.io, .reg3);
+    program := import("@/examples/circuit/defs.fr")'the_maze;
     world := state.world&;
     world.save_wire_values = false;
     values := temp().alloc_zeroed(WireValue, 4);
+    world.scratch.len = 0;
+    world.instance = 0;
+    world.storage.set_zeroed();
     range(0, 256) { i |
         values[0] = (byte = program[i]);
         values[1] = (bit = true);
@@ -209,6 +315,9 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     world.save_wire_values = true;
     @println("256 ticks in %ms", timestamp() - start);
+    
+    world.scratch.len = world.scratch.cap;
+    world.scratch.items().set_zeroed();
 }
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
@@ -240,6 +349,14 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 fn ESCAPE() => { _ := state.component_tree&.pop(); }
                 fn ENTER() => { state.want_eval = true; }
                 fn SPACE() => { state.auto_eval = !state.auto_eval; }
+                fn R() => state.reset();
+                fn C() => state.recenter();
+                fn LEFT_BRACKET() => if state.ticks_per_eval > 1 {
+                    state.ticks_per_eval -= 1;
+                }
+                fn RIGHT_BRACKET() => if state.ticks_per_eval < 100 {
+                    state.ticks_per_eval += 1;
+                }
                 @default => return();
             };
         }
@@ -281,6 +398,26 @@ fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.text&.shutdown();
     drop(state.world&, general_allocator());
 }
+
+maze_width :: count_ones(maze_data[0]).zext();
+// first maze from Turing Complete
+maze_data :: @const_slice(@as(i64)
+    0b1111111111111111111111111,
+    0b1000100000001010001000001,
+    0b1110111110111010111011101,
+    0b1000100010000010000010101,
+    0b1011101111101110111010101,
+    0b1010101010000000101010001,
+    0b1010101011111011101110111,
+    0b1000000000000010000010101,
+    0b1011101111111010111011101,
+    0b1010000000001000001000101,
+    0b1111101111111110111011101,
+    0b1000001000000010100000001,
+    0b1011111010111011111011111,
+    0b1000000010100000001000001,
+    0b1111111111111111111111111,
+);
 
 driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
 main :: fn() void = Easy'start(State);
