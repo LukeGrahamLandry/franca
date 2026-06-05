@@ -7,7 +7,12 @@
 - assemble with labels so can write maze solver program
 - io/visualization for the maze
 - program doesdent workd... added disassembler to the ui for debuggin. found the one messed up wire. yay!
-
+- slow! (safe/unsafe) 15s/7s. 
+  - tried caching truth tables, saves 2s safe but slower unsafe.
+  - when doing_pre_read don't recurse in gates before the first with storage. 9.9s/5.5s
+    BUT the condition is wrong because one of the old values might be mixed with a storage one before returning.
+    so cant do that for circuits in general. 
+  - inline_range in byte_make/byte_split: 6720->6220 (unsafe)
 
 ## (Jun 3)
 

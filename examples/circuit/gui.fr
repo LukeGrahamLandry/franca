@@ -26,9 +26,8 @@ State :: @struct {
     clicked: bool;
     want_eval: bool;
     auto_eval: bool;
-    robot_pos: i64;
-    robot_direction: i64;
     ticks_per_eval: i64;
+    maze: Scenario.Maze;
 };
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -37,57 +36,15 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     world := state.world&;
     
     if state.want_eval || state.auto_eval {
-    range(0, @if(state.auto_eval, state.ticks_per_eval, 1)) { _ |
-        // TODO: factor out all the maze logic
-        deltas :: @const_slice((0, -1), (1, 0), (0, 1), (-1, 0));  // (up, right, down, left)
-        y, x := state.robot_pos.div_mod(maze_width);
-        dx, dy := deltas[state.robot_direction];
-        x += dx; y += dy;
-        look_pos := y*maze_width + x;
-        @debug_assert(look_pos >= 0 && look_pos < maze_width*maze_data.len(), "looking out of maze");
-        looking_at_wall := maze_data[y].bit_and(1.shift_left(maze_width - x - 1)) != 0;
-        input: u8 = @if_else {
-            @if(look_pos == 1) => 3;
-            @if(looking_at_wall) => 1;
-            @else => 0;
-        };
-
-        state.want_eval = false;
-        world.instance = 0;
-        world.scratch.len = 0;
-        values := temp().alloc_zeroed(WireValue, 4);
-        values[0] = (byte = input);
-        values[1] = (bit = false);
-        eval(
-            world, values, 
-            @slice(@as(WireId) (id = 2), (id = 3)), 
-            @slice(@as(WireId) (id = 0), (id = 1)),
-            state.root_component, 
-            0,
-        );
-        
-        // there should be a wall around but just to make sure:
-        not_looking_at_edge := x != 0 && x != maze_width - 1 && y != 0 && y != maze_data.len() - 1;
-        
-        @if(values[3].bit)
-        @switch(values[2].byte) {
-            @case(0) => {  // left
-                state.robot_direction = state.robot_direction.add(4).sub(1).umod(4);
-            };
-            @case(1) => if !looking_at_wall && not_looking_at_edge {  // move
-                state.robot_pos = look_pos;
-            };
-            @case(2) => { // right
-                state.robot_direction = state.robot_direction.add(1).umod(4);
-            };
-            @case(3) => (); // wait
-            @case(4) => {  // action
-                // TODO: open door
-            };
-            @case(5) => (); // shoot
-            @default => ();
+    count := @if(state.auto_eval, state.ticks_per_eval, 1);
+    range(0, count) { i |
+        input := state.maze&.input();
+        out := tick_overture(world, state.root_component, input, false, i == count - 1);
+        if out { byte |
+            state.maze&.output(byte);
         };
     };
+    state.want_eval = false;
     };
     
     app_w, app_h := (sapp.width().float().cast(), sapp.height().float().cast());
@@ -236,27 +193,10 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         pos.y -= width*2;
     };
     
-    robot_pos, robot_direction := (state.robot_pos, state.robot_direction);
-    maze_text := u8.list((maze_width + 1)*maze_data.len(), temp());
-    range(0, maze_width*maze_data.len()) { i |
-        y, x := i.div_mod(maze_width);
-        @if(x == 0) maze_text&.push_all("\n");
-        x = maze_width - x - 1;  // little endian bit literal
-        wall := maze_data[y].bit_and(1.shift_left(x)) != 0;
-        if i == 1 {
-            maze_text&.push_all("+");
-        } else {
-            if i == robot_pos {
-                // cpc font has arrows
-                maze_text&.push("\xF0\xF3\xF1\xF2".index(state.robot_direction)[]);
-            } else {
-                // could use \x8F which is solid
-                maze_text&.push_all(@if(wall, "@", " "));
-            };
-        };
-    };
-    sdtx.color = pack_rgba(@if(state.robot_pos == maze_width + 1, 255, 50), 200, 150, 255);
-    sdtx.origin = world_to_text_pos(vec2(-38 * width, (maze_data.len().float().cast())*width*2 + height*3));
+    maze_text := u8.list(temp());
+    result := state.maze&.render(maze_text&);
+    sdtx.color = pack_rgba(@if(result.win, 255, 50), 200, 150, 255);
+    sdtx.origin = world_to_text_pos(vec2(-38 * width, (state.maze.map.len().float().cast())*width*2 + height*3));
     sdtx.pos = vec2(0);
     sdtx.put(maze_text.items());
     
@@ -288,32 +228,16 @@ fn recenter(state: *State) void = {
 }
 
 fn reset(state: *State) void = {
-    state.robot_pos = maze_width * (maze_data.len() - 1) - 2;
-    state.robot_direction = 0;
+    state.maze = Scenario'Maze'new(Scenario.Maze.tc0);
     
-    // :SLOW
-    // load program
+    world := state.world&;
+    world.storage.set_zeroed();  // importantly resets ip,registers=0
+    
     start := timestamp();
     program := import("@/examples/circuit/defs.fr")'the_maze;
-    world := state.world&;
-    world.save_wire_values = false;
-    values := temp().alloc_zeroed(WireValue, 4);
-    world.scratch.len = 0;
-    world.instance = 0;
-    world.storage.set_zeroed();
     range(0, 256) { i |
-        values[0] = (byte = program[i]);
-        values[1] = (bit = true);
-        eval(
-            world, values, 
-            @slice(@as(WireId) (id = 2), (id = 3)), 
-            @slice(@as(WireId) (id = 0), (id = 1)),
-            state.root_component, 
-            0,
-        );
-        world.instance = 0;
+        tick_overture(world, state.root_component, program[i], true, false);
     };
-    world.save_wire_values = true;
     @println("256 ticks in %ms", timestamp() - start);
     
     world.scratch.len = world.scratch.cap;
@@ -393,31 +317,10 @@ fn read_memory(world: *World, root_component: ComponentId) []u8 = {
     };
 }
 
-
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.text&.shutdown();
     drop(state.world&, general_allocator());
 }
-
-maze_width :: count_ones(maze_data[0]).zext();
-// first maze from Turing Complete
-maze_data :: @const_slice(@as(i64)
-    0b1111111111111111111111111,
-    0b1000100000001010001000001,
-    0b1110111110111010111011101,
-    0b1000100010000010000010101,
-    0b1011101111101110111010101,
-    0b1010101010000000101010001,
-    0b1010101011111011101110111,
-    0b1000000000000010000010101,
-    0b1011101111111010111011101,
-    0b1010000000001000001000101,
-    0b1111101111111110111011101,
-    0b1000001000000010100000001,
-    0b1011111010111011111011111,
-    0b1000000010100000001000001,
-    0b1111111111111111111111111,
-);
 
 driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
 main :: fn() void = Easy'start(State);
@@ -425,3 +328,4 @@ main :: fn() void = Easy'start(State);
 
 #use("@/examples/circuit/eval.fr");
 #use("@/examples/circuit/parse.fr");
+Scenario :: import("@/examples/circuit/scenario.fr");

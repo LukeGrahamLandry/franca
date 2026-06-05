@@ -18,6 +18,7 @@ Component :: @struct {
     wire_depth: i64;  // recursive max wire_count of children
     wire_sum: i64;    // like ^ but don't reset scratch for each child so can use it for visualization
     gate_sum: i64;
+    has8: bool;
     Gate :: @struct {
         kind: ComponentId;
         inputs: []WireId;
@@ -38,13 +39,14 @@ defs :: @static {
     //       so can't have this work with a main function in both parse.fr and eval.fr. 
     Eval :: import("@/examples/circuit/eval.fr");
     S := Type.scope_of(Eval.primitives);
-    F :: @FnPtr(world: *Eval.World, parent: []Eval.WireValue, out: []WireId, in: []WireId, param: i64) void;
+    F :: @FnPtr(world: *Eval.World, parent: []Eval.WireValue, it: *Component.Gate) void;
     prims := @ref F.list(ast_alloc());
     for get_constants(S) { name |
         components.push(
             name = name.str(), gates = empty(), 
             wire_count = 0, wire_depth = 0, wire_sum = 0, gate_sum = 1,
             storage_count = int(name == sym("delay")),
+            has8 = ((@const_slice(sym("switch8"), sym("byte_make"), sym("byte_split"))).contains(name)),
         );
         map&.insert(name, (id = components.len.trunc() - 1));
         f := F.get_constant(S, name)
@@ -62,6 +64,7 @@ defs :: @static {
         defs: HashMap(WireId, ComponentId) = init(temp());
         storage_count := 0;
         wire_depth, wire_sum, gate_sum := (0, 0, 0);
+        has8 := false;
         locations := Span.list(block.body.len, temp());
         ::AutoHash(WireId, TrivialHasher); ::AutoEq(WireId);
         
@@ -120,6 +123,7 @@ defs :: @static {
             wire_depth = max(wire_depth, child.wire_depth);
             wire_sum += child.wire_sum;
             gate_sum += child.gate_sum;
+            has8 = has8 || child.has8;
             
             // TODO: check arity if not intrinsic
             
@@ -189,6 +193,7 @@ defs :: @static {
             wire_depth = wire_depth + wire_count,
             wire_sum = wire_sum + wire_count,
             gate_sum = gate_sum + gates.len,
+            has8 = has8,
         );
         map&.insert(name, (id = components.len.trunc() - 1));
     };

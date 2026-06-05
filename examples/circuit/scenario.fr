@@ -1,0 +1,135 @@
+
+Maze :: @struct {
+    pos: i64;
+    direction: i64;
+    map: []i64;
+    
+    new :: fn(map: []i64) Maze = {
+        self: Maze = (pos = 0, direction = 0, map = map);
+        self.pos = self&.width() * (self.map.len() - 1) - 2;
+        self
+    }
+    
+    fn facing(self: *Maze) Ty(i64, i64, i64, bool) = {
+        width := self.width();
+        deltas :: @const_slice((0, -1), (1, 0), (0, 1), (-1, 0));  // (up, right, down, left)
+        y, x := self.pos.div_mod(width);
+        dx, dy := deltas[self.direction];
+        x += dx; y += dy;
+        look_pos := y*width + x;
+        looking_at_wall := self.map[y].bit_and(1.shift_left(width - x - 1)) != 0;
+        (look_pos, x, y, looking_at_wall)
+    }
+    
+    fn input(self: *Maze) u8 = {
+        look_pos, x, y, looking_at_wall := self.facing();
+        width := self.width();
+        @debug_assert(look_pos >= 0 && look_pos < width*self.map.len(), "looking out of maze");
+        input: u8 = @if_else {
+            @if(look_pos == 1) => 3;
+            @if(looking_at_wall) => 1;
+            @else => 0;
+        };
+        input
+    }
+    
+    fn output(self: *Maze, byte: u8) void = {
+        width := self.width();
+        look_pos, x, y, looking_at_wall := self.facing();
+        // there should be a wall around but just to make sure:
+        not_looking_at_edge := x != 0 && x != width - 1 && y != 0 && y != self.map.len() - 1;
+        
+        @switch(byte) {
+            @case(0) => {  // left
+                self.direction = self.direction.add(4).sub(1).umod(4);
+            };
+            @case(1) => if !looking_at_wall && not_looking_at_edge {  // move
+                self.pos = look_pos;
+            };
+            @case(2) => { // right
+                self.direction = self.direction.add(1).umod(4);
+            };
+            @case(3) => (); // wait
+            @case(4) => {  // action
+                // TODO: open door and require that for win
+            };
+            @case(5) => (); // shoot
+            @default => ();
+        };
+    }
+    
+    R :: @struct(win: bool);
+    fn render(self: *Maze, maze_text: *List(u8)) R = {
+        width := self.width();
+        maze_text.reserve((width + 1)*self.map.len());
+        range(0, width*self.map.len()) { i |
+            y, x := i.div_mod(width);
+            @if(x == 0) maze_text.push_all("\n");
+            x = width - x - 1;  // little endian bit literal
+            wall := self.map[y].bit_and(1.shift_left(x)) != 0;
+            maze_text.push(@if_else {
+                @if(i == 1) => "+".ascii();
+                // cpc font has arrows
+                @if(i == self.pos) => "\xF0\xF3\xF1\xF2".index(self.direction)[];
+                // could use \x8F which is solid
+                @else => @if(wall, "@".ascii(), " ".ascii());
+            });
+        };
+        (win = self.pos == width + 1)
+    }
+    
+    fn width(self: *Maze) i64 = count_ones(self.map[0]).zext();
+    
+    // a map stolen from TuringComplete.Game's The Maze level
+    tc0 :: @const_slice(@as(i64)
+        0b1111111111111111111111111,
+        0b1000100000001010001000001,
+        0b1110111110111010111011101,
+        0b1000100010000010000010101,
+        0b1011101111101110111010101,
+        0b1010101010000000101010001,
+        0b1010101011111011101110111,
+        0b1000000000000010000010101,
+        0b1011101111111010111011101,
+        0b1010000000001000001000101,
+        0b1111101111111110111011101,
+        0b1000001000000010100000001,
+        0b1011111010111011111011111,
+        0b1000000010100000001000001,
+        0b1111111111111111111111111,
+    );
+};
+
+// TODO: add this to auto test
+// TODO: !!! :SLOW
+main :: fn() void = {
+    #use("@/examples/circuit/eval.fr");
+    #use("@/examples/circuit/parse.fr");
+    world := @ref zeroed(World);
+    maze := @ref Maze'new(Maze.tc0);
+    a := general_allocator();
+    root_component := init(world, "overture", a, false);
+    
+    program := import("@/examples/circuit/defs.fr")'the_maze;
+    range(0, 256) { i |
+        tick_overture(world, root_component, program[i], true, false);
+    };
+    
+    drawing := u8.list(temp());
+    n := 0;
+    dowhile {
+        input := maze.input();
+        done := false;
+        if tick_overture(world, root_component, input, false, false) { byte |
+            maze.output(byte);
+            drawing&.clear();
+            result := maze.render(drawing&);
+            done = result.win;
+        };
+        n += 1;
+        @assert_lt(n, 20000, "this is taking too long. broken?");
+        !done
+    };
+    
+    drop(world, a);
+}
