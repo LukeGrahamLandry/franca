@@ -6,9 +6,10 @@
 //       that allows nested expressions only used once to be unnamed wires.
 //       so you can do ex. `and :: @{ w0, w1 := input(); output(not(nand(w0, w1))); }`
 //       the extra lines don't make it more readable. if i do symbolic, get that for free. 
-// TODO: i do want this interpreter form for visualizing all the wire states
-//       but also compile the logic to actual code where wire slots are just variables 
-//       so they can be executed fast when a component isn't being rendered. 
+// TODO: type check bit vs byte
+
+FEAT_COMPILE :: true;
+max_in_out_wires :: 64;
 
 Component :: @struct {
     name: Str;
@@ -18,7 +19,7 @@ Component :: @struct {
     wire_depth: i64;  // recursive max wire_count of children
     wire_sum: i64;    // like ^ but don't reset scratch for each child so can use it for visualization
     gate_sum: i64;
-    has8: bool;
+    primitive_arity := (-1, -1); // (out, in)
     Gate :: @struct {
         kind: ComponentId;
         inputs: []WireId;
@@ -41,12 +42,24 @@ defs :: @static {
     S := Type.scope_of(Eval.primitives);
     F :: @FnPtr(world: *Eval.World, parent: []Eval.WireValue, it: *Component.Gate) void;
     prims := @ref F.list(ast_alloc());
+    prim_arity := @ref Ty(i64, i64).list(ast_alloc());
     for get_constants(S) { name |
+        arity := (-1, -1);
+        if !(name == sym("input") || name == sym("output")) {
+            fid := FuncId.get_constant(S, name)
+                || @panic("expected % to be a function", str(name));
+            func := get_function_ast(fid, true, false, false, false);
+            tag := func.annotations.find(fn(it) => it.name == sym("arity"))
+                || @panic("missing #arity for %", str(name));
+            arity = Ty(i64, i64).const_eval(tag.args);
+            @ct_assert(arity._0 + arity._1 <= max_in_out_wires, func.loc, "intrinsic has too many in_out wires");
+        };
+        
         components.push(
             name = name.str(), gates = empty(), 
             wire_count = 0, wire_depth = 0, wire_sum = 0, gate_sum = 1,
             storage_count = int(name == sym("delay")),
-            has8 = ((@const_slice(sym("switch8"), sym("byte_make"), sym("byte_split"))).contains(name)),
+            primitive_arity = arity,
         );
         map&.insert(name, (id = components.len.trunc() - 1));
         f := F.get_constant(S, name)
@@ -64,9 +77,10 @@ defs :: @static {
         defs: HashMap(WireId, ComponentId) = init(temp());
         storage_count := 0;
         wire_depth, wire_sum, gate_sum := (0, 0, 0);
-        has8 := false;
         locations := Span.list(block.body.len, temp());
         ::AutoHash(WireId, TrivialHasher); ::AutoEq(WireId);
+        
+        use_before_def := @ref Ty(WireId, Span).list(temp());
         
         for block.body { it |
             continue :: local_return;
@@ -116,6 +130,7 @@ defs :: @static {
                 @default => compile_error("bad stmt type", it.loc);
             };
             
+            is_io := kind == sym("input") || kind == sym("output");
             kind := map&.get(kind)
                 || compile_error(@tfmt("undeclared component kind %", kind.str()), it.loc);
             child := components[kind.id.zext()]&;
@@ -123,14 +138,18 @@ defs :: @static {
             wire_depth = max(wire_depth, child.wire_depth);
             wire_sum += child.wire_sum;
             gate_sum += child.gate_sum;
-            has8 = has8 || child.has8;
+
+            if !is_io {
+                // give a better error message than array length mismatch when typechecking the generated code.
+                o, i := child.arity();
+                @ct_assert(o == out.len && i == in.len, it.loc, "arity error");
+            };
             
-            // TODO: check arity if not intrinsic
-            
-            // todo: only allow if the eventual def component storage_count!=0
-            //for in { id |
-                //@ct_assert(defs&.get(id).is_some(), it.loc, "use before def: w%", id.id);
-            //};
+            for in { id |
+                if !defs&.get(id).is_some() {
+                    push(use_before_def, (id, it.loc));
+                };
+            };
             for out { id |
                 prev := defs&.insert(id, kind);
                 @if(!(id& == @ref NONE))
@@ -155,6 +174,12 @@ defs :: @static {
             for it.inputs { id |
                 @ct_assert(!(id& == @ref NONE), locations[i], "'_' (discard) cannot be used as an input");
                 @ct_assert(defs&.get(id).is_some(), locations[i], "use undefined: w%", id.id);
+            };
+        };
+        for use_before_def { id, loc |
+            if defs&.get(id) { def_kind |
+                def_has_memory := components[def_kind.id.zext()].storage_count > 0;
+                @ct_assert(def_has_memory, loc, "use before def: w%", id.id);
             };
         };
         
@@ -193,9 +218,11 @@ defs :: @static {
             wire_depth = wire_depth + wire_count,
             wire_sum = wire_sum + wire_count,
             gate_sum = gate_sum + gates.len,
-            has8 = has8,
         );
         map&.insert(name, (id = components.len.trunc() - 1));
+        
+        o_n, i_n := components[components.len - 1]&.arity();
+        @ct_assert(o_n + i_n <= max_in_out_wires, it.loc, "component has too many in+out wires (% > %)", o_n + i_n, max_in_out_wires);
     };
     NONE :WireId: (id = 0xFFFFFFFF);
     
@@ -204,6 +231,149 @@ defs :: @static {
         primitives = prims.items(),
     )
 }
+
+// each Component becomes a function pointer (*World, *Array(WireValue, OutputN), *Array(WireValue, InputN))
+// equivalent to interpreting with eval(). the primitive impls here need to stay in sync with the ones in eval(). 
+// wire values are local variables instead of in world.scratch 
+// so indexing with the Gate.(i,o) happens at compile time instead of run time. 
+// compiled fns call each other directly without going through the interpreter's calling convention. 
+compile_gates :: fn(components: []Component) []rawptr = {
+    out := @ref u8.list(components.len * 2000, ast_alloc());
+    @fmt(out, "{\n#use(\"@/examples/circuit/eval.fr\");\n#use(\"@/examples/circuit/parse.fr\");\n");
+    get_name :: fn(i) => @tfmt("g%_%", i, components[i].name);
+    enumerate components { i, c |
+        continue :: local_return;
+        if i < defs.primitives.len {
+            S :: Type.scope_of(CompilerRt);
+            if FuncId.get_constant(S, c.name.sym()).is_some() {
+                @fmt(out, "% :: CompilerRt.%;\n", get_name(i), c.name);
+            } else {
+                @fmt(out, "% :: zeroed(rawptr);\n", get_name(i));
+            };
+            continue();
+        };
+        
+        out_n, in_n := (c.gates[c.gates.len - 1].inputs.len, c.gates[0].outputs.len);
+        @fmt(out, "% :: fn(world: *World, out: *Array(WireValue, %), in: *Array(WireValue, %)) void ", get_name(i), out_n, in_n);
+        //@fmt(out, """ #log_ir("Rh") """);
+        @fmt(out, "= {\n");
+        
+        range(0, c.wire_count) { i |
+            @fmt(out, "w% := zeroed(WireValue);", i);
+        };
+        @fmt(out, "\n");
+        
+        @fmt(out, """
+        doing_pre_read, instance := (world.doing_pre_read, world.instance);
+        have_storage := %;
+        inline_range(0, 2) { iter_i |
+            continue :: local_return;
+            this_iter_is_doing_pre_read := iter_i == 0;
+            if this_iter_is_doing_pre_read {
+                @if(!have_storage) continue();  // :postmemory (alternative to the below one)
+                world.doing_pre_read = true;
+            } else {
+                @if(doing_pre_read /* :postmemory && have_storage*/) continue();
+                world.instance = instance;
+                world.doing_pre_read = false;
+            };
+        """, c.storage_count != 0);
+        
+        enumerate c.gates& { gate_i, it |
+            child := components[it.kind.id.zext()]&;
+            name := child.name;
+            if name == "switch1" {
+                name = "switch8";
+            };
+            simple := name != "switch8" && name != "delay" && name != "const";
+            if simple && name != "input" {
+                @fmt(out, "o := @uninitialized Array(WireValue, %);\n", it.outputs.len);
+                if it.inputs.len != 0 {
+                    if it.inputs.len == 1 {  // HACK
+                        @fmt(out, "i := bit_cast_unchecked(WireValue, Array(WireValue, 1), w%);\n", it.inputs[0].id);
+                    } else {
+                        @fmt(out, "i: Array(WireValue, %) = (", it.inputs.len);
+                        for it.inputs { it |
+                            @fmt(out, "w%, ", it.id);
+                        };
+                        @fmt(out, ");\n");
+                    };
+                } else {
+                    // TODO: coerce '()' literal to zero length array :compiler
+                    @fmt(out, "i := zeroed(Array(WireValue, 0));\n");
+                };
+            };
+
+            @switch(name) {
+                @case("input") => @fmt(out, "o := in[];\n");
+                @case("output") => @fmt(out, "out[] = i;\n");
+                @case("const") => @fmt(out, "w%: WireValue = (byte = %);\n", it.outputs[0].id, it.param);
+                @case("switch8") => {
+                    @fmt(out, "if w%.bit {| w% = w%; };\n", it.inputs[1].id, it.outputs[0].id, it.inputs[0].id);
+                };
+                @case("delay") => {
+                    @fmt(out, """
+                        @debug_assert_ult(world.instance, world.storage.len, "must preallocate storage_count");
+                        slot := world.storage[world.instance]&;
+                        w% = slot[];
+                        if !this_iter_is_doing_pre_read {
+                            slot[] = w%;
+                        };
+                        world.instance += 1;
+                    """, it.outputs[0].id, it.inputs[0].id);
+                };
+                @default => {
+                    if child.storage_count == 0 && child.gate_sum < 15 {
+                        @fmt(out, "@inline ");
+                    };
+                    @fmt(out, "%(world, o&, i&);\n", get_name(it.kind.id.zext()));
+                };
+            };
+            if simple && it.outputs.len > 0 {
+                enumerate it.outputs { i, it |
+                    @fmt(out, "w% = o&[%]; ", it.id, i);
+                };
+                @fmt(out, "\n");
+            };
+        };
+        
+        @fmt(out, """
+            }; // range
+            world.doing_pre_read = doing_pre_read;
+        }; // func
+        """);
+    };
+    
+    @fmt(out, "dispatch :: @const_slice(@as(rawptr) ");
+    range(0, components.len) { i |
+        @fmt(out, "%, ", get_name(i));
+    };
+    @fmt(out, ");\n");  // dispatch
+    @fmt(out, "};");  // scope
+    S := import(out.items());
+    const_eval([]rawptr, @{ @[@literal S].dispatch })
+};
+
+CompilerRt :: @struct {
+    #use("@/examples/circuit/eval.fr");
+    // #inline // TODO: why is it allowed since take function pointer to this? (correctly can't mark the others) :compiler?
+    nand :: fn(_: *World, out: *Array(WireValue, 1), in: *Array(WireValue, 2)) void = {
+        out[0].bit = in[0].bit.int().bit_and(in[1].bit.int()) == 0;
+    };
+    byte_split :: fn(_: *World, out: *Array(WireValue, 8), in: *Array(WireValue, 1)) void = {
+        r := in[0].byte;
+        inline_range(0, 8) { i |
+            out[i].bit = r.bit_and(1.shift_left(i)) != 0;
+        };
+    };
+    byte_make :: fn(_: *World, out: *Array(WireValue, 1), in: *Array(WireValue, 8)) void = {
+        r: u8 = 0;
+        inline_range(0, 8) { i |
+            r = r.bit_or(in[i].bit.int().shift_left(i).trunc());
+        };
+        out[0].byte = r;
+    };
+};
 
 AsmOverture :: @rec @struct {
     reg :: @enum(u8) (reg0, reg1, reg2, reg3, reg4, reg5, io);
@@ -284,7 +454,16 @@ main :: fn() void = {
             out.len -= 2 * int(out.items().ends_with(", "));
             @fmt(out, ");\n");
         };
+        if it.gates.len == 0 {
+            @fmt(out, "    // intrinsic % <- %\n", it.primitive_arity._0 , it.primitive_arity._1);
+        };
         @fmt(out, "};\n");
     };
-    println(out.items());
+    print(out.items());
+}
+
+fn arity(c: *Component) Ty(i64, i64) = {
+    @if(c.gates.len == 0) return(c.primitive_arity);
+    out_n, in_n := (c.gates[c.gates.len - 1].inputs.len, c.gates[0].outputs.len);
+    (out_n, in_n)
 }

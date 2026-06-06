@@ -1,4 +1,12 @@
 
+## (Jun 5)
+
+- compile the circuit to franca source code and add that to the program. 
+  - (unsafe) before: 6.0, compile but interpret for pre_read: 5.2, compile both: 1.9. 
+    also now safe isn't 2x speed hit. inline_range the pre_read/normal: 1.43. 
+  - not doing it when save_wire_values but it still helps the gui when running multiple ticks per frame (only save the last one)
+- arity check the gates when parsing. 
+
 ## (Jun 4)
 
 - finish overture (program memory, cond, instruction decoding). 
@@ -11,7 +19,7 @@
   - tried caching truth tables, saves 2s safe but slower unsafe.
   - when doing_pre_read don't recurse in gates before the first with storage. 9.9s/5.5s
     BUT the condition is wrong because one of the old values might be mixed with a storage one before returning.
-    so cant do that for circuits in general. 
+    so cant do that for circuits in general. but i feel like i already assume that with the !doing_pre_read around the second eval loop so nothing runs in preread if !have_storage
   - inline_range in byte_make/byte_split: 6720->6220 (unsafe)
 
 ## (Jun 3)

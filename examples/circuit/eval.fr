@@ -10,6 +10,7 @@ fn init(world: *World, name: Str, a: Alloc, save_wire_values: bool) ComponentId 
         storage = a.alloc_zeroed(WireValue, child.storage_count),
         doing_pre_read = false,
         save_wire_values = save_wire_values,
+        fast_eval = @if(FEAT_COMPILE, @run compile_gates(defs.components), empty()),
     );
     (id = gate.trunc())
 }
@@ -42,6 +43,7 @@ World :: @struct {
     doing_pre_read: bool;
     // for visualization, don't unscratch so can show values of wires in nested gates. 
     save_wire_values: bool;
+    fast_eval: []rawptr;
 };
 
 fn eval(world: *World, parent: []WireValue, it: *Component.Gate) void = {
@@ -68,7 +70,7 @@ fn eval(world: *World, parent: []WireValue, it: *Component.Gate) void = {
             world.eval(wires, it);
         };
     };
-    if !doing_pre_read {
+    if !doing_pre_read  /* || :postmemory c.storage_count == 0 */{
         world.instance = instance;
         world.doing_pre_read = false;
         each gates { it |
@@ -87,6 +89,7 @@ fn eval(world: *World, parent: []WireValue, it: *Component.Gate) void = {
 }
 
 primitives :: @struct {
+    #arity(1, 2)
     nand :: fn(world, parent, it) = {
         in, out := (it.inputs, it.outputs);
         a, b := (parent[in[0].id.zext()].bit, parent[in[1].id.zext()].bit);
@@ -94,6 +97,7 @@ primitives :: @struct {
     };
     input :: fn(world, parent, it) = panic("only one input allowed");
     output :: fn(world, parent, it) = panic("only one output allowed");
+    #arity(8, 1)
     byte_split :: fn(world, parent, it) = {
         in, out := (it.inputs, it.outputs);
         r := parent[in[0].id.zext()].byte;
@@ -101,6 +105,7 @@ primitives :: @struct {
             parent[out[i].id.zext()].bit = r.bit_and(1.shift_left(i)) != 0;
         };
     };
+    #arity(1, 8)
     byte_make :: fn(world, parent, it) = {
         in, out := (it.inputs, it.outputs);
         r: u8 = 0;
@@ -109,6 +114,7 @@ primitives :: @struct {
         };
         parent[out[0].id.zext()].byte = r;
     };
+    #arity(1, 0)
     const :: fn(world, parent, it) = {
         out, param := (it.outputs, it.param);
         parent[out[0].id.zext()].bit = param == 1;
@@ -117,6 +123,7 @@ primitives :: @struct {
     // TODO: default to off if none write
     // TODO: detect use before all writes done
     switch1 :: switch8;
+    #arity(1, 2)
     switch8 :: fn(world, parent, it) = {
         in, out := (it.inputs, it.outputs);
         a, b := (parent[in[0].id.zext()], parent[in[1].id.zext()].bit);  // value, cond
@@ -124,6 +131,7 @@ primitives :: @struct {
             parent[out[0].id.zext()] = a;
         };
     };
+    #arity(1, 1)
     delay :: fn(world, parent, it) = {
         in, out := (it.inputs, it.outputs);
         @debug_assert_ult(world.instance, world.storage.len, "must preallocate storage_count");
@@ -150,11 +158,12 @@ fn unscratch(world: *World, wires: []WireValue) void #inline = {
 fn index(world: *World, i: ComponentId) *Component = world.components.index(i.id.zext()); 
 
 fn tick_overture(world: *World, root_component: ComponentId, input: u8, write_program: bool, save_wire_values: bool) ?u8 = {
+    world.instance = 0; 
+    world.scratch.len = 0;
+    
     prev := world.save_wire_values;
     @debug_assert(prev || !save_wire_values, "if init(save_wire_values=false), won't have preallocated enough");
     world.save_wire_values = prev && save_wire_values;  
-    world.instance = 0; 
-    world.scratch.len = 0;
     values := @slice(@as(WireValue) (byte = input), (bit = write_program), (byte = 0), (bit = false));
     base_gate := @ref @as(Component.Gate) (
         outputs = @const_slice(@as(WireId) (id = 2), (id = 3)), 
@@ -162,10 +171,51 @@ fn tick_overture(world: *World, root_component: ComponentId, input: u8, write_pr
         kind = root_component, 
         param = 0,
     );
-    eval(world, values, base_gate);
+    // TODO: have interpret eval switch to this mode for pre_read too
+    if get_compiled(world, base_gate.kind).is_some() {
+        eval_compiled(world, values, base_gate);
+    } else {
+        eval(world, values, base_gate);
+    };
+    
     world.save_wire_values = prev;
     @if(values[3].bit, (Some = values[2].byte), .None)
 }
 
+// expose the compiled version with the intepreter's calling convention. 
+fn eval_compiled(world: *World, parent: []WireValue, it: *Component.Gate) void = {
+    @debug_assert(!world.save_wire_values, "compiler doesn't save_wire_values");
+    compiled := get_compiled(world, it.kind).unwrap();
+    o_n, i_n := world[it.kind]&.arity();
+    // redundant if the gate is from a Component but be safe for base_gate in the top level call. 
+    @assert(it.inputs.len == i_n && it.outputs.len == o_n, "arity error calling compiled gate");  
+    a := Arena'stack_alloc(size_of(WireValue) * max_in_out_wires);
+    inputs := a.alloc_init(WireValue, it.inputs.len, fn(i) => parent[it.inputs[i].id.zext()]);
+    outputs := a.alloc_uninit(WireValue, it.outputs.len);
+    // SAFETY: *Array(T, N) has same repr as *T. compile_gates chooses N based on Gate arity. 
+    compiled := bit_cast_unchecked(rawptr, @FnPtr(*World, *WireValue, *WireValue) void, compiled);
+    compiled(world, outputs.ptr, inputs.ptr);
+    range(0, it.outputs.len) { i |
+        parent[it.outputs[i].id.zext()] = outputs[i];
+    };
+}
+
+fn get_compiled(world: *World, kind: ComponentId) ?rawptr #inline = {
+    i: i64 = kind.id.zext();
+    @if(FEAT_COMPILE)
+    if !world.save_wire_values && !world.fast_eval[i].is_null() {
+        return(Some = world.fast_eval[i]);
+    };
+    .None
+}
+
 #use("@/examples/circuit/parse.fr");
 #use("@/lib/collections/map.fr");
+
+// TODO: the preread does redundant work for the ram128. 
+//       ex. ram128 prereads all <=64 and then evaluates ram64 which prereads again all <=32
+//       cache so only preread each instance once per tick? 
+// TODO: its wrong if you use the output of a memory before returning in a subcomponent in something that's not an intrinsic :postmemory
+// TODO: show error if a switch doesn't have exactly one true input?
+// TODO: walk backwards from output and use switch to avoid evaluating unneeded gates. 
+//       maybe easier would be to add a discard(bit) intrinsic that would early return if you promise not to use the output. 
