@@ -10,7 +10,7 @@ fn init(world: *World, name: Str, a: Alloc, save_wire_values: bool) ComponentId 
         storage = a.alloc_zeroed(WireValue, child.storage_count),
         doing_pre_read = false,
         save_wire_values = save_wire_values,
-        fast_eval = @if(FEAT_COMPILE, @run compile_gates(defs.components), empty()),
+        fast_eval = defs.fast_eval,
     );
     (id = gate.trunc())
 }
@@ -23,6 +23,7 @@ fn drop(world: *World, a: Alloc) void = {
 
 WireValue :: @struct {
     value: (@union(bit: bool, byte: u8)) #use;
+    _pad := zeroed(Array(u8, 7));
 };
 
 ComponentEval :: @struct {
@@ -44,6 +45,7 @@ World :: @struct {
     // for visualization, don't unscratch so can show values of wires in nested gates. 
     save_wire_values: bool;
     fast_eval: []rawptr;
+    pre_read_depth := 0;
 };
 
 fn eval(world: *World, parent: []WireValue, it: *Component.Gate) void = {
@@ -66,11 +68,15 @@ fn eval(world: *World, parent: []WireValue, it: *Component.Gate) void = {
     doing_pre_read, instance := (world.doing_pre_read, world.instance);
     if c.storage_count != 0 {
         world.doing_pre_read = true;
+        world.pre_read_depth += 1;
+        prev_scratch := world.scratch.len;
         each gates { it |
             world.eval(wires, it);
         };
+        world.pre_read_depth -= 1;
+        @debug_assert_eq(prev_scratch, world.scratch.len);
     };
-    if !doing_pre_read  /* || :postmemory c.storage_count == 0 */{
+    if !doing_pre_read || c.storage_count == 0 {
         world.instance = instance;
         world.doing_pre_read = false;
         each gates { it |
@@ -83,7 +89,8 @@ fn eval(world: *World, parent: []WireValue, it: *Component.Gate) void = {
         parent[it.outputs[i].id.zext()] = wires[outputs[i].id.zext()];
     };
     
-    if !world.save_wire_values || doing_pre_read {
+    // pre_read_depth: when a preread calls one without stroage it sets doing_pre_read to false but still want to unscratch those until called again for.
+    if !world.save_wire_values || world.pre_read_depth > 0 {
         world.unscratch(wires);
     };
 }
@@ -134,14 +141,19 @@ primitives :: @struct {
     #arity(1, 1)
     delay :: fn(world, parent, it) = {
         in, out := (it.inputs, it.outputs);
-        @debug_assert_ult(world.instance, world.storage.len, "must preallocate storage_count");
-        slot := world.storage[world.instance]&;
-        parent[out[0].id.zext()] = slot[];
-        if !world.doing_pre_read {
-            slot[] = parent[in[0].id.zext()];
-        };
-        world.instance += 1;
+        parent[out[0].id.zext()] = eval_delay_gate(world, parent[in[0].id.zext()], world.doing_pre_read);
     };
+}
+
+fn eval_delay_gate(world: *World, input: WireValue, doing_pre_read: bool) WireValue #inline = {
+    @debug_assert_ult(world.instance, world.storage.len, "must preallocate storage_count");
+    slot := world.storage[world.instance]&;
+    output := slot[];
+    if !doing_pre_read {
+        slot[] = input;
+    };
+    world.instance += 1;
+    output
 }
 
 fn scratch(world: *World, n: i64) []WireValue #inline = {
@@ -212,6 +224,7 @@ fn get_compiled(world: *World, kind: ComponentId) ?rawptr #inline = {
 #use("@/examples/circuit/parse.fr");
 #use("@/lib/collections/map.fr");
 
+// these two are fixed in the compiler but not the interpreter
 // TODO: the preread does redundant work for the ram128. 
 //       ex. ram128 prereads all <=64 and then evaluates ram64 which prereads again all <=32
 //       cache so only preread each instance once per tick? 

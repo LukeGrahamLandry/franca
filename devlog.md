@@ -1,4 +1,34 @@
 
+## (Jun 6/7)
+
+- example that makes the pre_read thing is complicated because a non-primitive but !has_storage
+  is used before outputting in a gate that has_storage so its caller will need to pre_read. 
+```
+end of memory memory8:
+w21 := byte_make(w8, w9, w10, w11, w12, w13, w14, w15);
+w20 := const(0);
+W16 := or8(w21, w20);  // nop
+```
+doing it more correctly being it up to 2s. 
+other problem is rn im assuming the preread can happen in order. 
+
+what i need is to split it into two different components. 
+ex. for pre_read delay doesn't care about the input value and propogate that up through components that use it. 
+and then for the post_eval ram256 doesn't need to give an output because you already know from pre_read and that can pragate back and not do the mux at each level. 
+so each gate has a pure and impure version.
+pure has `<=` inputs than impure and impure has `<=` outputs than pure. 
+if !has_memory they're the same. 
+
+compiling the pre_read section without gates that don't affect the result gets it back to 1s. 
+
+now normal eval only needs to preread a gate if used before all inputs def-ed.
+ex. writing eval of ram4 doesn't need to preread ram2 because there's no cycle. 
+any reordering needs to be careful because of world.instance. 
+did that now 285ms and can move the ram256 anywhere it the function without breaking it. 
+
+somehow adding `_pad := zeroed(Array(u8, 7));` to WireValue makes it 170ms. that's concerning. 
+discrepancy goes away if i turn off elide_abi_slots, so it's just that's better when the stack slots are spread out more because i size/4.
+
 ## (Jun 5)
 
 - compile the circuit to franca source code and add that to the program. 

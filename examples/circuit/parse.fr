@@ -20,6 +20,15 @@ Component :: @struct {
     wire_sum: i64;    // like ^ but don't reset scratch for each child so can use it for visualization
     gate_sum: i64;
     primitive_arity := (-1, -1); // (out, in)
+    
+    usage: *Usage #use = zeroed(*Usage);
+    Usage :: @struct {
+        // indices in inputs of gates[0] that are needed to eval if not writing to delay() storage. 
+        inputs_for_pure_eval: []i64 = empty();
+        gates_needed_for_pure_eval := zeroed DynamicBitSet;
+        instance_offset_by_gate: []i64 = empty();
+    };
+    
     Gate :: @struct {
         kind: ComponentId;
         inputs: []WireId;
@@ -168,7 +177,7 @@ defs :: @static {
         @ct_assert(gates.len >= 2, it.loc, "must have at least input() and output()");
         @ct_assert(components[gates[0].kind.id.zext()].name == "input", it.loc, "first gate must be input");
         @ct_assert(components[gates[gates.len - 1].kind.id.zext()].name == "output", it.loc, "last gate must be output");
-
+        
         // can't check in the main loop because of memory
         enumerate gates { i, it |
             for it.inputs { id |
@@ -226,10 +235,216 @@ defs :: @static {
     };
     NONE :WireId: (id = 0xFFFFFFFF);
     
+    calculate_usage(components.items());
     @anon_literal(
         components = components.items(),
         primitives = prims.items(),
+        fast_eval = @if(FEAT_COMPILE, compile_gates(components.items()), @as([]rawptr) empty()),
     )
+}
+
+calculate_usage :: fn(components: []Component) void = {
+    each components { c |
+        continue :: local_return;
+        if c.gates.len == 0 {
+            c.usage = ast_alloc().box_zeroed(Component.Usage);
+            if c.name == "delay" || c.name == "input" || c.name == "output" {
+                c.inputs_for_pure_eval = empty();
+            } else {
+                _, in_arity := c.arity();
+                c.inputs_for_pure_eval = ast_alloc().alloc_init(i64, in_arity, fn(i) => i);
+            };
+            continue();
+        };
+        
+        instance := 0;
+        instance_offset_by_gate := ast_alloc().alloc_zeroed(i64, c.gates.len);
+        enumerate c.gates { i, it |
+            instance_offset_by_gate[i] = instance;
+            instance += components[it.kind.id.zext()].storage_count;
+        };
+        
+        needed: DynamicBitSet = empty(temp());
+        out_gate, in_gate := (c.gates[c.gates.len - 1]&, c.gates[0]&);
+        
+        gates_needed: DynamicBitSet = empty(ast_alloc());
+        gates_needed&.set(c.gates.len - 1);
+        for out_gate.inputs { id |
+            needed&.set(id.id.zext());
+        };
+
+        dowhile {
+            changed := false;
+            enumerate c.gates { gate_i, gate |
+                need_this_gate := false;
+                for gate.outputs { id |
+                    need_this_gate = need_this_gate || needed&.get(id.id.zext());
+                };
+                
+                if need_this_gate { 
+                    child := components[gate.kind.id.zext()]&;
+                    gates_needed&.set(gate_i);
+                    for child.inputs_for_pure_eval { i |
+                        id := gate.inputs[i];
+                        if !needed&.get_set(id.id.zext()) {
+                            changed = true;
+                        };
+                    };
+                };
+            };
+            changed
+        };
+        
+        pure_inputs := i64.list(ast_alloc());
+        enumerate in_gate.outputs { i, id |
+            if needed&.get(id.id.zext()) {
+                pure_inputs&.push(i);
+            };
+        };
+
+        c.usage = ast_alloc().box_zeroed(Component.Usage);
+        c.inputs_for_pure_eval = pure_inputs.items();
+        gates_needed.bits.gpa = panicking_allocator;
+        c.gates_needed_for_pure_eval = gates_needed;
+        c.instance_offset_by_gate = instance_offset_by_gate;
+    };
+}
+
+CompileGates :: @struct {
+    components: []Component;
+    c: *Component;
+    out: *List(u8);
+    wires_evaluated: DynamicBitSet;
+    need_pre_read: List(WireId);
+    doing_pre_read := false;
+    doing_pre_read_local := false;
+};
+
+fn compile_gate(self: *CompileGates, gate_i: i64) void = {
+    out := self.out;
+    it := self.c.gates[gate_i]&;
+    child := self.components[it.kind.id.zext()]&;
+    
+    if !self.c.gates_needed_for_pure_eval&.get(gate_i) && self.doing_pre_read && !self.doing_pre_read_local {
+        if child.storage_count != 0 {
+            // can test that this matters by adding a random memory1 whose output isn't used somewhere in another ramN component. 
+            @fmt(out, "world.instance += %;\n", child.storage_count);
+        };
+        return();
+    };
+
+    // TODO: for things with storage that were already pre_read, also compile a version that only does the writes and propagates not needing outputs
+    discard_outputs := !self.doing_pre_read && it.outputs.len > 0 && self.wires_evaluated&.get(it.outputs[0].id.zext());
+    if discard_outputs && child.storage_count == 0 && !child.name.starts_with("switch") {
+        return();
+    };
+    
+    if !self.doing_pre_read && self.c.storage_count > 0 {
+        for it.inputs { it |
+            if !self.wires_evaluated&.get(it.id.zext()) {
+                self.need_pre_read&.push(it);
+            };
+        };
+        
+        any_pre_read := self.need_pre_read.len != 0;
+        if any_pre_read {
+            @fmt(out, "world.doing_pre_read = %;\n", true);
+        };
+        while => self.need_pre_read.len > 0 {
+            wire := self.need_pre_read[self.need_pre_read.len - 1];
+            // :SLOW should compute wireid -> defining gate once and reuse
+            gate_i := self.c.gates.index_of(fn(it) => it.outputs.contains(fn(it) => it.id == wire.id)).unwrap();
+            it := self.c.gates[gate_i]&;
+            child := self.components[it.kind.id.zext()]&;
+            @debug_assert(child.storage_count != 0, "use-before-def without memory");
+            changed := false;
+            
+            for child.inputs_for_pure_eval { i |
+                it := it.inputs[i];
+                if !self.wires_evaluated&.get(it.id.zext()) {
+                    self.need_pre_read&.push(it);
+                    changed = true;
+                };
+            };
+            if !changed {
+                self.need_pre_read&.ordered_retain(fn(wire) => !it.outputs.contains(fn(it) => it.id == wire.id));
+                
+                instance := self.c.instance_offset_by_gate[gate_i];
+                @fmt(out, "world.instance = instance + %;\n", instance);
+                self.doing_pre_read = true;
+                self.doing_pre_read_local = true;
+                
+                self.compile_gate(gate_i);
+                
+                self.doing_pre_read = false;
+                self.doing_pre_read_local = false;
+                
+                each it.outputs { it |
+                    self.wires_evaluated&.set(it.id.zext());
+                };
+            };
+        };
+        if any_pre_read {
+            @fmt(out, "world.instance = instance + %;\n", self.c.instance_offset_by_gate[gate_i]);
+            @fmt(out, "world.doing_pre_read = %;\n", false);
+        };
+    };
+        
+    name := child.name;
+    if name == "switch1" {
+        name = "switch8";
+    };
+    simple := name != "switch8" && name != "delay" && name != "const";
+    if simple && name != "input" {
+        @fmt(out, "o := @uninitialized Array(WireValue, %);\n", it.outputs.len);
+        if it.inputs.len != 0 {
+            if it.inputs.len == 1 {  // HACK
+                @fmt(out, "i := bit_cast_unchecked(WireValue, Array(WireValue, 1), w%);\n", it.inputs[0].id);
+            } else {
+                @fmt(out, "i: Array(WireValue, %) = (", it.inputs.len);
+                for it.inputs { it |
+                    @fmt(out, "w%, ", it.id);
+                };
+                @fmt(out, ");\n");
+            };
+        } else {
+            // TODO: coerce '()' literal to zero length array :compiler
+            @fmt(out, "i := zeroed(Array(WireValue, 0));\n");
+        };
+    };
+    
+    @switch(name) {
+        @case("input") => @fmt(out, "o := in[];\n");
+        @case("output") => @fmt(out, "out[] = i;\n");
+        @case("const") => @fmt(out, "w%: WireValue = (byte = %);\n", it.outputs[0].id, it.param);
+        @case("switch8") => @fmt(out, "if w%.bit {| w% = w%; };\n", it.inputs[1].id, it.outputs[0].id, it.inputs[0].id);
+        @case("delay") => @fmt(out, "w% = eval_delay_gate(world, w%, %);\n", it.outputs[0].id, it.inputs[0].id, self.doing_pre_read);
+        @default => {
+            if child.storage_count == 0 && child.gate_sum < 25 {
+                @fmt(out, "@inline ");
+            };
+            @fmt(out, "%(world, o&, i&);\n", mangle(self.components, it.kind.id.zext()));
+        };
+    };
+    if simple && it.outputs.len > 0 && !discard_outputs {
+        enumerate it.outputs { i, it |
+            @fmt(out, "w% = o&[%]; ", it.id, i);
+        };
+        @fmt(out, "\n");
+    };
+    
+    @if(!self.doing_pre_read)
+    for it.outputs { it |
+        self.wires_evaluated&.set(it.id.zext());
+    };
+}
+
+fn compile_component(self: *CompileGates, doing_pre_read: bool) void = {
+    self.doing_pre_read = doing_pre_read;
+    self.declare_wire_vars();
+    enumerate self.c.gates& { gate_i, it |
+        self.compile_gate(gate_i);
+    };
 }
 
 // each Component becomes a function pointer (*World, *Array(WireValue, OutputN), *Array(WireValue, InputN))
@@ -240,119 +455,73 @@ defs :: @static {
 compile_gates :: fn(components: []Component) []rawptr = {
     out := @ref u8.list(components.len * 2000, ast_alloc());
     @fmt(out, "{\n#use(\"@/examples/circuit/eval.fr\");\n#use(\"@/examples/circuit/parse.fr\");\n");
-    get_name :: fn(i) => @tfmt("g%_%", i, components[i].name);
     enumerate components { i, c |
         continue :: local_return;
-        if i < defs.primitives.len {
+        if c.gates.len == 0 {
             S :: Type.scope_of(CompilerRt);
             if FuncId.get_constant(S, c.name.sym()).is_some() {
-                @fmt(out, "% :: CompilerRt.%;\n", get_name(i), c.name);
+                @fmt(out, "% :: CompilerRt.%;\n", mangle(components, i), c.name);
             } else {
-                @fmt(out, "% :: zeroed(rawptr);\n", get_name(i));
+                @fmt(out, "% :: zeroed(rawptr);\n", mangle(components, i));
             };
             continue();
         };
         
+        self: CompileGates = (
+            c = c, out = out, components = components,
+            wires_evaluated = empty(temp()),
+            need_pre_read = WireId.list(temp()),
+        ); self := self&;
+        
         out_n, in_n := (c.gates[c.gates.len - 1].inputs.len, c.gates[0].outputs.len);
-        @fmt(out, "% :: fn(world: *World, out: *Array(WireValue, %), in: *Array(WireValue, %)) void ", get_name(i), out_n, in_n);
-        //@fmt(out, """ #log_ir("Rh") """);
+        @fmt(out, "% :: fn(world: *World, out: *Array(WireValue, %), in: *Array(WireValue, %)) void ", mangle(components, i), out_n, in_n);
+        @if(false) @fmt(out, """ #log_ir("Rh") """);
         @fmt(out, "= {\n");
         
-        range(0, c.wire_count) { i |
-            @fmt(out, "w% := zeroed(WireValue);", i);
+        have_storage := self.c.storage_count != 0;
+        if have_storage {
+            @fmt(out, "doing_pre_read, instance := (world.doing_pre_read, world.instance);\n");
+            range(0, 2) { iter_i |
+                doing_pre_read := iter_i == 0;
+                @fmt(out, "if %doing_pre_read {\n", @if(doing_pre_read, "", "!"));
+                self.compile_component(doing_pre_read);
+                @fmt(out, "return();\n};\n");
+            };
+        } else {
+            self.compile_component(false);
         };
-        @fmt(out, "\n");
-        
-        @fmt(out, """
-        doing_pre_read, instance := (world.doing_pre_read, world.instance);
-        have_storage := %;
-        inline_range(0, 2) { iter_i |
-            continue :: local_return;
-            this_iter_is_doing_pre_read := iter_i == 0;
-            if this_iter_is_doing_pre_read {
-                @if(!have_storage) continue();  // :postmemory (alternative to the below one)
-                world.doing_pre_read = true;
-            } else {
-                @if(doing_pre_read /* :postmemory && have_storage*/) continue();
-                world.instance = instance;
-                world.doing_pre_read = false;
-            };
-        """, c.storage_count != 0);
-        
-        enumerate c.gates& { gate_i, it |
-            child := components[it.kind.id.zext()]&;
-            name := child.name;
-            if name == "switch1" {
-                name = "switch8";
-            };
-            simple := name != "switch8" && name != "delay" && name != "const";
-            if simple && name != "input" {
-                @fmt(out, "o := @uninitialized Array(WireValue, %);\n", it.outputs.len);
-                if it.inputs.len != 0 {
-                    if it.inputs.len == 1 {  // HACK
-                        @fmt(out, "i := bit_cast_unchecked(WireValue, Array(WireValue, 1), w%);\n", it.inputs[0].id);
-                    } else {
-                        @fmt(out, "i: Array(WireValue, %) = (", it.inputs.len);
-                        for it.inputs { it |
-                            @fmt(out, "w%, ", it.id);
-                        };
-                        @fmt(out, ");\n");
-                    };
-                } else {
-                    // TODO: coerce '()' literal to zero length array :compiler
-                    @fmt(out, "i := zeroed(Array(WireValue, 0));\n");
-                };
-            };
-
-            @switch(name) {
-                @case("input") => @fmt(out, "o := in[];\n");
-                @case("output") => @fmt(out, "out[] = i;\n");
-                @case("const") => @fmt(out, "w%: WireValue = (byte = %);\n", it.outputs[0].id, it.param);
-                @case("switch8") => {
-                    @fmt(out, "if w%.bit {| w% = w%; };\n", it.inputs[1].id, it.outputs[0].id, it.inputs[0].id);
-                };
-                @case("delay") => {
-                    @fmt(out, """
-                        @debug_assert_ult(world.instance, world.storage.len, "must preallocate storage_count");
-                        slot := world.storage[world.instance]&;
-                        w% = slot[];
-                        if !this_iter_is_doing_pre_read {
-                            slot[] = w%;
-                        };
-                        world.instance += 1;
-                    """, it.outputs[0].id, it.inputs[0].id);
-                };
-                @default => {
-                    if child.storage_count == 0 && child.gate_sum < 15 {
-                        @fmt(out, "@inline ");
-                    };
-                    @fmt(out, "%(world, o&, i&);\n", get_name(it.kind.id.zext()));
-                };
-            };
-            if simple && it.outputs.len > 0 {
-                enumerate it.outputs { i, it |
-                    @fmt(out, "w% = o&[%]; ", it.id, i);
-                };
-                @fmt(out, "\n");
-            };
-        };
-        
-        @fmt(out, """
-            }; // range
-            world.doing_pre_read = doing_pre_read;
-        }; // func
-        """);
+        @fmt(out, "};\n");  // func
     };
     
     @fmt(out, "dispatch :: @const_slice(@as(rawptr) ");
     range(0, components.len) { i |
-        @fmt(out, "%, ", get_name(i));
+        @fmt(out, "%, ", mangle(components, i));
     };
     @fmt(out, ");\n");  // dispatch
     @fmt(out, "};");  // scope
+    if false {
+        #use("@/lib/sys/fs.fr");
+        write_entire_file_or_crash("target/a.fr", out.items());
+    };
     S := import(out.items());
     const_eval([]rawptr, @{ @[@literal S].dispatch })
 };
+
+fn declare_wire_vars(self: *CompileGates) void = {
+    out, c := (self.out, self.c);
+    seen: DynamicBitSet = empty(temp());
+    each c.gates { gate |
+        for gate.outputs { id |
+            if !seen&.get_set(id.id.zext()) {
+                @fmt(out, "w% := zeroed(WireValue);", id.id);
+            };
+        }
+    };
+    @fmt(out, "\n");
+}
+
+fn mangle(c: []Component, i: i64) Str = 
+    @tfmt("g%_%", i, c[i].name);
 
 CompilerRt :: @struct {
     #use("@/examples/circuit/eval.fr");
@@ -440,6 +609,10 @@ main :: fn() void = {
     out := @ref u8.list(temp());
     for components { it |
         @fmt(out, "% :: @{\n", it.name);
+        if it.gates.len > 0 && it.inputs_for_pure_eval.len != it.gates[0].outputs.len {
+            @fmt(out, "    // inputs_for_pure_eval: %\n", it.inputs_for_pure_eval);
+        };
+        
         for it.gates { it |
             @fmt(out, "    ");
             for it.outputs { it |
@@ -452,6 +625,7 @@ main :: fn() void = {
                 @fmt(out, "w%, ", it.id);
             };
             out.len -= 2 * int(out.items().ends_with(", "));
+            @if(components[it.kind.id.zext()].name == "const") @fmt(out, "%", it.param);
             @fmt(out, ");\n");
         };
         if it.gates.len == 0 {
@@ -467,3 +641,9 @@ fn arity(c: *Component) Ty(i64, i64) = {
     out_n, in_n := (c.gates[c.gates.len - 1].inputs.len, c.gates[0].outputs.len);
     (out_n, in_n)
 }
+
+#use("@/lib/collections/bit_set.fr");
+
+// TODO: maybe get rid of switch gate so it's always ssa
+// TODO: compile pre_read version as a seperate function and call it directly instead of branching.
+// TODO: a problem now is that the interpreter is totally different eval strategy from the compiler and they can disagree
