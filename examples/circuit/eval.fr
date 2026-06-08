@@ -1,18 +1,24 @@
 
-fn init(world: *World, name: Str, a: Alloc, save_wire_values: bool) ComponentId = {
-    gate := defs.components.index_of(fn(it) => it.name == name).unwrap();
-    child := defs.components[gate]&;
-    wires := @if(save_wire_values, child.wire_sum, child.wire_depth);
+fn init(world: *World, a: Alloc, save_wire_values: bool) void = {
+    wire_sum, wire_depth, storage_count := @run {
+        ws, wd, s := (0, 0, 0);
+        for defs.components { it |
+            ws = max(ws, it.wire_sum);
+            wd = max(wd, it.wire_depth);
+            s = max(s, it.storage_count);
+        };
+        (ws, wd, s)
+    };
+    wires := @if(save_wire_values, wire_sum, wire_depth);
     world[] = (
         components = defs.components,
         scratch = from_capacity(a.alloc_uninit(WireValue, wires)),
         instance = 0,
-        storage = a.alloc_zeroed(WireValue, child.storage_count),
+        storage = a.alloc_zeroed(WireValue, storage_count),
         doing_pre_read = false,
         save_wire_values = save_wire_values,
         fast_eval = defs.fast_eval,
     );
-    (id = gate.trunc())
 }
 
 fn drop(world: *World, a: Alloc) void = {
@@ -176,9 +182,13 @@ fn tick_overture(world: *World, root_component: ComponentId, input: u8, write_pr
     prev := world.save_wire_values;
     @debug_assert(prev || !save_wire_values, "if init(save_wire_values=false), won't have preallocated enough");
     world.save_wire_values = prev && save_wire_values;  
-    values := @slice(@as(WireValue) (byte = input), (bit = write_program), (byte = 0), (bit = false));
+    values := @slice(@as(WireValue) (byte = input), (bit = write_program), (byte = 0), (bit = false), (bit = false));
+    out := @const_slice(@as(WireId) (id = 2), (id = 3), (id = 4));
+    if world[root_component].name != "leg" {
+        out.len -= 1;
+    };
     base_gate := @ref @as(Component.Gate) (
-        outputs = @const_slice(@as(WireId) (id = 2), (id = 3)), 
+        outputs = out, 
         inputs = @const_slice(@as(WireId) (id = 0), (id = 1)),
         kind = root_component, 
         param = 0,
@@ -223,6 +233,11 @@ fn get_compiled(world: *World, kind: ComponentId) ?rawptr #inline = {
 
 #use("@/examples/circuit/parse.fr");
 #use("@/lib/collections/map.fr");
+
+get_component_by_name :: fn(name: Str) ComponentId #fold = {
+    kind := defs.components.index_of(fn(it) => it.name == name).unwrap();
+    (id = kind.trunc())
+};
 
 // these two are fixed in the compiler but not the interpreter
 // TODO: the preread does redundant work for the ram128. 

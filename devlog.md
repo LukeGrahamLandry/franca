@@ -7,6 +7,16 @@
   - better xor with just nand: 980ms.
   - better full_add (reusing the first xor): 950ms. 
   - better equal8 (xnor bits instead of eq0(sub(w0, w1))): 440ms.
+- trying to solve the maze with leg now. assembler. 
+  - ip read is off by one? am i going to regret just adding 1 to the counter? 
+  - when i jump the ram256save4 is still using what the address would have been on the next tick. 
+    works if i put a nop after each jump and jump target... lol i've reinvented branch delay slots. 
+    - right, have valid be on tick 3 instead of saving all 4 bytes and valid on tick 0. 
+      since new counter value isn't ready until the end of the tick, 
+      need to save address on tick 0 not tick 3, which works out because address 
+      is always coming in from a counter so remembered on invalid ticks. 
+      but then also no need to save the address in the ram256save4 and manually offset it. 
+      solve ticks: 7025 -> 4140 (because not wasting 4 per branch). 
 
 ## (Jun 6/7)
 

@@ -20,6 +20,7 @@ Component :: @struct {
     wire_sum: i64;    // like ^ but don't reset scratch for each child so can use it for visualization
     gate_sum: i64;
     primitive_arity := (-1, -1); // (out, in)
+    labels: []GateLabel = empty();
     
     usage: *Usage #use = zeroed(*Usage);
     Usage :: @struct {
@@ -37,12 +38,15 @@ Component :: @struct {
         param: i64;
     };
 };
+
+GateLabel :: @struct(name: Str, bit_size: i64, instance_offset: i64);
+
 ComponentId :: @struct(id: u32);
 WireId :: @struct(id: u32);
 GateId :: @struct(id: u32);
 
+#use("@/lib/collections/map.fr");
 defs :: @static {
-    #use("@/lib/collections/map.fr");
     components := @ref Component.list(ast_alloc());
     map: HashMap(Symbol, ComponentId) = init(temp());
     
@@ -82,6 +86,7 @@ defs :: @static {
         continue :: local_return;
         it := FatExpr.get_constant(S, name) || continue();
         gates := @ref Component.Gate.list(ast_alloc());
+        labels := @ref GateLabel.list(ast_alloc());
         @ct_assert(it.expr&.is(.Block), it.loc, "expected block body");
         block := it.expr.Block&;
         defs: HashMap(WireId, ComponentId) = init(temp());
@@ -110,6 +115,13 @@ defs :: @static {
                 
                 if kind == sym("const") {
                     param = i64.const_eval(call.arg[]);
+                };
+                
+                if kind == sym("label") {
+                    name, size := Ty(Str, i64).const_eval(call.arg[]);
+                    labels.push(name = name, bit_size = size, instance_offset = storage_count);
+                    @ct_assert(out.len == 0, expr.loc, "label() must have no outputs");
+                    continue();
                 };
                 
                 @if(!call.arg.expr&.is(.Value))
@@ -233,6 +245,7 @@ defs :: @static {
             wire_depth = wire_depth + wire_count,
             wire_sum = wire_sum + wire_count,
             gate_sum = gate_sum + gates.len,
+            labels = labels.items(),
         );
         map&.insert(name, (id = components.len.trunc() - 1));
         
@@ -435,7 +448,7 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
         @case("switch8") => @fmt(out, "if w%.bit {| w% = w%; };\n", it.inputs[1].id, it.outputs[0].id, it.inputs[0].id);
         @case("delay") => @fmt(out, "w% = eval_delay_gate(world, w%, %);\n", it.outputs[0].id, it.inputs[0].id, self.doing_pre_read);
         @default => {
-            if child.storage_count == 0 && child.gate_sum < 50 {
+            if child.storage_count == 0 && child.gate_sum < 30 {
                 @fmt(out, "@inline ");
             };
             @fmt(out, "%(world, o&, i&);\n", mangle(self.components, it.kind.id.zext()));
@@ -581,35 +594,8 @@ AsmOverture :: @rec @struct {
         a.code&.push(i.trunc());
     }
     
-    fn set_label(a: *AsmOverture, name: Str) void = {
-        it := a.labels&.get_or_insert(name, => (use = list(temp()), def = .None));
-        @assert(it.def.is_none(), "label % defined twice (%, %)", name, it.def.Some, a.code.len);
-        it.def = (Some = a.code.len);
-    }
-    
-    fn get_label(a: *AsmOverture, name: Str) void = {
-        it := a.labels&.get_or_insert(name, => (use = list(temp()), def = .None));
-        it.use&.push(a.code.len);
-        a.code&.push(0);
-    }
-    
-    start :: fn() AsmOverture = (code = list(256, temp()), labels = init(temp()));
-    fn end(a: *AsmOverture, out: Alloc) []u8 = {
-        each a.labels& { name, it |
-            def := it.def || @panic("undefined label %", name);
-            @assert(def < a.code.len && def < 64, "immediate out of range % for label %", def, name);
-            for it.use { off |
-                a.code[off] = def.trunc();
-            };
-        };
-        @assert_le(a.code.len, 256, "too much code");
-        a.code&.push_repeated(256 - a.code.len, 0);
-        a.code&.items().shallow_copy(out)
-    }
-    
-    code: List(u8);
-    labels: HashMap(Str, Label);
-    Label :: @struct(use: List(i64), def: ?i64);
+    start :: fn() AsmOverture = (labels = Labels'start(64));
+    labels: Labels #use;
     
     disassemble :: fn(out: *List(u8), byte: u8) void = {
         hi, lo := (byte.shift_right_logical(3).bit_and(0b111), byte.bit_and(0b111));
@@ -621,6 +607,102 @@ AsmOverture :: @rec @struct {
             @case(0b11) => @fmt(out, "% r3", @as(cond) lo);
             @default => unreachable();
         };
+    };
+};
+
+Labels :: @struct {
+    code: List(u8);
+    names: HashMap(Str, Label);
+    immediate_range: i64;
+    Label :: @struct(use: List(i64), def: ?i64);
+
+    fn set_label(a: *Labels, name: Str) void = {
+        it := a.names&.get_or_insert(name, => (use = list(temp()), def = .None));
+        @assert(it.def.is_none(), "label % defined twice (%, %)", name, it.def.Some, a.code.len);
+        it.def = (Some = a.code.len);
+    }
+    
+    fn get_label(a: *Labels, name: Str) void = {
+        it := a.names&.get_or_insert(name, => (use = list(temp()), def = .None));
+        it.use&.push(a.code.len);
+        a.code&.push(0);
+    }
+    
+    start :: fn(immediate_range: i64) Labels = (code = list(256, temp()), names = init(temp()), immediate_range = immediate_range);
+    fn end(a: *Labels, out: Alloc) []u8 = {
+        each a.names& { name, it |
+            def := it.def || @panic("undefined label %", name);
+            @assert(def < a.code.len && def < a.immediate_range, "immediate out of range % for label %", def, name);
+            for it.use { off |
+                a.code[off] = def.trunc();
+            };
+        };
+        @assert_le(a.code.len, 256, "too much code");
+        a.code&.push_repeated(256 - a.code.len, 0);
+        a.code&.items().shallow_copy(out)
+    }
+};
+
+LabelsTrait :: fn(T) => T == *AsmLeg || T == *AsmOverture;
+fn set_label(a: ~T, name: Str) void #where(LabelsTrait) = a.labels&.set_label(name);
+fn get_label(a: ~T, name: Str) void #where(LabelsTrait) = a.labels&.get_label(name);
+fn end(a: ~T, out: Alloc) []u8 #where(LabelsTrait) = a.labels&.end(out);
+
+AsmLeg :: @rec @struct {
+    reg :: @tagged(r0: void, r1, r2, r3, r4, r5, _, io, imm: u8);
+    fn op(a: *AsmLeg, c: alu, dest: reg, a0: reg, a1: reg) void = 
+        a.encode_op(@as(u8) c, false, dest, a0, a1);
+    alu :: @enum(u8) (add, sub, and, or, not, xor, _0, _1);  
+    cond :: @enum(u8) (eq, ne, lt, le, gt, ge, _0, _1); 
+    
+    fn jmp(a: *AsmLeg, c: cond, a0: reg, a1: reg, label: Str) void = {
+        encode_op(a, @as(u8) c, true, (imm = 255), a0, a1);
+        a.code.len -= 1;
+        a.get_label(label);
+    };
+    
+    encode_op :: fn(a: *AsmLeg, op: u8, cond: bool, dest: reg, a0: reg, a1: reg) void = {
+        c0: u8 = trunc(@or(op.bit_and(0b111).zext(), 
+            int(cond).shift_left(5), 
+            int(a1&.is(.imm)).shift_left(6), 
+            int(a0&.is(.imm)).shift_left(7),
+        ));
+        a.code&.push(c0);
+        a.code&.push(encode_arg(a0));
+        a.code&.push(encode_arg(a1));
+        a.code&.push(encode_arg(dest));
+    };
+    encode_arg :: fn(a: reg) u8 = 
+        @if(a&.is(.imm), a.imm, trunc(@as(i64) @as(Tag(reg)) a&.tag()));
+    
+    start :: fn() AsmLeg = (labels = Labels'start(256));
+    labels: Labels #use;
+    
+    disassemble :: fn(out: *List(u8), o: u32) void = {
+        op, a0, a1, dest := (o.bit_and(0xFF), o.shift_right_logical(8).bit_and(0xFF), o.shift_right_logical(16).bit_and(0xFF), o.shift_right_logical(24).bit_and(0xFF));
+        is_cond := op.bit_and(32) != 0;
+        if is_cond {
+            @fmt(out, "j% ", @as(cond) @as(u8) op.bit_and(0b111).trunc());
+        } else {
+            @fmt(out, "% ", @as(alu) @as(u8) op.bit_and(0b111).trunc());
+        };
+        if !is_cond {
+            @fmt(out, "% ", @as(Tag(reg)) @as(i64) dest.bit_and(0b111).zext());
+        };
+        if op.bit_and(128) != 0 {
+            @fmt(out, "% ", { push_hex_byte(out, a0.trunc(), true); "" });
+        } else {
+            @fmt(out, "% ", @as(Tag(reg)) @as(i64) a0.zext());
+        };
+        if op.bit_and(64) != 0 {
+            @fmt(out, "% ", { push_hex_byte(out, a1.trunc(), true); "" });
+        } else {
+            @fmt(out, "% ", @as(Tag(reg)) @as(i64) a1.zext());
+        };
+        if is_cond {
+            @fmt(out, "->%", { push_hex_byte(out, dest.trunc(), true); "" });
+        };
+        @fmt(out, "\n");
     };
 };
 
