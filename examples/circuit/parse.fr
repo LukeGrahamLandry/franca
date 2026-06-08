@@ -27,6 +27,7 @@ Component :: @struct {
         inputs_for_pure_eval: []i64 = empty();
         gates_needed_for_pure_eval := zeroed DynamicBitSet;
         instance_offset_by_gate: []i64 = empty();
+        wires_used := zeroed DynamicBitSet;
     };
     
     Gate :: @struct {
@@ -90,6 +91,11 @@ defs :: @static {
         ::AutoHash(WireId, TrivialHasher); ::AutoEq(WireId);
         
         use_before_def := @ref Ty(WireId, Span).list(temp());
+        
+        for str(name) { c |
+            ok := c.is_ascii_alpha() || c.is_ascii_digit() || c == "_".ascii();
+            @ct_assert(ok, it.loc, "invalid identifier");  // possible because of @"raw identifiers"
+        };
         
         for block.body { it |
             continue :: local_return;
@@ -264,6 +270,13 @@ calculate_usage :: fn(components: []Component) void = {
             instance += components[it.kind.id.zext()].storage_count;
         };
         
+        wires_used: DynamicBitSet = empty(ast_alloc());
+        each c.gates { it |
+            for it.inputs { id |
+                wires_used&.set(id.id.zext());
+            };
+        };
+        
         needed: DynamicBitSet = empty(temp());
         out_gate, in_gate := (c.gates[c.gates.len - 1]&, c.gates[0]&);
         
@@ -307,6 +320,8 @@ calculate_usage :: fn(components: []Component) void = {
         gates_needed.bits.gpa = panicking_allocator;
         c.gates_needed_for_pure_eval = gates_needed;
         c.instance_offset_by_gate = instance_offset_by_gate;
+        wires_used.bits.gpa = panicking_allocator;
+        c.wires_used = wires_used;
     };
 }
 
@@ -420,7 +435,7 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
         @case("switch8") => @fmt(out, "if w%.bit {| w% = w%; };\n", it.inputs[1].id, it.outputs[0].id, it.inputs[0].id);
         @case("delay") => @fmt(out, "w% = eval_delay_gate(world, w%, %);\n", it.outputs[0].id, it.inputs[0].id, self.doing_pre_read);
         @default => {
-            if child.storage_count == 0 && child.gate_sum < 25 {
+            if child.storage_count == 0 && child.gate_sum < 50 {
                 @fmt(out, "@inline ");
             };
             @fmt(out, "%(world, o&, i&);\n", mangle(self.components, it.kind.id.zext()));
@@ -428,7 +443,10 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
     };
     if simple && it.outputs.len > 0 && !discard_outputs {
         enumerate it.outputs { i, it |
-            @fmt(out, "w% = o&[%]; ", it.id, i);
+            // TODO: use this info to call specialized version for each set of discarded outputs?
+            if self.c.wires_used&.get(it.id.zext()) {
+                @fmt(out, "w% = o&[%]; ", it.id, i);
+            };
         };
         @fmt(out, "\n");
     };
@@ -455,6 +473,7 @@ fn compile_component(self: *CompileGates, doing_pre_read: bool) void = {
 compile_gates :: fn(components: []Component) []rawptr = {
     out := @ref u8.list(components.len * 2000, ast_alloc());
     @fmt(out, "{\n#use(\"@/examples/circuit/eval.fr\");\n#use(\"@/examples/circuit/parse.fr\");\n");
+    @fmt(out, "Z :: zeroed(WireValue);\n");
     enumerate components { i, c |
         continue :: local_return;
         if c.gates.len == 0 {
@@ -512,8 +531,8 @@ fn declare_wire_vars(self: *CompileGates) void = {
     seen: DynamicBitSet = empty(temp());
     each c.gates { gate |
         for gate.outputs { id |
-            if !seen&.get_set(id.id.zext()) {
-                @fmt(out, "w% := zeroed(WireValue);", id.id);
+            if !seen&.get_set(id.id.zext()) && self.c.wires_used&.get(id.id.zext()) {
+                @fmt(out, "w% := Z;", id.id);
             };
         }
     };
@@ -594,10 +613,11 @@ AsmOverture :: @rec @struct {
     
     disassemble :: fn(out: *List(u8), byte: u8) void = {
         hi, lo := (byte.shift_right_logical(3).bit_and(0b111), byte.bit_and(0b111));
+        name :: @const_slice("r0", "r1", "r2", "r3", "r4", "r5", "io");
         @switch(byte.shift_right_logical(6)) {
             @case(0b00) => @fmt(out, "imm r0 %", { push_hex_byte(out, byte, true); "" });
             @case(0b01) => @fmt(out, "% r3 r1 r2", @as(alu) lo);
-            @case(0b10) => @fmt(out, "mov r% r%", lo, hi);
+            @case(0b10) => @fmt(out, "mov % %", name[lo.zext()], name[hi.zext()]);
             @case(0b11) => @fmt(out, "% r3", @as(cond) lo);
             @default => unreachable();
         };

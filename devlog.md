@@ -1,4 +1,13 @@
 
+## (Jun 8)
+
+- also be more efficient in the_maze program. ticks to solve: 7418 -> 3736. 
+- start leg arch: big ram, 3reg, alu, cond. 
+- 1300ms test all combinations of (8 bit eq0,neg,add,sub,and,or,xor,equal,ult,leg_cond) + maze. 
+  - better xor with just nand: 980ms.
+  - better full_add (reusing the first xor): 950ms. 
+  - better equal8 (xnor bits instead of eq0(sub(w0, w1))): 440ms.
+
 ## (Jun 6/7)
 
 - example that makes the pre_read thing is complicated because a non-primitive but !has_storage

@@ -3,6 +3,7 @@ Maze :: @struct {
     pos: i64;
     direction: i64;
     map: []i64;
+    win := false;
     
     new :: fn(map: []i64) Maze = {
         self: Maze = (pos = 0, direction = 0, map = map);
@@ -50,16 +51,14 @@ Maze :: @struct {
                 self.direction = self.direction.add(1).umod(4);
             };
             @case(3) => (); // wait
-            @case(4) => {  // action
-                // TODO: open door and require that for win
+            @case(4) => if look_pos == 1 {  // action
+                self.win = true;
             };
-            @case(5) => (); // shoot
             @default => ();
         };
     }
     
-    R :: @struct(win: bool);
-    fn render(self: *Maze, maze_text: *List(u8)) R = {
+    fn render(self: *Maze, maze_text: *List(u8)) void = {
         width := self.width();
         maze_text.reserve((width + 1)*self.map.len());
         range(0, width*self.map.len()) { i |
@@ -75,7 +74,6 @@ Maze :: @struct {
                 @else => @if(wall, "@".ascii(), " ".ascii());
             });
         };
-        (win = self.pos == width + 1)
     }
     
     fn width(self: *Maze) i64 = count_ones(self.map[0]).zext();
@@ -103,32 +101,79 @@ Maze :: @struct {
 main :: fn() void = {
     #use("@/examples/circuit/eval.fr");
     #use("@/examples/circuit/parse.fr");
+    #use("@/lib/sys/process.fr");
     world := @ref zeroed(World);
     maze := @ref Maze'new(Maze.tc0);
     a := general_allocator();
     root_component := init(world, "overture", a, false);
     
+    start := timestamp();
     program := import("@/examples/circuit/defs.fr")'the_maze;
     range(0, 256) { i |
         tick_overture(world, root_component, program[i], true, false);
     };
     
-    drawing := u8.list(temp());
     n := 0;
     dowhile {
         input := maze.input();
-        done := false;
         if tick_overture(world, root_component, input, false, false) { byte |
             maze.output(byte);
-            drawing&.clear();
-            result := maze.render(drawing&);
-            done = result.win;
         };
         n += 1;
         @assert_lt(n, 20000, "this is taking too long. broken?");
-        !done
+        !maze.win
     };
-    @println("solved maze in % ticks", n);
+    end := timestamp();
+    @println("solved maze in % ticks (%ms)", n, end - start);
+    
+    C :: fn($a: Str, b: []i64) => world.check(a, b);
+    range(0, 256) { a0 |
+        C("eq0", @slice(a0, int(a0 == 0)));
+        C("neg8", @slice(a0, bit_and(-a0, 255)));
+        range(0, 256) { a1 |
+            C("add8", @slice(0, a0, a1, bit_and(a0+a1, 255), int(a0 + a1 > 255)));
+            C("sub8", @slice(a0, a1, bit_and(a0-a1, 255)));
+            C("and8", @slice(a0, a1, bit_and(a0, a1)));
+            C("or8", @slice(a0, a1, bit_or(a0, a1)));
+            C("xor8", @slice(a0, a1, bit_xor(a0, a1)));
+            C("equal8", @slice(a0, a1, int(a0 == a1)));
+            C("ult8", @slice(a0, a1, int(a0 < a1)));
+            
+            range(0, 6) { c |
+                F :: @FnPtr(i64, i64) bool;
+                x := @const_slice(@as(F) eq, ne, lt, le, gt, ge);
+                cond := x[c];
+                C("leg_cond", @slice(c, a0, a1, 1, int(cond(a0, a1))));
+            };
+        };
+    };
+    
+    check :: fn(world: *World, $name: Str, args: []i64) void = {
+        it := @static {
+            kind := defs.components.index_of(fn(it) => it.name == name).unwrap();
+            c := defs.components[kind]&;
+            o_n, i_n := c.arity();
+            a := ast_alloc();
+            it := @as(Component.Gate) (
+                inputs = a.alloc_init(WireId, i_n, fn(i) => (id = trunc(i))),
+                outputs = a.alloc_init(WireId, o_n, fn(i) => (id = trunc(i_n + i))),
+                kind = (id = kind.trunc()),
+                param = 0,
+            );
+            it
+        };
+        a := Arena'stack_alloc(size_of(WireValue) * max_in_out_wires);
+        wires := a.alloc_zeroed(WireValue, args.len);
+        o_n, i_n := (it.outputs.len, it.inputs.len);
+        @assert_eq(o_n + i_n, args.len, "check arity error");
+        range(0, i_n) { i |
+            wires[i].byte = args[i].trunc();
+        };
+        eval_compiled(world, wires, it);
+        range(0, o_n) { i |
+            @assert_eq(wires[i_n + i].byte, args[i_n + i].trunc(), "check(%, %) o[%]", name, args, i);
+        };
+    };
     
     drop(world, a);
 }
