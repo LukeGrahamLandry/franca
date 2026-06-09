@@ -1,0 +1,203 @@
+
+Circuit :: @struct {
+    wires: []Wire;
+    gates: []Gate;
+    
+    Wire :: @struct {
+        path: RawList(WireNode);
+    };
+    WireNode :: @struct(pos: Vec2);
+    Gate :: @struct {
+        pos: Vec2;
+        kind: u16;
+        rotation: u8;
+        custom_id: i64;
+        settings: Array(i64, 2);
+        data: []u8;
+    };
+};
+
+// https://github.com/Stuffe/save_monger/blob/22fa398d95c3d3a0b5e88a80e9daee613cab1823/versions/v6.nim CC0
+// for now i want to use save files from non-save_breaker 0.1059 beta, 
+// the lastest version of that repo has the old vN files as though they would still be correct but they're super not because they changed all the component numbers on the commit for v2.1.77 
+load_circuit :: fn(in: Str, arena: Alloc) Result(Circuit, Str) = {
+    a := arena;  // want an arena because leak on error
+    @if(in[0] != 6) return(Err = "only tc circuit.data version 6 is supported");
+    in = in.rest(1);
+    
+    out := @ref u8.list(temp());
+    consumed_bytes, ok := decompress(in, out);
+    @if(!ok) return(Err = "failed to decompress");
+    @if(in.len != consumed_bytes) return(Err = "extra junk on the end of the file");
+    in := out.items();
+    
+    gates := list(Circuit.Gate, a);
+    wires := list(Circuit.Wire, a);
+    
+    i := 0;
+    eat :: fn($T: Type) => {
+        @if(i + size_of(T) > in.len) fail("malformed");
+        t := in.rest(i).peek_type(T)[];
+        i += size_of(T); 
+        t
+    };
+    eatN :: fn($I: Type, $T: Type) => {
+        n: i64 = eat(I).int() * size_of(T);
+        @if(i + n*size_of(T) >= in.len) fail("malformed");
+        t := T.reinterpret_bytes(in.subslice(i, n));
+        i += n;
+        t
+    };
+    eat_point :: fn() => {
+        x, y := (eat(i16), eat(i16));
+        vec2(x.intcast().float().cast(), y.intcast().float().cast())
+    };
+    fail :: fn(s) => return(Err = s);
+    
+    eat(i64); eat(u32); eat(i64); eat(i64); eat(bool); eat(u32);
+    eatN(u16, i64); // dependencies
+    eatN(u16, u8);  // description
+    eat_point(); eat(u8); eat(bool); eat(u16);
+    eatN(u16, u8);  // player data
+    eatN(u16, u8);  // hub description
+    
+    gate_count := eat(i64);
+    gates&.reserve(gate_count);
+    range(0, gate_count) { _ |
+        kind := eat(u16);
+        pos := eat_point();
+        rotation := eat(u8);
+        id := eat(i64);
+        custom_string := eatN(u16, u8);
+        // settings
+        s1 := eat(i64);
+        s2 := eat(i64);
+        _ := eat(i16);
+        custom_id := -1;
+        if kind == 92 {  // Custom
+            custom_id = eat(i64);
+            custom_pos := eat_point();
+        };
+        if kind == 94 || kind == 68 || kind == 64 {  // Program
+            n := eat(u16);
+            range(0, n.zext()) { _ |
+                key := eat(i64);
+                program := eatN(u16, u8);
+                // TODO: do something with these
+            };
+        };
+        gates&.push(
+            rotation = rotation,
+            custom_id = id,
+            kind = kind,
+            pos = pos,
+            settings = (s1, s2),
+            data = custom_string.shallow_copy(a),
+        );
+    };
+    
+    directions :: @const_slice(vec2(1,0), vec2(1,1), vec2(0,1), vec2(-1,1), vec2(-1,0), vec2(-1,-1), vec2(0,-1), vec2(1,-1));
+    wire_count := eat(i64);
+    wires&.reserve(wire_count);
+    range(0, wire_count) { _ |
+        continue :: local_return;
+        kind := eat(u8);
+        colour := eat(u8);
+        n := eat(u16);
+        comment := in.subslice(i, n.zext());
+        i += n.zext(); 
+        
+        pos := eat_point();
+        segment := eat(u8);
+        if segment == 0b0010_0000 {
+            x := eat(i16);
+            y := eat(i16);
+            continue();
+        };
+        
+        path := Circuit.WireNode.list(a);
+        path&.push(pos = pos);
+        length := segment.bit_and(0b0001_1111);
+        while => length != 0 {
+            direction := directions[segment.zext().shift_right_logical(5)];
+            len: i64 = length.zext();
+            prev := path[path.len-1].pos;
+            path&.push(pos = prev + direction*len.float().cast());
+            
+            segment = eat(u8);
+            length = segment.bit_and(0b0001_1111);
+        };
+        wires&.push(path = path.as_raw());
+    };
+    @if(i != in.len) fail("extra junk at the end");
+    (Ok = (wires = wires.items(), gates = gates.items()))
+}
+
+#use("@/graphics/vec.fr");
+
+// https://raw.githubusercontent.com/google/snappy/27ab5f7f518430a021239bc26a5b2fd64affbc7b/format_description.txt
+decompress :: fn(in: []u8, out: *List(u8)) Ty(i64, bool) = {
+    #use("@/lib/encoding/leb128.fr");
+    n, r, ok := read_leb128_unsigned(in);
+    @if(!ok) return(0, false);
+    i := in.len - r.len;
+    decompressed_size: i64 = n.bitcast();
+    @if(decompressed_size < 0) return(0, false); // 2^63 bytes ought to be enough for anyone
+    out.reserve(decompressed_size);
+    start := out.len;
+    while => out.len - start < decompressed_size {
+        continue :: local_return;
+        @if(i + 1 > in.len) return(i, false);
+        tag_byte := in[i]; i += 1;
+        tag := tag_byte.bit_and(0b11);
+        upper: i64 = tag_byte.zext().shift_right_logical(2);
+        length, offset := @switch(tag) {
+            @case(0b00) => {  // 2.1. 
+                len := if upper < 60 {
+                    upper + 1
+                } else {
+                    len_length := upper - 60 + 1;
+                    @if(i + len_length > in.len) return(i, false);
+                    len := 0;
+                    range(0, len_length) { j |
+                        len += in[i].zext().shift_left(8*j); i += 1;
+                    };
+                    len + 1
+                };
+                
+                @if(i + len > in.len) return(i, false);
+                @if(out.len - start + len > decompressed_size) return(i, false);
+                out.push_all(in.subslice(i, len)); i += len;
+                continue();
+            };
+            @case(0b01) => {  // 2.2.1.
+                len := upper.bit_and(0b111) + 4;
+                upper := upper.shift_right_logical(3);
+                offset := upper.shift_left(8).bit_or(in[i].zext()); i += 1;
+                (len, offset)
+            };
+            @case(0b10) => {  // 2.2.2. 
+                @if(i + 2 > in.len) return(i, false);
+                offset: i64 = peek_type(in.rest(i), u16)[].zext(); i += 2;
+                (upper + 1, offset)
+            };
+            @case(0b11) => {  // 2.2.3. 
+                @if(i + 4 > in.len) return(i, false);
+                offset: i64 = peek_type(in.rest(i), u32)[].zext(); i += 4;
+                (upper + 1, offset)
+            };
+            @default => unreachable();
+        };
+        @if(offset > out.len - start) return(i, false);
+        @if(out.len - start + length > decompressed_size) return(i, false);
+        @if(offset == 0) return(i, false);
+        dest := out.len;
+        src := dest - offset;
+        out.len += length;
+        // note: the copy is allowed to overlap the new bytes it writes.  
+        range(0, length) { i |  
+            out[dest + i] = out[src + i];
+        };
+    };
+    (i, true)
+};

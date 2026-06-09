@@ -1878,3 +1878,27 @@ StbTrueType :: include { C |
 - init from small union field then read from large.
 - c style variadic functions
 - nan bit pattern for any instructions other than load/copy
+
+## examples/circuit
+
+- finish leg: memory, stack, call, shifts
+- make the defs language less painful
+  - number literal instead of const()
+  - nested expressions
+  - variable names
+- read turing complete schematic files
+  - https://raw.githubusercontent.com/google/snappy/27ab5f7f518430a021239bc26a5b2fd64affbc7b/format_description.txt
+  - https://github.com/Stuffe/save_monger
+  - do they have an api for the schematic hub?
+  - need to know pin locations for each component somehow
+  - add disable pins to my components to match theirs
+- 16/32/64 bit components
+- io devices: console, dot matrix, 7 segment, time, keyboard
+- compile new schematics at runtime
+- compile a version with save_wire_values so can get rid of the interpreter? 
+  otherwise need to make interpreter's pre_read work the same way as compiler. 
+- speed mode that cheats and implements components with native instructions instead of nand gates
+- fast mode that doesn't even save_wire_values once per frame
+- option for flow chart ish rendering.
+  need to do layout somehow. 
+- ui: use a better coordinate system so resizing the screen doesn't make things move

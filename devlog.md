@@ -1,5 +1,19 @@
 
-## (Jun 8)
+## (Jun 9) circuit
+
+i want to be able to load a TuringComplete.Game schematic into my simulator. 
+people have made some pretty cool stuff in it (riscv, tetris, doom, etc.)
+and they give you the code for loading it: Stuffe/save_monger.
+- snappy decompression is trivial, it's like the easy part of deflate.
+- very confused by trying to use v6.nim, i guess that's just junk and you have to 
+  use the v6 from when v6 was the lastest. why do they keep them all around then? 
+- can load a circuit.data and draw the wires on the screen
+- sadly the file just has the positions of gates/wires, it doesn't tell you which gates are connected. 
+  so i need to know the pin positions relative to each type of gate and that data doesn't seem to be in the library. 
+  i guess there aren't that many different shapes so maybe its not a big deal to just look at them and write a list. 
+  - for custom components its based on aprox. position of the inputs/outputs in the implementation, that's fine. 
+
+## (Jun 8) circuit
 
 - also be more efficient in the_maze program. ticks to solve: 7418 -> 3736. 
 - start leg arch: big ram, 3reg, alu, cond. 
@@ -48,7 +62,7 @@ did that now 285ms and can move the ram256 anywhere it the function without brea
 somehow adding `_pad := zeroed(Array(u8, 7));` to WireValue makes it 170ms. that's concerning. 
 discrepancy goes away if i turn off elide_abi_slots, so it's just that's better when the stack slots are spread out more because i size/4.
 
-## (Jun 5)
+## (Jun 5) circuit
 
 - compile the circuit to franca source code and add that to the program. 
   - (unsafe) before: 6.0, compile but interpret for pre_read: 5.2, compile both: 1.9. 
@@ -56,7 +70,7 @@ discrepancy goes away if i turn off elide_abi_slots, so it's just that's better 
   - not doing it when save_wire_values but it still helps the gui when running multiple ticks per frame (only save the last one)
 - arity check the gates when parsing. 
 
-## (Jun 4)
+## (Jun 4) circuit
 
 - finish overture (program memory, cond, instruction decoding). 
   - good progress, now i have something that's too slow as an incentive to compile (writing the program by ticking 256 times at the start)
@@ -71,9 +85,8 @@ discrepancy goes away if i turn off elide_abi_slots, so it's just that's better 
     so cant do that for circuits in general. but i feel like i already assume that with the !doing_pre_read around the second eval loop so nothing runs in preread if !have_storage
   - inline_range in byte_make/byte_split: 6720->6220 (unsafe)
 
-## (Jun 3)
+## (Jun 3) circuit
 
-circuit
 - trying to debug mistakes by printing out wires at random recursion levels is a bit painful. 
   made basic gui. just showing the graph as text again. 
   keep all the wire values so can let you click in to

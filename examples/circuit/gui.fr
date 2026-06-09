@@ -15,6 +15,7 @@ State :: @struct {
     HIGH_DPI :: true;
     WIDTH :: 500; HEIGHT :: 500;
     text: Sdtx.Self;
+    draw: Sgl.Self;
     pos: Vec2;
     scale: f32;
     sg: *Sg.Self;
@@ -32,6 +33,9 @@ State :: @struct {
     arch_is_leg: bool;
     tick: i64;
     win_tick: ?i64;
+    
+    circuit: Tc.Circuit;
+    circuit_arena: Arena.Allocator;
 };
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -250,10 +254,66 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sdtx.origin = world_to_text_pos(vec2(-38 * width, (state.maze.map.len().float().cast())*width*2 + height*3));
     sdtx.pos = vec2(0);
     sdtx.put(maze_text.items());
+    sdtx.origin = vec2(0);
     
     if state.win_tick { win_tick |
         sdtx.pos = vec2(0, -1);
         sdtx.put(@tfmt("solved in % ticks", win_tick));
+    };
+    
+    // TODO: also this is totally fucked if you resize the screen because im using a stupid coordinate system
+    // might get rid of this rendering but for now its all i can do with the tc circuits i load.
+    // especially the hover stuff is just useful because i have to transcribe the pin positions before i can actually simulate it. 
+    // TODO: if i keep it should clean it up a bit and position in a sane way relative to the rest of the ui. 
+    have_circuit := state.circuit.gates.len != 0 || state.circuit.wires.len != 0;
+    sgl := state.draw&;
+    if have_circuit {
+        sgl.defaults();
+        sgl.viewport(0, 0, app_w, app_h, true);
+        sgl.begin(.QUADS);
+        sgl.load_identity();
+        sgl.translate(state.pos.x, state.pos.y, 0.0);
+        sgl.scale(state.scale, state.scale, 0.0);
+        
+        tc_to_world_pos :: fn(pos) => pos / 30 * vec2(1, -1) + vec2(-1, -4);
+        W: f32 = 0.025;
+        each state.circuit.gates { it |
+            text := @tfmt("%", it.kind);
+            b := tc_to_world_pos(it.pos);
+            sdtx.color = pack_rgba(200, 200, 50, 255);
+            sdtx.pos = world_to_text_pos(b);
+            sdtx.put(text);
+            
+            hover := p.y < b.y + W/2 && p.y > b.y - W/2 && p.x > b.x - W/2 && p.x < b.x + W/2;
+            sgl.color = pack_rgba(100, 100, 100, 255);
+            if hover {
+                sgl.color = pack_rgba(200, 200, 200, 255);
+                sdtx.color = pack_rgba(255, 255, 255, 255);
+                sdtx.put(@tfmt("  (%, %)", it.pos.x, it.pos.y));
+            };
+            sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
+        };
+        
+        each state.circuit.wires { wire |
+            enumerate wire.path { i, it |
+                sgl.color = pack_rgba(100, 50, 50, 255);
+                b := tc_to_world_pos(it.pos);
+                if i != 0 {
+                    a := tc_to_world_pos(wire.path[i - 1].pos);
+                    sgl.line(a, b, 0.01);
+                    
+                };
+                hover := p.y < b.y + W/2 && p.y > b.y - W/2 && p.x > b.x - W/2 && p.x < b.x + W/2;
+                if hover {
+                    sgl.color = pack_rgba(200, 50, 50, 255);
+                    sdtx.pos = world_to_text_pos(b);
+                    sdtx.color = pack_rgba(255, 255, 255, 255);
+                    sdtx.put(@tfmt("  (%, %)", it.pos.x, it.pos.y));
+                };
+                sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
+            };
+        };
+        sgl.end();
     };
     
     state.clicked = false;
@@ -261,15 +321,19 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         load_action = .CLEAR,
         clear_value = (r = 0.15, g = 0.15, b = 0.15, a = 1),
     ), ..)));
+    @if(have_circuit) sgl.draw_layer(sg, 0);
     sdtx.draw_layer(0);
     sg.end_pass();
     sg.commit();
 };
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    sapp.desc.enable_dragndrop = true;
     state.sg = sg; state.sapp = sapp;
     a := general_allocator();
-    state.text&.setup(sg = sg, allocator = a, fonts = @slice(Sdtx.font.cpc));
+    state.text&.setup(sg = sg, allocator = a, fonts = @slice(Sdtx.font.cpc), context = (char_buf_size = 10000));
+    state.draw&.setup(allocator = general_allocator(), sg = sg, max_vertices = 10_000);
+    
     init(state.world&, a, true);
     state.root_component = get_component_by_name("overture");
     state.component_tree = list(a);
@@ -277,6 +341,14 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.ticks_per_eval = 1;
     state.recenter();
     state.reset();
+    
+    state.circuit_arena = init(general_allocator(), 1.shift_left(16));
+    for cli_args() { path |
+        path := path.str();
+        if path.ends_with("circuit.data") {
+            state.load_path(path);
+        }
+    };
 }
 
 fn recenter(state: *State) void = {
@@ -354,10 +426,27 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             state.mouse_pos = mouse;
             state.clicked = true;
         }
+        fn FILES_DROPPED() => for event.drop { path |
+            state.load_path(path);
+        };
         @default => return();
     };
     state.dirty = true;
 }
+
+fn load_path(state: *State, path: Str) void = {
+    #use("@/lib/sys/fs.fr");
+    in := read_entire_file(temp(), path) || return();
+    state.circuit = zeroed(Tc.Circuit);
+    state.circuit_arena&.reset_retaining_capacity();
+    res := Tc'load_circuit(in, state.circuit_arena&.borrow());
+    state.circuit = res.or(fn(msg) => {
+        @eprintln("failed to load [%]: %", path, msg);
+        return();
+    });
+}
+
+Tc :: import("@/examples/circuit/tc/load.fr");
 
 fn read_memory(world: *World, root_component: ComponentId) []u8 = {
     out := u8.list(world.storage.len / 8, temp());
@@ -389,6 +478,7 @@ fn read_memory(world: *World, root_component: ComponentId) []u8 = {
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.text&.shutdown();
     drop(state.world&, general_allocator());
+    // TODO: state.draw, state.circuit_arena
 }
 
 driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
