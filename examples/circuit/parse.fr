@@ -9,6 +9,7 @@
 // TODO: type check bit vs byte
 
 FEAT_COMPILE :: true;
+FEAT_TC_CIRCUIT :: true;  // be able to load TuringComplete.Game's circuit.data save files?
 max_in_out_wires :: 64;
 
 Component :: @struct {
@@ -18,13 +19,15 @@ Component :: @struct {
     storage_count: i64;
     wire_depth: i64;  // recursive max wire_count of children
     wire_sum: i64;    // like ^ but don't reset scratch for each child so can use it for visualization
-    gate_sum: i64;
+    gate_sum := 0;
     primitive_arity := (-1, -1); // (out, in)
     labels: []GateLabel = empty();
+    fast_eval := zeroed(rawptr);
     
     usage: *Usage #use = zeroed(*Usage);
     Usage :: @struct {
         // indices in inputs of gates[0] that are needed to eval if not writing to delay() storage. 
+        // TODO: just make this a StaticBitSet(64)
         inputs_for_pure_eval: []i64 = empty();
         gates_needed_for_pure_eval := zeroed DynamicBitSet;
         instance_offset_by_gate: []i64 = empty();
@@ -69,7 +72,7 @@ defs :: @static {
             @ct_assert(arity._0 + arity._1 <= max_in_out_wires, func.loc, "intrinsic has too many in_out wires");
         };
         
-        User := import("@/examples/circuit/defs.fr");
+        User := Main.defs;
         @ct_assert(get_constant(User, name).is_none(), @source_location(), "defs has conflict with builtin name: %", name.str());
         
         components.push(
@@ -257,13 +260,48 @@ defs :: @static {
     };
     NONE :WireId: (id = 0xFFFFFFFF);
     
-    calculate_usage(components.items());
     @anon_literal(
-        components = components.items(),
+        components = components[],
         primitives = prims.items(),
-        fast_eval = @if(FEAT_COMPILE, compile_gates(components.items()), @as([]rawptr) empty()),
+        tc_components_offset = components.len(),
     )
 }
+
+finished_defs :: @static {
+    components := defs.components&;
+    @if(FEAT_TC_CIRCUIT) {
+        // TODO: quarantine this in ./tc/*.fr
+        templates :: import("@/examples/circuit/tc/builtin.fr").templates;
+        each templates { it |
+            c := zeroed(Component);
+            c.primitive_arity = (it.out_arity, it.in_arity);
+            c.fast_eval = @if(it.body&.is(.Native), it.body.Native.callee, zeroed(rawptr));
+            c.name = it.name;
+            // TODO: copy over inputs_for_pure_eval
+            components.push(c);
+        };
+        
+        // TODO: eventually need to do this at runtime instead of comptime but then need to embed the compiler
+        for cli_args() { path |
+            path := path.str();
+            if path.ends_with("circuit.data") {
+                #use("@/lib/sys/fs.fr");
+                in := read_entire_file_or_crash(temp(), path);
+                res := Tc'load_circuit(in, ast_alloc());
+                circuit := res.or(fn(msg) => {
+                    @panic("failed to load [%]: %", path, msg);
+                });
+                Tc'compile_circuit(circuit&, components);
+            }
+        };
+    };
+    components.gpa = panicking_allocator;
+    calculate_usage(components.items());
+    @if(FEAT_COMPILE) compile_gates(components.items());
+    @anon_literal(components = components.items())
+};
+Tc :: import("@/examples/circuit/tc/load.fr");
+TcBuiltins :: import("@/examples/circuit/tc/builtin.fr").impl;
 
 calculate_usage :: fn(components: []Component) void = {
     each components { c |
@@ -338,6 +376,8 @@ calculate_usage :: fn(components: []Component) void = {
         c.instance_offset_by_gate = instance_offset_by_gate;
         wires_used.bits.gpa = panicking_allocator;
         c.wires_used = wires_used;
+        
+        // TODO: for TcBuiltins use Template.inputs_for_pure_eval
     };
 }
 
@@ -447,8 +487,8 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
     @switch(name) {
         @case("input") => @fmt(out, "o := in[];\n");
         @case("output") => @fmt(out, "out[] = i;\n");
-        @case("const") => @fmt(out, "w%: WireValue = (byte = %);\n", it.outputs[0].id, it.param);
-        @case("switch8") => @fmt(out, "if w%.bit {| w% = w%; };\n", it.inputs[1].id, it.outputs[0].id, it.inputs[0].id);
+        @case("const") => @fmt(out, "w%: WireValue = (%);\n", it.outputs[0].id, it.param);
+        @case("switch8") => @fmt(out, "if w% != 0 {| w% = w%; };\n", it.inputs[1].id, it.outputs[0].id, it.inputs[0].id);
         @case("delay") => @fmt(out, "w% = eval_delay_gate(world, w%, %);\n", it.outputs[0].id, it.inputs[0].id, self.doing_pre_read);
         @default => {
             if child.storage_count == 0 && child.gate_sum < 30 {
@@ -486,19 +526,35 @@ fn compile_component(self: *CompileGates, doing_pre_read: bool) void = {
 // wire values are local variables instead of in world.scratch 
 // so indexing with the Gate.(i,o) happens at compile time instead of run time. 
 // compiled fns call each other directly without going through the interpreter's calling convention. 
-compile_gates :: fn(components: []Component) []rawptr = {
+compile_gates :: fn(components: []Component) void = {
     out := @ref u8.list(components.len * 2000, ast_alloc());
     @fmt(out, "{\n#use(\"@/examples/circuit/eval.fr\");\n#use(\"@/examples/circuit/parse.fr\");\n");
+    
     @fmt(out, "Z :: zeroed(WireValue);\n");
+    tc_components_offset := defs.tc_components_offset; 
     enumerate components { i, c |
         continue :: local_return;
         if c.gates.len == 0 {
-            S :: Type.scope_of(CompilerRt);
+            templates :: Tc.templates;
+            tc_start := defs.tc_components_offset;
+            tc_end := defs.tc_components_offset + templates.len();
+            if i < tc_start {
+            S :: Type.scope_of(DefsBuiltins);
             if FuncId.get_constant(S, c.name.sym()).is_some() {
-                @fmt(out, "% :: CompilerRt.%;\n", mangle(components, i), c.name);
-            } else {
-                @fmt(out, "% :: zeroed(rawptr);\n", mangle(components, i));
+                @fmt(out, "% :: DefsBuiltins.%;\n", mangle(components, i), c.name);
+                continue();
             };
+            };
+            // TODO: quarantine this in ./tc/*.fr
+            @if(FEAT_TC_CIRCUIT) if i >= tc_start && i < tc_end {
+                tc_index := i - defs.tc_components_offset;
+                shape := templates[tc_index]&;
+                if shape.body&.is(.Native) {
+                    @fmt(out, "% :: get_native(TcBuiltins.%);\n", mangle(components, i), shape.name);
+                    continue();
+                };
+            };
+            @fmt(out, "% :: zeroed(rawptr);\n", mangle(components, i));
             continue();
         };
         
@@ -534,12 +590,16 @@ compile_gates :: fn(components: []Component) []rawptr = {
     };
     @fmt(out, ");\n");  // dispatch
     @fmt(out, "};");  // scope
-    if false {
+    if true {
         #use("@/lib/sys/fs.fr");
         write_entire_file_or_crash("target/a.fr", out.items());
     };
     S := import(out.items());
-    const_eval([]rawptr, @{ @[@literal S].dispatch })
+    fast_eval := const_eval([]rawptr, @{ @[@literal S].dispatch });
+    enumerate components { i, it |
+        it.fast_eval = fast_eval[i];
+    };
+    
 };
 
 fn declare_wire_vars(self: *CompileGates) void = {
@@ -558,26 +618,10 @@ fn declare_wire_vars(self: *CompileGates) void = {
 fn mangle(c: []Component, i: i64) Str = 
     @tfmt("g%_%", i, c[i].name);
 
-// TODO: replace these with the ones from ./tc/builtin.fr
-CompilerRt :: @struct {
-    #use("@/examples/circuit/eval.fr");
-    // #inline // TODO: why is it allowed since take function pointer to this? (correctly can't mark the others) :compiler?
-    nand :: fn(_: *World, out: *Array(WireValue, 1), in: *Array(WireValue, 2)) void = {
-        out[0].bit = in[0].bit.int().bit_and(in[1].bit.int()) == 0;
-    };
-    byte_split :: fn(_: *World, out: *Array(WireValue, 8), in: *Array(WireValue, 1)) void = {
-        r := in[0].byte;
-        inline_range(0, 8) { i |
-            out[i].bit = r.bit_and(1.shift_left(i)) != 0;
-        };
-    };
-    byte_make :: fn(_: *World, out: *Array(WireValue, 1), in: *Array(WireValue, 8)) void = {
-        r: u8 = 0;
-        inline_range(0, 8) { i |
-            r = r.bit_or(in[i].bit.int().shift_left(i).trunc());
-        };
-        out[0].byte = r;
-    };
+DefsBuiltins :: @struct {
+    nand :: get_native(TcBuiltins.Nand);
+    byte_split :: get_native(TcBuiltins.Splitter8);
+    byte_make :: get_native(TcBuiltins.Maker8);
 };
 
 AsmOverture :: @rec @struct {
@@ -711,7 +755,7 @@ AsmLeg :: @rec @struct {
 };
 
 main :: fn() void = {
-    components := defs.components;
+    components := @run defs.components.items();
     out := @ref u8.list(temp());
     for components { it |
         @fmt(out, "% :: @{\n", it.name);
@@ -749,7 +793,9 @@ fn arity(c: *Component) Ty(i64, i64) = {
 }
 
 #use("@/lib/collections/bit_set.fr");
+Main :: import().examples.circuit;
 
 // TODO: maybe get rid of switch gate so it's always ssa
 // TODO: compile pre_read version as a seperate function and call it directly instead of branching.
 // TODO: a problem now is that the interpreter is totally different eval strategy from the compiler and they can disagree
+// TODO: allow defs.fr to access tc/builtin.fr

@@ -98,15 +98,18 @@ Maze :: @struct {
     );
 };
 
+// TODO: #use(Main.eval); doesn't work at top level (works if #use the string): "Compile Error: Poison expression Unknown." :compiler
+Main :: import().examples.circuit;
 main :: fn() void = {
-    #use("@/examples/circuit/eval.fr");
-    #use("@/examples/circuit/parse.fr");
+    #use(Main.eval);
+    Main.eval.World; // TODO: #use doesn't trigger fill_directory_scope? :compiler
+    #use(Main.parse);
     #use("@/lib/sys/process.fr");
     world := @ref zeroed(World);
     a := general_allocator();
     init(world, a, false);
     
-    Defs :: import("@/examples/circuit/defs.fr");
+    Defs :: Main.defs;
     cpus := @slice(
         ("overture", Defs.the_maze),
         ("leg", Defs.the_maze_leg),
@@ -114,7 +117,7 @@ main :: fn() void = {
     for cpus { name, program |
     world.storage.set_zeroed();
     maze := @ref Maze'new(Maze.tc0);
-    root_component := get_component_by_name(name);
+    root_component := get_component_by_name(name, finished_defs.components);
     start := timestamp();
     range(0, 256) { i |
         tick_overture(world, root_component, program[i], true, false);
@@ -158,8 +161,9 @@ main :: fn() void = {
     
     check :: fn(world: *World, $name: Str, args: []i64) void = {
         it := @static {
-            kind := defs.components.index_of(fn(it) => it.name == name).unwrap();
-            c := defs.components[kind]&;
+            components := finished_defs.components;
+            kind := components.index_of(fn(it) => it.name == name).unwrap();
+            c := components[kind]&;
             o_n, i_n := c.arity();
             a := ast_alloc();
             it := @as(Component.Gate) (
@@ -175,11 +179,11 @@ main :: fn() void = {
         o_n, i_n := (it.outputs.len, it.inputs.len);
         @assert_eq(o_n + i_n, args.len, "check arity error");
         range(0, i_n) { i |
-            wires[i].byte = args[i].trunc();
+            wires[i] = args[i];
         };
         eval_compiled(world, wires, it);
         range(0, o_n) { i |
-            @assert_eq(wires[i_n + i].byte, args[i_n + i].trunc(), "check(%, %) o[%]", name, args, i);
+            @assert_eq(wires[i_n + i], args[i_n + i], "check(%, %) o[%]", name, args, i);
         };
     };
     

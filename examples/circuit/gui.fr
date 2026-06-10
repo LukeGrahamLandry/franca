@@ -135,7 +135,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         colour: Array(u32, 2) = (pack_rgba(150, 150, 255, 255), pack_rgba(255, 0, 150, 255));
         base_colour := @if(hover, pack_rgba(0, 255, 0, 255), pack_rgba(255, 255, 0, 255));
         show :: fn(id: WireId) => {
-            value := wires[id.id.zext()].byte;
+            value: u8 = wires[id.id.zext()].trunc();
             sdtx.color = colour&[int(value != 0)];
             sdtx.put(@tfmt("w%", id.id));
             sdtx.color = pack_rgba(150, 150, 150, 255);
@@ -267,7 +267,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     // TODO: if i keep it should clean it up a bit and position in a sane way relative to the rest of the ui. 
     have_circuit := state.circuit.gates.len != 0 || state.circuit.wires.len != 0;
     sgl := state.draw&;
-    if have_circuit {
+    
+    @if(FEAT_TC_CIRCUIT) if have_circuit {
         sgl.defaults();
         sgl.viewport(0, 0, app_w, app_h, true);
         sgl.begin(.QUADS);
@@ -377,7 +378,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.draw&.setup(allocator = general_allocator(), sg = sg, max_vertices = 10_000);
     
     init(state.world&, a, true);
-    state.root_component = get_component_by_name("overture");
+    state.root_component = get_component_by_name("overture", finished_defs.components);
     state.component_tree = list(a);
     state.dirty = true;
     state.ticks_per_eval = 1;
@@ -389,6 +390,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         path := path.str();
         if path.ends_with("circuit.data") {
             state.load_path(path);
+            state.root_component = (id = finished_defs.components.len().trunc() - 1);
         }
     };
 }
@@ -457,7 +459,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 }
                 fn A() => {
                     state.arch_is_leg = !state.arch_is_leg;
-                    state.root_component = get_component_by_name(@if(state.arch_is_leg, "leg", "overture"));
+                    state.root_component = get_component_by_name(@if(state.arch_is_leg, "leg", "overture"), finished_defs.components);
                     state.component_tree&.clear();
                     state.reset();
                 }
@@ -477,20 +479,23 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
 }
 
 fn load_path(state: *State, path: Str) void = {
+    @if(!FEAT_TC_CIRCUIT) return(eprintln("FEAT_TC_CIRCUIT is disabled"));
     #use("@/lib/sys/fs.fr");
     in := read_entire_file(temp(), path) || return();
     state.circuit = zeroed(Tc.Circuit);
     state.circuit_arena&.reset_retaining_capacity();
-    res := Tc'load_circuit(in, state.circuit_arena&.borrow());
+    a := state.circuit_arena&.borrow();
+    res := Tc'load_circuit(in, a);
     state.circuit = res.or(fn(msg) => {
         @eprintln("failed to load [%]: %", path, msg);
         return();
     });
-    Tc'compile_circuit(state.circuit&);
+     _ := Tc'find_pins(state.circuit&, a); // for now just to set Circuit.Wire.logical to show on hover in the ui
+    // TODO: Tc'compile_circuit(state.circuit&);
 }
 
-Tc :: import("@/examples/circuit/tc/load.fr");
-Builtin :: import("@/examples/circuit/tc/builtin.fr");
+Tc :: Main.tc.load;
+Builtin :: Main.tc.builtin;
 
 fn read_memory(world: *World, root_component: ComponentId) []u8 = {
     out := u8.list(world.storage.len / 8, temp());
@@ -504,7 +509,7 @@ fn read_memory(world: *World, root_component: ComponentId) []u8 = {
             r: u8 = 0;
             for world.storage.subslice(world.instance, 8) { it |
                 r = r.shift_right_logical(1);
-                r = r.bit_or(int(it.bit).shift_left(7).trunc());
+                r = r.bit_or(int(it != 0).shift_left(7).trunc());
             };
             out.push(r);
             world.instance += 8;
@@ -525,10 +530,11 @@ fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     // TODO: state.draw, state.circuit_arena
 }
 
+Main :: import().examples.circuit;
 driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
 main :: fn() void = Easy'start(State);
 #use("@/graphics/lib.fr");
 
 #use("@/examples/circuit/eval.fr");
 #use("@/examples/circuit/parse.fr");
-Scenario :: import("@/examples/circuit/scenario.fr");
+Scenario :: Main.scenario;

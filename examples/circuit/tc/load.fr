@@ -55,16 +55,85 @@ main :: fn() void = {
 // move more of the validation stuff out of the parse from FatExpr into a post pass so can share with this. 
 // need to integrate these new builtins with the old defs.components. make it not a const global perhaps. 
 
-compile_circuit :: fn(c: *Circuit) void = {
-    // TODO: for custom components to be sane the order of inputs/outputs has to be stable based on the component's permenent_id from the file somehow?
-    a := temp();
+// TODO: need to pass in many at once so it can find custom component implementations
+compile_circuit :: fn(c: *Circuit, components: *List(Component)) void = {
+    arena := ast_alloc();  // TODO
+    a := arena;
     gates, wire_count := find_pins(c, a);
-    xx();
-    println("----");
-    #use("@/lib/collections/bit_set.fr");
+
+    // TODO: when doing runtime need to be careful not to bake before setting fast_eval pointer
+    builtin_count := defs.tc_components_offset + templates.len();
+    @assert_eq(components.len, builtin_count, "TODO: be more flexible about adding new ones");
     
-    // todo: factor out schedule_gates
+    gates := schedule_gates(c, gates, wire_count, a);
     
+    kill: DynamicBitSet = empty(temp());
+    in, out := (WireId.list(a), WireId.list(a));
+    enumerate gates { i, it |
+        shape := templates[it.kind.id.zext()];
+        @match(shape.body&) { 
+            fn Unimplemented() => {
+                kill&.set(i);
+                @eprintln("TODO: not implemented (%)", shape.name);
+            }
+            fn IO() => {
+                kill&.set(i);
+                // TODO: order needs to be consistant
+                out&.push_all(it.outputs);
+                in&.push_all(it.inputs);
+            }
+            fn Def(name) => {
+                #use("@/examples/circuit/eval.fr");
+                it.kind = get_component_by_name(name[], defs.components.items());
+            }
+            fn Native(info) => {
+                it.kind.id += defs.tc_components_offset.trunc();
+            }
+            fn Constant() => {
+                eprintln("TODO: constant");
+            } 
+            fn Custom() => {
+                eprintln("TODO: Custom");
+            } 
+            fn Device() => {
+                eprintln("TODO: Device");
+            } 
+        }
+    };
+    range_rev(0, gates.len) { i |
+        if kill&.get(i) {
+            gates&.ordered_remove(i);
+        }
+    };  
+
+    #use("@/examples/circuit/eval.fr");
+    gates&.insert(0, (
+        kind = @run get_component_by_name("input", defs.components.items()),
+        inputs = empty(),
+        outputs = out.items(),
+        param = 0,
+    ));
+    gates&.push(
+        kind = @run get_component_by_name("output", defs.components.items()),
+        inputs = in.items(),
+        outputs = empty(),
+        param = 0,
+    );
+    
+    components.push(
+        gates = gates.items(),
+        name = "todo",
+        wire_count = wire_count,
+        storage_count = 0, // TODO
+        wire_depth = wire_count,
+        wire_sum = wire_count,  // TODO: compute based on custom gates
+        gate_sum = 0,  // TODO
+    );
+};
+#use("@/lib/collections/bit_set.fr");
+
+// TODO: for custom components to be sane the order of inputs/outputs has to be stable based on the component's permenent_id from the file somehow?
+schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, a: Alloc) List(Component.Gate) = {
     // TODO: gates with memory need to go to the end. 
     // TODO: compiler needs to delay all writes until after all reads, not just do them in order unless forced to preread. 
     defining_gate := temp().alloc_zeroed(i64, wire_count);
@@ -104,7 +173,6 @@ compile_circuit :: fn(c: *Circuit) void = {
         changed
     };
     
-    @println("%", order.items());
     @if(order.len != gates.len) eprintln("TODO: cycles!");
     gates2 := Component.Gate.list(gates.len, a);
     for order { i |
@@ -114,28 +182,9 @@ compile_circuit :: fn(c: *Circuit) void = {
     gates&.drop();
     gates = gates2;
     
-    // TODO: merge inputs and outputs into one each
-    
-    xx();
-    xx :: fn() => {
-        out := @ref u8.list(temp());
-        enumerate gates { i, it |
-            @fmt(out, "    ");
-            for it.outputs { it |
-                @fmt(out, "w%, ", it.id);
-            };
-            out.len -= 2 * int(out.items().ends_with(", "));
-            @if(it.outputs.len > 0) @fmt(out, " := ");
-            @fmt(out, "g%_%(", it.kind.id, templates[it.kind.id.zext()].name);
-            for it.inputs { it |
-                @fmt(out, "w%, ", it.id);
-            };
-            out.len -= 2 * int(out.items().ends_with(", "));
-            @fmt(out, "); // %\n", i);
-        };
-        println(out.items());
-    };
+    gates
 };
+
 templates :: import("@/examples/circuit/tc/builtin.fr").templates;
 
 find_pins :: fn(c: *Circuit, a: Alloc) Ty(List(Component.Gate), i64) = {
@@ -188,6 +237,7 @@ find_pins :: fn(c: *Circuit, a: Alloc) Ty(List(Component.Gate), i64) = {
         );
         
         // compiler requires all pins be connected to a wire.
+        // TODO: update c.logical so can show it in the ui?
         enumerate w { i, it |
             @if(it.id == 0xFFFFFFFF) 
             if i < shape.out_arity {  // output (discarded)
@@ -272,6 +322,7 @@ load_circuit :: fn(in: Str, arena: Alloc) Result(Circuit, Str) = {
         vec2(x.intcast().float().cast(), y.intcast().float().cast())
     };
     fail :: fn(s) => return(Err = s);
+    // TODO: use the default clock speed 
     
     id := eat(i64); 
     eat(u32); eat(i64); eat(i64); eat(bool); eat(u32);

@@ -1,8 +1,11 @@
 
-fn init(world: *World, a: Alloc, save_wire_values: bool) void = {
-    wire_sum, wire_depth, storage_count := @run {
+fn init(world: *World, a: Alloc, save_wire_values: bool) void = 
+    init(world, a, save_wire_values, finished_defs.components);
+
+fn init(world: *World, a: Alloc, save_wire_values: bool, components: []Component) void = {
+    wire_sum, wire_depth, storage_count := {
         ws, wd, s := (0, 0, 0);
-        for defs.components { it |
+        for components { it |
             ws = max(ws, it.wire_sum);
             wd = max(wd, it.wire_depth);
             s = max(s, it.storage_count);
@@ -11,13 +14,12 @@ fn init(world: *World, a: Alloc, save_wire_values: bool) void = {
     };
     wires := @if(save_wire_values, wire_sum, wire_depth);
     world[] = (
-        components = defs.components,
+        components = components,
         scratch = from_capacity(a.alloc_uninit(WireValue, wires)),
         instance = 0,
         storage = a.alloc_zeroed(WireValue, storage_count),
         doing_pre_read = false,
         save_wire_values = save_wire_values,
-        fast_eval = defs.fast_eval,
     );
 }
 
@@ -27,10 +29,11 @@ fn drop(world: *World, a: Alloc) void = {
     world[] = zeroed(World);
 }
 
-WireValue :: @struct {
+OldWireValue :: @struct {
     value: (@union(bit: bool, byte: u8)) #use;
     _pad := zeroed(Array(u8, 7));
 };
+WireValue :: i64;
 
 World :: @struct {
     components: []Component;
@@ -45,7 +48,6 @@ World :: @struct {
     doing_pre_read: bool;
     // for visualization, don't unscratch so can show values of wires in nested gates. 
     save_wire_values: bool;
-    fast_eval: []rawptr;
     pre_read_depth := 0;
 };
 
@@ -53,6 +55,11 @@ fn eval(world: *World, parent: []WireValue, it: *Component.Gate) void = {
     c := world[it.kind]&;
     // can't just early return here on (doing_pre_read&&storage_count==0) 
     // ex. memory8 needs to use make_byte to write its output. 
+    
+    @if(FEAT_TC_CIRCUIT) if it.kind.id > defs.tc_components_offset.trunc() && c.gates.len == 0 {
+        eval_compiled(world, parent, it);
+        return();
+    };
     
     if c.wire_count == 0 {
         f := defs.primitives[it.kind.id.zext()];
@@ -100,32 +107,32 @@ primitives :: @struct {
     #arity(1, 2)
     nand :: fn(world, parent, it) = {
         in, out := (it.inputs, it.outputs);
-        a, b := (parent[in[0].id.zext()].bit, parent[in[1].id.zext()].bit);
-        parent[out[0].id.zext()].bit = a.int().bit_and(b.int()) == 0;
+        a, b := (parent[in[0].id.zext()] != 0, parent[in[1].id.zext()] != 0);
+        parent[out[0].id.zext()] = int(a.int().bit_and(b.int()) == 0);
     };
     input :: fn(world, parent, it) = panic("only one input allowed");
     output :: fn(world, parent, it) = panic("only one output allowed");
     #arity(8, 1)
     byte_split :: fn(world, parent, it) = {
         in, out := (it.inputs, it.outputs);
-        r := parent[in[0].id.zext()].byte;
+        r := parent[in[0].id.zext()];
         inline_range(0, 8) { i |
-            parent[out[i].id.zext()].bit = r.bit_and(1.shift_left(i)) != 0;
+            parent[out[i].id.zext()] = int(r.bit_and(1.shift_left(i)) != 0);
         };
     };
     #arity(1, 8)
     byte_make :: fn(world, parent, it) = {
         in, out := (it.inputs, it.outputs);
-        r: u8 = 0;
+        r := 0;
         inline_range(0, 8) { i |
-            r = r.bit_or(parent[in[i].id.zext()].bit.int().shift_left(i).trunc());
+            r = r.bit_or(parent[in[i].id.zext()].shift_left(i));
         };
-        parent[out[0].id.zext()].byte = r;
+        parent[out[0].id.zext()] = r;
     };
     #arity(1, 0)
     const :: fn(world, parent, it) = {
         out, param := (it.outputs, it.param);
-        parent[out[0].id.zext()].bit = param == 1;
+        parent[out[0].id.zext()] = param;
     };
     // TODO: detect same wire being written by multiple switches in the same tick
     // TODO: default to off if none write
@@ -134,7 +141,7 @@ primitives :: @struct {
     #arity(1, 2)
     switch8 :: fn(world, parent, it) = {
         in, out := (it.inputs, it.outputs);
-        a, b := (parent[in[0].id.zext()], parent[in[1].id.zext()].bit);  // value, cond
+        a, b := (parent[in[0].id.zext()], parent[in[1].id.zext()] != 0);  // value, cond
         if b {
             parent[out[0].id.zext()] = a;
         };
@@ -170,6 +177,9 @@ fn unscratch(world: *World, wires: []WireValue) void #inline = {
 
 fn index(world: *World, i: ComponentId) *Component = world.components.index(i.id.zext()); 
 
+fixwirevalue :: fn(a: []OldWireValue) []WireValue = 
+    bit_cast_unchecked([]OldWireValue, []WireValue, a);
+
 fn tick_overture(world: *World, root_component: ComponentId, input: u8, write_program: bool, save_wire_values: bool) ?u8 = {
     world.instance = 0; 
     world.scratch.len = 0;
@@ -177,14 +187,19 @@ fn tick_overture(world: *World, root_component: ComponentId, input: u8, write_pr
     prev := world.save_wire_values;
     @debug_assert(prev || !save_wire_values, "if init(save_wire_values=false), won't have preallocated enough");
     world.save_wire_values = prev && save_wire_values;  
-    values := @slice(@as(WireValue) (byte = input), (bit = write_program), (byte = 0), (bit = false), (bit = false));
+    values := fixwirevalue @slice(@as(OldWireValue) (byte = input), (bit = write_program), (byte = 0), (bit = false), (bit = false));
     out := @const_slice(@as(WireId) (id = 2), (id = 3), (id = 4));
-    if world[root_component].name != "leg" {
+    name := world[root_component].name;
+    if name != "leg" {
         out.len -= 1;
+    };
+    in := @const_slice(@as(WireId) (id = 0), (id = 1), (id = 1)/*TODO: remove*/);
+    if name == "leg" || name == "overture" { 
+        in.len -= 1;
     };
     base_gate := @ref @as(Component.Gate) (
         outputs = out, 
-        inputs = @const_slice(@as(WireId) (id = 0), (id = 1)),
+        inputs = in,
         kind = root_component, 
         param = 0,
     );
@@ -196,12 +211,12 @@ fn tick_overture(world: *World, root_component: ComponentId, input: u8, write_pr
     };
     
     world.save_wire_values = prev;
-    @if(values[3].bit, (Some = values[2].byte), .None)
+    @if(values[3] != 0, (Some = values[2].trunc()), .None)
 }
 
 // expose the compiled version with the intepreter's calling convention. 
 fn eval_compiled(world: *World, parent: []WireValue, it: *Component.Gate) void = {
-    @debug_assert(!world.save_wire_values, "compiler doesn't save_wire_values");
+    //@debug_assert(!world.save_wire_values, "compiler doesn't save_wire_values");
     compiled := get_compiled(world, it.kind).unwrap();
     o_n, i_n := world[it.kind]&.arity();
     // redundant if the gate is from a Component but be safe for base_gate in the top level call. 
@@ -218,10 +233,10 @@ fn eval_compiled(world: *World, parent: []WireValue, it: *Component.Gate) void =
 }
 
 fn get_compiled(world: *World, kind: ComponentId) ?rawptr #inline = {
-    i: i64 = kind.id.zext();
+    f := world[kind].fast_eval;
     @if(FEAT_COMPILE)
-    if !world.fast_eval[i].is_null() {
-        return(Some = world.fast_eval[i]);
+    if !f.is_null() {
+        return(Some = f);
     };
     .None
 }
@@ -229,10 +244,16 @@ fn get_compiled(world: *World, kind: ComponentId) ?rawptr #inline = {
 #use("@/examples/circuit/parse.fr");
 #use("@/lib/collections/map.fr");
 
-get_component_by_name :: fn(name: Str) ComponentId #fold = {
-    kind := defs.components.index_of(fn(it) => it.name == name).unwrap();
+get_component_by_name :: fn(name: Str, components: []Component) ComponentId #fold = {
+    kind := components.index_of(fn(it) => it.name == name).unwrap();
     (id = kind.trunc())
 };
+
+fn find_component(world: *World, name: Str) ?ComponentId = {
+    kind := world.components.index_of(fn(it) => it.name == name)
+        || return(.None);
+    (Some = (id = kind.trunc()))
+}
 
 // these two are fixed in the compiler but not the interpreter
 // TODO: the preread does redundant work for the ram128. 
