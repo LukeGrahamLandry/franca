@@ -274,8 +274,26 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sgl.load_identity();
         sgl.translate(state.pos.x, state.pos.y, 0.0);
         sgl.scale(state.scale, state.scale, 0.0);
+
+        off := vec2(0);
+        {
+            hi, lo := (state.circuit.max + vec2(1), state.circuit.min - vec2(1));
+            size := abs(hi - lo);
+            circuit_top_right := tc_to_world_pos(lo + vec2(size.x, 0));
+            goal_top_right := vec2(-100 * width, height*3);
+            off = goal_top_right - circuit_top_right;
+            
+            a, b := (tc_to_world_pos(lo), tc_to_world_pos(hi));
+            s := abs(a - b);
+            w: f32 = 0.03;
+            sgl.color = pack_rgba(20, 20, 20, 255);
+            sgl.line(a, a + vec2(s.x, 0), w);
+            sgl.line(a, a - vec2(0, s.y), w);
+            sgl.line(b, a + vec2(s.x, 0), w);
+            sgl.line(b, a - vec2(0, s.y), w);
+        };
         
-        tc_to_world_pos :: fn(pos) => pos / 30 * vec2(1, -1) + vec2(-1, -4);
+        tc_to_world_pos :: fn(pos) => (pos) / 30 * vec2(1, -1) + vec2(-1, -4) + off;
         W: f32 = 0.025;
         each state.circuit.gates { it |
             text := @tfmt("%", it.kind);
@@ -286,33 +304,57 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             
             hover := p.y < b.y + W/2 && p.y > b.y - W/2 && p.x > b.x - W/2 && p.x < b.x + W/2;
             sgl.color = pack_rgba(100, 100, 100, 255);
+            info := Builtin'templates[it.kind.zext()];
             if hover {
                 sgl.color = pack_rgba(200, 200, 200, 255);
                 sdtx.color = pack_rgba(255, 255, 255, 255);
-                sdtx.put(@tfmt("  (%, %)", it.pos.x, it.pos.y));
+                sdtx.put(@tfmt("  (%, %) %", it.pos.x, it.pos.y, info.name));
             };
             sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
         };
         
-        each state.circuit.wires { wire |
+        wire_hover_count: f32 = 0;
+        enumerate state.circuit.wires { wire_i, wire |
             enumerate wire.path { i, it |
                 sgl.color = pack_rgba(100, 50, 50, 255);
                 b := tc_to_world_pos(it.pos);
                 if i != 0 {
                     a := tc_to_world_pos(wire.path[i - 1].pos);
-                    sgl.line(a, b, 0.01);
-                    
+                    sgl.line(a, b, W/2.5);
                 };
                 hover := p.y < b.y + W/2 && p.y > b.y - W/2 && p.x > b.x - W/2 && p.x < b.x + W/2;
                 if hover {
                     sgl.color = pack_rgba(200, 50, 50, 255);
-                    sdtx.pos = world_to_text_pos(b);
+                    sdtx.pos = world_to_text_pos(b) + vec2(0, wire_hover_count);
                     sdtx.color = pack_rgba(255, 255, 255, 255);
-                    sdtx.put(@tfmt("  (%, %)", it.pos.x, it.pos.y));
+                    sdtx.put(@tfmt("  (%, %) w%-%", it.pos.x, it.pos.y, wire.logical.id, wire_i));
+                    wire_hover_count += 1;
                 };
                 sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
             };
         };
+        each state.circuit.gates { it |
+            info := Builtin'templates[it.kind.zext()];
+            i := 0;
+            for info.pins { dx, dy |
+                a := tc_to_world_pos(it.pos);
+                b := tc_to_world_pos(it.pos + vec2(dx.float().cast(), dy.float().cast()));
+                is_input := i >= info.out_arity;
+                sgl.color = pack_rgba(0, 100 * int(info.in_arity + info.out_arity > 0), 100 * int(!is_input), 255);
+                sgl.line(a, b, W/4);
+                
+                hover := p.y < b.y + W/2 && p.y > b.y - W/2 && p.x > b.x - W/2 && p.x < b.x + W/2;
+                if hover {
+                    sdtx.pos = world_to_text_pos(b) + vec2(0, wire_hover_count);
+                    sdtx.color = pack_rgba(255, 255, 255, 255);
+                    sdtx.put(@tfmt("% %[%]", info.name, @if(is_input, "in", "out"), @if(is_input, i - info.out_arity, i)));
+                    wire_hover_count += 1;
+                };
+                
+                i += 1;
+            };
+        };
+        
         sgl.end();
     };
     
@@ -444,9 +486,11 @@ fn load_path(state: *State, path: Str) void = {
         @eprintln("failed to load [%]: %", path, msg);
         return();
     });
+    Tc'compile_circuit(state.circuit&);
 }
 
 Tc :: import("@/examples/circuit/tc/load.fr");
+Builtin :: import("@/examples/circuit/tc/builtin.fr");
 
 fn read_memory(world: *World, root_component: ComponentId) []u8 = {
     out := u8.list(world.storage.len / 8, temp());

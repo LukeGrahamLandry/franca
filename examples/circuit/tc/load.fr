@@ -1,21 +1,240 @@
 
+// diagram layout loaded from one circuit.data file. 
 Circuit :: @struct {
+    id: i64;
     wires: []Wire;
     gates: []Gate;
+    min: Vec2;
+    max: Vec2;
     
     Wire :: @struct {
         path: RawList(WireNode);
+        logical: WireId = (id = 0xFFFFFFFF);
     };
     WireNode :: @struct(pos: Vec2);
     Gate :: @struct {
         pos: Vec2;
         kind: u16;
         rotation: u8;
-        custom_id: i64;
+        // if kind is Custom, need to find the circuit with this custom_id as its id from the schematics folder
+        custom_id: i64;  
         settings: Array(i64, 2);
         data: []u8;
     };
 };
+
+#use("@/examples/circuit/parse.fr");
+
+main :: fn() void = {
+    #use("@/lib/sys/fs.fr");
+    _ := import("@/examples/circuit/tc/builtin.fr").templates;
+    root := "/Users/luke/Library/Application Support/godot/app_userdata/Turing Complete/schematics";
+    
+    files := collect_schematics(root, temp());
+    failed := 0;
+    for files { path |
+        continue :: local_return;
+        in := read_entire_file_or_crash(temp(), path);
+        res := load_circuit(in, temp());
+        info := res.or(fn(msg) => {
+            @eprintln("failed to load [%]: %", path, msg);
+            failed += 1;
+            continue();
+        });
+        @println("[%] %", info.id, path.rest(root.len + 1));
+        for info.gates { it |
+            if it.kind == 92 {
+                @println("- %", it.custom_id);
+            };
+        };
+    };
+    @assert_eq(failed, 0);
+}
+
+// TODO
+// move more of the validation stuff out of the parse from FatExpr into a post pass so can share with this. 
+// need to integrate these new builtins with the old defs.components. make it not a const global perhaps. 
+
+compile_circuit :: fn(c: *Circuit) void = {
+    // TODO: for custom components to be sane the order of inputs/outputs has to be stable based on the component's permenent_id from the file somehow?
+    a := temp();
+    gates, wire_count := find_pins(c, a);
+    xx();
+    println("----");
+    #use("@/lib/collections/bit_set.fr");
+    
+    // todo: factor out schedule_gates
+    
+    // TODO: gates with memory need to go to the end. 
+    // TODO: compiler needs to delay all writes until after all reads, not just do them in order unless forced to preread. 
+    defining_gate := temp().alloc_zeroed(i64, wire_count);
+    order := i64.list(temp());
+    ready: DynamicBitSet = empty(temp());
+    done: DynamicBitSet = empty(temp());
+    enumerate gates { i, it |
+        for it.outputs { id |
+            defining_gate[id.id.zext()] = i;
+            
+            // TODO: wrong for memory
+            if @is(templates[c.gates[i].kind.zext()].body&.tag(), .IO) { 
+                ready&.set(id.id.zext());
+                done&.set(i);
+                order&.push(i);
+            };
+        };
+    };
+    dowhile {
+        changed := false;
+        enumerate gates { i, it |
+            if !done&.get(i) {
+                ok := true;
+                for it.inputs { id |
+                    ok = ok && ready&.get(id.id.zext());
+                };
+                if ok {
+                    changed = true;
+                    order&.push(i);
+                    done&.set(i);
+                    for it.outputs { id |
+                        ready&.set(id.id.zext());
+                    };
+                }
+            }
+        };
+        changed
+    };
+    
+    @println("%", order.items());
+    @if(order.len != gates.len) eprintln("TODO: cycles!");
+    gates2 := Component.Gate.list(gates.len, a);
+    for order { i |
+        it := gates[i]&;
+        gates2&.push(gates[i]);
+    };
+    gates&.drop();
+    gates = gates2;
+    
+    // TODO: merge inputs and outputs into one each
+    
+    xx();
+    xx :: fn() => {
+        out := @ref u8.list(temp());
+        enumerate gates { i, it |
+            @fmt(out, "    ");
+            for it.outputs { it |
+                @fmt(out, "w%, ", it.id);
+            };
+            out.len -= 2 * int(out.items().ends_with(", "));
+            @if(it.outputs.len > 0) @fmt(out, " := ");
+            @fmt(out, "g%_%(", it.kind.id, templates[it.kind.id.zext()].name);
+            for it.inputs { it |
+                @fmt(out, "w%, ", it.id);
+            };
+            out.len -= 2 * int(out.items().ends_with(", "));
+            @fmt(out, "); // %\n", i);
+        };
+        println(out.items());
+    };
+};
+templates :: import("@/examples/circuit/tc/builtin.fr").templates;
+
+find_pins :: fn(c: *Circuit, a: Alloc) Ty(List(Component.Gate), i64) = {
+    #use("@/examples/circuit/parse.fr");
+    pos_key :: fn(a: Vec2) i64 = bit_cast_unchecked(Vec2, i64, a);
+    
+    // all the places wires connect (to a component or to other wires). 
+    wire_positions: HashMap(i64, *WireId) = init(temp());
+    enumerate c.wires& { wire_i, new |
+        new.logical = (id = wire_i.trunc());
+        for new.path { node |
+            found := wire_positions&.get_or_insert(pos_key(node.pos), => new.logical&);
+            if new.logical.id != found.id {
+                // when two graphical wires overlap they become one logical wire.
+                each c.wires.slice(0, wire_i + 1) { old |  // :SLOW
+                    if old.logical.id == new.logical.id {
+                        old.logical.id = found.id;
+                    };
+                };
+            };
+        };
+    };
+    
+    logic_gates := Component.Gate.list(c.gates.len, a);
+    new_false_wire: ?WireId = .None;
+    next_wire_id: u32 = c.wires.len.trunc();
+    enumerate c.gates& { gate_i, it |
+        shape := templates[it.kind.zext()];
+        // TODO: custom is different
+        w := a.alloc_init(WireId, shape.out_arity + shape.in_arity, fn(_) => (id = 0xFFFFFFFF));
+        i := 0;
+        if shape.pins.len == 0 {
+            @eprintln("TODO: % has no pins", shape.name);
+        };
+        for shape.pins { dx, dy |
+            pos := it.pos + vec2(dx.float().cast(), dy.float().cast());
+            if wire_positions&.get(pos_key(pos)) { g_wire |
+                l_wire := c.wires[g_wire.id.zext()].logical;
+                w[i] = l_wire;
+            };
+            
+            i += 1;
+        };
+        out, in := (w.slice(0, shape.out_arity), w.rest(shape.out_arity));
+        logic_gates&.push(
+            outputs = w.slice(0, shape.out_arity),
+            inputs = w.rest(shape.out_arity),
+            kind = (id = it.kind.zext()),  // TODO: add them to the World.components
+            param = 0,  // TODO: Constant gate needs to set this 
+        );
+        
+        // compiler requires all pins be connected to a wire.
+        enumerate w { i, it |
+            @if(it.id == 0xFFFFFFFF) 
+            if i < shape.out_arity {  // output (discarded)
+                it[] = (id = next_wire_id);
+                next_wire_id += 1;
+            } else {  // input (false)
+                if new_false_wire.is_none() {
+                    new_false_wire = (Some = (id = next_wire_id));
+                    next_wire_id += 1;
+                }
+                it[] = new_false_wire.unwrap();
+            };
+        };
+    };
+    
+    if new_false_wire { wire |  // there was a disconnected input pin
+        logic_gates&.push(
+            outputs = a.alloc_init(WireId, 1, fn(_) => wire),
+            inputs = empty(),
+            kind = zeroed(ComponentId),  // TODO: defs.const
+            param = 0,
+        );
+    };
+    
+    (logic_gates, next_wire_id.zext())
+};
+
+collect_schematics :: fn(tc_save_root: Str, a: Alloc) List(Str) = {
+    files := Str.list(a);
+    dirs := Str.list(temp());
+    dirs&.push(@tfmt("%/architecture", tc_save_root));
+    dirs&.push(@tfmt("%/component_factory", tc_save_root));
+    while => dirs&.pop() { s |
+        _ := (walk_directory_unordered(as_cstr s) { e |
+            continue :: local_return;
+            if e.is(.Directory) {
+                @if(e.name.starts_with(".")) continue();
+                dirs&.push(@tfmt("%/%", s, e.name));
+                continue();
+            };
+            if e.name == "circuit.data" {
+                files&.push(@afmt(a, "%/%", s, e.name));
+            };
+        });
+    };
+    files
+}
 
 // https://github.com/Stuffe/save_monger/blob/22fa398d95c3d3a0b5e88a80e9daee613cab1823/versions/v6.nim CC0
 // for now i want to use save files from non-save_breaker 0.1059 beta, 
@@ -54,12 +273,15 @@ load_circuit :: fn(in: Str, arena: Alloc) Result(Circuit, Str) = {
     };
     fail :: fn(s) => return(Err = s);
     
-    eat(i64); eat(u32); eat(i64); eat(i64); eat(bool); eat(u32);
+    id := eat(i64); 
+    eat(u32); eat(i64); eat(i64); eat(bool); eat(u32);
     eatN(u16, i64); // dependencies
     eatN(u16, u8);  // description
     eat_point(); eat(u8); eat(bool); eat(u16);
     eatN(u16, u8);  // player data
     eatN(u16, u8);  // hub description
+    
+    min_pos, max_pos := (vec2(65000), vec2(-65000));
     
     gate_count := eat(i64);
     gates&.reserve(gate_count);
@@ -74,6 +296,7 @@ load_circuit :: fn(in: Str, arena: Alloc) Result(Circuit, Str) = {
         s2 := eat(i64);
         _ := eat(i16);
         custom_id := -1;
+        // TODO: get the enum from ./builin.fr
         if kind == 92 {  // Custom
             custom_id = eat(i64);
             custom_pos := eat_point();
@@ -88,12 +311,15 @@ load_circuit :: fn(in: Str, arena: Alloc) Result(Circuit, Str) = {
         };
         gates&.push(
             rotation = rotation,
-            custom_id = id,
+            custom_id = custom_id,
             kind = kind,
             pos = pos,
             settings = (s1, s2),
             data = custom_string.shallow_copy(a),
         );
+        
+        min_pos = min(min_pos, pos);
+        max_pos = max(max_pos, pos);
     };
     
     directions :: @const_slice(vec2(1,0), vec2(1,1), vec2(0,1), vec2(-1,1), vec2(-1,0), vec2(-1,-1), vec2(0,-1), vec2(1,-1));
@@ -116,6 +342,7 @@ load_circuit :: fn(in: Str, arena: Alloc) Result(Circuit, Str) = {
         };
         
         path := Circuit.WireNode.list(a);
+        
         path&.push(pos = pos);
         length := segment.bit_and(0b0001_1111);
         while => length != 0 {
@@ -128,9 +355,19 @@ load_circuit :: fn(in: Str, arena: Alloc) Result(Circuit, Str) = {
             length = segment.bit_and(0b0001_1111);
         };
         wires&.push(path = path.as_raw());
+        
+        for path { it |
+            min_pos = min(min_pos, it.pos);
+            max_pos = max(max_pos, it.pos);
+        };
     };
     @if(i != in.len) fail("extra junk at the end");
-    (Ok = (wires = wires.items(), gates = gates.items()))
+    (Ok = (
+        wires = wires.items(), 
+        gates = gates.items(), 
+        id = id,
+        min = min_pos, max = max_pos,
+    ))
 }
 
 #use("@/graphics/vec.fr");

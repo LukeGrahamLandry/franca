@@ -1,3 +1,10 @@
+  
+## (Jun 10) circuit
+
+need to convert circuit.data into a graph that can be compiled. 
+- table of wire position -> wire index and then iter all component pins pins and check which wire index they're connected to. 
+- the wires in the file are just the lines you draw. need to fuse into one wire when they connect. 
+- gates are probably just in the order they were placed in the gui. sort into evaluation order.
 
 ## (Jun 9) circuit
 
@@ -12,6 +19,8 @@ and they give you the code for loading it: Stuffe/save_monger.
   so i need to know the pin positions relative to each type of gate and that data doesn't seem to be in the library. 
   i guess there aren't that many different shapes so maybe its not a big deal to just look at them and write a list. 
   - for custom components its based on aprox. position of the inputs/outputs in the implementation, that's fine. 
+  - bit more ui for showing the expected pin positions so its easier to transcribe
+- started doing native impls for the builtin components
 
 ## (Jun 8) circuit
 
