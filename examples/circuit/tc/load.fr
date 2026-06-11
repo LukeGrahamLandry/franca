@@ -16,6 +16,7 @@ Circuit :: @struct {
     // used when referenced as a Custom Gate in another Circuit. 
     // these are based on layout of the implementation. 
     pins: []Ty(i64, i64) = empty();
+    switches: []SwitchablePin = empty();
     
     Wire :: @struct {
         path: RawList(WireNode);
@@ -30,6 +31,11 @@ Circuit :: @struct {
         mystery_spice_minus_fifteen_for_custom_pins: Vec2;
         settings: Array(i64, 2);
         data: []u8;
+    };
+    
+    SwitchablePin :: @struct {
+        value_output_index: i64;     // components[compiled].gates[-1].inputs[_]
+        condition_output_index: i64; // ^
     };
 };
 
@@ -105,6 +111,8 @@ load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64) = {
     (circuits.items(), root_index)
 }
 
+HACK_NONE_PIN_POSITION :: 999999;
+
 // TODO
 // move more of the validation stuff out of the parse from FatExpr into a post pass so can share with this. 
 // - detect use-before-def (bad input or just confused) gracefully and error instead of crashing on franca compile error later. 
@@ -137,6 +145,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     a := arena;
     gates, wire_count := find_pins(c, a, circuits);
     custom_pins := Ty(i64, i64).list(a);
+    switches := Circuit.SwitchablePin.list(a);
         
     // TODO: when doing runtime need to be careful not to bake before setting fast_eval pointer
     builtin_count := defs.tc_components_offset + templates.len();
@@ -147,8 +156,9 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     output_pin_count := 0;
     // before: gates[_].kind.id is in just the tc range, now remap into `components`. 
     // after this can't access the TcBuiltins.Shape anymore so any required into needs to get transfered out. 
-    enumerate gates { i, it |
+    range(0, gates.len) { i |  // gate.push in this loop
         continue :: local_return;
+        it := gates.index(i); 
         if i == c.gates.len {
             // new_false_wire CONST_INDEX is already remapped. TODO: this is more error prone than it needs to be
             @assert(it.inputs.len == 0 && it.kind.id == 5, "CONST_INDEX HACK"); 
@@ -169,7 +179,8 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
             unimplemented = true;
             @eprintln("TODO: arity error (%) I: % vs %; O: % vs %; gate %/%", shape.name, shape.in_arity, it.inputs.len, shape.out_arity, it.outputs.len, i, gates.len);
         }
-        if shape.pins.len == 0 {
+        if shape.pins.len == 0 && shape.name != "LevelScreen" && !shape.name.starts_with("Probe") && shape.name != "Custom" {
+            @println("TODO: no pins for %", shape.name);
             unimplemented = true;
         };
         
@@ -187,30 +198,43 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 // outputs first 
                 is_input := it.outputs.len != 0;
                 dest := @if(is_input, custom_pins.len, output_pin_count);
-                output_pin_count += int(!is_input); 
-
+                
+                is_switchable_output := shape.name.ends_with("z") && shape.name.starts_with("Output") && it.inputs.len == 2 && it.outputs.len == 0 && !is_input; 
+                if it.outputs.len + it.inputs.len > 1 {
+                    if !is_switchable_output {
+                        @println("TODO: deal with pin layout for %", shape.name);
+                        // TODO: do i have to allow LevelInputArch (which is both in and out) nested in custom component? 
+                        continue();
+                    };
+                    
+                    // :OutputNz ughhhhh this seems convoluted but i don't have a better idea rn. 
+                    // it has two input pins on the inside but only exposes one output pin. 
+                    // my representation doesn't have an extra bit for being disabled so it compiles to two outputs
+                    // and the caller inserts a switch to merge them back into one wire. 
+                    switches&.push(
+                        value_output_index = out.len - 2,
+                        condition_output_index = out.len - 1,
+                    );
+                };
+                
                 OFF :: 256*256;  // idk dont fuck with negative numbers
                 p := original_gate.pos;
                 x, y := (p.x.cast().int() + OFF, p.y.cast().int() + OFF);
                 x = (x.align_to(8) - OFF)/8;
                 y = (y.align_to(8) - OFF)/8;
                 insert(custom_pins&, dest, (x, y));
-                                
-                // TODO: a problem here is Outputz has two input pins on the inside but only exposes one output pin. 
-                //       so the pins array can't be one to one with the compiled inputs/outputs. 
-                is_switchable_output := shape.name.ends_with("z") && shape.name.starts_with("Output"); 
-                if it.outputs.len + it.inputs.len > 1 {
-                    @println("TODO: deal with pin layout for %", shape.name);
+                
+                if is_switchable_output {
+                    insert(custom_pins&, dest + 1, (HACK_NONE_PIN_POSITION, HACK_NONE_PIN_POSITION));
+                    output_pin_count += 1;
                 };
                 
-                
-                // TODO: do i have to allow LevelInputArch (which is both in and out) nested in custom component? 
+                output_pin_count += int(!is_input); 
             }
             fn Def(name) => {
-                #use("@/examples/circuit/eval.fr");
                 it.kind = get_component_by_name(name[], defs.components.items());
             }
-            fn Native(info) => {
+            fn Native() => {
                 it.kind.id += defs.tc_components_offset.trunc();
             }
             fn Constant() => {
@@ -218,24 +242,33 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 unimplemented = true;
             } 
             fn Custom() => {
-                ok := false;
-                if find_custom_impl(original_gate, circuits) { child |
-                    ok = true;
-                    it.kind = child.compiled.unwrap();
-                }
-                if !ok {
+                child := find_custom_impl(original_gate, circuits) || {
                     // should be unreachable because of the `dependencies` in the data file. 
+                    @println("missing custom component %", original_gate.custom_id.id);
                     unimplemented = true;
+                    continue();
+                };
+                it.kind = child.compiled.unwrap();
+                
+                // :OutputNz 
+                for child.switches { switchable_pin |
+                    w := a.alloc_uninit(WireId, 3);
+                    switchable_wire: WireId = (id = wire_count.trunc());
+                    wire_count += 1;
+                    
+                    value, condition := (it.outputs[switchable_pin.value_output_index]&, it.outputs[switchable_pin.condition_output_index]&);
+                    w[0] = value[];
+                    w[1] = switchable_wire;
+                    w[2] = condition[];
+                    value[] = switchable_wire;
+                    
+                    S := @run get_component_by_name("switch1", defs.components.items()); 
+                    gates&.push(kind = S, inputs = w.slice(1, 3), outputs = w.slice(0, 1));
+                    it = gates.index(i);  // ^ can reallocate
                 };
             } 
             fn Device() => {
-                if shape.name != "Program" {
-                    eprintln("TODO: Device");
-                    unimplemented = true;
-                } else {
-                    eprintln("TODO: Device");
-                    unimplemented = true;
-                };
+                it.kind.id += defs.tc_components_offset.trunc();
             } 
         }
     };    
@@ -246,6 +279,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     };  
     
     c.pins = custom_pins.items();
+    c.switches = switches.items();
     c.arity = (out.len, in.len);
     push_inputs_outputs(gates&, out.items(), in.items());
     gates := schedule_gates(c, gates, wire_count, a, out.items(), in.items());
@@ -254,6 +288,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         gates.len = 0;
         in.len = 0;
         out.len = 0;
+        @eprintln("something was unimplemented in (%)", c.name);
     };
     
     c.compiled = (Some = (id = components.len.trunc()));
@@ -269,8 +304,8 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
 };
 #use("@/lib/collections/bit_set.fr");
 
+#use("@/examples/circuit/eval.fr");
 fn push_inputs_outputs(gates: *List(Component.Gate), out: []WireId, in: []WireId) void = {
-    #use("@/examples/circuit/eval.fr");
     I, O := (
          @run get_component_by_name("input", defs.components.items()), 
          @run get_component_by_name("output", defs.components.items()),
@@ -386,18 +421,15 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
         out_arity, in_arity := get_arity(shape, it, circuits);
         
         w := a.alloc_init(WireId, out_arity + in_arity, fn(_) => (id = 0xFFFFFFFF));
-        i := 0;
         
         no_pins := true;
-        for_pins(shape, it, circuits) { dx, dy |
+        for_pins(shape, it, circuits) { i, dx, dy |
             no_pins = false;
             pos := it.pos + vec2(dx.float().cast(), dy.float().cast());
             if wire_positions&.get(pos_key(pos)) { g_wire |
                 l_wire := c.wires[g_wire.id.zext()].logical;
                 w[i] = l_wire;
             };
-            
-            i += 1;
         };
         
         if no_pins && shape.name != "LevelScreen" && !shape.name.starts_with("Probe") {
@@ -461,7 +493,7 @@ fn get_arity(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit)
 }
 
 
-fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, $body: @Fn(dx: i64, dy: i64) void) void = {
+fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, $body: @Fn(pin_index: i64, dx: i64, dy: i64) void) void = {
     // TODO: also pass in the []Circuit so it works for custom components
     pins := shape.pins;
     dx, dy := (0, 0);
@@ -479,12 +511,16 @@ fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, 
     };
     
     rot: i64 = gate.rotation.zext();
+    i := 0;
     for pins { x, y |
         x += dx; y += dy;  // TODO: before or after rotation?
         range(0, rot) { _ |
             t := x; x = -y; y = t; // counter clockwise 90 deg around (0, 0)
         };
-        body(x, y);
+        if x != HACK_NONE_PIN_POSITION {
+            body(i, x, y);
+        };
+        i += 1;
     };
 }
 

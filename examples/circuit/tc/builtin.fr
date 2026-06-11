@@ -5,16 +5,17 @@ Template :: @struct {
     name := "";
     body: Body;
     inputs_for_pure_eval: ?[]i64 = .None; 
+    fid: ?FuncId = .None;
+    callee := zeroed(rawptr);
+    storage_count := 0;
     
     Body :: @tagged(
         Unimplemented: void,
         Def: Str,  // use nand based implementation from ../defs.fr
-        Native: @struct {
-            fid: FuncId;
-            callee := zeroed(rawptr);
-        },
+        Native,
         Constant,
-        Device,  // pins become memory that's accessed by the embedder (ie. ram/screen/keyboard)
+        // pins become memory that's accessed by the embedder (ie. ram/screen/keyboard)
+        Device,
         IO,      // pins compile to function arguments
         Custom,
     );
@@ -81,8 +82,8 @@ templates :: {
             it.body = .Constant;
         };
         
-        @if_let(it.body&) fn Native(it) => {
-            it.callee = current_compiler_context().get_jitted(it.fid);
+        @if_let(it.fid) fn Some(fid) => {
+            it.callee = current_compiler_context().get_jitted(fid);
         };
         out&.push(it);
         
@@ -110,21 +111,23 @@ math :: fn($out_arity: i64, $in_arity: i64, $fid: FuncId) *Template = {
     ast_alloc().boxed(Template, (
         in_arity = in_arity, 
         out_arity = out_arity, 
-        body = (Native = (fid = wrapped)),
+        fid = (Some = wrapped),
+        body = .Native,
     ))
 };
 mask :: fn($bits: i64, $child: *Template) *Template = {
     // TODO: infer a useful name
     wrapped :: (fn(w: *World, o: *Array(WireValue, child.out_arity), i: *Array(WireValue, child.in_arity)) void = {
-        (@run child.body.Native.fid)(w, o, i);
+        (@run child.fid.unwrap())(w, o, i);
         inline_range(0, child.out_arity) { I |
             o[I] = bit_and(o[I], 1.shift_left(bits) - 1);
         };
     });
     ast_alloc().boxed(Template, (
         in_arity = child.in_arity, 
-        out_arity = child.out_arity, 
-        body = @if(!child.body&.is(.Native), .Unimplemented, (Native = (fid = wrapped))),
+        out_arity = child.out_arity,
+        fid = @if(!child.fid.is_some(), .None, (Some = wrapped)),
+        body = child.body,
     ))
 };
 from_defs :: fn(name: Str) *Template = {
@@ -139,7 +142,7 @@ from_defs :: fn(name: Str) *Template = {
         body = (Def = name),
     ))
 }
-with_pins :: fn(o: i64, i: i64, body: Template.Body, pins: []Ty(i64, i64)) = {
+fn with_pins(o: i64, i: i64, body: Template.Body, pins: []Ty(i64, i64)) = {
     @assert_eq(o + i, pins.len, "wire arity typo");
     ast_alloc().boxed(Template, (
         in_arity = i, 
@@ -149,11 +152,27 @@ with_pins :: fn(o: i64, i: i64, body: Template.Body, pins: []Ty(i64, i64)) = {
     ))
 }
 
-todo :: fn() *Template = ast_alloc().boxed(Template, zeroed(Template));
+fn with_pins(o: i64, i: i64, body: Template.Body, pins: []Ty(i64, i64), storage_count: i64, fid: FuncId) = {
+    @assert_eq(o + i, pins.len, "wire arity typo");
+    ast_alloc().boxed(Template, (
+        in_arity = i, 
+        out_arity = o, 
+        body = body,
+        pins = pins,
+        fid = (Some = fid),
+        storage_count = storage_count.ualign_to(64).udiv(64),
+    ))
+}
+
+
+todo :: fn() *Template = ast_alloc().boxed(Template, {
+    ugh := zeroed(Template);
+    ugh.fid = .None;
+    ugh
+});
 
 fn get_native(a: *Template) FuncId = {
-    @assert(a.body&.is(.Native), "bad get_native (%)", a.name);
-    a.body.Native.fid
+    a.fid || @panic("bad get_native (%)", a.name)
 }
 
 // TODO: should be more careful about data sizes if they don't match expected. 
@@ -163,6 +182,9 @@ fn get_native(a: *Template) FuncId = {
 // TODO: all the io devices should just be treated like a memory and then the outer simulation deals with it between ticks. 
 //       the actual input/output pins need to be special to compile custom components. 
 // TODO: check if their shift/rot is supposed to wrap the amount like mine do
+// TODO: the registers/program here use more packed storage than the ones in ../defs.fr 
+//       so either need to unify them or have the ui know about both for showing ram/disassembly. 
+// TODO: move the impls of storage out? because they're different enough that it's annoying to have to search for them. 
 
 // these are in order by their ComponentKind value in the circuit.data format. 
 impl :: @struct {
@@ -195,8 +217,20 @@ Register8Red :: todo();
 VirtualRegister8Red :: todo();
 Register8RedPlus :: todo();
 VirtualRegister8RedPlus :: todo();
-// TODO Register (load?, save?, save value)
-Register64 :: with_pins(1, 3, .Device, @const_slice((1, 0), (-1, -1), (-1, 0), (-1, 1)));
+Register64 :: with_pins(1, 3, .Device, 
+    @const_slice((1, 0), (-1, -1), (-1, 0), (-1, 1)),
+    8*8,
+    fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 3)) void = {
+        load, save, value := (i[0] != 0, i[1] != 0, i[2]);
+        @debug_assert_ult(world.instance, world.storage.len, "must preallocate storage_count");
+        slot := world.storage[world.instance]&;
+        o[0] = slot[];  // TODO: need to do something about unpowered when !load. 
+        if !world.doing_pre_read && save {
+            slot[] = value;
+        };
+        world.instance += 1;
+    },
+);
 VirtualRegister64 :: todo();
 Switch8 :: Switch64;
 Mux8 :: math(1, 3) { o, i | o[0] = @if(i[0] == 0, i[1], i[2]); };
@@ -287,7 +321,20 @@ LevelOutputCounter :: todo();
 _91 :: todo();
 Custom :: todo();
 VirtualCustom :: todo();
-Program :: with_pins(1, 1, .Device, @const_slice((13, -7), (-13, -7)));
+Program :: with_pins(1, 1, .Device,
+    @const_slice((13, -7), (-13, -7)),
+    256*8,
+    fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 1)) void = {
+        // TODO: actually 4 outputs, configurable size. 
+        address := i[0].bit_and(255);
+        n := (256*8)/64;
+        @debug_assert_ule(world.instance + n, world.storage.len, "must preallocate storage_count");
+        slot := world.storage.subslice(world.instance, n);
+        bytes := interpret_as_bytes(slot);
+        o[0] = bytes[address].zext();
+        world.instance += n;
+    },
+);
 DelayLine1 :: todo();
 VirtualDelayLine1 :: todo();
 Console :: todo();

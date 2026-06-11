@@ -1890,11 +1890,11 @@ StbTrueType :: include { C |
   - do they have an api for the schematic hub?
   - finish transcribing pin locations for each component
   - add disable pins to my components to match theirs
-  - custom component pins need to be ordered 
   - load program without the arch cooperating (ie no 3rd input)
   - OutputZ is what the game calls Switched Output. 
     with my current way of compiling would need to inline a Switch into the caller. 
   - dropping in a circuit.data file in the web demo is totally broken
+  - my wire merging is wrong. see the Decode3 in my COND. 
 - io devices: console, dot matrix, 7 segment, time, keyboard
 - compile new schematics at runtime
 - compile a version with save_wire_values so can get rid of the interpreter? 
