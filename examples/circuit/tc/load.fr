@@ -1,11 +1,21 @@
+// TODO: get rid of all the places i do string comparisons on the name. 
+//       put flags on the Template so don't have to be defensive about someone naming their CC "Output12456z" or whatever 
 
 // diagram layout loaded from one circuit.data file. 
 Circuit :: @struct {
-    id: i64;
+    id: CustomId;
     wires: []Wire;
     gates: []Gate;
     min: Vec2;
     max: Vec2;
+    dependencies: []CustomId;
+    name: Str = "";
+    arity: Ty(i64, i64) = (-1, -1);
+    
+    compiled: ?ComponentId = .None;
+    // used when referenced as a Custom Gate in another Circuit. 
+    // these are based on layout of the implementation. 
+    pins: []Ty(i64, i64) = empty();
     
     Wire :: @struct {
         path: RawList(WireNode);
@@ -16,17 +26,20 @@ Circuit :: @struct {
         pos: Vec2;
         kind: u16;
         rotation: u8;
-        // if kind is Custom, need to find the circuit with this custom_id as its id from the schematics folder
-        custom_id: i64;  
+        custom_id: CustomId;  // when kind is Custom
+        mystery_spice_minus_fifteen_for_custom_pins: Vec2;
         settings: Array(i64, 2);
         data: []u8;
     };
 };
 
+CustomId :: @struct(id: i64);
+
 #use("@/examples/circuit/parse.fr");
+#use("@/lib/sys/fs.fr");
+Builtin :: import("@/examples/circuit/tc/builtin.fr");
 
 main :: fn() void = {
-    #use("@/lib/sys/fs.fr");
     _ := import("@/examples/circuit/tc/builtin.fr").templates;
     root := "/Users/luke/Library/Application Support/godot/app_userdata/Turing Complete/schematics";
     
@@ -51,36 +64,147 @@ main :: fn() void = {
     @assert_eq(failed, 0);
 }
 
+load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64) = {
+    root := original_root;
+    root_name := name_from_path(root);
+    while => !root.ends_with("schematics/") && root.len > 0 {
+        root = root.pop_path_segment();
+    };
+    
+    // TODO: could just look at the headers and only load full data if in dependencies
+    files := collect_schematics(root, temp());
+    if files.len == 0 {
+        files&.push(original_root);
+    };
+    
+    circuits := Circuit.list(a);
+    for files { path |
+        continue :: local_return;
+        in := read_entire_file(temp(), path) || {
+            @println("failed to read [%]", path);
+            continue();
+        };
+        res := load_circuit(in, a);
+        info := res.or(fn(msg) => {
+            @eprintln("failed to load [%]: %", path, msg);
+            continue();
+        });
+        info.name = name_from_path(path).shallow_copy(a);
+        circuits&.push(info);
+    };
+    
+    root_index := circuits.index_of(fn(it) => it.name == root_name) || {
+        @eprintln("couldn't find (%). shouldn't happen if path is in tc save directory", root_name);        
+        0
+    };
+    
+    if circuits.len == 0 {
+        return(empty(), -1);
+    };
+    
+    (circuits.items(), root_index)
+}
+
 // TODO
 // move more of the validation stuff out of the parse from FatExpr into a post pass so can share with this. 
-// need to integrate these new builtins with the old defs.components. make it not a const global perhaps. 
+// - detect use-before-def (bad input or just confused) gracefully and error instead of crashing on franca compile error later. 
 
-// TODO: need to pass in many at once so it can find custom component implementations
-compile_circuit :: fn(c: *Circuit, components: *List(Component)) void = {
-    arena := ast_alloc();  // TODO
+compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Component), arena: Alloc) void = {
+    c := circuits[root_index]&;
+    if c.compiled.is_some() {
+        @println("why am i compiling % twice?", c.name);
+        return();
+    };
+    
+    unimplemented := false;
+    
+    for c.dependencies { custom_id |
+        continue :: local_return;
+        // TODO: detect cycles (malformed data file)
+        ::AutoEq(CustomId); ::RefEq(CustomId);
+        child_index := circuits.index_of(fn(it) => it.id == custom_id) || {
+            @eprintln("missing dependency custom component % in (%)", custom_id.id, c.name);
+            unimplemented = true;
+            continue();
+        };
+        if circuits[child_index].compiled.is_none() {
+            compile_circuit(circuits, child_index, components, arena);
+        };
+    };
+    @if(c.compiled.is_some()) return();
+    
+    @println("loading (%):", c.name);
     a := arena;
-    gates, wire_count := find_pins(c, a);
-
+    gates, wire_count := find_pins(c, a, circuits);
+    custom_pins := Ty(i64, i64).list(a);
+        
     // TODO: when doing runtime need to be careful not to bake before setting fast_eval pointer
     builtin_count := defs.tc_components_offset + templates.len();
-    @assert_eq(components.len, builtin_count, "TODO: be more flexible about adding new ones");
-    
-    gates := schedule_gates(c, gates, wire_count, a);
-    
+    @assert_ge(components.len, builtin_count, "TODO: be more flexible about adding new ones");
+        
     kill: DynamicBitSet = empty(temp());
     in, out := (WireId.list(a), WireId.list(a));
+    output_pin_count := 0;
+    // before: gates[_].kind.id is in just the tc range, now remap into `components`. 
+    // after this can't access the TcBuiltins.Shape anymore so any required into needs to get transfered out. 
     enumerate gates { i, it |
+        continue :: local_return;
+        if i == c.gates.len {
+            // new_false_wire CONST_INDEX is already remapped. TODO: this is more error prone than it needs to be
+            @assert(it.inputs.len == 0 && it.kind.id == 5, "CONST_INDEX HACK"); 
+            continue();
+        };
+        original_gate := c.gates[i]&;
         shape := templates[it.kind.id.zext()];
+        
+        if shape.name.starts_with("Probe") {
+            // TODO
+            kill&.set(i);
+            continue();
+        }
+        
+        out_arity, in_arity := get_arity(shape, original_gate, circuits);
+        
+        if in_arity != it.inputs.len || out_arity != it.outputs.len {
+            unimplemented = true;
+            @eprintln("TODO: arity error (%) I: % vs %; O: % vs %; gate %/%", shape.name, shape.in_arity, it.inputs.len, shape.out_arity, it.outputs.len, i, gates.len);
+        }
+        if shape.pins.len == 0 {
+            unimplemented = true;
+        };
+        
         @match(shape.body&) { 
             fn Unimplemented() => {
                 kill&.set(i);
                 @eprintln("TODO: not implemented (%)", shape.name);
+                unimplemented = true;
             }
             fn IO() => {
                 kill&.set(i);
-                // TODO: order needs to be consistant
-                out&.push_all(it.outputs);
-                in&.push_all(it.inputs);
+                out&.push_all(it.inputs);
+                in&.push_all(it.outputs);
+                
+                // outputs first 
+                is_input := it.outputs.len != 0;
+                dest := @if(is_input, custom_pins.len, output_pin_count);
+                output_pin_count += int(!is_input); 
+
+                OFF :: 256*256;  // idk dont fuck with negative numbers
+                p := original_gate.pos;
+                x, y := (p.x.cast().int() + OFF, p.y.cast().int() + OFF);
+                x = (x.align_to(8) - OFF)/8;
+                y = (y.align_to(8) - OFF)/8;
+                insert(custom_pins&, dest, (x, y));
+                                
+                // TODO: a problem here is Outputz has two input pins on the inside but only exposes one output pin. 
+                //       so the pins array can't be one to one with the compiled inputs/outputs. 
+                is_switchable_output := shape.name.ends_with("z") && shape.name.starts_with("Output"); 
+                if it.outputs.len + it.inputs.len > 1 {
+                    @println("TODO: deal with pin layout for %", shape.name);
+                };
+                
+                
+                // TODO: do i have to allow LevelInputArch (which is both in and out) nested in custom component? 
             }
             fn Def(name) => {
                 #use("@/examples/circuit/eval.fr");
@@ -91,38 +215,51 @@ compile_circuit :: fn(c: *Circuit, components: *List(Component)) void = {
             }
             fn Constant() => {
                 eprintln("TODO: constant");
+                unimplemented = true;
             } 
             fn Custom() => {
-                eprintln("TODO: Custom");
+                ok := false;
+                if find_custom_impl(original_gate, circuits) { child |
+                    ok = true;
+                    it.kind = child.compiled.unwrap();
+                }
+                if !ok {
+                    // should be unreachable because of the `dependencies` in the data file. 
+                    unimplemented = true;
+                };
             } 
             fn Device() => {
-                eprintln("TODO: Device");
+                if shape.name != "Program" {
+                    eprintln("TODO: Device");
+                    unimplemented = true;
+                } else {
+                    eprintln("TODO: Device");
+                    unimplemented = true;
+                };
             } 
         }
-    };
+    };    
     range_rev(0, gates.len) { i |
         if kill&.get(i) {
             gates&.ordered_remove(i);
         }
     };  
-
-    #use("@/examples/circuit/eval.fr");
-    gates&.insert(0, (
-        kind = @run get_component_by_name("input", defs.components.items()),
-        inputs = empty(),
-        outputs = out.items(),
-        param = 0,
-    ));
-    gates&.push(
-        kind = @run get_component_by_name("output", defs.components.items()),
-        inputs = in.items(),
-        outputs = empty(),
-        param = 0,
-    );
     
+    c.pins = custom_pins.items();
+    c.arity = (out.len, in.len);
+    push_inputs_outputs(gates&, out.items(), in.items());
+    gates := schedule_gates(c, gates, wire_count, a, out.items(), in.items());
+    
+    if unimplemented { 
+        gates.len = 0;
+        in.len = 0;
+        out.len = 0;
+    };
+    
+    c.compiled = (Some = (id = components.len.trunc()));
     components.push(
         gates = gates.items(),
-        name = "todo",
+        name = c.name,
         wire_count = wire_count,
         storage_count = 0, // TODO
         wire_depth = wire_count,
@@ -132,26 +269,39 @@ compile_circuit :: fn(c: *Circuit, components: *List(Component)) void = {
 };
 #use("@/lib/collections/bit_set.fr");
 
+fn push_inputs_outputs(gates: *List(Component.Gate), out: []WireId, in: []WireId) void = {
+    #use("@/examples/circuit/eval.fr");
+    I, O := (
+         @run get_component_by_name("input", defs.components.items()), 
+         @run get_component_by_name("output", defs.components.items()),
+    );
+    gates.insert(0, (kind = I, inputs = empty(), outputs = in));
+    gates.push(kind = O, inputs = out, outputs = empty());
+}
+
 // TODO: for custom components to be sane the order of inputs/outputs has to be stable based on the component's permenent_id from the file somehow?
-schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, a: Alloc) List(Component.Gate) = {
+schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, a: Alloc, out: []WireId, in: []WireId) List(Component.Gate) = {
     // TODO: gates with memory need to go to the end. 
     // TODO: compiler needs to delay all writes until after all reads, not just do them in order unless forced to preread. 
-    defining_gate := temp().alloc_zeroed(i64, wire_count);
+    defining_gate := temp().alloc_zeroed(i64, wire_count);  // [WireId]
     order := i64.list(temp());
-    ready: DynamicBitSet = empty(temp());
-    done: DynamicBitSet = empty(temp());
+    ready: DynamicBitSet = empty(temp()); // [WireId]
+    done: DynamicBitSet = empty(temp());  // [index in gates]
     enumerate gates { i, it |
         for it.outputs { id |
             defining_gate[id.id.zext()] = i;
-            
-            // TODO: wrong for memory
-            if @is(templates[c.gates[i].kind.zext()].body&.tag(), .IO) { 
-                ready&.set(id.id.zext());
-                done&.set(i);
-                order&.push(i);
-            };
         };
     };
+    
+    // inputs/outputs are fixed at start/end
+    order&.push(0);
+    done&.set(gates.len - 1);
+    done&.set(0);
+    for gates[0].outputs { id |
+        ready&.set(id.id.zext());
+    };
+    
+    // TODO: for Device, outputs are ready once inputs_for_pure_eval are ready (but i don't set those yet, and for custom components need to take that out of calculate_usage to do it as i go)
     dowhile {
         changed := false;
         enumerate gates { i, it |
@@ -171,9 +321,18 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
             }
         };
         changed
-    };
+    };    
     
-    @if(order.len != gates.len) eprintln("TODO: cycles!");
+    if order.len != gates.len - 1 {
+        eprintln("TODO: cycles!");
+        enumerate gates { i, it |
+            if !done&.get_set(i) {
+                order&.push(i);
+            }
+        };
+    };
+    order&.push(gates.len - 1);
+    
     gates2 := Component.Gate.list(gates.len, a);
     for order { i |
         it := gates[i]&;
@@ -187,7 +346,9 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
 
 templates :: import("@/examples/circuit/tc/builtin.fr").templates;
 
-find_pins :: fn(c: *Circuit, a: Alloc) Ty(List(Component.Gate), i64) = {
+// return._0[_].kind.id is in just the tc range. 
+// `circuits` is needed for finding the pins when `c` uses a custom component. 
+find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Gate), i64) = {
     #use("@/examples/circuit/parse.fr");
     pos_key :: fn(a: Vec2) i64 = bit_cast_unchecked(Vec2, i64, a);
     
@@ -199,6 +360,10 @@ find_pins :: fn(c: *Circuit, a: Alloc) Ty(List(Component.Gate), i64) = {
             found := wire_positions&.get_or_insert(pos_key(node.pos), => new.logical&);
             if new.logical.id != found.id {
                 // when two graphical wires overlap they become one logical wire.
+                
+                // TODO: i think this is wrong, it has to be at the end of one of the wires. (but not both so still have to put all in the table). 
+                //       my COND component has this problem with the decoder3. 
+                
                 each c.wires.slice(0, wire_i + 1) { old |  // :SLOW
                     if old.logical.id == new.logical.id {
                         old.logical.id = found.id;
@@ -212,14 +377,20 @@ find_pins :: fn(c: *Circuit, a: Alloc) Ty(List(Component.Gate), i64) = {
     new_false_wire: ?WireId = .None;
     next_wire_id: u32 = c.wires.len.trunc();
     enumerate c.gates& { gate_i, it |
+        continue :: local_return;
+        if templates.len() <= it.kind.zext() {
+            @println("TODO kind OOB %", it.kind);
+            continue();
+        }
         shape := templates[it.kind.zext()];
-        // TODO: custom is different
-        w := a.alloc_init(WireId, shape.out_arity + shape.in_arity, fn(_) => (id = 0xFFFFFFFF));
+        out_arity, in_arity := get_arity(shape, it, circuits);
+        
+        w := a.alloc_init(WireId, out_arity + in_arity, fn(_) => (id = 0xFFFFFFFF));
         i := 0;
-        if shape.pins.len == 0 {
-            @eprintln("TODO: % has no pins", shape.name);
-        };
-        for shape.pins { dx, dy |
+        
+        no_pins := true;
+        for_pins(shape, it, circuits) { dx, dy |
+            no_pins = false;
             pos := it.pos + vec2(dx.float().cast(), dy.float().cast());
             if wire_positions&.get(pos_key(pos)) { g_wire |
                 l_wire := c.wires[g_wire.id.zext()].logical;
@@ -228,10 +399,15 @@ find_pins :: fn(c: *Circuit, a: Alloc) Ty(List(Component.Gate), i64) = {
             
             i += 1;
         };
-        out, in := (w.slice(0, shape.out_arity), w.rest(shape.out_arity));
+        
+        if no_pins && shape.name != "LevelScreen" && !shape.name.starts_with("Probe") {
+            @eprintln("TODO: % has no pins", shape.name);
+        };
+        
+        out, in := (w.slice(0, out_arity), w.rest(out_arity));
         logic_gates&.push(
-            outputs = w.slice(0, shape.out_arity),
-            inputs = w.rest(shape.out_arity),
+            outputs = out,
+            inputs = in,
             kind = (id = it.kind.zext()),  // TODO: add them to the World.components
             param = 0,  // TODO: Constant gate needs to set this 
         );
@@ -240,7 +416,7 @@ find_pins :: fn(c: *Circuit, a: Alloc) Ty(List(Component.Gate), i64) = {
         // TODO: update c.logical so can show it in the ui?
         enumerate w { i, it |
             @if(it.id == 0xFFFFFFFF) 
-            if i < shape.out_arity {  // output (discarded)
+            if i < out_arity {  // output (discarded)
                 it[] = (id = next_wire_id);
                 next_wire_id += 1;
             } else {  // input (false)
@@ -254,10 +430,11 @@ find_pins :: fn(c: *Circuit, a: Alloc) Ty(List(Component.Gate), i64) = {
     };
     
     if new_false_wire { wire |  // there was a disconnected input pin
+        CONST_INDEX :: 5;  // TODO: :fragile!! get_component_by_name("const", @run defs.components.items())
         logic_gates&.push(
             outputs = a.alloc_init(WireId, 1, fn(_) => wire),
             inputs = empty(),
-            kind = zeroed(ComponentId),  // TODO: defs.const
+            kind = (id = 5),
             param = 0,
         );
     };
@@ -265,9 +442,65 @@ find_pins :: fn(c: *Circuit, a: Alloc) Ty(List(Component.Gate), i64) = {
     (logic_gates, next_wire_id.zext())
 };
 
+fn find_custom_impl(g_gate: *Circuit.Gate, circuits: []Circuit) ?*Circuit = {
+    if circuits.find(fn(it) => it.id == g_gate.custom_id) { child |
+        if child.compiled { child_id |
+            return(Some = child);  // will also have computed pin locations
+        }
+    };
+    .None
+}
+
+fn get_arity(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit) Ty(i64, i64) = {
+    @if(shape.name != "Custom") return(shape.out_arity, shape.in_arity);
+    child := find_custom_impl(gate, circuits) || {
+        @eprintln("TODO: custom component missing from dependencies?? %", gate.custom_id.id);
+        return(0, 0);
+    };
+    child.arity
+}
+
+
+fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, $body: @Fn(dx: i64, dy: i64) void) void = {
+    // TODO: also pass in the []Circuit so it works for custom components
+    pins := shape.pins;
+    dx, dy := (0, 0);
+    if shape.name == "Custom" {
+        child := find_custom_impl(gate, circuits)
+            || return(@eprintln("TODO: custom component missing from dependencies?? %", gate.custom_id.id));
+        pins = child.pins;
+        
+        // TODO: i don't understand why this is part of the gate not the component or why 15 is the magic number but it makes the ones i've tested look right so here we are. 
+        p := gate.mystery_spice_minus_fifteen_for_custom_pins;
+        dx = p.x.cast().int() + 15;
+        dy = p.y.cast().int() + 15;
+        
+        // TODO: use gate.custom_pos for something?
+    };
+    
+    rot: i64 = gate.rotation.zext();
+    for pins { x, y |
+        x += dx; y += dy;  // TODO: before or after rotation?
+        range(0, rot) { _ |
+            t := x; x = -y; y = t; // counter clockwise 90 deg around (0, 0)
+        };
+        body(x, y);
+    };
+}
+
+name_from_path :: fn(path: Str) Str = {
+    name := path;
+    name = name.pop_path_segment();  // circuit.data
+    prefix := name.pop_path_segment();
+    name = @if(name.ends_with("/"), name.slice(0, name.len - 1), name);
+    name = name.rest(prefix.len);
+    name
+};
+
 collect_schematics :: fn(tc_save_root: Str, a: Alloc) List(Str) = {
     files := Str.list(a);
     dirs := Str.list(temp());
+    tc_save_root.len -= int(tc_save_root.ends_with("/"));
     dirs&.push(@tfmt("%/architecture", tc_save_root));
     dirs&.push(@tfmt("%/component_factory", tc_save_root));
     while => dirs&.pop() { s |
@@ -324,9 +557,9 @@ load_circuit :: fn(in: Str, arena: Alloc) Result(Circuit, Str) = {
     fail :: fn(s) => return(Err = s);
     // TODO: use the default clock speed 
     
-    id := eat(i64); 
+    id := eat(CustomId); 
     eat(u32); eat(i64); eat(i64); eat(bool); eat(u32);
-    eatN(u16, i64); // dependencies
+    dependencies := eatN(u16, CustomId);
     eatN(u16, u8);  // description
     eat_point(); eat(u8); eat(bool); eat(u16);
     eatN(u16, u8);  // player data
@@ -346,11 +579,12 @@ load_circuit :: fn(in: Str, arena: Alloc) Result(Circuit, Str) = {
         s1 := eat(i64);
         s2 := eat(i64);
         _ := eat(i16);
-        custom_id := -1;
+        custom_id: CustomId = (id = -1);
+        custom_pos := zeroed(Vec2);
         // TODO: get the enum from ./builin.fr
         if kind == 92 {  // Custom
-            custom_id = eat(i64);
-            custom_pos := eat_point();
+            custom_id = eat(CustomId);
+            custom_pos = eat_point();
         };
         if kind == 94 || kind == 68 || kind == 64 {  // Program
             n := eat(u16);
@@ -367,6 +601,7 @@ load_circuit :: fn(in: Str, arena: Alloc) Result(Circuit, Str) = {
             pos = pos,
             settings = (s1, s2),
             data = custom_string.shallow_copy(a),
+            mystery_spice_minus_fifteen_for_custom_pins = custom_pos, 
         );
         
         min_pos = min(min_pos, pos);
@@ -418,6 +653,7 @@ load_circuit :: fn(in: Str, arena: Alloc) Result(Circuit, Str) = {
         gates = gates.items(), 
         id = id,
         min = min_pos, max = max_pos,
+        dependencies = dependencies.shallow_copy(a),
     ))
 }
 

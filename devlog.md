@@ -1,10 +1,20 @@
   
+## (Jun 11) circuit
+
+- placing more pins. ui: fix coordinate system when resizing, click into custom component.
+- i barely use rotation because i forget the keybind for it but from the one time it could just be number of 90 degree counterclockwise turns.
+  yeah https://github.com/Stuffe/save_monger/blob/b0419dffc944fc462a11b113991fe556203ecb7d/common.nim#L701 at least in the new one it is. 
+- schedule_gates before remapping kind so can still get circuit.gate.custom_id, and then don't have to deal with the seperate io gates there either. 
+- progress on pin layout for custom components. outer position is mostly just inner position scaled by 8 (which is the handy grid in the game), 
+  but also a random offset that's stored on the gate usage instead which doesn't really make sense to me but whatever. so that's progress. 
+
 ## (Jun 10) circuit
 
 need to convert circuit.data into a graph that can be compiled. 
 - table of wire position -> wire index and then iter all component pins pins and check which wire index they're connected to. 
 - the wires in the file are just the lines you draw. need to fuse into one wire when they connect. 
 - gates are probably just in the order they were placed in the gui. sort into evaluation order.
+- for referencing custom components seems i need to load all of the files in save directory to find the ones with the right id?
 
 ## (Jun 9) circuit
 

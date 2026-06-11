@@ -38,7 +38,7 @@ Component :: @struct {
         kind: ComponentId;
         inputs: []WireId;
         outputs: []WireId;
-        param: i64;
+        param := 0;
     };
 };
 
@@ -72,7 +72,8 @@ defs :: @static {
             @ct_assert(arity._0 + arity._1 <= max_in_out_wires, func.loc, "intrinsic has too many in_out wires");
         };
         
-        User := Main.defs;
+        //User := Main.defs;
+        User :: import("@/examples/circuit/defs.fr");
         @ct_assert(get_constant(User, name).is_none(), @source_location(), "defs has conflict with builtin name: %", name.str());
         
         components.push(
@@ -285,38 +286,41 @@ finished_defs :: @static {
         for cli_args() { path |
             path := path.str();
             if path.ends_with("circuit.data") {
-                #use("@/lib/sys/fs.fr");
-                in := read_entire_file_or_crash(temp(), path);
-                res := Tc'load_circuit(in, ast_alloc());
-                circuit := res.or(fn(msg) => {
-                    @panic("failed to load [%]: %", path, msg);
-                });
-                Tc'compile_circuit(circuit&, components);
+                // if it uses custom components, need to load everything to find them
+                circuits, root_index := Tc'load_all_circuits(path, ast_alloc());
+                if root_index != -1 {
+                    Tc'compile_circuit(circuits, root_index, components, ast_alloc());
+                    THE_CIRCUIT[] = (circuits, root_index);
+                };
             }
         };
     };
     components.gpa = panicking_allocator;
     calculate_usage(components.items());
+    @if(false) print_components(components.items());
     @if(FEAT_COMPILE) compile_gates(components.items());
     @anon_literal(components = components.items())
 };
+
+THE_CIRCUIT :: @static zeroed(Ty([]Tc.Circuit, i64));  // TODO: remove this and load at runtime instead
 Tc :: import("@/examples/circuit/tc/load.fr");
 TcBuiltins :: import("@/examples/circuit/tc/builtin.fr").impl;
 
 calculate_usage :: fn(components: []Component) void = {
-    each components { c |
+    enumerate components { i, c |
         continue :: local_return;
         if c.gates.len == 0 {
             c.usage = ast_alloc().box_zeroed(Component.Usage);
+            @if(i < defs.tc_components_offset)
             if c.name == "delay" || c.name == "input" || c.name == "output" {
                 c.inputs_for_pure_eval = empty();
             } else {
                 _, in_arity := c.arity();
+                @assert_ne(in_arity, -1, "TODO: % arity?", c.name);
                 c.inputs_for_pure_eval = ast_alloc().alloc_init(i64, in_arity, fn(i) => i);
             };
             continue();
         };
-        
         instance := 0;
         instance_offset_by_gate := ast_alloc().alloc_zeroed(i64, c.gates.len);
         enumerate c.gates { i, it |
@@ -484,12 +488,13 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
         };
     };
     
+    result_used := it.outputs.len > 0 && self.c.wires_used&.get(it.outputs[0].id.zext());
     @switch(name) {
         @case("input") => @fmt(out, "o := in[];\n");
         @case("output") => @fmt(out, "out[] = i;\n");
-        @case("const") => @fmt(out, "w%: WireValue = (%);\n", it.outputs[0].id, it.param);
-        @case("switch8") => @fmt(out, "if w% != 0 {| w% = w%; };\n", it.inputs[1].id, it.outputs[0].id, it.inputs[0].id);
-        @case("delay") => @fmt(out, "w% = eval_delay_gate(world, w%, %);\n", it.outputs[0].id, it.inputs[0].id, self.doing_pre_read);
+        @case("const") => @if(result_used) @fmt(out, "w% = (%);\n", it.outputs[0].id, it.param);
+        @case("switch8") => @if(result_used) @fmt(out, "if w% != 0 {| w% = w%; };\n", it.inputs[1].id, it.outputs[0].id, it.inputs[0].id);
+        @case("delay") => @if(result_used) @fmt(out, "w% = eval_delay_gate(world, w%, %);\n", it.outputs[0].id, it.inputs[0].id, self.doing_pre_read);
         @default => {
             if child.storage_count == 0 && child.gate_sum < 30 {
                 @fmt(out, "@inline ");
@@ -754,8 +759,10 @@ AsmLeg :: @rec @struct {
     };
 };
 
-main :: fn() void = {
-    components := @run defs.components.items();
+main :: fn() void = 
+    print_components(@run defs.components.items());
+
+print_components :: fn(components: []Component) void = {
     out := @ref u8.list(temp());
     for components { it |
         @fmt(out, "% :: @{\n", it.name);

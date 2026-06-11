@@ -34,8 +34,10 @@ State :: @struct {
     tick: i64;
     win_tick: ?i64;
     
-    circuit: Tc.Circuit;
+    circuit: []Tc.Circuit;
+    circuit_index: i64;
     circuit_arena: Arena.Allocator;
+    circuit_tree: List(i64);
 };
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -62,11 +64,12 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     app_w, app_h := (sapp.width().float().cast(), sapp.height().float().cast());
     screen_aspect := app_w / app_h;
+    screen_scale := vec2(500 * sapp.dpi_scale) / vec2(app_w, app_h);
     
     sdtx := state.text.default_context&;
     
     p := (state.mouse_pos - state.pos) / state.scale;
-    p.y /= screen_aspect;
+    p /= screen_scale;
     
     sdtx.desc.char_height = 10 * state.scale;
     sdtx.desc.char_width = sdtx.desc.char_height / 2;
@@ -78,8 +81,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     c := world[state.root_component]&;
     wire_offset := 0;
     
-    world_to_text_pos :: fn(pos) => ((pos*state.scale*vec2(1, screen_aspect) + state.pos)*vec2(1, -1) + vec2(1)) / sdtx.glyph_size / 2;
-    text_to_world_pos :: fn(pos) => (((pos * 2 * sdtx.glyph_size) - vec2(1)) * vec2(1, -1) - state.pos) / vec2(1, screen_aspect) / state.scale;
+    world_to_text_pos :: fn(pos) => ((pos*state.scale*screen_scale + state.pos)*vec2(1, -1) + vec2(1)) / sdtx.glyph_size / 2;
+    text_to_world_pos :: fn(pos) => (((pos * 2 * sdtx.glyph_size) - vec2(1)) * vec2(1, -1) - state.pos) / state.scale / screen_scale;
     
     width, height := {
         a := text_to_world_pos(vec2(0, 0)); 
@@ -265,24 +268,44 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     // might get rid of this rendering but for now its all i can do with the tc circuits i load.
     // especially the hover stuff is just useful because i have to transcribe the pin positions before i can actually simulate it. 
     // TODO: if i keep it should clean it up a bit and position in a sane way relative to the rest of the ui. 
-    have_circuit := state.circuit.gates.len != 0 || state.circuit.wires.len != 0;
+    have_circuit := state.circuit.len > 0 && state.circuit_tree.len > 0;
     sgl := state.draw&;
     
     @if(FEAT_TC_CIRCUIT) if have_circuit {
+        circuit := state.circuit[state.circuit_tree[state.circuit_tree.len - 1]]&;
         sgl.defaults();
         sgl.viewport(0, 0, app_w, app_h, true);
         sgl.begin(.QUADS);
         sgl.load_identity();
         sgl.translate(state.pos.x, state.pos.y, 0.0);
-        sgl.scale(state.scale, state.scale, 0.0);
+        sgl.scale(state.scale * screen_scale.x, state.scale * screen_scale.y, 1.0);
 
         off := vec2(0);
         {
-            hi, lo := (state.circuit.max + vec2(1), state.circuit.min - vec2(1));
+            hi, lo := (circuit.max + vec2(1), circuit.min - vec2(1));
             size := abs(hi - lo);
             circuit_top_right := tc_to_world_pos(lo + vec2(size.x, 0));
             goal_top_right := vec2(-100 * width, height*3);
             off = goal_top_right - circuit_top_right;
+            
+            {  // vaguely the grid for custom component pins
+                grid_size :: 8;
+                sgl.color = pack_rgba(40, 40, 40, 255);
+                start := lo.x.cast().int().align_back(grid_size).float().cast();
+                p := vec2(start, lo.y);
+                while => p.x < hi.x {
+                    a, b := (tc_to_world_pos(p), tc_to_world_pos(p + vec2(0, size.y)));
+                    sgl.line(a, b, 0.01);
+                    p.x += grid_size.float().cast();
+                };
+                start := lo.y.cast().int().align_back(grid_size).float().cast();
+                p := vec2(lo.x, start);
+                while => p.y < hi.y {
+                    a, b := (tc_to_world_pos(p), tc_to_world_pos(p + vec2(size.x, 0)));
+                    sgl.line(a, b, 0.01);
+                    p.y += grid_size.float().cast();
+                };
+            };
             
             a, b := (tc_to_world_pos(lo), tc_to_world_pos(hi));
             s := abs(a - b);
@@ -292,30 +315,52 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             sgl.line(a, a - vec2(0, s.y), w);
             sgl.line(b, a + vec2(s.x, 0), w);
             sgl.line(b, a - vec2(0, s.y), w);
+            
+            sdtx.pos = world_to_text_pos(goal_top_right) + vec2(-circuit.name.len().float().cast(), -2);
+            sdtx.put(circuit.name);
         };
         
         tc_to_world_pos :: fn(pos) => (pos) / 30 * vec2(1, -1) + vec2(-1, -4) + off;
         W: f32 = 0.025;
-        each state.circuit.gates { it |
-            text := @tfmt("%", it.kind);
+        wire_hover_count: f32 = 1;
+        each circuit.gates { it |
             b := tc_to_world_pos(it.pos);
-            sdtx.color = pack_rgba(200, 200, 50, 255);
-            sdtx.pos = world_to_text_pos(b);
-            sdtx.put(text);
-            
             hover := p.y < b.y + W/2 && p.y > b.y - W/2 && p.x > b.x - W/2 && p.x < b.x + W/2;
             sgl.color = pack_rgba(100, 100, 100, 255);
             info := Builtin'templates[it.kind.zext()];
             if hover {
                 sgl.color = pack_rgba(200, 200, 200, 255);
                 sdtx.color = pack_rgba(255, 255, 255, 255);
-                sdtx.put(@tfmt("  (%, %) %", it.pos.x, it.pos.y, info.name));
+                name := info.display_name(it, state.circuit);
+                sdtx.pos = world_to_text_pos(b) + vec2(0, wire_hover_count);
+                sdtx.put(@tfmt("% (%, %) %", it.kind, it.pos.x, it.pos.y, name));
+                wire_hover_count += 1;
+                
+                if state.clicked {
+                    if state.circuit.index_of(fn(check) => check.id == it.custom_id) { new |
+                        state.circuit_tree&.push(new);
+                        state.clicked = false;
+                        state.dirty = true;
+                    };
+                    if info.name.contains("Input") || info.name.contains("Output") {
+                        _ := state.circuit_tree&.pop();
+                        state.clicked = false;
+                        state.dirty = true;
+                    };
+                    if state.circuit_tree.len > 0 {
+                        // TODO: once i can actually simulate do this the old way where don't change root_component. but then need to deal with the gate indices getting changed by schedule_gates
+                        c := state.circuit[state.circuit_tree[state.circuit_tree.len - 1]]&;
+                        if c.compiled { id |
+                            state.root_component = id;
+                            state.component_tree&.clear();
+                        };
+                    };
+                };
             };
             sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
         };
         
-        wire_hover_count: f32 = 0;
-        enumerate state.circuit.wires { wire_i, wire |
+        enumerate circuit.wires { wire_i, wire |
             enumerate wire.path { i, it |
                 sgl.color = pack_rgba(100, 50, 50, 255);
                 b := tc_to_world_pos(it.pos);
@@ -328,33 +373,45 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                     sgl.color = pack_rgba(200, 50, 50, 255);
                     sdtx.pos = world_to_text_pos(b) + vec2(0, wire_hover_count);
                     sdtx.color = pack_rgba(255, 255, 255, 255);
-                    sdtx.put(@tfmt("  (%, %) w%-%", it.pos.x, it.pos.y, wire.logical.id, wire_i));
+                    sdtx.put(@tfmt("(%, %) w%-%", it.pos.x, it.pos.y, wire.logical.id, wire_i));
                     wire_hover_count += 1;
                 };
                 sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
             };
         };
-        each state.circuit.gates { it |
+        each circuit.gates { it |
             info := Builtin'templates[it.kind.zext()];
             i := 0;
-            for info.pins { dx, dy |
+            for_pins(info, it, state.circuit) { dx, dy |
                 a := tc_to_world_pos(it.pos);
                 b := tc_to_world_pos(it.pos + vec2(dx.float().cast(), dy.float().cast()));
-                is_input := i >= info.out_arity;
-                sgl.color = pack_rgba(0, 100 * int(info.in_arity + info.out_arity > 0), 100 * int(!is_input), 255);
+                
+                out_arity, in_arity := get_arity(info, it, state.circuit);
+                is_input := i >= out_arity;
+                sgl.color = pack_rgba(0, 100 * int(in_arity + out_arity > 0), 100 * int(!is_input), 255);
                 sgl.line(a, b, W/4);
                 
                 hover := p.y < b.y + W/2 && p.y > b.y - W/2 && p.x > b.x - W/2 && p.x < b.x + W/2;
                 if hover {
                     sdtx.pos = world_to_text_pos(b) + vec2(0, wire_hover_count);
                     sdtx.color = pack_rgba(255, 255, 255, 255);
-                    sdtx.put(@tfmt("% %[%]", info.name, @if(is_input, "in", "out"), @if(is_input, i - info.out_arity, i)));
+                    name := info.display_name(it, state.circuit);
+                    sdtx.put(@tfmt("% %[%]", name, @if(is_input, "in", "out"), @if(is_input, i - out_arity, i)));
                     wire_hover_count += 1;
                 };
                 
                 i += 1;
             };
         };
+        
+        display_name :: fn(info: *Builtin.Template, it: *Tc.Circuit.Gate, circuit: []Tc.Circuit) Str = {
+            name := info.name;
+            @if(name == "Custom")
+            if circuit.find(fn(check) => check.id == it.custom_id) { it |
+                name = @tfmt("Custom (%)", it.name);
+            };
+            name
+        }
         
         sgl.end();
     };
@@ -482,20 +539,37 @@ fn load_path(state: *State, path: Str) void = {
     @if(!FEAT_TC_CIRCUIT) return(eprintln("FEAT_TC_CIRCUIT is disabled"));
     #use("@/lib/sys/fs.fr");
     in := read_entire_file(temp(), path) || return();
-    state.circuit = zeroed(Tc.Circuit);
+    state.circuit = empty();
     state.circuit_arena&.reset_retaining_capacity();
     a := state.circuit_arena&.borrow();
-    res := Tc'load_circuit(in, a);
-    state.circuit = res.or(fn(msg) => {
-        @eprintln("failed to load [%]: %", path, msg);
+    state.circuit_tree = list(a);
+    
+    //circuits, root_index := Tc'load_all_circuits(path, a);
+    circuits, root_index := THE_CIRCUIT[];
+    state.circuit = circuits;
+    if circuits.len == 0 || root_index == -1 {
+        state.circuit = empty();
+        @eprintln("failed to load [%]", path);
         return();
-    });
-     _ := Tc'find_pins(state.circuit&, a); // for now just to set Circuit.Wire.logical to show on hover in the ui
+    };
+    state.circuit_tree&.push(root_index);
+    
+    c := circuits[root_index]&;
+    if c.compiled { id |
+        state.root_component = id;
+        state.component_tree&.clear();
+    };
+    
+    //each state.circuit { it |
+    //    _ := Tc'find_pins(it, a); // for now just to set Circuit.Wire.logical to show on hover in the ui
+    //}
     // TODO: Tc'compile_circuit(state.circuit&);
 }
 
-Tc :: Main.tc.load;
-Builtin :: Main.tc.builtin;
+Tc :: import("@/examples/circuit/tc/load.fr");
+Builtin :: import("@/examples/circuit/tc/builtin.fr");
+//Tc :: Main.tc.load;
+//Builtin :: Main.tc.builtin;
 
 fn read_memory(world: *World, root_component: ComponentId) []u8 = {
     out := u8.list(world.storage.len / 8, temp());
@@ -530,11 +604,13 @@ fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     // TODO: state.draw, state.circuit_arena
 }
 
-Main :: import().examples.circuit;
+// TODO: this doesn't work in the web demo ?? :compiler
+//Main :: import().examples.circuit;
 driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
 main :: fn() void = Easy'start(State);
 #use("@/graphics/lib.fr");
 
 #use("@/examples/circuit/eval.fr");
 #use("@/examples/circuit/parse.fr");
-Scenario :: Main.scenario;
+//Scenario :: Main.scenario;
+Scenario :: import("@/examples/circuit/scenario.fr");

@@ -1888,8 +1888,13 @@ StbTrueType :: include { C |
   - variable names
 - read turing complete schematic files
   - do they have an api for the schematic hub?
-  - need to know pin locations for each component somehow
+  - finish transcribing pin locations for each component
   - add disable pins to my components to match theirs
+  - custom component pins need to be ordered 
+  - load program without the arch cooperating (ie no 3rd input)
+  - OutputZ is what the game calls Switched Output. 
+    with my current way of compiling would need to inline a Switch into the caller. 
+  - dropping in a circuit.data file in the web demo is totally broken
 - io devices: console, dot matrix, 7 segment, time, keyboard
 - compile new schematics at runtime
 - compile a version with save_wire_values so can get rid of the interpreter? 
@@ -1897,5 +1902,9 @@ StbTrueType :: include { C |
 - speed mode that cheats and implements components with native instructions instead of nand gates
   (when running the defs.fr one. tc import will probably always do that)
 - fast mode that doesn't even save_wire_values once per frame
-- ui: use a better coordinate system so resizing the screen doesn't make things move
 - ui: allow copying the code to clipboard
+- `Main :: import().examples.circuit;` doesn't work in the web demo
+- i don't really care about ui for visually editing the wires
+  but i have a bunch of code for converting positions into graph 
+  and rn the only way to test it involves opening Steam which is a pain, 
+  so maybe i have to give up and have my own shitty version too. 
