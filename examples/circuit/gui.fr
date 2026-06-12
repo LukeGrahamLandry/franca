@@ -7,7 +7,7 @@ enter: evaluate one tick.
 space: toggle auto eval.
 r: restart program. 
 c: reset scale/pos.
-[/]: slower/faster eval. 
+[/]: slower/faster eval (shift:50, cmd:1000). 
 a: change architecture (overture, leg).
 """;
 
@@ -38,6 +38,7 @@ State :: @struct {
     circuit_index: i64;
     circuit_arena: Arena.Allocator;
     circuit_tree: List(i64);
+    is_new_overture: bool;
 };
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -50,7 +51,29 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     range(0, count) { i |
         state.tick += 1;
         input := state.maze&.input();
-        out := tick_overture(world, state.root_component, input, false, i == count - 1);
+        OUT: ?u8 = .None;
+        if state.is_new_overture {
+            root_component := state.root_component;
+            save_wire_values := i == count - 1;
+            world.instance = 0; 
+            world.scratch.len = 0;
+            
+            prev := world.save_wire_values;
+            @debug_assert(prev || !save_wire_values, "if init(save_wire_values=false), won't have preallocated enough");
+            world.save_wire_values = prev && save_wire_values;  
+            values := @slice(0, 0, 0, @as(i64) input.zext());
+            if !world.save_wire_values && get_compiled(world, root_component).is_some() {
+                eval_compiled(world, values, root_component);
+            } else {
+                eval(world, values, root_component);
+            };
+            
+            world.save_wire_values = prev;
+            OUT = @if(values[1] != 0, (Some = values[0].trunc()), .None);
+        } else {
+            OUT = tick_overture(world, state.root_component, input, false, i == count - 1);
+        };
+        out := OUT;
         if out { byte |
             state.maze&.output(byte);
             if state.maze.win && state.win_tick.is_none() {
@@ -164,7 +187,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         pos.y -= height;
         
         if state.clicked && hover {
-            if i == 0 {
+            if i == 0 || i == c.gates.len - 1 {
                 _ := state.component_tree&.pop();
             } else {
                 state.component_tree&.push(id = i.trunc());
@@ -179,6 +202,10 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     instruction_width := @if(state.arch_is_leg, 4, 1);
     ip_index := MAX_i64;
     memory := read_memory(state.world&, state.root_component);
+    if state.is_new_overture {
+        memory = state.world.storage.interpret_as_bytes();
+    };
+    memory.len = min(memory.len, 512);
     root_component := state.world&[state.root_component]&;
     for root_component.labels { label |
         if label.name == "ip" && label.bit_size == 8 {
@@ -187,6 +214,12 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                 ip_index = byte;
             };
         };
+    };
+    
+    ram_start := 0;
+    if state.is_new_overture {
+        ip_index = 0;
+        ram_start = 8;
     };
     pos := vec2(-60 * width, 2*height);
     b := 1;
@@ -199,7 +232,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sdtx.color = pack_rgba(255, 150, b*40, 255);
         if memory.len > ip_index {
             drawing := i.align_back(instruction_width);
-            ip_raw: i64 = memory[ip_index].zext();
+            ip_raw: i64 = memory[ip_index].zext() + ram_start;
             ip := ip_raw.align_back(instruction_width);
             if drawing == ip {
                 sdtx.color = pack_rgba(200, 0, 0, 255);
@@ -240,8 +273,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         range(0, end) { i |
             sdtx.color = pack_rgba(255, 255, 255, 255);
             sdtx.pos = world_to_text_pos(pos);
-            if memory.len > ip_index && i*alignment == memory[ip_index].zext().align_back(alignment) {
-                ip_raw: i64 = memory[ip_index].zext();
+            if memory.len > ip_index && i*alignment == memory[ip_index].zext().add(ram_start).align_back(alignment) {
+                ip_raw: i64 = memory[ip_index].zext() + ram_start;
                 sdtx.color = pack_rgba(@if(ip_raw.mod(alignment) == 0, 255, 200), 0, 0, 255);
             };
             Arch'disassemble(out, instructions[i]);
@@ -257,12 +290,12 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sdtx.origin = world_to_text_pos(vec2(-38 * width, (state.maze.map.len().float().cast())*width*2 + height*3));
     sdtx.pos = vec2(0);
     sdtx.put(maze_text.items());
-    sdtx.origin = vec2(0);
     
     if state.win_tick { win_tick |
         sdtx.pos = vec2(0, -1);
         sdtx.put(@tfmt("solved in % ticks", win_tick));
     };
+    sdtx.origin = vec2(0);
     
     // TODO: also this is totally fucked if you resize the screen because im using a stupid coordinate system
     // might get rid of this rendering but for now its all i can do with the tc circuits i load.
@@ -349,6 +382,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                     };
                     if state.circuit_tree.len > 0 {
                         // TODO: once i can actually simulate do this the old way where don't change root_component. but then need to deal with the gate indices getting changed by schedule_gates
+                        //       - but need to keep a mapping between visual gate index and logical gate index 
                         c := state.circuit[state.circuit_tree[state.circuit_tree.len - 1]]&;
                         if c.compiled { id |
                             state.root_component = id;
@@ -445,8 +479,18 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         if path.ends_with("circuit.data") {
             state.load_path(path);
             state.root_component = (id = finished_defs.components.len().trunc() - 1);
+            
+            state.is_new_overture = true;
         }
     };
+    
+    if THE_CIRCUIT._1 != -1 {
+        state.load_path("path");
+        state.root_component = (id = finished_defs.components.len().trunc() - 1);
+        state.is_new_overture = true;
+    };
+    
+    state.reset();
 }
 
 fn recenter(state: *State) void = {
@@ -454,6 +498,7 @@ fn recenter(state: *State) void = {
     state.pos = vec2(0, 0.5);
 }
 
+Defs :: import("@/examples/circuit/defs.fr");
 fn reset(state: *State) void = {
     state.maze = Scenario'Maze'new(Scenario.Maze.tc0);
     state.tick = 0;
@@ -462,15 +507,19 @@ fn reset(state: *State) void = {
     world := state.world&;
     world.storage.set_zeroed();  // importantly resets ip,registers=0
     
-    start := timestamp();
-    Defs :: import("@/examples/circuit/defs.fr");
+    if !state.is_new_overture {
     program := @if(state.arch_is_leg, Defs.the_maze_leg, Defs.the_maze);
     range(0, 256) { i |
         tick_overture(world, state.root_component, program[i], true, false);
     };
-    
+    };
     world.scratch.len = world.scratch.cap;
     world.scratch.items().set_zeroed();
+    
+    if state.is_new_overture {
+        program := Defs.the_maze;
+        world.storage.subslice(1, 256/8).interpret_as_bytes().copy_from(program);
+    }
 }
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
@@ -499,6 +548,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         }
         fn KEY_DOWN() => {
             tick_off := @if(event.modifiers.get(.shift) == 1, 50, 1);
+            tick_off := @if(event.modifiers.get(.super) == 1, 1000, tick_off);
             @match(event.key_code) {
                 fn ESCAPE() => { _ := state.component_tree&.pop(); }
                 fn ENTER() => { state.want_eval = true; }
@@ -508,10 +558,11 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 fn LEFT_BRACKET() => if state.ticks_per_eval - tick_off > 0 {
                     state.ticks_per_eval -= tick_off;
                 }
-                fn RIGHT_BRACKET() => if state.ticks_per_eval + tick_off < 15000 {
+                fn RIGHT_BRACKET() => if state.ticks_per_eval + tick_off < 1_000_000 {
                     state.ticks_per_eval += tick_off;
                 }
                 fn A() => {
+                    state.is_new_overture = false;
                     state.arch_is_leg = !state.arch_is_leg;
                     state.root_component = get_component_by_name(@if(state.arch_is_leg, "leg", "overture"), finished_defs.components);
                     state.component_tree&.clear();

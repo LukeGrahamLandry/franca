@@ -22,7 +22,7 @@ Circuit :: @struct {
         path: RawList(WireNode);
         logical: WireId = (id = 0xFFFFFFFF);
     };
-    WireNode :: @struct(pos: Vec2);
+    WireNode :: @struct(pos: Vec2, direction: Vec2, length: i64);
     Gate :: @struct {
         pos: Vec2;
         kind: u16;
@@ -191,6 +191,23 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 unimplemented = true;
             }
             fn IO() => {
+                // :OutputNz same thing as for Custom but not both outputs here 
+                if shape.name == "LevelInputArch" {  // TODO: registers also need this so should have a switchable_pins list on the Template perhaps
+                    w := a.alloc_uninit(WireId, 3);
+                    switchable_wire: WireId = (id = wire_count.trunc());
+                    wire_count += 1;
+                    
+                    value, condition := (it.outputs[0]&, it.inputs[0]&);
+                    w[0] = value[];
+                    w[1] = switchable_wire;
+                    w[2] = condition[];
+                    value[] = switchable_wire;
+                    
+                    S := @run get_component_by_name("switch1", defs.components.items()); 
+                    gates&.push(kind = S, inputs = w.slice(1, 3), outputs = w.slice(0, 1));
+                    it = gates.index(i);  // ^ can reallocate
+                };
+                
                 kill&.set(i);
                 out&.push_all(it.inputs);
                 in&.push_all(it.outputs);
@@ -282,7 +299,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     c.switches = switches.items();
     c.arity = (out.len, in.len);
     push_inputs_outputs(gates&, out.items(), in.items());
-    gates := schedule_gates(c, gates, wire_count, a, out.items(), in.items());
+    gates := schedule_gates(c, gates, wire_count, a, out.items(), in.items(), components.items());
     
     if unimplemented { 
         gates.len = 0;
@@ -291,16 +308,26 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         @eprintln("something was unimplemented in (%)", c.name);
     };
     
+    // TODO: do this in calculate_usage instead of duplicating here and in parse for defs
+    storage_count, wire_sum, wire_depth := (0, 0, 0);
+    each gates { it |
+        child := components[it.kind.id.zext()]&;
+        storage_count += child.storage_count;
+        wire_sum += child.wire_sum;
+        wire_depth = max(wire_depth, child.wire_depth);
+    };
+    
     c.compiled = (Some = (id = components.len.trunc()));
     components.push(
         gates = gates.items(),
         name = c.name,
         wire_count = wire_count,
-        storage_count = 0, // TODO
-        wire_depth = wire_count,
-        wire_sum = wire_count,  // TODO: compute based on custom gates
+        storage_count = storage_count,
+        wire_depth = wire_depth,
+        wire_sum = wire_sum + wire_count,
         gate_sum = 0,  // TODO
     );
+    calculate_usage(components.items(), components.len - 1, a);
 };
 #use("@/lib/collections/bit_set.fr");
 
@@ -314,19 +341,17 @@ fn push_inputs_outputs(gates: *List(Component.Gate), out: []WireId, in: []WireId
     gates.push(kind = O, inputs = out, outputs = empty());
 }
 
-// TODO: for custom components to be sane the order of inputs/outputs has to be stable based on the component's permenent_id from the file somehow?
-schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, a: Alloc, out: []WireId, in: []WireId) List(Component.Gate) = {
-    // TODO: gates with memory need to go to the end. 
+schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, a: Alloc, out: []WireId, in: []WireId, components: []Component) List(Component.Gate) = {
     // TODO: compiler needs to delay all writes until after all reads, not just do them in order unless forced to preread. 
-    defining_gate := temp().alloc_zeroed(i64, wire_count);  // [WireId]
+    //defining_gate := temp().alloc_zeroed(i64, wire_count);  // [WireId]
     order := i64.list(temp());
     ready: DynamicBitSet = empty(temp()); // [WireId]
     done: DynamicBitSet = empty(temp());  // [index in gates]
-    enumerate gates { i, it |
-        for it.outputs { id |
-            defining_gate[id.id.zext()] = i;
-        };
-    };
+    //enumerate gates { i, it |
+    //    for it.outputs { id |
+    //        defining_gate[id.id.zext()] = i;
+    //    };
+    //};
     
     // inputs/outputs are fixed at start/end
     order&.push(0);
@@ -336,36 +361,68 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
         ready&.set(id.id.zext());
     };
     
-    // TODO: for Device, outputs are ready once inputs_for_pure_eval are ready (but i don't set those yet, and for custom components need to take that out of calculate_usage to do it as i go)
+    switch_gates := i64.list(temp());
     dowhile {
         changed := false;
         enumerate gates { i, it |
             if !done&.get(i) {
+                kind := components[it.kind.id.zext()]&;
                 ok := true;
-                for it.inputs { id |
-                    ok = ok && ready&.get(id.id.zext());
+                for kind.inputs_for_pure_eval { i |
+                    ok = ok && ready&.get(it.inputs[i].id.zext());
                 };
+                
+                // :SLOW
+                // TODO: turn switches into a more sane phi representation so its ssa?
+                if ok && (kind.name == "switch1" || kind.name == "switch8") {
+                    enumerate gates { x, jt |
+                        if jt.outputs.len == 1 && jt.outputs[0].id == it.outputs[0].id {
+                            @if(x != i) switch_gates&.push(x);
+                            for jt.inputs { id |
+                                ok = ok && ready&.get(id.id.zext());
+                            };
+                        };  
+                    };
+                };
+                
                 if ok {
+                    switch_gates&.push(i);
                     changed = true;
-                    order&.push(i);
-                    done&.set(i);
+                    for switch_gates { i |
+                        order&.push(i);
+                        done&.set(i);
+                    };
                     for it.outputs { id |
                         ready&.set(id.id.zext());
                     };
-                }
+                };
+                switch_gates&.clear();
             }
         };
         changed
     };    
     
     if order.len != gates.len - 1 {
-        eprintln("TODO: cycles!");
         enumerate gates { i, it |
             if !done&.get_set(i) {
+                @eprintln("TODO: cycles! gate (%) in (%)", components[gates[i].kind.id.zext()].name, c.name);
                 order&.push(i);
             }
         };
     };
+
+    // confusing. see doing_pre_read in compile_gate()
+    n := 0;
+    range_rev(0, order.len) { i |
+        kind := components[gates[order[i]].kind.id.zext()]&;
+        if kind.storage_count != 0 {
+            x := order&.ordered_remove(i).unwrap();
+            order&.push(x);
+            n += 1;
+        };
+    };
+    order.items().slice(order.len - n, order.len).reverse();
+    
     order&.push(gates.len - 1);
     
     gates2 := Component.Gate.list(gates.len, a);
@@ -389,10 +446,13 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
     
     // all the places wires connect (to a component or to other wires). 
     wire_positions: HashMap(i64, *WireId) = init(temp());
+    wire_mid_positions: HashMap(i64, *WireId) = init(temp());
     enumerate c.wires& { wire_i, new |
         new.logical = (id = wire_i.trunc());
-        for new.path { node |
-            found := wire_positions&.get_or_insert(pos_key(node.pos), => new.logical&);
+        ends := @slice(new.path[0].pos, new.path[new.path.len - 1].pos);
+        
+        for ends { end_pos |
+            found := wire_positions&.get_or_insert(pos_key(end_pos), => new.logical&);
             if new.logical.id != found.id {
                 // when two graphical wires overlap they become one logical wire.
                 
@@ -404,6 +464,28 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
                         old.logical.id = found.id;
                     };
                 };
+            };
+            if wire_mid_positions&.get(pos_key(end_pos)) { found |
+            if new.logical.id != found.id {
+                // when two graphical wires overlap they become one logical wire.
+                
+                // TODO: i think this is wrong, it has to be at the end of one of the wires. (but not both so still have to put all in the table). 
+                //       my COND component has this problem with the decoder3. 
+                
+                each c.wires.slice(0, wire_i + 1) { old |  // :SLOW
+                    if old.logical.id == new.logical.id {
+                        old.logical.id = found.id;
+                    };
+                };
+            };
+            };
+        };
+        
+        for new.path& { node |
+            p := node.pos;
+            range(0, node.length) { i |
+                wire_mid_positions&.get_or_insert(pos_key(p), => new.logical&);
+                p += node.direction;
             };
         };
     };
@@ -513,11 +595,12 @@ fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, 
     rot: i64 = gate.rotation.zext();
     i := 0;
     for pins { x, y |
+        skip := x == HACK_NONE_PIN_POSITION;
         x += dx; y += dy;  // TODO: before or after rotation?
         range(0, rot) { _ |
             t := x; x = -y; y = t; // counter clockwise 90 deg around (0, 0)
         };
-        if x != HACK_NONE_PIN_POSITION {
+        if !skip {
             body(i, x, y);
         };
         i += 1;
@@ -665,13 +748,15 @@ load_circuit :: fn(in: Str, arena: Alloc) Result(Circuit, Str) = {
         
         path := Circuit.WireNode.list(a);
         
-        path&.push(pos = pos);
+        path&.push(pos = pos, direction = vec2(0), length = 0);
         length := segment.bit_and(0b0001_1111);
         while => length != 0 {
             direction := directions[segment.zext().shift_right_logical(5)];
             len: i64 = length.zext();
-            prev := path[path.len-1].pos;
-            path&.push(pos = prev + direction*len.float().cast());
+            prev := path[path.len-1]&;
+            prev.direction = direction;
+            prev.length = len;
+            path&.push(pos = prev.pos + direction*len.float().cast(), direction = vec2(0), length = 0);
             
             segment = eat(u8);
             length = segment.bit_and(0b0001_1111);

@@ -66,7 +66,14 @@ fn eval(world: *World, parent: []WireValue, it: *Component.Gate) void = {
         return f(world, parent, it);
     };
     
+    @if(FEAT_COMPILE) if world.doing_pre_read {
+        eval_compiled(world, parent, it);
+        return();
+    };
+    
     wires := world.scratch(c.wire_count);
+    wires.set_zeroed();  // switches with none enabled default to zero TODO: could just do it for those specific wires, compile the list like compile_order etc. 
+    
     inputs, outputs := (c.gates[0].outputs, c.gates[c.gates.len - 1].inputs);
     @debug_assert_eq(inputs.len, it.inputs.len, "eval input arity %", c.name);
     range(0, inputs.len) { i |
@@ -74,23 +81,31 @@ fn eval(world: *World, parent: []WireValue, it: *Component.Gate) void = {
     };
     gates := c.gates.slice(1, c.gates.len - 1);
     doing_pre_read, instance := (world.doing_pre_read, world.instance);
-    if c.storage_count != 0 {
-        world.doing_pre_read = true;
-        world.pre_read_depth += 1;
-        prev_scratch := world.scratch.len;
+    // TODO: compiler crash if this is `false` (works if indirection through a #noinline function)? :compiler :fucked !!
+    if true {  // TODO: remove this block, im just documenting the bug^
+    if c.storage_count != 0 && !doing_pre_read && c.compile_order.len != 0 {
+        for c.compile_order.slice(1, c.compile_order.len - 1) { op |
+            if op.pre_read {
+                world.doing_pre_read = true;
+                world.pre_read_depth += 1;
+                prev := world.instance;
+                world.instance = instance + c.instance_offset_by_gate[op.gate_i];
+                world.eval(wires, c.gates.index(op.gate_i));
+                world.instance = prev;
+                world.pre_read_depth -= 1;
+            } else {
+                @debug_assert_eq(world.instance, instance + c.instance_offset_by_gate[op.gate_i]);
+                world.doing_pre_read = false;
+                world.eval(wires, c.gates.index(op.gate_i));
+            };
+        };
+    } else {
         each gates { it |
             world.eval(wires, it);
         };
-        world.pre_read_depth -= 1;
-        @debug_assert_eq(prev_scratch, world.scratch.len);
     };
-    if !doing_pre_read || c.storage_count == 0 {
-        world.instance = instance;
-        world.doing_pre_read = false;
-        each gates { it |
-            world.eval(wires, it);
-        };
     };
+    
     world.doing_pre_read = doing_pre_read;
     @debug_assert_eq(outputs.len, it.outputs.len, "eval output arity %", c.name);
     range(0, outputs.len) { i |
@@ -194,17 +209,13 @@ fn tick_overture(world: *World, root_component: ComponentId, input: u8, write_pr
     if name != "leg" {
         out.len -= 1;
     };
-    in := @const_slice(@as(WireId) (id = 0), (id = 1), (id = 1)/*TODO: remove*/);
-    if name == "leg" || name == "overture" { 
-        in.len -= 1;
-    };
+    in := @const_slice(@as(WireId) (id = 0), (id = 1));
     base_gate := @ref @as(Component.Gate) (
         outputs = out, 
         inputs = in,
         kind = root_component, 
         param = 0,
     );
-    // TODO: have interpret eval switch to this mode for pre_read too
     if !world.save_wire_values && get_compiled(world, base_gate.kind).is_some() {
         eval_compiled(world, values, base_gate);
     } else {
@@ -217,25 +228,48 @@ fn tick_overture(world: *World, root_component: ComponentId, input: u8, write_pr
 
 // expose the compiled version with the intepreter's calling convention. 
 fn eval_compiled(world: *World, parent: []WireValue, it: *Component.Gate) void = {
-    //@debug_assert(!world.save_wire_values, "compiler doesn't save_wire_values");
-    compiled := get_compiled(world, it.kind).expect("eval_compiled gate to have fast_eval");
     o_n, i_n := world[it.kind]&.arity();
     // redundant if the gate is from a Component but be safe for base_gate in the top level call. 
     @assert(it.inputs.len == i_n && it.outputs.len == o_n, "arity error calling compiled gate");  
     a := Arena'stack_alloc(size_of(WireValue) * max_in_out_wires);
-    inputs := a.alloc_init(WireValue, it.inputs.len, fn(i) => parent[it.inputs[i].id.zext()]);
-    outputs := a.alloc_uninit(WireValue, it.outputs.len);
+    values := a.alloc_zeroed(WireValue, it.outputs.len + it.inputs.len);
+    range(0, it.inputs.len) { i |
+        values[i + o_n] = parent[it.inputs[i].id.zext()];
+    };
+    eval_compiled(world, values, it.kind);
+    range(0, it.outputs.len) { i |
+        parent[it.outputs[i].id.zext()] = values[i];
+    };
+}
+
+// values is (uninit outputs, inputs)
+fn eval_compiled(world: *World, values: []WireValue, kind: ComponentId) []i64 = {
+    //@debug_assert(!world.save_wire_values, "compiler doesn't save_wire_values");
+    compiled := get_compiled(world, kind)
+        || @panic("expected eval_compiled gate to have fast_eval for (%)", world[kind].name);
+    o_n, i_n := world[kind]&.arity();
+    @assert_eq(o_n + i_n, values.len, "arity error calling compiled gate");  
     // SAFETY: *Array(T, N) has same repr as *T. compile_gates chooses N based on Gate arity. 
     compiled := bit_cast_unchecked(rawptr, @FnPtr(*World, *WireValue, *WireValue) void, compiled);
-    compiled(world, outputs.ptr, inputs.ptr);
-    range(0, it.outputs.len) { i |
-        parent[it.outputs[i].id.zext()] = outputs[i];
-    };
+    compiled(world, values.ptr, values.ptr.offset(o_n));
+    values.slice(0, o_n)
+}
+
+fn eval(world: *World, values: []WireValue, kind: ComponentId) []i64 = {
+    a := Arena'stack_alloc(size_of(WireId) * max_in_out_wires);
+    o_n, i_n := world[kind]&.arity();
+    it: Component.Gate = (
+        inputs = a.alloc_init(WireId, i_n, fn(i) => (id = (i + o_n).trunc())),
+        outputs = a.alloc_init(WireId, o_n, fn(i) => (id = i.trunc())),
+        kind = kind,
+    );
+    eval(world, values, it&);
+    values.slice(0, o_n)
 }
 
 fn get_compiled(world: *World, kind: ComponentId) ?rawptr #inline = {
     f := world[kind].fast_eval;
-    @if(FEAT_COMPILE)
+    //@if(FEAT_COMPILE)  // still needed for native tc
     if !f.is_null() {
         return(Some = f);
     };
@@ -256,11 +290,7 @@ fn find_component(world: *World, name: Str) ?ComponentId = {
     (Some = (id = kind.trunc()))
 }
 
-// these two are fixed in the compiler but not the interpreter
-// TODO: the preread does redundant work for the ram128. 
-//       ex. ram128 prereads all <=64 and then evaluates ram64 which prereads again all <=32
-//       cache so only preread each instance once per tick? 
-// TODO: its wrong if you use the output of a memory before returning in a subcomponent in something that's not an intrinsic :postmemory
 // TODO: show error if a switch doesn't have exactly one true input?
+//       - no; game allows none enabled (gives value=0), but still not multiple enabled. 
 // TODO: walk backwards from output and use switch to avoid evaluating unneeded gates. 
 //       maybe easier would be to add a discard(bit) intrinsic that would early return if you promise not to use the output. 

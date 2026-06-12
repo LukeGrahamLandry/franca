@@ -1,4 +1,16 @@
-  
+
+## (Jun 12) circuit
+
+- deal with inputs_for_pure_eval in schedule_gates
+- find_pins: i think it's actually 1 end of a path hits any part of another wire (even that's not a key point)
+- LevelInputArch needs to be treated like a CC with a SwitchablePin except that the condition is an input not an output. 
+- scheduale_gates: keep switches together and wait for all inputs to be ready. 
+  thats super annoying should merge them into one gate like a phi perhaps?
+- overture works tho! but only the compiled version not the iterp that does pre_read wrong so only works in gui if you turn up the tick rate a bunch. 
+  - tried recording the order to pre_read things in from the compiler and using that to interp. 
+  - problem is tick 53 `jump always` isn't happening. COND is wrong. 
+    oh its just that game allows you to have all switches off and get zero. eval() wasn't clearing wires. 
+
 ## (Jun 11) circuit
 
 - placing more pins. ui: fix coordinate system when resizing, click into custom component.

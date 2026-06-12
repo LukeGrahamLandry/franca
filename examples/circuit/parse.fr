@@ -8,6 +8,7 @@
 //       the extra lines don't make it more readable. if i do symbolic, get that for free. 
 // TODO: type check bit vs byte
 
+// even when disabled still need to call compile_gates to fill `compile_order` for the interpreter and set fast_eval callback for tc builtins. 
 FEAT_COMPILE :: true;
 FEAT_TC_CIRCUIT :: true;  // be able to load TuringComplete.Game's circuit.data save files?
 max_in_out_wires :: 64;
@@ -23,6 +24,7 @@ Component :: @struct {
     primitive_arity := (-1, -1); // (out, in)
     labels: []GateLabel = empty();
     fast_eval := zeroed(rawptr);
+    compile_order: []Op = empty();
     
     usage: *Usage #use = zeroed(*Usage);
     Usage :: @struct {
@@ -39,6 +41,11 @@ Component :: @struct {
         inputs: []WireId;
         outputs: []WireId;
         param := 0;
+    };
+    
+    Op :: @struct {
+        gate_i: i64;
+        pre_read: bool;
     };
 };
 
@@ -270,9 +277,11 @@ defs :: @static {
 
 finished_defs :: @static {
     components := defs.components&;
+    calculate_usage(components.items(), 0, ast_alloc());
     @if(FEAT_TC_CIRCUIT) {
         // TODO: quarantine this in ./tc/*.fr
         templates :: import("@/examples/circuit/tc/builtin.fr").templates;
+        n := components.len;
         each templates { it |
             c := zeroed(Component);
             c.primitive_arity = (it.out_arity, it.in_arity);
@@ -280,10 +289,9 @@ finished_defs :: @static {
                 c.fast_eval = it.callee;
             };
             c.name = it.name;
-            @if_let(it.body&) fn Device() => {
-                c.storage_count = it.storage_count;
-            };
-            // TODO: copy over inputs_for_pure_eval
+            c.storage_count = it.storage_count;
+            c.usage = ast_alloc().box_zeroed(Component.Usage);
+            c.inputs_for_pure_eval = it.inputs_for_pure_eval;
             components.push(c);
         };
         
@@ -301,9 +309,9 @@ finished_defs :: @static {
         };
     };
     components.gpa = panicking_allocator;
-    calculate_usage(components.items());
     @if(false) print_components(components.items());
-    @if(FEAT_COMPILE) compile_gates(components.items());
+    // not: @if(FEAT_COMPILE) because need to set Component.compile_order even for interp
+    compile_gates(components.items());
     @anon_literal(components = components.items())
 };
 
@@ -311,29 +319,30 @@ THE_CIRCUIT :: @static zeroed(Ty([]Tc.Circuit, i64));  // TODO: remove this and 
 Tc :: import("@/examples/circuit/tc/load.fr");
 TcBuiltins :: import("@/examples/circuit/tc/builtin.fr").impl;
 
-calculate_usage :: fn(components: []Component) void = {
+calculate_usage :: fn(components: []Component, off: i64, a: Alloc) void = {
     enumerate components { i, c |
         continue :: local_return;
+        @if(i < off) continue();
+        c.usage = ast_alloc().box_zeroed(Component.Usage);
         if c.gates.len == 0 {
-            c.usage = ast_alloc().box_zeroed(Component.Usage);
             @if(i < defs.tc_components_offset)
             if c.name == "delay" || c.name == "input" || c.name == "output" {
                 c.inputs_for_pure_eval = empty();
             } else {
                 _, in_arity := c.arity();
                 @assert_ne(in_arity, -1, "TODO: % arity?", c.name);
-                c.inputs_for_pure_eval = ast_alloc().alloc_init(i64, in_arity, fn(i) => i);
+                c.inputs_for_pure_eval = a.alloc_init(i64, in_arity, fn(i) => i);
             };
             continue();
         };
         instance := 0;
-        instance_offset_by_gate := ast_alloc().alloc_zeroed(i64, c.gates.len);
+        instance_offset_by_gate := a.alloc_zeroed(i64, c.gates.len);
         enumerate c.gates { i, it |
             instance_offset_by_gate[i] = instance;
             instance += components[it.kind.id.zext()].storage_count;
         };
-        
-        wires_used: DynamicBitSet = empty(ast_alloc());
+
+        wires_used: DynamicBitSet = empty(a);
         each c.gates { it |
             for it.inputs { id |
                 wires_used&.set(id.id.zext());
@@ -343,7 +352,7 @@ calculate_usage :: fn(components: []Component) void = {
         needed: DynamicBitSet = empty(temp());
         out_gate, in_gate := (c.gates[c.gates.len - 1]&, c.gates[0]&);
         
-        gates_needed: DynamicBitSet = empty(ast_alloc());
+        gates_needed: DynamicBitSet = empty(a);
         gates_needed&.set(c.gates.len - 1);
         for out_gate.inputs { id |
             needed&.set(id.id.zext());
@@ -371,14 +380,13 @@ calculate_usage :: fn(components: []Component) void = {
             changed
         };
         
-        pure_inputs := i64.list(ast_alloc());
+        pure_inputs := i64.list(a);
         enumerate in_gate.outputs { i, id |
             if needed&.get(id.id.zext()) {
                 pure_inputs&.push(i);
             };
         };
 
-        c.usage = ast_alloc().box_zeroed(Component.Usage);
         c.inputs_for_pure_eval = pure_inputs.items();
         gates_needed.bits.gpa = panicking_allocator;
         c.gates_needed_for_pure_eval = gates_needed;
@@ -398,6 +406,11 @@ CompileGates :: @struct {
     need_pre_read: List(WireId);
     doing_pre_read := false;
     doing_pre_read_local := false;
+    compile_order: List(Component.Op);
+    // TODO
+    // for now this is just so maybe if the pins are messed up you can still draw. should get rid of it once more confident. 
+    // tho maybe for runtime loading circuits should keep something like this and turn it into error to show in ui instead of just crashing. 
+    failed := false;
 };
 
 fn compile_gate(self: *CompileGates, gate_i: i64) void = {
@@ -433,9 +446,15 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
         while => self.need_pre_read.len > 0 {
             wire := self.need_pre_read[self.need_pre_read.len - 1];
             // :SLOW should compute wireid -> defining gate once and reuse
-            gate_i := self.c.gates.index_of(fn(it) => it.outputs.contains(fn(it) => it.id == wire.id)).unwrap();
+            gate_i := self.c.gates.index_of(fn(it) => it.outputs.contains(fn(it) => it.id == wire.id))
+                || @panic("missing def for w%", wire.id);
             it := self.c.gates[gate_i]&;
             child := self.components[it.kind.id.zext()]&;
+            if child.storage_count == 0 {
+                @println("TODO: use-before-def without memory w% in (%)", wire.id, self.c.name);
+                self.failed = true;
+                return();
+            };
             @debug_assert(child.storage_count != 0, "use-before-def without memory");
             changed := false;
             
@@ -469,7 +488,6 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
             @fmt(out, "world.doing_pre_read = %;\n", false);
         };
     };
-        
     name := child.name;
     if name == "switch1" {
         name = "switch8";
@@ -493,6 +511,7 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
         };
     };
     
+    self.compile_order&.push(gate_i = gate_i, pre_read = self.doing_pre_read);
     result_used := it.outputs.len > 0 && self.c.wires_used&.get(it.outputs[0].id.zext());
     @switch(name) {
         @case("input") => @fmt(out, "o := in[];\n");
@@ -526,8 +545,14 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
 fn compile_component(self: *CompileGates, doing_pre_read: bool) void = {
     self.doing_pre_read = doing_pre_read;
     self.declare_wire_vars();
+    if self.failed {
+        return();
+    };
     enumerate self.c.gates& { gate_i, it |
         self.compile_gate(gate_i);
+        if self.failed {
+            return();
+        };
     };
 }
 
@@ -572,6 +597,7 @@ compile_gates :: fn(components: []Component) void = {
             c = c, out = out, components = components,
             wires_evaluated = empty(temp()),
             need_pre_read = WireId.list(temp()),
+            compile_order = list(ast_alloc()),
         ); self := self&;
         
         out_n, in_n := (c.gates[c.gates.len - 1].inputs.len, c.gates[0].outputs.len);
@@ -583,6 +609,8 @@ compile_gates :: fn(components: []Component) void = {
         if have_storage {
             @fmt(out, "doing_pre_read, instance := (world.doing_pre_read, world.instance);\n");
             range(0, 2) { iter_i |
+                self.compile_order&.clear();
+            
                 doing_pre_read := iter_i == 0;
                 @fmt(out, "if %doing_pre_read {\n", @if(doing_pre_read, "", "!"));
                 self.compile_component(doing_pre_read);
@@ -591,12 +619,17 @@ compile_gates :: fn(components: []Component) void = {
         } else {
             self.compile_component(false);
         };
+        self.c.compile_order = self.compile_order.items();
         @fmt(out, "};\n");  // func
     };
     
     @fmt(out, "dispatch :: @const_slice(@as(rawptr) ");
     range(0, components.len) { i |
-        @fmt(out, "%, ", mangle(components, i));
+        if FEAT_COMPILE || components[i].gates.len == 0 {
+            @fmt(out, "%, ", mangle(components, i));
+        } else {
+            @fmt(out, "zeroed(rawptr), ");
+        };
     };
     @fmt(out, ");\n");  // dispatch
     @fmt(out, "};");  // scope
@@ -609,7 +642,6 @@ compile_gates :: fn(components: []Component) void = {
     enumerate components { i, it |
         it.fast_eval = fast_eval[i];
     };
-    
 };
 
 fn declare_wire_vars(self: *CompileGates) void = {
@@ -623,6 +655,15 @@ fn declare_wire_vars(self: *CompileGates) void = {
         }
     };
     @fmt(out, "\n");
+    
+    for c.wires_used& { i |
+        if !seen&.get(i) {
+            self.failed = true;
+            @eprintln("TODO: malformed wire in % %", c.name, i);
+            // for now turn it into a runtime error instead of a compile error
+            @fmt(out, "@panic(\"malformed wire \%\", %);\n", i);
+        }
+    };
 }
 
 fn mangle(c: []Component, i: i64) Str = 
@@ -809,5 +850,4 @@ Main :: import().examples.circuit;
 
 // TODO: maybe get rid of switch gate so it's always ssa
 // TODO: compile pre_read version as a seperate function and call it directly instead of branching.
-// TODO: a problem now is that the interpreter is totally different eval strategy from the compiler and they can disagree
 // TODO: allow defs.fr to access tc/builtin.fr
