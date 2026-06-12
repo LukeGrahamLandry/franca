@@ -8,6 +8,7 @@ Template :: @struct {
     fid: ?FuncId = .None;
     callee := zeroed(rawptr);
     storage_count := 0;
+    has_param := false;
     
     Body :: @tagged(
         Unimplemented: void,
@@ -44,9 +45,15 @@ templates :: {
         if it.name.starts_with("Register") || it.name.starts_with("Counter") {
             it.inputs_for_pure_eval = empty();
         };
+        if it.name == "Ram" {
+            it.inputs_for_pure_eval = ast_alloc().alloc_init(i64, 1, fn(_) => 2);
+        };
         
-        if it.name == "Or8" {
+        if it.name == "Or8" || it.name == "Equal8" || it.name == "LessU8" || it.name == "Xor8" || it.name == "And8" {
             it.pins = y_shape8;
+        };
+        if it.name == "Shl8" || it.name == "Shr8" {
+            it.pins = @X((1, -1), (-1, 0), (-1, -1));
         };
         if it.pins.len == 0 {
         if it.in_arity == 2 && it.out_arity == 1 {
@@ -57,12 +64,15 @@ templates :: {
         };
         if it.in_arity == 3 && it.out_arity == 1 {
             it.pins = tri_shape;
+            if it.name == "Mux8" {
+                it.pins = @X((1, 0), (-1, 1), (-1, 0), (-1, -1));
+            };
         };
         if it.name.starts_with("Counter") {
             it.pins = @const_slice((1, 0), (-1, 0), (-1, -1));
         };
         
-        if it.name == "On" || it.name == "Off" {
+        if it.name == "On" || it.name == "Off" || it.name.starts_with("Constant") {
             x :: (1, 0);
             it.pins = @X(x);
         };
@@ -73,13 +83,18 @@ templates :: {
         if it.in_arity == 1 && it.out_arity == 8 {
             it.pins = line8;
         };
+        if it.in_arity == 8 && it.out_arity == 1 {
+            it.pins = @X((1, 0), (-1, -3), (-1, -2), (-1, -1), (-1, 0), (-1, 1), (-1, 2), (-1, 3), (-1, 4));
+        };
         if it.name == "Decoder3" {
             it.pins = cat(line8.slice(0, line8.len() - 1), @X((-1, -3), (-1, -2), (-1, -1), (0, -4)));
         };
-        if it.name == "Add8" {
+        if it.name == "Add8" || it.name == "LessU8" {
             it.pins = @X((1, -1), (1, 0), (-1, -1), (-1, 1), (-1, 0));
         };
         };
+        
+        it.has_param = it.name.starts_with("Constant") || it.name.starts_with("Counter");
         
         if name == sym("Custom") {
             it.body = .Custom;
@@ -137,6 +152,24 @@ mask :: fn($bits: i64, $child: *Template) *Template = {
         storage_count = child.storage_count,
     ))
 };
+
+// TODO: way too much paste
+mask_param :: fn($bits: i64, $child: *Template) *Template = {
+    wrapped :: (fn(w: *World, o: *Array(WireValue, child.out_arity), i: *Array(WireValue, child.in_arity), param: i64) void = {
+        (@run child.fid.unwrap())(w, o, i, param);
+        inline_range(0, child.out_arity) { I |
+            o[I] = bit_and(o[I], 1.shift_left(bits) - 1);
+        };
+    });
+    ast_alloc().boxed(Template, (
+        in_arity = child.in_arity, 
+        out_arity = child.out_arity,
+        fid = @if(!child.fid.is_some(), .None, (Some = wrapped)),
+        body = child.body,
+        storage_count = child.storage_count,
+    ))
+};
+
 from_defs :: fn(name: Str) *Template = {
     it := defs.components.find(fn(it) => it.name == name)
         || @panic("missing (%) in defs.fr", name);
@@ -145,7 +178,6 @@ from_defs :: fn(name: Str) *Template = {
     ast_alloc().boxed(Template, (
         in_arity = i, 
         out_arity = o, 
-        // todo: hook it up and also need to make everything else use i64 as wire value
         body = (Def = name),
     ))
 }
@@ -208,14 +240,12 @@ Or3 :: math(1, 3) { o, i | o[0] = i[0].bit_or(i[1]).bit_or(i[2]); };
 Nor :: mask(2, Nor64);
 Xor :: math(1, 2) { o, i | o[0] = i[0].bit_xor(i[1]); };
 Xnor :: mask(2, Xnor64);
-// the defs one has the bits spread out in an annoying way
-//Counter8 :: from_defs("counter");
-Counter8 :: mask(8, Counter64);
+Counter8 :: mask_param(8, Counter64);
 VirtualCounter8 :: todo();
 Counter64 :: with_pins(1, 2, .Device, 
     @const_slice((1, 0), (-1, 0), (-1, -1)),
     8*8,
-    fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 2)) void = {
+    fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 2), param: i64) void = {
         value, set := (i[0], i[1] != 0);
         @debug_assert_ult(world.instance, world.storage.len, "must preallocate storage_count");
         slot := world.storage[world.instance]&;
@@ -224,7 +254,7 @@ Counter64 :: with_pins(1, 2, .Device,
             if set {
                 slot[] = value;
             } else {
-                slot[] += 1;
+                slot[] += param;
             };
         };
         world.instance += 1;
@@ -268,7 +298,7 @@ Decoder3 :: math(8, 4) { o, i |
         o[i] = int(n == i);
     };
 };
-Constant8 :: todo();
+Constant8 :: Constant64;
 Not8 :: math(1, 1) { o, i | o[0] = bit_not(i[0]); };
 Or8 :: Or;
 And8 :: And;
@@ -353,17 +383,21 @@ LevelOutputCounter :: todo();
 _91 :: todo();
 Custom :: todo();
 VirtualCustom :: todo();
-Program :: with_pins(1, 1, .Device,
-    @const_slice((13, -7), (-13, -7)),
+Program :: with_pins(4, 1, .Device,
+    @const_slice(
+        (13, -7), (13, -6), (13, -5), (13, -4), 
+        (-13, -7),
+    ),
     256*8,
-    fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 1)) void = {
-        // TODO: actually 4 outputs, configurable size. 
+    fn(world: *World, o: *Array(i64, 4), i: *Array(i64, 1)) void = {
         address := i[0].bit_and(255);
         n := (256*8)/64;
         @debug_assert_ule(world.instance + n, world.storage.len, "must preallocate storage_count");
         slot := world.storage.subslice(world.instance, n);
         bytes := interpret_as_bytes(slot);
-        o[0] = bytes[address].zext();
+        range(0, 4) { I |    
+            o[I] = bytes[bit_and(address + I, 255)].zext();
+        };
         world.instance += n;
     },
 );
@@ -372,7 +406,7 @@ VirtualDelayLine1 :: todo();
 Console :: todo();
 Shl8 :: mask(8, Shl64);
 Shr8 :: mask(8, Shr64);
-Constant64 :: todo();
+Constant64 :: from_defs("const");
 Not64 :: math(1, 1) { o, i | o[0] = bit_not(i[0]); };
 Or64 :: Or;
 And64 :: And;
@@ -392,7 +426,7 @@ ProbeMemoryWord :: todo();
 AndOrLatch :: todo();
 NandNandLatch :: todo();
 NorNorLatch :: todo();
-LessU8 :: todo();
+LessU8 :: LessU64;
 LessI8 :: todo();
 DotMatrixDisplay :: todo();
 SegmentDisplay :: todo();
@@ -417,7 +451,7 @@ Output8z :: Output64z;
 Output16z :: Output64z;
 Output32z :: Output64z;
 Output64z :: with_pins(0, 2, .IO, @const_slice((-1, 0), (0, 1)));
-Constant16 :: todo();
+Constant16 :: Constant64;
 Not16 :: todo();
 Or16 :: todo();
 And16 :: todo();
@@ -436,9 +470,9 @@ Splitter16 :: todo();
 Maker16 :: todo();
 Register16 :: mask(16, Register64);
 VirtualRegister16 :: todo();
-Counter16 :: mask(16, Counter64);
+Counter16 :: mask_param(16, Counter64);
 VirtualCounter16 :: todo();
-Constant32 :: todo();
+Constant32 :: Constant64;
 Not32 :: mask(32, Not64);
 Or32 :: Or64;
 And32 :: And64;
@@ -457,7 +491,7 @@ Splitter32 :: todo();
 Maker32 :: todo();
 Register32 :: mask(32, Register64);
 VirtualRegister32 :: todo();
-Counter32 :: mask(32, Counter64);
+Counter32 :: mask_param(32, Counter64);
 VirtualCounter32 :: todo();
 LevelOutput8z :: todo();
 Nand8 :: mask(8, Nand64);
@@ -472,7 +506,30 @@ Xnor32 :: mask(32, Xor64);
 Nand64 :: math(1, 2) { o, i | o[0] = i[0].bit_and(i[1]).bit_not(); };
 Nor64 :: math(1, 2) { o, i | o[0] = i[0].bit_or(i[1]).bit_not(); };
 Xnor64 :: math(1, 2) { o, i | o[0] = i[0].bit_xor(i[1]).bit_not(); };
-Ram :: todo();
+Ram :: with_pins(4, 7, .Device,
+    @const_slice(
+        (13, -7), (13, -6), (13, -5), (13, -4), 
+        (-13, -7), (-13, -6), (-13, -5), (-13, -4), (-13, -3), (-13, -2), (-13, -1), 
+    ),
+    256*8,
+    fn(world: *World, o: *Array(i64, 4), i: *Array(i64, 7)) void = {
+        load, save, address := (i[0] != 0, i[1] != 0, i[2]);
+        inputs := i.items().rest(3);
+        
+        n := (256*8)/64;
+        slot := world.storage.subslice(world.instance, n);
+        bytes := interpret_as_bytes(slot);
+        range(0, 4) { I |
+            slot := bytes[bit_and(address + I, 255)]&;
+            o[I] = slot[].zext();
+            if !world.doing_pre_read && save {
+                slot[] = inputs[I].trunc();
+            }
+        };
+        world.instance += n;
+    },
+);
+
 VirtualRam :: todo();
 RamLatency :: todo();
 VirtualRamLatency :: todo();

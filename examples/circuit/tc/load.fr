@@ -255,8 +255,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 it.kind.id += defs.tc_components_offset.trunc();
             }
             fn Constant() => {
-                eprintln("TODO: constant");
-                unimplemented = true;
+                it.kind = get_component_by_name("const", defs.components.items());
             } 
             fn Custom() => {
                 child := find_custom_impl(original_gate, circuits) || {
@@ -405,7 +404,15 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
     if order.len != gates.len - 1 {
         enumerate gates { i, it |
             if !done&.get_set(i) {
-                @eprintln("TODO: cycles! gate (%) in (%)", components[gates[i].kind.id.zext()].name, c.name);
+                it := gates[i]&;
+                kind := components[it.kind.id.zext()]&;
+                @eprintln("TODO: cycles! gate (%) in (%)", kind.name, c.name);
+                for kind.inputs_for_pure_eval { i |
+                    id := it.inputs[i];
+                    if !ready&.get(id.id.zext()) {
+                        @eprintln("- w% not ready", id.id);
+                    }
+                };
                 order&.push(i);
             }
         };
@@ -519,11 +526,12 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
         };
         
         out, in := (w.slice(0, out_arity), w.rest(out_arity));
+        // TODO: counter needs to get the param in the impl somehow
         logic_gates&.push(
             outputs = out,
             inputs = in,
-            kind = (id = it.kind.zext()),  // TODO: add them to the World.components
-            param = 0,  // TODO: Constant gate needs to set this 
+            kind = (id = it.kind.zext()),
+            param = @if(shape.has_param, it.settings&[0], 0),
         );
         
         // compiler requires all pins be connected to a wire.

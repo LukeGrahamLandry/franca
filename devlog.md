@@ -10,6 +10,8 @@
   - tried recording the order to pre_read things in from the compiler and using that to interp. 
   - problem is tick 53 `jump always` isn't happening. COND is wrong. 
     oh its just that game allows you to have all switches off and get zero. eval() wasn't clearing wires. 
+- for leg, more pin tedium. 
+  counter needs settings for step size so compiler needs to pass through the param all the way. 
 
 ## (Jun 11) circuit
 

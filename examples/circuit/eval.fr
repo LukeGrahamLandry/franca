@@ -236,22 +236,23 @@ fn eval_compiled(world: *World, parent: []WireValue, it: *Component.Gate) void =
     range(0, it.inputs.len) { i |
         values[i + o_n] = parent[it.inputs[i].id.zext()];
     };
-    eval_compiled(world, values, it.kind);
+    eval_compiled(world, values, it.kind, it.param);
     range(0, it.outputs.len) { i |
         parent[it.outputs[i].id.zext()] = values[i];
     };
 }
 
 // values is (uninit outputs, inputs)
-fn eval_compiled(world: *World, values: []WireValue, kind: ComponentId) []i64 = {
+fn eval_compiled(world: *World, values: []WireValue, kind: ComponentId, param: i64) []i64 = {
     //@debug_assert(!world.save_wire_values, "compiler doesn't save_wire_values");
     compiled := get_compiled(world, kind)
         || @panic("expected eval_compiled gate to have fast_eval for (%)", world[kind].name);
     o_n, i_n := world[kind]&.arity();
     @assert_eq(o_n + i_n, values.len, "arity error calling compiled gate");  
+    // TODO: the param:i64 needs to be added to all of them for it to work on wasm :(
     // SAFETY: *Array(T, N) has same repr as *T. compile_gates chooses N based on Gate arity. 
-    compiled := bit_cast_unchecked(rawptr, @FnPtr(*World, *WireValue, *WireValue) void, compiled);
-    compiled(world, values.ptr, values.ptr.offset(o_n));
+    compiled := bit_cast_unchecked(rawptr, @FnPtr(*World, *WireValue, *WireValue, i64) void, compiled);
+    compiled(world, values.ptr, values.ptr.offset(o_n), param);
     values.slice(0, o_n)
 }
 

@@ -1894,6 +1894,7 @@ StbTrueType :: include { C |
   - load program without the arch cooperating (ie no 3rd input)
   - dropping in a circuit.data file in the web demo is totally broken
   - get the program data out of the save file
+  - at top level sort by type of IO maybe so don't have to add random offsets in the evaluator depending on the arch. ie in my overture and leg input and output are swapped because the order in save file is arbitrary. 
 - io devices: console, dot matrix, 7 segment, time, keyboard
 - compile new schematics at runtime
 - compile a version with save_wire_values so can get rid of the interpreter? 
