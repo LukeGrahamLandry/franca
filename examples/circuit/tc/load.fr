@@ -45,29 +45,20 @@ CustomId :: @struct(id: i64);
 #use("@/lib/sys/fs.fr");
 Builtin :: import("@/examples/circuit/tc/builtin.fr");
 
-main :: fn() void = {
-    _ := import("@/examples/circuit/tc/builtin.fr").templates;
-    root := "/Users/luke/Library/Application Support/godot/app_userdata/Turing Complete/schematics";
-    
-    files := collect_schematics(root, temp());
-    failed := 0;
-    for files { path |
-        continue :: local_return;
-        in := read_entire_file_or_crash(temp(), path);
-        res := load_circuit(in, temp());
-        info := res.or(fn(msg) => {
-            @eprintln("failed to load [%]: %", path, msg);
-            failed += 1;
-            continue();
-        });
-        @println("[%] %", info.id, path.rest(root.len + 1));
-        for info.gates { it |
-            if it.kind == 92 {
-                @println("- %", it.custom_id);
-            };
+load_builtins :: fn(components: *List(Component), a: Alloc) void = {
+    each Builtin.templates { it |
+        c := zeroed(Component);
+        c.primitive_arity = (it.out_arity, it.in_arity);
+        if it.fid { _ |
+            c.fast_eval = it.callee;
         };
+        c.name = it.name;
+        c.storage_count = it.storage_count;
+        c.usage = a.box_zeroed(Component.Usage);
+        c.inputs_for_pure_eval = it.inputs_for_pure_eval;
+        c.has_param = it.has_param;
+        components.push(c);
     };
-    @assert_eq(failed, 0);
 }
 
 load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64) = {
@@ -95,6 +86,8 @@ load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64) = {
             @eprintln("failed to load [%]: %", path, msg);
             continue();
         });
+        // TODO: fix if its not a valid identifier because it's used in function name when compiled. (important to not let you get code injection that way)
+        //       important not to let a circuit be named "x :: evil(); y"
         info.name = name_from_path(path).shallow_copy(a);
         circuits&.push(info);
     };
@@ -117,6 +110,7 @@ HACK_NONE_PIN_POSITION :: 999999;
 // move more of the validation stuff out of the parse from FatExpr into a post pass so can share with this. 
 // - detect use-before-def (bad input or just confused) gracefully and error instead of crashing on franca compile error later. 
 
+// diagram -> gate graph
 compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Component), arena: Alloc) void = {
     c := circuits[root_index]&;
     if c.compiled.is_some() {

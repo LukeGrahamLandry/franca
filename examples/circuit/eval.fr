@@ -66,7 +66,7 @@ fn eval(world: *World, parent: []WireValue, it: *Component.Gate) void = {
         return f(world, parent, it);
     };
     
-    @if(FEAT_COMPILE) if world.doing_pre_read {
+    if world.doing_pre_read && get_compiled(world, it.kind).is_some() {
         eval_compiled(world, parent, it);
         return();
     };
@@ -244,15 +244,19 @@ fn eval_compiled(world: *World, parent: []WireValue, it: *Component.Gate) void =
 
 // values is (uninit outputs, inputs)
 fn eval_compiled(world: *World, values: []WireValue, kind: ComponentId, param: i64) []i64 = {
-    //@debug_assert(!world.save_wire_values, "compiler doesn't save_wire_values");
+    child := world[kind]&;
     compiled := get_compiled(world, kind)
-        || @panic("expected eval_compiled gate to have fast_eval for (%)", world[kind].name);
-    o_n, i_n := world[kind]&.arity();
+        || @panic("expected eval_compiled gate to have fast_eval for (%)", child.name);
+    o_n, i_n := child.arity();
     @assert_eq(o_n + i_n, values.len, "arity error calling compiled gate");  
-    // TODO: the param:i64 needs to be added to all of them for it to work on wasm :(
     // SAFETY: *Array(T, N) has same repr as *T. compile_gates chooses N based on Gate arity. 
-    compiled := bit_cast_unchecked(rawptr, @FnPtr(*World, *WireValue, *WireValue, i64) void, compiled);
-    compiled(world, values.ptr, values.ptr.offset(o_n), param);
+    if child.has_param {  // TODO: this is stupid. only matters on wasm. should probably just always add a junk param:i64 in the compiler instead. 
+        compiled := bit_cast_unchecked(rawptr, @FnPtr(*World, *WireValue, *WireValue, i64) void, compiled);
+        compiled(world, values.ptr, values.ptr.offset(o_n), param);
+    } else {
+        compiled := bit_cast_unchecked(rawptr, @FnPtr(*World, *WireValue, *WireValue) void, compiled);
+        compiled(world, values.ptr, values.ptr.offset(o_n));
+    };
     values.slice(0, o_n)
 }
 
@@ -270,7 +274,6 @@ fn eval(world: *World, values: []WireValue, kind: ComponentId) []i64 = {
 
 fn get_compiled(world: *World, kind: ComponentId) ?rawptr #inline = {
     f := world[kind].fast_eval;
-    //@if(FEAT_COMPILE)  // still needed for native tc
     if !f.is_null() {
         return(Some = f);
     };

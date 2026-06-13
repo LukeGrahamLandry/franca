@@ -9,7 +9,8 @@
 // TODO: type check bit vs byte
 
 // even when disabled still need to call compile_gates to fill `compile_order` for the interpreter and set fast_eval callback for tc builtins. 
-FEAT_COMPILE :: true;
+FEAT_COMPILE :: true;  // disable to test the interpreter. enabled is ~30x speedup on defs (nand only) maze solve. 
+FEAT_RT_COMPILE :: true && FEAT_COMPILE;  // disabling makes it compile faster because don't have to bundle franca compiler
 FEAT_TC_CIRCUIT :: true;  // be able to load TuringComplete.Game's circuit.data save files?
 max_in_out_wires :: 64;
 
@@ -278,54 +279,24 @@ defs :: @static {
 
 finished_defs :: @static {
     components := defs.components&;
-    calculate_usage(components.items(), 0, ast_alloc());
-    @if(FEAT_TC_CIRCUIT) {
-        // TODO: quarantine this in ./tc/*.fr
-        templates :: import("@/examples/circuit/tc/builtin.fr").templates;
-        n := components.len;
-        each templates { it |
-            c := zeroed(Component);
-            c.primitive_arity = (it.out_arity, it.in_arity);
-            if it.fid { _ |
-                c.fast_eval = it.callee;
-            };
-            c.name = it.name;
-            c.storage_count = it.storage_count;
-            c.usage = ast_alloc().box_zeroed(Component.Usage);
-            c.inputs_for_pure_eval = it.inputs_for_pure_eval;
-            c.has_param = it.has_param;
-            components.push(c);
-        };
-        
-        // TODO: eventually need to do this at runtime instead of comptime but then need to embed the compiler
-        for cli_args() { path |
-            path := path.str();
-            if path.ends_with("circuit.data") {
-                // if it uses custom components, need to load everything to find them
-                circuits, root_index := Tc'load_all_circuits(path, ast_alloc());
-                if root_index != -1 {
-                    Tc'compile_circuit(circuits, root_index, components, ast_alloc());
-                    THE_CIRCUIT[] = (circuits, root_index);
-                };
-            }
-        };
-    };
+    a := ast_alloc();
+    calculate_usage(components.items(), 0, a);
+    @if(FEAT_TC_CIRCUIT) Tc'load_builtins(components, a);
     components.gpa = panicking_allocator;
     @if(false) print_components(components.items());
-    // not: @if(FEAT_COMPILE) because need to set Component.compile_order even for interp
-    compile_gates(components.items());
+    fr := current_compiler_context();
+    compile_gates(fr, components.items());
     @anon_literal(components = components.items())
 };
 
-THE_CIRCUIT :: @static zeroed(Ty([]Tc.Circuit, i64));  // TODO: remove this and load at runtime instead
 Tc :: import("@/examples/circuit/tc/load.fr");
-TcBuiltins :: import("@/examples/circuit/tc/builtin.fr").impl;
+TcBuiltins :: Tc.Builtin.impl;
 
 calculate_usage :: fn(components: []Component, off: i64, a: Alloc) void = {
     enumerate components { i, c |
         continue :: local_return;
         @if(i < off) continue();
-        c.usage = ast_alloc().box_zeroed(Component.Usage);
+        c.usage = a.box_zeroed(Component.Usage);
         if c.gates.len == 0 {
             @if(i < defs.tc_components_offset)
             if c.name == "delay" || c.name == "input" || c.name == "output" {
@@ -395,8 +366,6 @@ calculate_usage :: fn(components: []Component, off: i64, a: Alloc) void = {
         c.instance_offset_by_gate = instance_offset_by_gate;
         wires_used.bits.gpa = panicking_allocator;
         c.wires_used = wires_used;
-        
-        // TODO: for TcBuiltins use Template.inputs_for_pure_eval
     };
 }
 
@@ -565,8 +534,18 @@ fn compile_component(self: *CompileGates, doing_pre_read: bool) void = {
 // wire values are local variables instead of in world.scratch 
 // so indexing with the Gate.(i,o) happens at compile time instead of run time. 
 // compiled fns call each other directly without going through the interpreter's calling convention. 
-compile_gates :: fn(components: []Component) void = {
-    out := @ref u8.list(components.len * 2000, ast_alloc());
+compile_gates :: fn(fr: CompCtx, components: []Component) void = {
+    src := compile_gates_source(components, fr.get_alloc());
+    // TODO: don't allow jit shims so load timer is more accurate? 
+    fast_eval := compile_value(fr, []rawptr, src, "dispatch");
+    enumerate components { i, it |
+        it.fast_eval = fast_eval[i];
+    };
+};
+
+// side effect: sets Component.compile_order which the interpreter needs
+compile_gates_source :: fn(components: []Component, a: Alloc) Str = {
+    out := @ref u8.list(components.len * 2000, a);
     @fmt(out, "{\n#use(\"@/examples/circuit/eval.fr\");\n#use(\"@/examples/circuit/parse.fr\");\n");
     
     @fmt(out, "Z :: zeroed(WireValue);\n");
@@ -578,8 +557,7 @@ compile_gates :: fn(components: []Component) void = {
             tc_start := defs.tc_components_offset;
             tc_end := defs.tc_components_offset + templates.len();
             if i < tc_start {
-            S :: Type.scope_of(DefsBuiltins);
-            if FuncId.get_constant(S, c.name.sym()).is_some() {
+            if defs_builtin_names.contains(c.name) {
                 @fmt(out, "% :: DefsBuiltins.%;\n", mangle(components, i), c.name);
                 continue();
             };
@@ -601,7 +579,7 @@ compile_gates :: fn(components: []Component) void = {
             c = c, out = out, components = components,
             wires_evaluated = empty(temp()),
             need_pre_read = WireId.list(temp()),
-            compile_order = list(ast_alloc()),
+            compile_order = list(a),
         ); self := self&;
         
         out_n, in_n := (c.gates[c.gates.len - 1].inputs.len, c.gates[0].outputs.len);
@@ -628,6 +606,7 @@ compile_gates :: fn(components: []Component) void = {
     };
     
     @fmt(out, "dispatch :: @const_slice(@as(rawptr) ");
+    // TODO: only reference the ones actually needed from the top level thing? ie. not always defs if just using a tc circuit.
     range(0, components.len) { i |
         if FEAT_COMPILE || components[i].gates.len == 0 {
             @fmt(out, "%, ", mangle(components, i));
@@ -637,15 +616,11 @@ compile_gates :: fn(components: []Component) void = {
     };
     @fmt(out, ");\n");  // dispatch
     @fmt(out, "};");  // scope
-    if true {
+    if false {
         #use("@/lib/sys/fs.fr");
         write_entire_file_or_crash("target/a.fr", out.items());
     };
-    S := import(out.items());
-    fast_eval := const_eval([]rawptr, @{ @[@literal S].dispatch });
-    enumerate components { i, it |
-        it.fast_eval = fast_eval[i];
-    };
+    out.items()
 };
 
 fn declare_wire_vars(self: *CompileGates) void = {
@@ -673,8 +648,17 @@ fn declare_wire_vars(self: *CompileGates) void = {
 fn mangle(c: []Component, i: i64) Str = 
     @tfmt("g%_%", i, c[i].name);
 
+defs_builtin_names :: {
+    names := Str.list(ast_alloc());
+    S :: Type.scope_of(DefsBuiltins);
+    for get_constants(S) { name |
+        names&.push(name.str());
+    };
+    names.items()
+};
+
 DefsBuiltins :: @struct {
-    nand :: get_native(TcBuiltins.Nand);
+    nand :: TcBuiltins'get_native(TcBuiltins.Nand);
     byte_split :: get_native(TcBuiltins.Splitter8);
     byte_make :: get_native(TcBuiltins.Maker8);
 };
@@ -851,6 +835,35 @@ fn arity(c: *Component) Ty(i64, i64) = {
 
 #use("@/lib/collections/bit_set.fr");
 Main :: import().examples.circuit;
+#use("@/compiler/ast_external.fr");
+
+// same as import(src).var_name but can be called from outside. 
+// UNSAFE: T must have the right repr and `src` must be in fr.get_alloc(). 
+compile_value :: fn(fr: CompCtx, $T: Type, src: Str, var_name: Str) T #generic = {
+    v, c := (fr.vtable, fr.data);
+    @assert(src.starts_with("{") && src.ends_with("};"), "compile_value wants block like import()");
+    src := src.slice(1, src.len - 2);
+    import_literal_file_name :: "(import literal)";
+    file := v'add_file(c, import_literal_file_name, src).shrink();
+    stmts := v'parse_stmts(c, file&);
+    stmts := stmts.or(fn(err) => fr.report_error(err));
+    loc := stmts[0].loc;
+    func: Func = empty_fn(fr.intern_string("compile_value_literal"), loc);
+    func.body = (Normal = (expr = (Block = (
+        body = stmts.as_raw_list(),
+        ret_label = .None,
+        flags = 0,
+        scope = NOSCOPE,
+        result = fr.get_alloc().boxed(FatExpr, (expr = (
+            GetNamed = fr.intern_string(var_name),
+        ), loc = loc)),
+    )), loc = loc));
+    func.resolve_scope = TOP_LEVEL_SCOPE;
+    fid := fr.intern_func(func&);
+    callee := fr.get_jitted(fid);
+    callee := bit_cast_unchecked(rawptr, @FnPtr() T, callee);
+    callee()
+};
 
 // TODO: maybe get rid of switch gate so it's always ssa
 // TODO: compile pre_read version as a seperate function and call it directly instead of branching.

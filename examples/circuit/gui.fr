@@ -38,7 +38,8 @@ State :: @struct {
     circuit_index: i64;
     circuit_arena: Arena.Allocator;
     circuit_tree: List(i64);
-    is_new_overture: bool;
+    is_new_overture: bool;  // TODO: remove
+    fr: ?CompCtx;
 };
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -460,6 +461,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 };
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    state.fr = .None;
     sapp.desc.enable_dragndrop = true;
     state.sg = sg; state.sapp = sapp;
     a := general_allocator();
@@ -479,16 +481,9 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         path := path.str();
         if path.ends_with("circuit.data") {
             state.load_path(path);
-            state.root_component = (id = finished_defs.components.len().trunc() - 1);
-            
+            state.root_component = (id = state.world.components.len().trunc() - 1);
             state.is_new_overture = true;
         }
-    };
-    
-    if THE_CIRCUIT._1 != -1 {
-        state.load_path("path");
-        state.root_component = (id = finished_defs.components.len().trunc() - 1);
-        state.is_new_overture = true;
     };
     
     state.reset();
@@ -583,8 +578,10 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     state.dirty = true;
 }
 
+// TODO: if loading fails, reset state.world back to the constant ones because it points into the arena
 fn load_path(state: *State, path: Str) void = {
     @if(!FEAT_TC_CIRCUIT) return(eprintln("FEAT_TC_CIRCUIT is disabled"));
+    start := timestamp();
     #use("@/lib/sys/fs.fr");
     in := read_entire_file(temp(), path) || return();
     state.circuit = empty();
@@ -592,8 +589,8 @@ fn load_path(state: *State, path: Str) void = {
     a := state.circuit_arena&.borrow();
     state.circuit_tree = list(a);
     
-    //circuits, root_index := Tc'load_all_circuits(path, a);
-    circuits, root_index := THE_CIRCUIT[];
+    // if it uses custom components, need to load everything to find them
+    circuits, root_index := Tc'load_all_circuits(path, a);
     state.circuit = circuits;
     if circuits.len == 0 || root_index == -1 {
         state.circuit = empty();
@@ -602,6 +599,37 @@ fn load_path(state: *State, path: Str) void = {
     };
     state.circuit_tree&.push(root_index);
     
+    components := @ref Component.list(a);
+    components.push_all(finished_defs.components);
+    Tc'compile_circuit(circuits, root_index, components, a);
+    
+    @if(FEAT_RT_COMPILE, {
+    
+    if state.fr&.take() { fr |
+        fr'vtable'destroy_compiler(fr.data);
+    };
+    
+    @if(state.fr.is_none())
+    push_as_tls(.comptime, zeroed(rawptr)) {
+        v := import("@/examples/repl.fr")'R'init_driver_vtable();
+        opts := v.default_build_options();
+        opts.no_cache = true;
+        fr := v.with(v'init_compiler(opts));
+        make_and_resolve_and_compile_top_level(fr.data, fr.vtable, """ #include_std("lib/core.fr"); """, "-");
+        state.fr = (Some = fr);
+    };
+    fr := state.fr.unwrap();
+
+    comptime_ctx := bit_cast_unchecked(Compiler, **rawptr, fr.data)[][];  // TODO: making everybody deal with this is kinda trash
+    push_as_tls(.comptime, comptime_ctx) {
+        compile_gates(fr, components.items());
+    };
+    }, { 
+        // else: no compile but still need to set Component.compile_order for interp
+        _ := compile_gates_source(components.items(), a);
+    });
+    init(state.world&, a, true, components.items());
+    
     c := circuits[root_index]&;
     if c.compiled { id |
         state.root_component = id;
@@ -609,14 +637,15 @@ fn load_path(state: *State, path: Str) void = {
         state.arch_is_leg = c.name == "LEG";
     };
     
-    //each state.circuit { it |
-    //    _ := Tc'find_pins(it, a); // for now just to set Circuit.Wire.logical to show on hover in the ui
-    //}
-    // TODO: Tc'compile_circuit(state.circuit&);
+    state.is_new_overture = true;
+    state.reset();
+    
+    // TODO: misleading because there can still be uncompiled jit-shims
+    @eprintln("loaded in %ms", timestamp() - start);
 }
 
 Tc :: import("@/examples/circuit/tc/load.fr");
-Builtin :: import("@/examples/circuit/tc/builtin.fr");
+Builtin :: Tc.Builtin;
 //Tc :: Main.tc.load;
 //Builtin :: Main.tc.builtin;
 

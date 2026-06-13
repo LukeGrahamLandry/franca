@@ -1,4 +1,8 @@
 
+## (Jun 13) circuit
+
+- include franca compiler so can load new circuits at runtime. great success. 
+
 ## (Jun 12) circuit
 
 - deal with inputs_for_pure_eval in schedule_gates
