@@ -31,6 +31,7 @@ Circuit :: @struct {
         mystery_spice_minus_fifteen_for_custom_pins: Vec2;
         settings: Array(i64, 2);
         data: []u8;
+        logical_gate_index := -1;
     };
     
     SwitchablePin :: @struct {
@@ -145,6 +146,8 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     builtin_count := defs.tc_components_offset + templates.len();
     @assert_ge(components.len, builtin_count, "TODO: be more flexible about adding new ones");
         
+    logical_to_circuit := i64.list(gates.len, temp());
+    extra_gates := 0;
     kill: DynamicBitSet = empty(temp());
     in, out := (WireId.list(a), WireId.list(a));
     output_pin_count := 0;
@@ -156,6 +159,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         if i == c.gates.len {
             // new_false_wire CONST_INDEX is already remapped. TODO: this is more error prone than it needs to be
             @assert(it.inputs.len == 0 && it.kind.id == 5, "CONST_INDEX HACK"); 
+            logical_to_circuit&.push(-1);
             continue();
         };
         original_gate := c.gates[i]&;
@@ -199,6 +203,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                     
                     S := @run get_component_by_name("switch1", defs.components.items()); 
                     gates&.push(kind = S, inputs = w.slice(1, 3), outputs = w.slice(0, 1));
+                    extra_gates += 1;
                     it = gates.index(i);  // ^ can reallocate
                 };
                 
@@ -256,6 +261,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                     // should be unreachable because of the `dependencies` in the data file. 
                     @println("missing custom component %", original_gate.custom_id.id);
                     unimplemented = true;
+                    kill&.set(i);
                     continue();
                 };
                 it.kind = child.compiled.unwrap();
@@ -274,31 +280,49 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                     
                     S := @run get_component_by_name("switch1", defs.components.items()); 
                     gates&.push(kind = S, inputs = w.slice(1, 3), outputs = w.slice(0, 1));
+                    extra_gates += 1;
                     it = gates.index(i);  // ^ can reallocate
                 };
             } 
             fn Device() => {
                 it.kind.id += defs.tc_components_offset.trunc();
             } 
-        }
+        };
+        
+        if !kill&.get(i) {
+            logical_to_circuit&.push(i);
+        };
     };    
-    range_rev(0, gates.len) { i |
+    range_rev(0, c.gates.len) { i |
         if kill&.get(i) {
             gates&.ordered_remove(i);
         }
     };  
+    logical_to_circuit&.push_repeated(extra_gates, -1);
+    
+    if unimplemented { 
+        gates.len = 0;
+        logical_to_circuit.len = 0;
+        in.len = 0;
+        out.len = 0;
+        @eprintln("something was unimplemented in (%)", c.name);
+    };
     
     c.pins = custom_pins.items();
     c.switches = switches.items();
     c.arity = (out.len, in.len);
     push_inputs_outputs(gates&, out.items(), in.items());
-    gates := schedule_gates(c, gates, wire_count, a, out.items(), in.items(), components.items());
+    logical_to_circuit&.insert(0, -1);  // in
+    logical_to_circuit&.push(-1);       // out
+    new_gates, order := schedule_gates(c, gates, wire_count, a, out.items(), in.items(), components.items());
+    gates := new_gates;
+    @assert_eq(logical_to_circuit.len, gates.len, "confused gate tracking");
     
-    if unimplemented { 
-        gates.len = 0;
-        in.len = 0;
-        out.len = 0;
-        @eprintln("something was unimplemented in (%)", c.name);
+    enumerate order { i, o |
+        gate_i := logical_to_circuit[o[]];
+        if gate_i != -1 {
+            c.gates[gate_i].logical_gate_index = i;
+        };
     };
     
     // TODO: do this in calculate_usage instead of duplicating here and in parse for defs
@@ -334,7 +358,7 @@ fn push_inputs_outputs(gates: *List(Component.Gate), out: []WireId, in: []WireId
     gates.push(kind = O, inputs = out, outputs = empty());
 }
 
-schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, a: Alloc, out: []WireId, in: []WireId, components: []Component) List(Component.Gate) = {
+schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, a: Alloc, out: []WireId, in: []WireId, components: []Component) Ty(List(Component.Gate), []i64) = {
     // TODO: compiler needs to delay all writes until after all reads, not just do them in order unless forced to preread. 
     //defining_gate := temp().alloc_zeroed(i64, wire_count);  // [WireId]
     order := i64.list(temp());
@@ -434,7 +458,7 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
     gates&.drop();
     gates = gates2;
     
-    gates
+    (gates, order.items())
 };
 
 templates :: import("@/examples/circuit/tc/builtin.fr").templates;
@@ -520,7 +544,6 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
         };
         
         out, in := (w.slice(0, out_arity), w.rest(out_arity));
-        // TODO: counter needs to get the param in the impl somehow
         logic_gates&.push(
             outputs = out,
             inputs = in,

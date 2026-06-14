@@ -2,6 +2,7 @@
 ## (Jun 13) circuit
 
 - include franca compiler so can load new circuits at runtime. great success. 
+- keep a mapping between visual gate index and logical gate index so gui can keep both views in sync. 
 
 ## (Jun 12) circuit
 

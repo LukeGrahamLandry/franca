@@ -23,8 +23,7 @@ State :: @struct {
     dirty: bool;
     mouse_pos: Vec2;
     world: World;
-    root_component: ComponentId;
-    component_tree: List(Component.GateId);
+    tree: List(CircuitNode);
     clicked: bool;
     want_eval: bool;
     auto_eval: bool;
@@ -37,9 +36,14 @@ State :: @struct {
     circuit: []Tc.Circuit;
     circuit_index: i64;
     circuit_arena: Arena.Allocator;
-    circuit_tree: List(i64);
     is_new_overture: bool;  // TODO: remove
     fr: ?CompCtx;
+};
+
+CircuitNode :: @struct {
+    diagram_circuit: ?i64 = .None;  // index in state.circuit
+    logical_gate: ?i64 = .None;  // index in previous component
+    component: ?ComponentId = .None;
 };
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -47,14 +51,16 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
     world := state.world&;
     
+    have_logic := state.tree.len > 0 && state.tree[0].component.is_some();
+    @if(have_logic)
     if state.want_eval || state.auto_eval {
     count := @if(state.auto_eval, state.ticks_per_eval, 1);
+    root_component := state.tree[0].component.unwrap();
     range(0, count) { i |
         state.tick += 1;
         input := state.maze&.input();
         OUT: ?u8 = .None;
         if state.is_new_overture {
-            root_component := state.root_component;
             save_wire_values := i == count - 1;
             world.instance = 0; 
             world.scratch.len = 0;
@@ -72,7 +78,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             world.save_wire_values = prev;
             OUT = @if(values[1 + int(state.arch_is_leg)] != 0, (Some = values[0 + int(state.arch_is_leg)].trunc()), .None);
         } else {
-            OUT = tick_overture(world, state.root_component, input, false, i == count - 1);
+            OUT = tick_overture(world, root_component, input, false, i == count - 1);
         };
         out := OUT;
         if out { byte |
@@ -102,7 +108,6 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     text_w, text_h := (app_w * text_scale, app_h * text_scale);
     sdtx.canvas(text_w, text_h);
     
-    c := world[state.root_component]&;
     wire_offset := 0;
     
     world_to_text_pos :: fn(pos) => ((pos*state.scale*screen_scale + state.pos)*vec2(1, -1) + vec2(1)) / sdtx.glyph_size / 2;
@@ -126,17 +131,36 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     sdtx.color = pack_rgba(255, 255, 255, 255);
     sdtx.pos = world_to_text_pos(vec2(0, height));
-    for state.component_tree { it |
+    wires: []WireValue = empty();
+    out := @ref u8.list(2, temp());
+    colour: Array(u32, 2) = (pack_rgba(150, 150, 255, 255), pack_rgba(255, 0, 150, 255));
+    show :: fn(id: WireId) => {
+        value: u8 = wires[id.id.zext()].trunc();
+        sdtx.color = colour&[int(value != 0)];
+        sdtx.put(@tfmt("w%", id.id));
+        sdtx.color = pack_rgba(150, 150, 150, 255);
+        sdtx.put("=");
+        push_hex_byte(out, value, true);
+        sdtx.put(out.items());
+        out.clear();
+        sdtx.put(" ");
+    };
+    if have_logic {
+    root_component := state.tree[0].component.unwrap();
+    c := world[root_component]&;
+    for state.tree { it |
+        if it.logical_gate { it |
         wire_offset += c.wire_count;
-        range(0, it.id.zext()) { i |
+        range(0, it) { i |
             child := state.world&[c.gates[i].kind]&;
             wire_offset += child.wire_sum;
         };
-        sdtx.put(@tfmt("%[%], ", c.name, it.id));
-        c = state.world&[c.gates[it.id.zext()].kind]&;
+        sdtx.put(@tfmt("%[%], ", c.name, it));
+        c = state.world&[c.gates[it].kind]&;
+        };
     };
     pos := vec2(0, 0);
-    wires := world.scratch.items().subslice(wire_offset, c.wire_count);
+    wires = world.scratch.items().subslice(wire_offset, c.wire_count);
     
     sdtx.put(c.name);
     if c.gates.len == 0 {
@@ -145,8 +169,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sdtx.color = @if(hover, pack_rgba(0, 255, 0, 255), pack_rgba(255, 255, 0, 255));
         sdtx.put("output(intrinsic(input()));");
         
-        if state.clicked && hover {
-            _ := state.component_tree&.pop();
+        if state.clicked && hover && state.tree.len > 1 {
+            _ := state.tree&.pop();
             state.clicked = false;
             state.dirty = true;
         };
@@ -154,24 +178,11 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sdtx.pos = world_to_text_pos(vec2(0, 2*height));
         sdtx.put(@tfmt("(shallow=(gates=%,wires=%), recursive=(gates=%,wires=%,storage=%))", c.gates.len, c.wire_count, c.gate_sum, c.wire_sum, c.storage_count));
     };
-    out := @ref u8.list(2, temp());
     enumerate c.gates { i, it |
         hover := p.y < pos.y && p.y > pos.y - height && p.x > 0 && p.x < 100;
         sdtx.pos = world_to_text_pos(pos);
         
-        colour: Array(u32, 2) = (pack_rgba(150, 150, 255, 255), pack_rgba(255, 0, 150, 255));
         base_colour := @if(hover, pack_rgba(0, 255, 0, 255), pack_rgba(255, 255, 0, 255));
-        show :: fn(id: WireId) => {
-            value: u8 = wires[id.id.zext()].trunc();
-            sdtx.color = colour&[int(value != 0)];
-            sdtx.put(@tfmt("w%", id.id));
-            sdtx.color = pack_rgba(150, 150, 150, 255);
-            sdtx.put("=");
-            push_hex_byte(out, value, true);
-            sdtx.put(out.items());
-            out.clear();
-            sdtx.put(" ");
-        };
         for(it.outputs, show);
         sdtx.color = base_colour;
         child := world[it.kind]&;
@@ -189,10 +200,30 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         pos.y -= height;
         
         if state.clicked && hover {
-            if i == 0 || i == c.gates.len - 1 {
-                _ := state.component_tree&.pop();
+            is_io := i == 0 || i == c.gates.len - 1;
+            if is_io && state.tree.len > 1 {
+                _ := state.tree&.pop();
             } else {
-                state.component_tree&.push(id = i.trunc());
+                graphic: ?i64 = .None;
+                @if(FEAT_TC_CIRCUIT) if state.tree.len > 0 {
+                    break :: local_return;
+                    if state.tree[state.tree.len - 1].diagram_circuit { circuit_i |
+                        circuit := state.circuit[circuit_i]&;
+                        each circuit.gates { gate |
+                            if gate.logical_gate_index == i {
+                                if state.circuit.index_of(fn(check) => check.id == gate.custom_id) { new |
+                                    graphic = (Some = new);
+                                };
+                                break();
+                            };
+                        };
+                    };
+                };
+                state.tree&.push(
+                    diagram_circuit = graphic,
+                    logical_gate = (Some = i),
+                    component = (Some = it.kind),
+                );
             };
             state.clicked = false;
             state.dirty = true;
@@ -203,12 +234,12 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     // TODO: use the other labels for colours as well
     instruction_width := @if(state.arch_is_leg, 4, 1);
     ip_index := MAX_i64;
-    memory := read_memory(state.world&, state.root_component);
+    memory := read_memory(state.world&, root_component);
     if state.is_new_overture {
         memory = state.world.storage.interpret_as_bytes();
     };
     memory.len = min(memory.len, 512);
-    root_component := state.world&[state.root_component]&;
+    root_component := state.world&[root_component]&;
     for root_component.labels { label |
         if label.name == "ip" && label.bit_size == 8 {
             byte, bit := label.instance_offset.udiv_mod(8);
@@ -285,7 +316,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             pos.y -= width*2;
         };
     }
-    
+    };
     maze_text := u8.list(temp());
     state.maze&.render(maze_text&);
     sdtx.color = pack_rgba(@if(state.maze.win, 255, 50), 200, 150, 255);
@@ -299,15 +330,15 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     sdtx.origin = vec2(0);
     
-    // TODO: also this is totally fucked if you resize the screen because im using a stupid coordinate system
     // might get rid of this rendering but for now its all i can do with the tc circuits i load.
     // especially the hover stuff is just useful because i have to transcribe the pin positions before i can actually simulate it. 
-    // TODO: if i keep it should clean it up a bit and position in a sane way relative to the rest of the ui. 
-    have_circuit := state.circuit.len > 0 && state.circuit_tree.len > 0;
     sgl := state.draw&;
     
-    @if(FEAT_TC_CIRCUIT) if have_circuit {
-        circuit := state.circuit[state.circuit_tree[state.circuit_tree.len - 1]]&;
+    have_circuit := false;
+    @if(state.tree.len > 0)
+    @if(FEAT_TC_CIRCUIT) if state.tree[state.tree.len - 1].diagram_circuit { circuit_i |
+        have_circuit = true;
+        circuit := state.circuit[circuit_i]&;
         sgl.defaults();
         sgl.viewport(0, 0, app_w, app_h, true);
         sgl.begin(.QUADS);
@@ -351,6 +382,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             sgl.line(b, a + vec2(s.x, 0), w);
             sgl.line(b, a - vec2(0, s.y), w);
             
+            sdtx.color = pack_rgba(50, 200, 150, 255);
             sdtx.pos = world_to_text_pos(goal_top_right) + vec2(-circuit.name.len().float().cast(), -2);
             sdtx.put(circuit.name);
         };
@@ -368,28 +400,29 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                 sdtx.color = pack_rgba(255, 255, 255, 255);
                 name := info.display_name(it, state.circuit);
                 sdtx.pos = world_to_text_pos(b) + vec2(0, wire_hover_count);
-                sdtx.put(@tfmt("% (%, %) %", it.kind, it.pos.x, it.pos.y, name));
+                sdtx.put(@tfmt("(%, %) %", it.pos.x, it.pos.y, name));
+                if it.logical_gate_index != -1 {
+                    sdtx.put(@tfmt(" [%]", it.logical_gate_index));
+                };
                 wire_hover_count += 1;
                 
                 if state.clicked {
-                    if state.circuit.index_of(fn(check) => check.id == it.custom_id) { new |
-                        state.circuit_tree&.push(new);
+                    logical: ?i64 = @if(it.logical_gate_index == -1, .None, (Some = it.logical_gate_index));
+                    graphic := state.circuit.index_of(fn(check) => check.id == it.custom_id);
+                    if graphic.is_some() {
                         state.clicked = false;
                         state.dirty = true;
-                    };
-                    if info.name.contains("Input") || info.name.contains("Output") {
-                        _ := state.circuit_tree&.pop();
+                        state.tree&.push(
+                            diagram_circuit = graphic,
+                            logical_gate = logical,
+                        );
+                    }
+                    
+                    is_io := info.name.contains("Input") || info.name.contains("Output");
+                    if is_io && state.tree.len > 1 {
+                        _ := state.tree&.pop();
                         state.clicked = false;
                         state.dirty = true;
-                    };
-                    if state.circuit_tree.len > 0 {
-                        // TODO: once i can actually simulate do this the old way where don't change root_component. but then need to deal with the gate indices getting changed by schedule_gates
-                        //       - but need to keep a mapping between visual gate index and logical gate index 
-                        c := state.circuit[state.circuit_tree[state.circuit_tree.len - 1]]&;
-                        if c.compiled { id |
-                            state.root_component = id;
-                            state.component_tree&.clear();
-                        };
                     };
                 };
             };
@@ -409,8 +442,10 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                     sgl.color = pack_rgba(200, 50, 50, 255);
                     sdtx.pos = world_to_text_pos(b) + vec2(0, wire_hover_count);
                     sdtx.color = pack_rgba(255, 255, 255, 255);
-                    sdtx.put(@tfmt("(%, %) w%-%", it.pos.x, it.pos.y, wire.logical.id, wire_i));
+                    sdtx.put(@tfmt("% (%, %) ", wire_i, it.pos.x, it.pos.y));
+                    @if(wires.len > 0) show(wire.logical);
                     wire_hover_count += 1;
+                    
                 };
                 sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
             };
@@ -432,6 +467,9 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                     sdtx.color = pack_rgba(255, 255, 255, 255);
                     name := info.display_name(it, state.circuit);
                     sdtx.put(@tfmt("% %[%]", name, @if(is_input, "in", "out"), @if(is_input, i - out_arity, i)));
+                    if it.logical_gate_index != -1 {
+                        sdtx.put(@tfmt(" [%]", it.logical_gate_index));
+                    };
                     wire_hover_count += 1;
                 };
             };
@@ -468,9 +506,11 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.text&.setup(sg = sg, allocator = a, fonts = @slice(Sdtx.font.cpc), context = (char_buf_size = 10000));
     state.draw&.setup(allocator = general_allocator(), sg = sg, max_vertices = 10_000);
     
-    init(state.world&, a, true);
-    state.root_component = get_component_by_name("overture", finished_defs.components);
-    state.component_tree = list(a);
+    init(state.world&, a, true);  // TODO: leaked when loading new circuit
+    state.tree = list(a);
+    state.tree&.push(
+        component = (Some = get_component_by_name("overture", finished_defs.components)),
+    );
     state.dirty = true;
     state.ticks_per_eval = 1;
     state.recenter();
@@ -481,8 +521,6 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         path := path.str();
         if path.ends_with("circuit.data") {
             state.load_path(path);
-            state.root_component = (id = state.world.components.len().trunc() - 1);
-            state.is_new_overture = true;
         }
     };
     
@@ -504,9 +542,10 @@ fn reset(state: *State) void = {
     world.storage.set_zeroed();  // importantly resets ip,registers=0
     
     program := @if(state.arch_is_leg, Defs.the_maze_leg, Defs.the_maze);
-    if !state.is_new_overture {
+    if !state.is_new_overture && state.tree.len > 0 && state.tree[0].component.is_some() {
+        root_component := state.tree[0].component.unwrap();
     range(0, 256) { i |
-        tick_overture(world, state.root_component, program[i], true, false);
+        tick_overture(world, root_component, program[i], true, false);
     };
     };
     world.scratch.len = world.scratch.cap;
@@ -545,7 +584,9 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             tick_off := @if(event.modifiers.get(.shift) == 1, 50, 1);
             tick_off := @if(event.modifiers.get(.super) == 1, 1000, tick_off);
             @match(event.key_code) {
-                fn ESCAPE() => { _ := state.component_tree&.pop(); }
+                fn ESCAPE() => if state.tree.len > 1 { 
+                    _ := state.tree&.pop(); 
+                }
                 fn ENTER() => { state.want_eval = true; }
                 fn SPACE() => { state.auto_eval = !state.auto_eval; }
                 fn R() => state.reset();
@@ -559,8 +600,9 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 fn A() => {
                     state.is_new_overture = false;
                     state.arch_is_leg = !state.arch_is_leg;
-                    state.root_component = get_component_by_name(@if(state.arch_is_leg, "leg", "overture"), finished_defs.components);
-                    state.component_tree&.clear();
+                    root := get_component_by_name(@if(state.arch_is_leg, "leg", "overture"), finished_defs.components);
+                    state.tree&.clear();
+                    state.tree&.push(component = (Some = root));
                     state.reset();
                 }
                 @default => return();
@@ -587,7 +629,6 @@ fn load_path(state: *State, path: Str) void = {
     state.circuit = empty();
     state.circuit_arena&.reset_retaining_capacity();
     a := state.circuit_arena&.borrow();
-    state.circuit_tree = list(a);
     
     // if it uses custom components, need to load everything to find them
     circuits, root_index := Tc'load_all_circuits(path, a);
@@ -597,7 +638,6 @@ fn load_path(state: *State, path: Str) void = {
         @eprintln("failed to load [%]", path);
         return();
     };
-    state.circuit_tree&.push(root_index);
     
     components := @ref Component.list(a);
     components.push_all(finished_defs.components);
@@ -629,14 +669,14 @@ fn load_path(state: *State, path: Str) void = {
         _ := compile_gates_source(components.items(), a);
     });
     init(state.world&, a, true, components.items());
-    
-    c := circuits[root_index]&;
-    if c.compiled { id |
-        state.root_component = id;
-        state.component_tree&.clear();
-        state.arch_is_leg = c.name == "LEG";
-    };
-    
+    state.tree&.clear();
+   
+    c := circuits[root_index]&; 
+    state.tree&.push(
+        diagram_circuit = (Some = root_index),
+        component = c.compiled,
+    );
+    state.arch_is_leg = c.name == "LEG";
     state.is_new_overture = true;
     state.reset();
     
