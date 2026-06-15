@@ -6,10 +6,11 @@ Circuit :: @struct {
     id: CustomId;
     wires: []Wire;
     gates: []Gate;
+    programs: []Program;
     min: Vec2;
     max: Vec2;
     dependencies: []CustomId;
-    name: Str = "";
+    name: Str;
     arity: Ty(i64, i64) = (-1, -1);
     has_bidirectional_pins := false;
     
@@ -33,6 +34,13 @@ Circuit :: @struct {
         settings: Array(i64, 2);
         data: []u8;
         logical_gate_index := -1;
+        link_id: i64;
+    };
+    Program :: @struct {
+        key: i64;  // TODO: what is this?
+        name: Str;
+        gate_index: i64;
+        assembly: ?Str = .None;
     };
     
     SwitchablePin :: @struct {
@@ -46,6 +54,7 @@ CustomId :: @struct(id: i64);
 #use("@/examples/circuit/parse.fr");
 #use("@/lib/sys/fs.fr");
 Builtin :: import("@/examples/circuit/tc/builtin.fr");
+Asm :: import("@/examples/circuit/tc/asm.fr");
 
 load_builtins :: fn(components: *List(Component), a: Alloc) void = {
     each Builtin.templates { it |
@@ -55,7 +64,6 @@ load_builtins :: fn(components: *List(Component), a: Alloc) void = {
             c.fast_eval = it.callee;
         };
         c.name = it.name;
-        c.storage_count = it.storage_count;
         c.usage = a.box_zeroed(Component.Usage);
         c.inputs_for_pure_eval = it.inputs_for_pure_eval;
         c.has_param = it.has_param;
@@ -83,12 +91,17 @@ load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64) = {
             @println("failed to read [%]", path);
             continue();
         };
-        res := load_circuit(in, a);
+        name := name_from_path(path).shallow_copy(a);
+        res := load_circuit(in, a, name);
         info := res.or(fn(msg) => {
             @eprintln("failed to load [%]: %", path, msg);
             continue();
         });
-        info.name = name_from_path(path).shallow_copy(a);
+        each info.programs { it |
+            // TODO: somehow have to look in subfolders
+            path := @tfmt("%/%.assembly", path.pop_path_segment(), it.name);
+            it.assembly = read_entire_file(a, path);
+        };
         circuits&.push(info);
     };
     
@@ -161,6 +174,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
             logical_to_circuit&.push(-1);
             continue();
         };
+        
         original_gate := c.gates[i]&;
         shape := templates[it.kind.id.zext()];
         
@@ -286,12 +300,21 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                     extra_gates += 1;
                     it = gates.index(i);  // ^ can reallocate
                 };
+                
+                if child.has_bidirectional_pins {
+                    kill&.set(i);
+                    child_logical := child.compiled || {
+                        @println("TODO: missing (%).compiled", child.name);
+                        unimplemented = true;
+                        continue();
+                    };
+                    child_logical := components.index(child_logical.id.zext());
+                    inline_for_bidirectional_gates(child_logical, gates&, wire_count&, extra_gates&, it[], a);
+                    it = gates.index(i);
+                };
             } 
             fn Device() => {
                 it.kind.id += defs.tc_components_offset.trunc();
-                if shape.name.contains("Ram") && original_gate.settings&[0] != 256 {
-                    @println("TODO: configure ram size");
-                };
             } 
         };
         
@@ -335,7 +358,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     storage_count, wire_sum, wire_depth := (0, 0, 0);
     each gates { it |
         child := components[it.kind.id.zext()]&;
-        storage_count += child.storage_count;
+        storage_count += get_storage_count(components.items(), it);
         wire_sum += child.wire_sum;
         wire_depth = max(wire_depth, child.wire_depth);
     };
@@ -352,9 +375,90 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         gate_sum = 0,  // TODO
     );
     calculate_usage(components.items(), components.len - 1, a);
-};
-#use("@/lib/collections/bit_set.fr");
+    find_links_for_lastest_component(c, components.items());
+}
 
+// TODO: report errors better
+find_links_for_lastest_component :: fn(c: *Circuit, components: []Component) void = {
+    component := components[components.len - 1]&;
+    each c.gates { it |
+        continue :: local_return;
+        shape := templates[it.kind.zext()];
+        if shape.name == "Console" {
+            if it.logical_gate_index == -1 {
+                @println("TODO: console without logical_gate_index can't update param for linked component");
+                continue();
+            };
+            custom_string := it.data;
+            linked0, s := convert_number(custom_string, 10, dec_digit);
+            if s.len == custom_string.len {
+                println("console string didn't start with a number so can't find linked component");
+                continue();
+            };
+            
+            ram := c.gates.find(fn(it) => it.link_id == linked0) || {
+                @println("didn't find console's linked id %", linked0);
+                continue();
+            };
+            if ram.logical_gate_index == -1 {
+                @println("TODO: console's linked ram doesn't have logical_gate_index");
+                continue();
+            };
+            if get_storage_count(components, component.gates[ram.logical_gate_index]&) == 0 {
+                @println("TODO: console's linked component doesn't have storage");
+                continue()
+            };
+            instance := component.instance_offset_by_gate[ram.logical_gate_index];
+            
+            logical_gate := component.gates[it.logical_gate_index]&;
+            T :: Builtin.Settings.Console;
+            param: T = (repr = logical_gate.param.bitcast());
+            param&.set(.linked_ram_instance, instance);
+            logical_gate.param = param.repr.bitcast();  // :PatchConsoleLink
+        };
+    };
+};
+
+// TODO: in the child: don't try to schedual gates and don't only treat bidirectional pins as output? 
+// TODO: instead of inlining, compile multiple versions for different sets of outputs that need different sets of inputs? that would be nicer to show in the ui. 
+inline_for_bidirectional_gates :: fn(child_logical: *Component, gates: *List(Component.Gate), wire_count: *i64, extra_gates: *i64, it: Component.Gate, a: Alloc) void = {
+    child_gates := child_logical.gates.slice(1, child_logical.gates.len - 1);
+    parent_out, parent_in := (it.outputs, it.inputs);
+    child_out, child_in := (child_logical.gates[child_logical.gates.len - 1].inputs, child_logical.gates[0].outputs);
+    // TODO: maybe instead of mapping, insert copies for in/out and just translate all wire values with an offset. 
+    map: HashMap(WireId, WireId) = init(temp());
+    
+    // TODO: this doesn't work if same child wire is both input and output
+    range(0, parent_out.len) { i |
+        prev := map&.insert(child_out[i], parent_out[i]);
+        @if(prev.is_some()) @println("TODO: wire used twice while inlining for bidirectional pin");
+    };
+    range(0, parent_in.len) { i |
+        prev := map&.insert(child_in[i], parent_in[i]);
+        @if(prev.is_some()) @println("TODO: wire used twice while inlining for bidirectional pin")
+    };
+    
+    fix_wire :: fn(child_wire: WireId) WireId => {
+        map&.get_or_insert(child_wire, => {
+            new: WireId = (id = wire_count[].trunc());
+            wire_count[] += 1;
+            new
+        })[]
+    };
+    each child_gates { gate |
+        out, in := (gate.outputs.shallow_copy(a), gate.inputs.shallow_copy(a));
+        each out { it |
+            it[] = fix_wire(it[]);
+        };
+        each in { it |
+            it[] = fix_wire(it[]);
+        };
+        gates.push(kind = gate.kind, outputs = out, inputs = in, param = gate.param);
+        extra_gates[] += 1;
+    };
+}
+
+#use("@/lib/collections/bit_set.fr");
 #use("@/examples/circuit/eval.fr");
 fn push_inputs_outputs(gates: *List(Component.Gate), out: []WireId, in: []WireId) void = {
     I, O := (
@@ -447,8 +551,8 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
     // confusing. see doing_pre_read in compile_gate()
     n := 0;
     range_rev(0, order.len) { i |
-        kind := components[gates[order[i]].kind.id.zext()]&;
-        if kind.storage_count != 0 {
+        it := gates[order[i]]&;
+        if get_storage_count(components, it) != 0 {
             x := order&.ordered_remove(i).unwrap();
             order&.push(x);
             n += 1;
@@ -556,11 +660,27 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
         };
         
         out, in := (w.slice(0, out_arity), w.rest(out_arity));
+        
+        param := 0;
+        if shape.has_param {
+            s0, s1 := (it.settings&[0], it.settings&[1]);
+            param = s0;
+            #use(Builtin.Settings);
+            if shape.name.starts_with("Ram") || shape.name.starts_with("Program") {
+                s: Ram = construct(storage_size = s0, word_size_index = s1);
+                param = s.repr.bitcast();
+            };
+            if shape.name == "Console" {
+                s: Console = construct(colour = s0, font = s1, linked_ram_instance = 0/*:PatchConsoleLink*/);
+                param = s.repr.bitcast();
+            }
+        };
+        
         logic_gates&.push(
             outputs = out,
             inputs = in,
             kind = (id = it.kind.zext()),
-            param = @if(shape.has_param, it.settings&[0], 0),
+            param = param,
         );
         
         // compiler requires all pins be connected to a wire.
@@ -696,7 +816,7 @@ collect_schematics :: fn(tc_save_root: Str, a: Alloc) List(Str) = {
 // https://github.com/Stuffe/save_monger/blob/22fa398d95c3d3a0b5e88a80e9daee613cab1823/versions/v6.nim CC0
 // for now i want to use save files from non-save_breaker 0.1059 beta, 
 // the lastest version of that repo has the old vN files as though they would still be correct but they're super not because they changed all the component numbers on the commit for v2.1.77 
-load_circuit :: fn(in: Str, arena: Alloc) Result(Circuit, Str) = {
+load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
     a := arena;  // want an arena because leak on error
     @if(in[0] != 6) return(Err = "only tc circuit.data version 6 is supported");
     in = in.rest(1);
@@ -743,7 +863,8 @@ load_circuit :: fn(in: Str, arena: Alloc) Result(Circuit, Str) = {
     
     gate_count := eat(i64);
     gates&.reserve(gate_count);
-    range(0, gate_count) { _ |
+    programs := Circuit.Program.list(a);
+    range(0, gate_count) { gate_index |
         kind := eat(u16);
         pos := eat_point();
         rotation := eat(u8);
@@ -763,14 +884,19 @@ load_circuit :: fn(in: Str, arena: Alloc) Result(Circuit, Str) = {
         if kind == 94 || kind == 68 || kind == 64 {  // Program
             n := eat(u16);
             range(0, n.zext()) { _ |
-                key := eat(i64);
-                program := eatN(u16, u8);
-                // TODO: do something with these
+                programs&.push(
+                    key = eat(i64), 
+                    name = eatN(u16, u8).shallow_copy(a), 
+                    gate_index = gate_index,
+                );
             };
+            
+            if s1 == 0 {  // i guess it gets a default if you don't set it manually in the game?
+                s1 = 256;  
+            }
         };
         if kind >= templates.len() {
-            @println("kind OOB %", kind);
-            kind = 0;
+            return(Err = @tfmt("gate[%] has OOB kind=%", gate_index, kind));
         };
         gates&.push(
             rotation = rotation,
@@ -780,6 +906,7 @@ load_circuit :: fn(in: Str, arena: Alloc) Result(Circuit, Str) = {
             settings = (s1, s2),
             data = custom_string.shallow_copy(a),
             mystery_spice_minus_fifteen_for_custom_pins = custom_pos, 
+            link_id = id,
         );
         
         min_pos = min(min_pos, pos);
@@ -834,6 +961,8 @@ load_circuit :: fn(in: Str, arena: Alloc) Result(Circuit, Str) = {
         id = id,
         min = min_pos, max = max_pos,
         dependencies = dependencies.shallow_copy(a),
+        name = name,
+        programs = programs.items(),
     ))
 }
 

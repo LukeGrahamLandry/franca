@@ -1,4 +1,20 @@
 
+## (Jun 15) circuit 
+
+- did the inlining version of bidirectional
+- don't have fixed storage_count by component type, compute it based on settings for Ram/Program. 
+- little mistakes
+  - had mux pins wrong way.
+  - fun fact: i appear to have fat fingered and moved the FortuneCounter up one square in the game while i was looking at it
+    ... so that was a source of confusion for a bit. 
+  - bunch of math input pins flipped
+- now works well enough that i have to hook up the visual io components to tell if it actually works
+- where does it store linked components? need it for the console. 
+  the numbers in custom_string change when i link new things so must be those somehow. 
+  maybe the pairs are the custom_id?
+- draw the ascii part of the console at least 
+- tetris gets to the loading screen now
+
 ## (Jun 14) circuit 
 
 - can't deal with the pin positions mixed in with everything else. put them in jail. 

@@ -77,6 +77,7 @@ for now what I have already is enough to draw some pretty pictures.
 - remove byte array clutter. load font data from readable string (parsed at comptime). 
 - removed the 8 font limit
 - support non-square fonts so you can provide your own modern (monospace) fonts and use them with the same api
+- cull offscreen characters early
 
 ### gl
 

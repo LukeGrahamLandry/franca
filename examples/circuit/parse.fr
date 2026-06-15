@@ -18,7 +18,7 @@ Component :: @struct {
     name: Str;
     gates: []Gate;
     wire_count: i64;
-    storage_count: i64;
+    storage_count: i64; // use get_storage_count instead if it could be a tc/builtin
     wire_depth: i64;  // recursive max wire_count of children
     wire_sum: i64;    // like ^ but don't reset scratch for each child so can use it for visualization
     gate_sum := 0;
@@ -293,9 +293,9 @@ Tc :: import("@/examples/circuit/tc/load.fr");
 TcBuiltins :: Tc.Builtin.impl;
 
 calculate_usage :: fn(components: []Component, off: i64, a: Alloc) void = {
-    enumerate components { i, c |
+    range(off, components.len) { i |
         continue :: local_return;
-        @if(i < off) continue();
+        c := components.index(i);
         c.usage = a.box_zeroed(Component.Usage);
         if c.gates.len == 0 {
             @if(i < defs.tc_components_offset)
@@ -312,8 +312,9 @@ calculate_usage :: fn(components: []Component, off: i64, a: Alloc) void = {
         instance_offset_by_gate := a.alloc_zeroed(i64, c.gates.len);
         enumerate c.gates { i, it |
             instance_offset_by_gate[i] = instance;
-            instance += components[it.kind.id.zext()].storage_count;
+            instance += get_storage_count(components, it);
         };
+        @debug_assert_eq(instance, c.storage_count);
 
         wires_used: DynamicBitSet = empty(a);
         each c.gates { it |
@@ -369,6 +370,21 @@ calculate_usage :: fn(components: []Component, off: i64, a: Alloc) void = {
     };
 }
 
+fn get_storage_count(components: []Component, it: *Component.Gate) i64 = {
+    tc := defs.tc_components_offset; 
+    kind: i64 = it.kind.id.zext();
+    if !FEAT_TC_CIRCUIT || kind < tc || kind >= tc + Tc.Builtin.templates.len() {
+        return components[kind].storage_count;
+    };
+    shape := Tc.Builtin.templates[kind - tc]&;
+    @debug_assert(!shape.body&.is(.Def));
+    if shape.compute_storage { compute_storage |
+        n := compute_storage(param = it.param).ualign_to(64).udiv(64);
+        return n;
+    };
+    0
+}
+
 CompileGates :: @struct {
     components: []Component;
     c: *Component;
@@ -388,18 +404,19 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
     out := self.out;
     it := self.c.gates[gate_i]&;
     child := self.components[it.kind.id.zext()]&;
+    child_storage_count := get_storage_count(self.components, it);
     
     if !self.c.gates_needed_for_pure_eval&.get(gate_i) && self.doing_pre_read && !self.doing_pre_read_local {
-        if child.storage_count != 0 {
+        if child_storage_count != 0 {
             // can test that this matters by adding a random memory1 whose output isn't used somewhere in another ramN component. 
-            @fmt(out, "world.instance += %;\n", child.storage_count);
+            @fmt(out, "world.instance += %;\n", child_storage_count);
         };
         return();
     };
 
     // TODO: for things with storage that were already pre_read, also compile a version that only does the writes and propagates not needing outputs
     discard_outputs := !self.doing_pre_read && it.outputs.len > 0 && self.wires_evaluated&.get(it.outputs[0].id.zext());
-    if discard_outputs && child.storage_count == 0 && !child.name.starts_with("switch") {
+    if discard_outputs && child_storage_count == 0 && !child.name.starts_with("switch") {
         return();
     };
     
@@ -421,12 +438,13 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
                 || @panic("missing def for w%", wire.id);
             it := self.c.gates[gate_i]&;
             child := self.components[it.kind.id.zext()]&;
-            if child.storage_count == 0 {
+            child_storage_count := get_storage_count(self.components, it);
+            if child_storage_count == 0 {
                 @println("TODO: use-before-def without memory w% in (%)", wire.id, self.c.name);
                 self.failed = true;
                 return();
             };
-            @debug_assert(child.storage_count != 0, "use-before-def without memory");
+            @debug_assert(child_storage_count != 0, "use-before-def without memory");
             changed := false;
             
             for child.inputs_for_pure_eval { i |
@@ -491,7 +509,7 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
         @case("switch8") => @if(result_used) @fmt(out, "if w% != 0 {| w% = w%; };\n", it.inputs[1].id, it.outputs[0].id, it.inputs[0].id);
         @case("delay") => @if(result_used) @fmt(out, "w% = eval_delay_gate(world, w%, %);\n", it.outputs[0].id, it.inputs[0].id, self.doing_pre_read);
         @default => {
-            if child.storage_count == 0 && child.gate_sum < 30 {
+            if child_storage_count == 0 && child.gate_sum < 30 {
                 @fmt(out, "@inline ");
             };
             @fmt(out, "%(world, o&, i&", mangle(self.components, it.kind.id.zext()));
@@ -548,7 +566,6 @@ compile_gates_source :: fn(components: []Component, a: Alloc) Str = {
     out := @ref u8.list(components.len * 2000, a);
     @fmt(out, "{\n#use(\"@/examples/circuit/eval.fr\");\n#use(\"@/examples/circuit/parse.fr\");\n");
     
-    @fmt(out, "Z :: zeroed(WireValue);\n");
     tc_components_offset := defs.tc_components_offset; 
     enumerate components { i, c |
         continue :: local_return;
@@ -629,7 +646,7 @@ fn declare_wire_vars(self: *CompileGates) void = {
     each c.gates { gate |
         for gate.outputs { id |
             if !seen&.get_set(id.id.zext()) && self.c.wires_used&.get(id.id.zext()) {
-                @fmt(out, "w% := Z;", id.id);
+                @fmt(out, "w% := 0;", id.id);
             };
         }
     };
