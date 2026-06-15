@@ -32,6 +32,7 @@ State :: @struct {
     arch_is_leg: bool;
     tick: i64;
     win_tick: ?i64;
+    show_wire_ref_lines: bool;
     
     circuit: []Tc.Circuit;
     circuit_index: i64;
@@ -134,7 +135,24 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     wires: []WireValue = empty();
     out := @ref u8.list(2, temp());
     colour: Array(u32, 2) = (pack_rgba(150, 150, 255, 255), pack_rgba(255, 0, 150, 255));
-    show :: fn(id: WireId) => {
+    
+    all_wire_positions: []RawList(Vec2) = empty();
+    hovered_wire_index: ?Ty(WireId, i64) = .None;
+    
+    show :: fn(id: WireId, force_hover: bool) => {
+        if state.show_wire_ref_lines {
+            start := sdtx.pos;
+            end := start + vec2(6, 1);
+            p := world_to_text_pos(p);
+            hover := p.x > start.x && p.x < end.x && p.y > start.y && p.y < end.y;
+            positions := all_wire_positions[id.id.zext()]&;
+            // collecting all these is a bit unreasonably :SLOW but here we are. it's only when holding shift so maybe it's fine 
+            positions.push(sdtx.pos, temp());
+            if hovered_wire_index.is_none() && (hover || force_hover) {
+                hovered_wire_index = (Some = (id, positions.len - 1));
+            };
+        };
+    
         value: u8 = wires[id.id.zext()].trunc();
         sdtx.color = colour&[int(value != 0)];
         sdtx.put(@tfmt("w%", id.id));
@@ -161,6 +179,9 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     pos := vec2(0, 0);
     wires = world.scratch.items().subslice(wire_offset, c.wire_count);
+    if state.show_wire_ref_lines {
+        all_wire_positions = temp().alloc_zeroed(RawList(Vec2), wires.len);
+    };
     
     sdtx.put(c.name);
     if c.gates.len == 0 {
@@ -183,7 +204,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sdtx.pos = world_to_text_pos(pos);
         
         base_colour := @if(hover, pack_rgba(0, 255, 0, 255), pack_rgba(255, 255, 0, 255));
-        for(it.outputs, show);
+        for(it.outputs, fn(it) => show(it, false));
         sdtx.color = base_colour;
         child := world[it.kind]&;
         name := child.name;
@@ -193,7 +214,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             sdtx.color = colour&[int(it.param != 0)];
             sdtx.put(@tfmt("% ", it.param));
         };
-        for(it.inputs, show);
+        for(it.inputs, fn(it) => show(it, false));
         sdtx.color = base_colour;
         sdtx.put(");");
         
@@ -334,11 +355,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     // especially the hover stuff is just useful because i have to transcribe the pin positions before i can actually simulate it. 
     sgl := state.draw&;
     
-    have_circuit := false;
-    @if(state.tree.len > 0)
-    @if(FEAT_TC_CIRCUIT) if state.tree[state.tree.len - 1].diagram_circuit { circuit_i |
-        have_circuit = true;
-        circuit := state.circuit[circuit_i]&;
+    need_draw := false;
         sgl.defaults();
         sgl.viewport(0, 0, app_w, app_h, true);
         sgl.begin(.QUADS);
@@ -346,6 +363,10 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sgl.translate(state.pos.x, state.pos.y, 0.0);
         sgl.scale(state.scale * screen_scale.x, state.scale * screen_scale.y, 1.0);
 
+    @if(state.tree.len > 0)
+    @if(FEAT_TC_CIRCUIT) if state.tree[state.tree.len - 1].diagram_circuit { circuit_i |
+        need_draw = true;
+        circuit := state.circuit[circuit_i]&;
         off := vec2(0);
         {
             hi, lo := (circuit.max + vec2(1), circuit.min - vec2(1));
@@ -438,14 +459,16 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                     sgl.line(a, b, W/2.5);
                 };
                 hover := p.y < b.y + W/2 && p.y > b.y - W/2 && p.x > b.x - W/2 && p.x < b.x + W/2;
+                if hovered_wire_index.is_some() && hovered_wire_index.Some._0.id == wire.logical.id && (i == 0 || i == wire.path.len - 1) {
+                    hover = true;
+                };
                 if hover {
                     sgl.color = pack_rgba(200, 50, 50, 255);
                     sdtx.pos = world_to_text_pos(b) + vec2(0, wire_hover_count);
                     sdtx.color = pack_rgba(255, 255, 255, 255);
                     sdtx.put(@tfmt("% (%, %) ", wire_i, it.pos.x, it.pos.y));
-                    @if(wires.len > 0) show(wire.logical);
+                    @if(wire.logical.id.zext() < wires.len) show(wire.logical, true);
                     wire_hover_count += 1;
-                    
                 };
                 sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
             };
@@ -483,16 +506,28 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             };
             name
         }
-        
-        sgl.end();
     };
+        
+        
+    if hovered_wire_index { wire, position_index |
+        need_draw = true;
+        positions := all_wire_positions[wire.id.zext()];
+        a := text_to_world_pos(positions[position_index]);
+        for positions { b |
+            b := text_to_world_pos(b);
+            sgl.color = pack_rgba(255, 255, 255, 50);
+            sgl.line(a, b, 0.005);
+        };
+    };
+    sgl.end();
+    
     
     state.clicked = false;
     Easy'glue_begin_pass(sapp, sg, (colors = ((
         load_action = .CLEAR,
         clear_value = (r = 0.15, g = 0.15, b = 0.15, a = 1),
     ), ..)));
-    @if(have_circuit) sgl.draw_layer(sg, 0);
+    @if(need_draw) sgl.draw_layer(sg, 0);
     sdtx.draw_layer(0);
     sg.end_pass();
     sg.commit();
@@ -605,6 +640,13 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                     state.tree&.push(component = (Some = root));
                     state.reset();
                 }
+                fn LEFT_SHIFT() => { state.show_wire_ref_lines = true; }
+                @default => return();
+            };
+        }
+        fn KEY_UP() => {
+            @match(event.key_code) {
+                fn LEFT_SHIFT() => { state.show_wire_ref_lines = false; }
                 @default => return();
             };
         }

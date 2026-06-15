@@ -1,4 +1,17 @@
 
+## (Jun 14) circuit 
+
+- can't deal with the pin positions mixed in with everything else. put them in jail. 
+- dumb version of goto definition by just drawing lines when hover a wire
+- progress towards tetris. got to the point of needing to deal with bidirectional pins. 
+  
+i think seperate from them being either input or output, them being in a Custom at all (even if unused)
+means the outputs each need to have input dependencies analyzed seperately and compile the thing into multiple versions so you can get 
+some outputs before all inputs are ready and avoid dying on a circular dependency. 
+i already have code for checking which inputs affect all outputs (for pre_read of memory) 
+and checked doing that for each output seperately fixes the cycle between FortuneStack and FortuneArithmetic so i think im right. 
+would get both for free if manually inlined into the caller circuit but that's a bit annoying because it will make the visualization more confusing. 
+
 ## (Jun 13) circuit
 
 - include franca compiler so can load new circuits at runtime. great success. 

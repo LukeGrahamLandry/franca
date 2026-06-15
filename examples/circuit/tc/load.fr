@@ -11,6 +11,7 @@ Circuit :: @struct {
     dependencies: []CustomId;
     name: Str = "";
     arity: Ty(i64, i64) = (-1, -1);
+    has_bidirectional_pins := false;
     
     compiled: ?ComponentId = .None;
     // used when referenced as a Custom Gate in another Circuit. 
@@ -87,8 +88,6 @@ load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64) = {
             @eprintln("failed to load [%]: %", path, msg);
             continue();
         });
-        // TODO: fix if its not a valid identifier because it's used in function name when compiled. (important to not let you get code injection that way)
-        //       important not to let a circuit be named "x :: evil(); y"
         info.name = name_from_path(path).shallow_copy(a);
         circuits&.push(info);
     };
@@ -164,6 +163,10 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         };
         original_gate := c.gates[i]&;
         shape := templates[it.kind.id.zext()];
+        
+        if shape.name.starts_with("Bidirectional") {
+            c.has_bidirectional_pins = true;
+        };
         
         if shape.name.starts_with("Probe") {
             // TODO
@@ -286,6 +289,9 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
             } 
             fn Device() => {
                 it.kind.id += defs.tc_components_offset.trunc();
+                if shape.name.contains("Ram") && original_gate.settings&[0] != 256 {
+                    @println("TODO: configure ram size");
+                };
             } 
         };
         
@@ -300,6 +306,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     };  
     logical_to_circuit&.push_repeated(extra_gates, -1);
     
+    c.arity = (out.len, in.len);
     if unimplemented { 
         gates.len = 0;
         logical_to_circuit.len = 0;
@@ -310,7 +317,6 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     
     c.pins = custom_pins.items();
     c.switches = switches.items();
-    c.arity = (out.len, in.len);
     push_inputs_outputs(gates&, out.items(), in.items());
     logical_to_circuit&.insert(0, -1);  // in
     logical_to_circuit&.push(-1);       // out
@@ -333,11 +339,12 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         wire_sum += child.wire_sum;
         wire_depth = max(wire_depth, child.wire_depth);
     };
-    
+
+    name := safe_name(c.name, a);
     c.compiled = (Some = (id = components.len.trunc()));
     components.push(
         gates = gates.items(),
-        name = c.name,
+        name = name,
         wire_count = wire_count,
         storage_count = storage_count,
         wire_depth = wire_depth,
@@ -386,6 +393,7 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
                 kind := components[it.kind.id.zext()]&;
                 ok := true;
                 for kind.inputs_for_pure_eval { i |
+                    @assert(i < it.inputs.len, "% arity or inputs_for_pure_eval error", kind.name);
                     ok = ok && ready&.get(it.inputs[i].id.zext());
                 };
                 
@@ -531,10 +539,14 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
         
         no_pins := true;
         for_pins(shape, it, circuits) { i, dx, dy |
+            continue :: local_return;
             no_pins = false;
             pos := it.pos + vec2(dx.float().cast(), dy.float().cast());
             if wire_positions&.get(pos_key(pos)) { g_wire |
                 l_wire := c.wires[g_wire.id.zext()].logical;
+                if i >= w.len {
+                    continue();
+                };
                 w[i] = l_wire;
             };
         };
@@ -552,7 +564,6 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
         );
         
         // compiler requires all pins be connected to a wire.
-        // TODO: update c.logical so can show it in the ui?
         enumerate w { i, it |
             @if(it.id == 0xFFFFFFFF) 
             if i < out_arity {  // output (discarded)
@@ -631,6 +642,25 @@ fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, 
         i += 1;
     };
 }
+
+// it's used in function name when compiled so important not to let a circuit be named "x :: evil(); y"
+safe_name :: fn(name: Str, a: Alloc) Str = {
+    // (first char isn't special because mangle() has a prefix) TODO: could do that here as well and store a sepreate display name and code name. 
+    valid_in_ident :: fn(c: u8) bool = c.is_ascii_alpha() || c.is_ascii_digit() || c == "_".ascii();
+    if !name.contains(fn(it) => !it[].valid_in_ident()) {
+        return name;
+    };
+    mangled_name := u8.list(name.len, a);
+    for name { c |
+        if valid_in_ident(c) {
+            mangled_name&.push(c);
+        } else {
+            // this is a bit dumb because it could technically collide with another name but that would at least be a compile error not something insane. 
+            @fmt(mangled_name&, "%", fmt_hex(c));
+        };
+    };
+    mangled_name.items()
+};
 
 name_from_path :: fn(path: Str) Str = {
     name := path;
@@ -737,6 +767,10 @@ load_circuit :: fn(in: Str, arena: Alloc) Result(Circuit, Str) = {
                 program := eatN(u16, u8);
                 // TODO: do something with these
             };
+        };
+        if kind >= templates.len() {
+            @println("kind OOB %", kind);
+            kind = 0;
         };
         gates&.push(
             rotation = rotation,
