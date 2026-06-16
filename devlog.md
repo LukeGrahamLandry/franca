@@ -4,6 +4,14 @@
 - i fear im going to need to actually track unpoweredness for each wire when you use switches
   but as a starting point, statically record which ram pins got an automatic zero instead of a real wire. 
   YAYYYYYY that also fixes tetris!!
+- added keyboard input. seems the values for non-character-mode are the physical arrangement of keys on the keyboard. should test how my events stuff copes with changing keyboard layout at some point. 
+- trying "QOI Image viewer"
+  - added file input. some trial and error comparing its outputs to the game to get the indexing right. 
+  - have to deal with collisions where a wire becomes two output wires when inlining 
+- im suspicious that my pre_read stuff is broken. i can see values on the wires that don't make sense and
+  aren't what it gets if i print them inside the templates. so must be that they're changing on the second pass? 
+
+TODO: (tetris) rotate doesn't work on red and i think whatever they use for random numbers doesn't work. its always red or light blue. 
 
 ## (Jun 15) circuit 
 

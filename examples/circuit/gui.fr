@@ -9,6 +9,7 @@ r: restart program.
 c: reset scale/pos.
 [/]: slower/faster eval (shift:50, cmd:1000). 
 n: change architecture (overture, leg).
+k+shift+cmd: toggle keyboard device capture.
 """;
 
 State :: @struct {
@@ -34,6 +35,12 @@ State :: @struct {
     win_tick: ?i64;
     show_wire_ref_lines: bool;
     do_debug_action_this_frame: bool;
+    pan_keys_pressed: i64;
+    key_buffer: RawDeque(@struct(key: Sapp.Keycode, up: bool));
+    keyboard_device_focused: bool;
+    keyboard_needs_update: bool;
+    gfx_error_last_frame: bool;
+    keyboard_data: ?*Tc.Builtin.KeyboardData;
     
     circuit: []Tc.Circuit;
     circuit_index: i64;
@@ -51,20 +58,22 @@ CircuitNode :: @struct {
 
 has_dis :: @const_slice("overture", "leg", "OVERTURE", "LEG");
 
-// TODO: report if one of the vertex buffers was full last frame 
 // :UGLY this whole thing needs to be rewritten. 
 // for now i just care about having enough visuals to see what's going on while debugging the evaluator. 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    state.check_movement();
     @if(!state.auto_eval)
     @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
     world := state.world&;
     
     have_logic := state.tree.len > 0 && state.tree[0].component.is_some();
+    show_the_maze := !state.is_new_overture;
     @if(have_logic)
     if state.want_eval || state.auto_eval {
     count := @if(state.auto_eval, state.ticks_per_eval, 1);
     root_component := state.tree[0].component.unwrap();
     range(0, count) { i |
+        state.service_keyboard_device();
         state.tick += 1;
         input := state.maze&.input();
         OUT: ?u8 = .None;
@@ -112,6 +121,14 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     sdtx := state.text.default_context&;
     
+    if state.gfx_error_last_frame {
+        sdtx.desc.char_height = 8;
+        sdtx.desc.char_width = sdtx.desc.char_height / 2;
+        sdtx.canvas(sapp, 1);
+        sdtx.color = pack_rgba(255, 255, 255, 255);
+        sdtx.put("TOO MANY VERTICES");
+    };
+    
     p := (state.mouse_pos - state.pos) / state.scale;
     p /= screen_scale;
     
@@ -136,7 +153,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     sdtx.color = pack_rgba(0, 0, 0, 255);
     sdtx.pos = world_to_text_pos(vec2(0, height*3));
-    sdtx.put(@tfmt("(paused=%, tick_rate=%, tick=%) ", !state.auto_eval, state.ticks_per_eval, state.tick));
+    sdtx.put(@tfmt("(paused=%, tick_rate=%, tick=%, keyboard=%) ", !state.auto_eval, state.ticks_per_eval, state.tick, state.keyboard_device_focused));
     
     sdtx.pos = vec2(0);
     sdtx.origin = world_to_text_pos(vec2(-width * 90, height * 10));
@@ -183,11 +200,17 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         out.clear();
         sdtx.put(" ");
     };
+    
     if have_logic {
+        break :: local_return;
     root_component := state.tree[0].component.unwrap();
     c := world[root_component]&;
+    
     for state.tree { it |
         if it.logical_gate { it |
+            if c.gates.len == 2 {  // HACK for load unimplemented
+                break();
+            };
         wire_offset += c.wire_count;
         range(0, it) { i |
             child := state.world&[c.gates[i].kind]&;
@@ -197,6 +220,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         c = state.world&[c.gates[it].kind]&;
         };
     };
+    
     pos := vec2(0, 0);
     wires = world.scratch.items().subslice(wire_offset, c.wire_count);
     if state.show_wire_ref_lines {
@@ -332,7 +356,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     // TODO: let the component declare that it uses this disassembler
     pos := vec2(-80 * width, 2*height);
-    @if(has_dis.contains(c.name))
+    show_the_maze = has_dis.contains(c.name);
+    @if(show_the_maze)
     if state.arch_is_leg {
         dis_iter(u32.reinterpret_bytes(memory), 4, AsmLeg);
     } else {
@@ -360,6 +385,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     }
     };
     
+    if show_the_maze {
     maze_text := u8.list(temp());
     state.maze&.render(maze_text&);
     sdtx.color = pack_rgba(@if(state.maze.win, 255, 50), 200, 150, 255);
@@ -371,6 +397,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sdtx.pos = vec2(0, -1);
         sdtx.put(@tfmt("solved in % ticks", win_tick));
     };
+    };
+    
     sdtx.origin = vec2(0);
     
     // might get rid of this rendering but for now its all i can do with the tc circuits i load.
@@ -540,7 +568,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             sgl.line(a, b, 0.005);
         };
     };
-    
+
     if have_logic && FEAT_TC_CIRCUIT {
         // TODO: allow console in custom component too (use last element in the tree and offset by its base instance)
         c := world[state.tree[0].component.unwrap()]&;
@@ -568,6 +596,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                 
                 @switch(param.get(.ram_word_size_index)) {
                     @case(0) => {
+                        // TODO: if colour mode am i supposed to be reading 8 bytes at a time? 
                         sdtx.color = pack_rgba(255, 255, 255, 255);
                         data := world.storage.subslice(param.get(.linked_ram_instance) + offset, 80*24/8).interpret_as_bytes();
                         range(0, 24) { y |
@@ -588,7 +617,10 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                         range(0, 24) { y |
                             range(0, 80) { x |
                                 value := data[y*80 + x];
-                                // TODO: only if in colour mode
+                                if param.get(.colour) == 0 {
+                                    value = value.bit_and(0xFF).bit_or(0x00_000000_FFFFFF_00);
+                                };
+                                
                                 sdtx.color = pack_rgba(value.shift_right_logical(48).bit_and(0xFF), value.shift_right_logical(40).bit_and(0xFF), value.shift_right_logical(32).bit_and(0xFF), 255);
                                 my_solid_char := "\x8F".index(0)[];
                                 sdtx.put(my_solid_char);
@@ -625,6 +657,10 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     sgl.end();
     
+    gfx_error := sdtx.vertices.len == sdtx.vertices.cap || sgl.error.any;
+    state.dirty = state.dirty || gfx_error != state.gfx_error_last_frame;
+    state.gfx_error_last_frame = gfx_error;
+    
     state.clicked = false;
     Easy'glue_begin_pass(sapp, sg, (colors = ((
         load_action = .CLEAR,
@@ -638,12 +674,14 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.fr = .None;
+    state.keyboard_data = .None;
     sapp.desc.enable_dragndrop = true;
     state.sg = sg; state.sapp = sapp;
     a := general_allocator();
     state.text&.setup(sg = sg, allocator = a, fonts = @slice(Sdtx.font.cpc), context = (char_buf_size = 10000));
     state.draw&.setup(allocator = general_allocator(), sg = sg, max_vertices = 100_000);
     
+    state.key_buffer = init(a, 64);
     init(state.world&, a, true);  // TODO: leaked when loading new circuit
     state.tree = list(a);
     state.tree&.push(
@@ -719,11 +757,72 @@ fn reset(state: *State) void = {
     }
 }
 
+fn service_keyboard_device(state: *State) void = {
+    data := state.keyboard_data || return();
+    buf := state.key_buffer&;
+    @if(buf.len == 0 && !state.keyboard_needs_update) return();
+    if state.keyboard_needs_update {
+        data.value = 0;
+        data.up = false;
+        state.keyboard_needs_update = false;
+        state.dirty = true;
+    };
+    if buf.len > 0 && data.want_next {
+        key := buf[0].key;
+        key := (key_order.index_of(fn(it) => it[] == key) || -13) + 13;
+        
+        data.value = key.trunc();
+        data.up = buf[0].up;
+        data.want_next = false;
+        _ := buf.pop_front();
+        state.dirty = true;
+        state.keyboard_needs_update = true;
+    };
+    data.have_next = buf.len > 0;
+}
+
+// TODO: allow multiple?
+fn find_keyboard(state: *State) void = {
+    state.keyboard_data = .None;
+    @if(state.tree.len == 0) return();
+    root := state.tree[0].component || return();
+    world := state.world&;
+    c := world[root]&;
+    gate_i := c.gates.index_of(fn(it) => world[it.kind].name == "Keyboard")
+        || return();
+    instance := c.instance_offset_by_gate[gate_i];
+    data := bit_cast_unchecked(*WireValue, *Tc.Builtin.KeyboardData, world.storage.index(instance));
+    state.keyboard_data = (Some = data);
+}
+
+#use("@/lib/collections/deque.fr");
+
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     screen := vec2(sapp.framebuffer_width.float().cast(), sapp.framebuffer_height.float().cast()) 
         / 2;
     mouse := vec2(event.mouse_x, -event.mouse_y) / screen + vec2(-1.0, 1.0);
     delta_mouse := vec2(event.mouse_dx, -event.mouse_dy) / screen;
+    
+    if !event.key_repeat && @is(event.type, .KEY_DOWN, .KEY_UP) {
+        if event.key_code == .K && event.type == .KEY_DOWN && event.modifiers.get(.shift) != 0  && event.modifiers.get(.super) != 0 {
+            state.keyboard_device_focused = !state.keyboard_device_focused;
+            state.dirty = true;
+            return();
+        }
+    
+        buf := state.key_buffer&;
+        if state.keyboard_device_focused && buf.len() < buf.capacity() {
+            buf.push_back((key = event.key_code, up = event.type == .KEY_UP), panicking_allocator);
+            state.dirty = state.dirty || buf.len < 2;
+            return();
+        };
+    
+        if pan_keys.index_of(fn(it) => it[] == event.key_code) { i |
+            s := state.pan_keys_pressed&;
+            s[] = s[].bit_xor(1.shift_left(i));
+        };
+    };
+    
     @match(event.type) {
         fn RESIZED() => ();
         fn MOUSE_MOVE() => {
@@ -793,6 +892,19 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     state.dirty = true;
 }
 
+pan_directions :: @const_slice(vec2(0, -1), vec2(1, 0), vec2(0, 1), vec2(-1, 0));
+pan_keys :: @const_slice(Sapp.Keycode.W, .A, .S, .D);
+fn check_movement(state: *State) void = if state.pan_keys_pressed != 0 {
+    state.dirty = true;
+    dir := vec2(0);
+    range(0, 4) { i |
+        if state.pan_keys_pressed.bit_and(1.shift_left(i)) != 0 {
+            dir += pan_directions[i];
+        };
+    };
+    state.pos += dir.normalize() * 0.05;
+};
+
 // TODO: if loading fails, reset state.world back to the constant ones because it points into the arena
 fn load_path(state: *State, path: Str) void = {
     @if(!FEAT_TC_CIRCUIT) return(eprintln("FEAT_TC_CIRCUIT is disabled"));
@@ -804,7 +916,7 @@ fn load_path(state: *State, path: Str) void = {
     a := state.circuit_arena&.borrow();
     
     // if it uses custom components, need to load everything to find them
-    circuits, root_index := Tc'load_all_circuits(path, a);
+    circuits, root_index, tc_file_loader_device := Tc'load_all_circuits(path, a);
     state.circuit = circuits;
     if circuits.len == 0 || root_index == -1 {
         state.circuit = empty();
@@ -842,6 +954,7 @@ fn load_path(state: *State, path: Str) void = {
         _ := compile_gates_source(components.items(), a);
     });
     init(state.world&, a, true, components.items());
+    state.world.tc_file_loader_device = tc_file_loader_device;
     state.tree&.clear();
    
     c := circuits[root_index]&; 
@@ -852,6 +965,7 @@ fn load_path(state: *State, path: Str) void = {
     state.arch_is_leg = c.name == "LEG";
     state.is_new_overture = true;
     state.reset();
+    state.find_keyboard();
     
     // TODO: misleading because there can still be uncompiled jit-shims
     @eprintln("loaded in %ms", timestamp() - start);
@@ -905,3 +1019,10 @@ main :: fn() void = Easy'start(State);
 #use("@/examples/circuit/parse.fr");
 //Scenario :: Main.scenario;
 Scenario :: import("@/examples/circuit/scenario.fr");
+
+key_order :: @const_slice(Sapp.Keycode.GRAVE_ACCENT, ._1, ._2, ._3, ._4, ._5, ._6, ._7, ._8, ._9, ._0, .MINUS, .EQUAL, .DELETE, 
+    .TAB, .Q, .W, .E, .R, .T, .Y, .U, .I, .O, .P, .LEFT_BRACKET, .RIGHT_BRACKET, .BACKSLASH,
+    .CAPS_LOCK, .A, .S, .D, .F, .G, .H, .J, .K, .L, .SEMICOLON, .APOSTROPHE, .ENTER, 
+    .LEFT_SHIFT, .Z, .X, .C, .V, .B, .N, .M, .COMMA, .PERIOD, .SLASH, 
+    .LEFT_CONTROL, .LEFT_SUPER, .LEFT_ALT, .SPACE, .LEFT, .UP, .RIGHT, .DOWN,
+);

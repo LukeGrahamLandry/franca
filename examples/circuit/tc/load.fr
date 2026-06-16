@@ -1,5 +1,9 @@
 // TODO: get rid of all the places i do string comparisons on the name. 
 //       put flags on the Template so don't have to be defensive about someone naming their CC "Output12456z" or whatever 
+// TODO: another source of bad things if i want to cope with malicious inputs: 
+//       every time i try to check if a path looks evil and if so print it out instead of using, 
+//       what if those bytes have magic terminal escape codes that do crazy shit.
+//       goes away if i just report errors gracefully in the gui instead. 
 
 // diagram layout loaded from one circuit.data file. 
 Circuit :: @struct {
@@ -71,7 +75,8 @@ load_builtins :: fn(components: *List(Component), a: Alloc) void = {
     };
 }
 
-load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64) = {
+LoadedFile :: @struct(data: []u8, name: Str);
+load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64, []LoadedFile) = {
     root := original_root;
     root_name := name_from_path(root);
     while => !root.ends_with("schematics/") && root.len > 0 {
@@ -84,6 +89,7 @@ load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64) = {
         files&.push(original_root);
     };
     
+    tc_file_loader_device := list(LoadedFile, a);
     circuits := Circuit.list(a);
     for files { path |
         continue :: local_return;
@@ -97,11 +103,40 @@ load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64) = {
             @eprintln("failed to load [%]: %", path, msg);
             continue();
         });
+        dir := path.pop_path_segment();
+        @debug_assert(dir.ends_with("/"));
+        has_path_escapes :: import("@/examples/fetch.fr")'has_path_escapes;
+        
         each info.programs { it |
+            continue :: local_return;
+            if has_path_escapes(it.name) {
+                @println("Assembly path [%] is sketchy", it.name);
+                continue();
+            };
             // TODO: somehow have to look in subfolders
-            path := @tfmt("%/%.assembly", path.pop_path_segment(), it.name);
+            path := @tfmt("%%.assembly", dir, it.name);
             it.assembly = read_entire_file(a, path);
         };
+        each info.gates { it |
+            continue :: local_return;
+            if templates[it.kind.zext()].name != "FileLoader" {
+                continue();
+            };
+            file_index := it.settings&[0]&;
+            file_index[] = -1;
+            if has_path_escapes(it.data) {
+                @println("FileLoader path [%] is sketchy", it.data);
+                continue();
+            };
+            path := @tfmt("%%", dir, it.data);
+            data := read_entire_file(a, path) || {
+                @println("- failed to read [%] for file loader in [%]", path, name);
+                continue();
+            };
+            file_index[] = tc_file_loader_device.len;
+            tc_file_loader_device&.push(name = it.data, data = data);
+        };
+        
         circuits&.push(info);
     };
     
@@ -111,10 +146,10 @@ load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64) = {
     };
     
     if circuits.len == 0 {
-        return(empty(), -1);
+        return(empty(), -1, empty());
     };
     
-    (circuits.items(), root_index)
+    (circuits.items(), root_index, tc_file_loader_device.items())
 }
 
 HACK_NONE_PIN_POSITION :: 999999;
@@ -239,7 +274,6 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                         // TODO: do i have to allow LevelInputArch (which is both in and out) nested in custom component? 
                         continue();
                     };
-                    
                     // :OutputNz ughhhhh this seems convoluted but i don't have a better idea rn. 
                     // it has two input pins on the inside but only exposes one output pin. 
                     // my representation doesn't have an extra bit for being disabled so it compiles to two outputs
@@ -301,6 +335,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                     it = gates.index(i);  // ^ can reallocate
                 };
                 
+                @if(!unimplemented)
                 if child.has_bidirectional_pins {
                     kill&.set(i);
                     child_logical := child.compiled || {
@@ -309,8 +344,23 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                         continue();
                     };
                     child_logical := components.index(child_logical.id.zext());
-                    inline_for_bidirectional_gates(child_logical, gates&, wire_count&, extra_gates&, it[], a);
+                    duplicates := inline_for_bidirectional_gates(child_logical, gates&, wire_count&, extra_gates&, it[], a);
                     it = gates.index(i);
+                    
+                    // TODO: this is is TRASHHHH and :SLOW 
+                    if duplicates.raw.len_including_tombstones != 0 {
+                        X :: fn(its) => each its { it |
+                            if duplicates&.get(it[]) { new |
+                                it[] = new;
+                            };
+                        };
+                        each gates { it |
+                            X(it.inputs);
+                            X(it.outputs);
+                        };
+                        X(in);
+                        X(out);
+                    };
                 };
             } 
             fn Device() => {
@@ -422,21 +472,26 @@ find_links_for_lastest_component :: fn(c: *Circuit, components: []Component) voi
 
 // TODO: in the child: don't try to schedual gates and don't only treat bidirectional pins as output? 
 // TODO: instead of inlining, compile multiple versions for different sets of outputs that need different sets of inputs? that would be nicer to show in the ui. 
-inline_for_bidirectional_gates :: fn(child_logical: *Component, gates: *List(Component.Gate), wire_count: *i64, extra_gates: *i64, it: Component.Gate, a: Alloc) void = {
+inline_for_bidirectional_gates :: fn(child_logical: *Component, gates: *List(Component.Gate), wire_count: *i64, extra_gates: *i64, it: Component.Gate, a: Alloc) HashMap(WireId, WireId) = {
     child_gates := child_logical.gates.slice(1, child_logical.gates.len - 1);
     parent_out, parent_in := (it.outputs, it.inputs);
     child_out, child_in := (child_logical.gates[child_logical.gates.len - 1].inputs, child_logical.gates[0].outputs);
     // TODO: maybe instead of mapping, insert copies for in/out and just translate all wire values with an offset. 
+    //       but that doesn't really work because then you need to know which direction the wire goes and you don't for bidirectional pins which is the whole point of this operation. 
     map: HashMap(WireId, WireId) = init(temp());
+    duplicates: HashMap(WireId, WireId) = init(temp());
     
-    // TODO: this doesn't work if same child wire is both input and output
     range(0, parent_out.len) { i |
         prev := map&.insert(child_out[i], parent_out[i]);
-        @if(prev.is_some()) @println("TODO: wire used twice while inlining for bidirectional pin");
+        if prev { prev |
+            // TODO: if i know its an output not bidirectional can just insert a copy? outputs are supposed to coerce Z to zero anyway. 
+            x := duplicates&.insert(prev, parent_out[i]);
+            @assert(x.is_none(), "TODO: multiple duplicates?");
+        };
     };
     range(0, parent_in.len) { i |
         prev := map&.insert(child_in[i], parent_in[i]);
-        @if(prev.is_some()) @println("TODO: wire used twice while inlining for bidirectional pin")
+        @assert(prev.is_none(), "collision on input wire");
     };
     
     fix_wire :: fn(child_wire: WireId) WireId => {
@@ -457,6 +512,7 @@ inline_for_bidirectional_gates :: fn(child_logical: *Component, gates: *List(Com
         gates.push(kind = gate.kind, outputs = out, inputs = in, param = gate.param);
         extra_gates[] += 1;
     };
+    duplicates
 }
 
 #use("@/lib/collections/bit_set.fr");
@@ -677,6 +733,13 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
                 it[] = new_false_wire.unwrap();
                 z_input_mask = z_input_mask.bit_or(1.shift_left(i));
             };
+        };
+        
+        if shape.name == "Add64" && z_input_mask.bit_and(2) != 0 {
+            @println("TODO: Add64 overflow flag for w%", w[1].id);
+        };
+        if shape.name == "Mul64" && z_input_mask.bit_and(2) != 0 {
+            @println("TODO: Mul64 high for w%", w[1].id);
         };
         
         param := 0;
