@@ -68,19 +68,23 @@ templates :: {
     out.items()
 };
 
-cat :: fn(a: []Pin, b: []Pin) []Pin = {
-    c := ast_alloc().alloc_uninit(Pin, a.len + b.len);
-    c.slice(0, a.len).copy_from(a);
-    c.rest(a.len).copy_from(b);
-    c
-};
-
 #use("@/examples/circuit/eval.fr");
 WireValue :: i64;
 
 Settings :: @struct {
-    Ram :: @bit_fields(storage_size := 62, word_size_index := 2);
-    Console :: @bit_fields(colour := 1, font := 2, linked_ram_instance := 61);
+    Ram :: @bit_fields(
+        storage_size := 58,
+        word_size_index := 2,
+        // there are four value input pins but only one store enable pin. 
+        // most of the time a disconnected pin is treated as a zero value but a ram allows you to write one slot without extra zeroes.
+        z_input_mask := 4,
+    );
+    Console :: @bit_fields(
+        colour := 1, 
+        font := 2, 
+        ram_word_size_index := 2, 
+        linked_ram_instance := 59,
+    );
 };
 
 math :: fn($out_arity: i64, $in_arity: i64, $fid: FuncId) *Template = {
@@ -134,6 +138,7 @@ mask_param :: fn($bits: i64, $child: *Template) *Template = {
             o[I] = bit_and(o[I], 1.shift_left(bits) - 1);
         };
     });
+    @assert(bits == 1 || bits == 8 || bits == 16 || bits == 32, "invalid mask(%)", bits);
     ast_alloc().boxed(Template, (
         in_arity = child.in_arity, 
         out_arity = child.out_arity,
@@ -285,7 +290,11 @@ Add8 :: math(2, 3) { o, i |
     o[0] = bit_and(r, 255); 
     o[1] = int(r >= 256);
 };
-Mul8 :: todo();
+Mul8 :: math(2, 2) { o, i |
+    r := i[0] * i[1];
+    o[0] = r.bit_and(0xFF); 
+    o[1] = r.shift_right_logical(8).bit_and(0xFF);
+};
 Splitter8 :: math(8, 1) { o, i | 
     r := i[0];
     inline_range(0, 8) { i |
@@ -429,7 +438,7 @@ LessU8 :: LessU64;
 LessI8 :: todo();
 DotMatrixDisplay :: todo();
 SegmentDisplay :: todo();
-Input16 :: todo();
+Input16 :: Input64;
 Input32 :: todo();
 Output16 :: with_pins(0, 1, .IO);
 Output32 :: todo();
@@ -451,15 +460,19 @@ Output16z :: Output64z;
 Output32z :: Output64z;
 Output64z :: with_pins(0, 2, .IO);
 Constant16 :: Constant64;
-Not16 :: todo();
-Or16 :: todo();
-And16 :: todo();
-Xor16 :: todo();
-Neg16 :: todo();
-Add16 :: todo();
+Not16 :: mask(16, Not64);
+Or16 :: mask(16, Or64);
+And16 :: mask(16, And64);
+Xor16 :: mask(16, Xor64);
+Neg16 :: mask(16, Neg64);
+Add16 :: math(2, 3) { o, i | 
+    r := i[0] + i[1] + i[2];
+    o[0] = bit_and(r, 0xFFFF); 
+    o[1] = int(r > 0xFFFF);
+};
 Mul16 :: todo();
-Equal16 :: todo();
-LessU16 :: todo();
+Equal16 :: Equal64;
+LessU16 :: LessU64;
 LessI16 :: todo();
 Shl16 :: mask(16, Shl64);
 Shr16 :: mask(16, Shr64);
@@ -530,7 +543,8 @@ Ram :: with_pins(4, 7, .Device,
                 // TODO: is it supposed to wrap like this or be zero or be an error?
                 slot := data[umod(address + I, storage_size)]&;
                 o[I] = slot[].int();
-                if !world.doing_pre_read && save {
+                z := param.get(.z_input_mask).bit_and(1.shift_left(I)) != 0;
+                if !world.doing_pre_read && save && !z {
                     slot[] = @if(@run(T == i64), inputs[I], inputs[I].trunc());
                 }
             };
@@ -580,7 +594,7 @@ Ror64 :: math(1, 2) { o, i | o[0] = i[0].rotate_right(i[1]); }
 IndexerBit :: math_param(1, 1) { o, i, param | o[0] = int(i[0].bit_and(1.shift_left(param)) != 0); }
 IndexerByte :: todo();
 DivMod8 :: todo();
-DivMod16 :: todo();
+DivMod16 :: mask(16, DivMod64);
 DivMod32 :: todo();
 DivMod64 :: math(2, 2) { o, i |
     if i[1] == 0 {  // TODO: the min int one too 
@@ -615,25 +629,29 @@ VirtualBidirectional64 :: todo();
 };
 
 pin_layouts :: @static @parse_pin_layouts(
-(("Or8", "Equal8", "LessU8", "Xor8", "And8", "Equal64", "Or64", "And64", "Xor64", "LessU64", "LessI64"),
+(("Or8", "Equal8", "LessU8", "Xor8", "And8", "Equal64", "Or64", "And64", "Xor64", "LessU64", "LessI64", "Or16", "Equal16"),
     ((1, 0), (-1, -1), (-1, 0))),
-(("Counter8", "Counter16", "Counter32", "Counter64"),
+(("Counter8"),
     ((1, 0), (-1, 0), (-1, -1))),
+(("Counter16", "Counter32"),
+    ((2, 0), (-2, 0), (-2, -1))),
 (("Maker16"),
     ((1, 0), (-1, -1), (-1, 0))),
 (("Shl8", "Shr8", "Shl64", "Shr64", "Shl16", "Shr16", "Shl32", "Shr32", "Rol8", "Rol16", "Rol32", "Rol64", "Ror8", "Ror16", "Ror32", "Ror64", "Ashr8", "Ashr16", "Ashr32", "Ashr64"),
     ((1, -1), (-1, -1), (-1, 0))),
 (("Switch1", "Switch8", "Switch16", "Switch32", "Switch64"),
     ((1, 0), (-1, 0), (0, -1))),
-(("On", "Off", "Constant8", "Constant16", "Constant32", "Constant64"),
+(("On", "Off", "Constant8"),
     ((1, 0))),
+(("Constant16", "Constant32"),
+    ((2, 0))),
 (("Maker8", "Maker64"),
     ((1, 0), (-1, -3), (-1, -2), (-1, -1), (-1, 0), (-1, 1), (-1, 2), (-1, 3), (-1, 4))),
 (("Splitter8", "Splitter64"),
     ((1, -3), (1, -2), (1, -1), (1, 0), (1, 1), (1, 2), (1, 3), (1, 4), (-1, 0))),
-(("Add8", "Add64"),
+(("Add8", "Add16", "Add64"),
     ((1, -1), (1, 0), (-1, -1), (-1, 1), (-1, 0))),
-(("DivMod64", "Mul64"),
+(("DivMod64", "Mul64", "Mul8", "DivMod16"),
     ((1, -1), (1, 0), (-1, -1), (-1, 0))),
 (("And3", "Or3"), 
     ((2, 0), (-1, 1), (-1, 0), (-1, -1))),
@@ -649,7 +667,9 @@ pin_layouts :: @static @parse_pin_layouts(
     ((1, -4), (2, -2), (2, -1), (-2, -2))),
 (("Input1", "Input8", "LevelInput1"),
     ((1, 0))),
-(("Input64"),
+(("Input16"),
+    ((2, 0))),
+(("Input64", "Constant64"),
     ((3, 0))),
 (("LevelInputArch"),
     ((1, 0), (0, 1))),
@@ -671,7 +691,7 @@ pin_layouts :: @static @parse_pin_layouts(
     ((13, -7), (13, -6), (13, -5), (13, -4), (-13, -7), (-13, -6), (-13, -5), (-13, -4), (-13, -3), (-13, -2), (-13, -1))),
 (("Output8", "LevelOutput1Car", "LevelOutput1Sum", "Output1", "Halt", "LevelOutput1"),
     ((-1, 0))),
-(("Not64", "Neg64", "Not32", "Neg32", "IndexerBit", "Not", "Not8", "Neg8", "DelayLine1"),
+(("Not64", "Neg64", "Not32", "Neg32", "IndexerBit", "Not", "Not8", "Neg8", "DelayLine1", "Neg16"),
     ((1, 0), (-1, 0))),
 (("Output64z"),
     ((-3, 0), (0, 2))),

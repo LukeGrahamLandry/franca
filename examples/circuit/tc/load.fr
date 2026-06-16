@@ -414,6 +414,7 @@ find_links_for_lastest_component :: fn(c: *Circuit, components: []Component) voi
             T :: Builtin.Settings.Console;
             param: T = (repr = logical_gate.param.bitcast());
             param&.set(.linked_ram_instance, instance);
+            param&.set(.ram_word_size_index, ram.settings&[1]);
             logical_gate.param = param.repr.bitcast();  // :PatchConsoleLink
         };
     };
@@ -661,29 +662,8 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
         
         out, in := (w.slice(0, out_arity), w.rest(out_arity));
         
-        param := 0;
-        if shape.has_param {
-            s0, s1 := (it.settings&[0], it.settings&[1]);
-            param = s0;
-            #use(Builtin.Settings);
-            if shape.name.starts_with("Ram") || shape.name.starts_with("Program") {
-                s: Ram = construct(storage_size = s0, word_size_index = s1);
-                param = s.repr.bitcast();
-            };
-            if shape.name == "Console" {
-                s: Console = construct(colour = s0, font = s1, linked_ram_instance = 0/*:PatchConsoleLink*/);
-                param = s.repr.bitcast();
-            }
-        };
-        
-        logic_gates&.push(
-            outputs = out,
-            inputs = in,
-            kind = (id = it.kind.zext()),
-            param = param,
-        );
-        
         // compiler requires all pins be connected to a wire.
+        z_input_mask := 0;
         enumerate w { i, it |
             @if(it.id == 0xFFFFFFFF) 
             if i < out_arity {  // output (discarded)
@@ -695,8 +675,33 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
                     next_wire_id += 1;
                 }
                 it[] = new_false_wire.unwrap();
+                z_input_mask = z_input_mask.bit_or(1.shift_left(i));
             };
         };
+        
+        param := 0;
+        if shape.has_param {
+            s0, s1 := (it.settings&[0], it.settings&[1]);
+            param = s0;
+            #use(Builtin.Settings);
+            if shape.name.starts_with("Ram") || shape.name.starts_with("Program") {
+                z_input_mask = z_input_mask.shift_right_logical(4+1+1+1);  // skip [4x out, load, store, addr]
+                s: Ram = construct(storage_size = s0, word_size_index = s1, z_input_mask = z_input_mask);
+                param = s.repr.bitcast();
+            };
+            if shape.name == "Console" {
+                s: Console = construct(colour = s0, font = s1, linked_ram_instance = 0/*:PatchConsoleLink*/, ram_word_size_index = 0);
+                param = s.repr.bitcast();
+            }
+        };
+        
+        logic_gates&.push(
+            outputs = out,
+            inputs = in,
+            kind = (id = it.kind.zext()),
+            param = param,
+        );
+        
     };
     
     if new_false_wire { wire |  // there was a disconnected input pin

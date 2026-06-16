@@ -8,7 +8,7 @@ space: toggle auto eval.
 r: restart program. 
 c: reset scale/pos.
 [/]: slower/faster eval (shift:50, cmd:1000). 
-a: change architecture (overture, leg).
+n: change architecture (overture, leg).
 """;
 
 State :: @struct {
@@ -33,6 +33,7 @@ State :: @struct {
     tick: i64;
     win_tick: ?i64;
     show_wire_ref_lines: bool;
+    do_debug_action_this_frame: bool;
     
     circuit: []Tc.Circuit;
     circuit_index: i64;
@@ -48,6 +49,9 @@ CircuitNode :: @struct {
     component: ?ComponentId = .None;
 };
 
+has_dis :: @const_slice("overture", "leg", "OVERTURE", "LEG");
+
+// TODO: report if one of the vertex buffers was full last frame 
 // :UGLY this whole thing needs to be rewritten. 
 // for now i just care about having enough visuals to see what's going on while debugging the evaluator. 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -73,7 +77,10 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             @debug_assert(prev || !save_wire_values, "if init(save_wire_values=false), won't have preallocated enough");
             world.save_wire_values = prev && save_wire_values;  
             values := @slice(0, 0, 0, @as(i64) input.zext());
-            if state.loaded_assembly {
+            
+            c := world[root_component]&;
+            has_dis := has_dis.contains(c.name);
+            if !has_dis {
                 values.len = 0;
             };
             if !world.save_wire_values && get_compiled(world, root_component).is_some() {
@@ -83,7 +90,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             };
             
             world.save_wire_values = prev;
-            OUT = @if(!state.loaded_assembly && values[1 + int(state.arch_is_leg)] != 0, (Some = values[0 + int(state.arch_is_leg)].trunc()), .None);
+            OUT = @if(has_dis && values[1 + int(state.arch_is_leg)] != 0, (Some = values[0 + int(state.arch_is_leg)].trunc()), .None);
         } else {
             OUT = tick_overture(world, root_component, input, false, i == count - 1);
         };
@@ -325,7 +332,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     // TODO: let the component declare that it uses this disassembler
     pos := vec2(-80 * width, 2*height);
-    @if(!state.loaded_assembly)
+    @if(has_dis.contains(c.name))
     if state.arch_is_leg {
         dis_iter(u32.reinterpret_bytes(memory), 4, AsmLeg);
     } else {
@@ -352,6 +359,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         };
     }
     };
+    
     maze_text := u8.list(temp());
     state.maze&.render(maze_text&);
     sdtx.color = pack_rgba(@if(state.maze.win, 255, 50), 200, 150, 255);
@@ -555,26 +563,60 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                 param: T = (repr = it.param.bitcast());
                 // TODO: colour and font
                 // TODO: i think i also need to know the data size of the ram (rn assumes 64) and should bounds check anyway so maybe delay the instance conversion to here
+                // TODO: graceful error if world.storage.subslice is oob
                 offset := world.storage[c.instance_offset_by_gate[i]];
                 
-                data := world.storage.subslice(param.get(.linked_ram_instance) + offset, 80*24);
-                range(0, 24) { y |
-                    range(0, 80) { x |
-                        value := data[y*80 + x];
-                        if value == 0 {
-                            sdtx.pos.x += 1;
-                        } else {
-                            sdtx.put(@as(u8) value.trunc());
-                        };
-                        if value.shift_right_logical(8) != 0 {
-                            @println("TODO: colour");
-                        };
-                        if value != 0 && (value <= 32 || value > 128) {
-                            println("TODO: nonascii");
+                @switch(param.get(.ram_word_size_index)) {
+                    @case(0) => {
+                        sdtx.color = pack_rgba(255, 255, 255, 255);
+                        data := world.storage.subslice(param.get(.linked_ram_instance) + offset, 80*24/8).interpret_as_bytes();
+                        range(0, 24) { y |
+                            range(0, 80) { x |
+                                value := data[y*80 + x];
+                                if value == 0 {
+                                    sdtx.pos.x += 1;
+                                } else {
+                                    sdtx.put(value);
+                                };
+                            };
+                            sdtx.pos.x = 0;
+                            sdtx.pos.y += 1;
                         };
                     };
-                    sdtx.pos.x = 0;
-                    sdtx.pos.y += 1;
+                    @case(3) => {
+                        data := world.storage.subslice(param.get(.linked_ram_instance) + offset, 80*24);
+                        range(0, 24) { y |
+                            range(0, 80) { x |
+                                value := data[y*80 + x];
+                                // TODO: only if in colour mode
+                                sdtx.color = pack_rgba(value.shift_right_logical(48).bit_and(0xFF), value.shift_right_logical(40).bit_and(0xFF), value.shift_right_logical(32).bit_and(0xFF), 255);
+                                my_solid_char := "\x8F".index(0)[];
+                                sdtx.put(my_solid_char);
+                                // TODO: use the right same font as them https://int10h.org/oldschool-pc-fonts/fontlist/font?ibm_bios-2y
+                                char: u8 = value.trunc();
+                                if char == 220 { // HACK bottom half square that tetris uses
+                                    char = my_solid_char - 3;
+                                };
+                                if char != 0 {
+                                    sdtx.pos.x -= 1;
+                                    sdtx.color = pack_rgba(value.shift_right_logical(24).bit_and(0xFF), value.shift_right_logical(16).bit_and(0xFF), value.shift_right_logical(8).bit_and(0xFF), 255);
+                                    sdtx.put(char);
+                                }
+                                
+                                start := sdtx.origin + sdtx.pos - vec2(1, 0);
+                                end := start + vec2(1, 1);
+                                p := world_to_text_pos(p);
+                                hover := p.x > start.x && p.x < end.x && p.y > start.y && p.y < end.y;
+                                if hover && state.do_debug_action_this_frame {
+                                    state.do_debug_action_this_frame = false;
+                                    @println("(%, %) %;", x, y, fmt_hex(value));
+                                }
+                            };
+                            sdtx.pos.x = 0;
+                            sdtx.pos.y += 1;
+                        };
+                    };
+                    @default => println("TODO: console ram word size");
                 };
             };
         };
@@ -600,7 +642,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.sg = sg; state.sapp = sapp;
     a := general_allocator();
     state.text&.setup(sg = sg, allocator = a, fonts = @slice(Sdtx.font.cpc), context = (char_buf_size = 10000));
-    state.draw&.setup(allocator = general_allocator(), sg = sg, max_vertices = 10_000);
+    state.draw&.setup(allocator = general_allocator(), sg = sg, max_vertices = 100_000);
     
     init(state.world&, a, true);  // TODO: leaked when loading new circuit
     state.tree = list(a);
@@ -650,9 +692,11 @@ fn reset(state: *State) void = {
     state.loaded_assembly = false;
     if state.is_new_overture {
         ok := false;
+        name := "";
         if state.tree[0].diagram_circuit { i |
             root_component := state.tree[0].component.unwrap();
             circuit := state.circuit[i]&;
+            name = circuit.name;
             c := world[root_component]&;
             if c.gates.index_of(fn(it) => world[it.kind].name == "Program") { gate_i |
                 if circuit.programs.find(fn(it) => it.assembly.is_some()) { asm |
@@ -669,7 +713,9 @@ fn reset(state: *State) void = {
         
         state.loaded_assembly = ok;
         @if(!ok)
-        world.storage.subslice(1, 256/8).interpret_as_bytes().copy_from(program);
+        if name == "LEG" || name == "OVERTURE" {
+            world.storage.subslice(1, 256/8).interpret_as_bytes().copy_from(program);
+        };
     }
 }
 
@@ -701,6 +747,9 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             tick_off := @if(event.modifiers.get(.shift) == 1, 50, 1);
             tick_off := @if(event.modifiers.get(.super) == 1, 1000, tick_off);
             @match(event.key_code) {
+                fn L() => {
+                    state.do_debug_action_this_frame = true;
+                };
                 fn ESCAPE() => if state.tree.len > 1 { 
                     _ := state.tree&.pop(); 
                 }
@@ -714,7 +763,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 fn RIGHT_BRACKET() => if state.ticks_per_eval + tick_off < 1_000_000 {
                     state.ticks_per_eval += tick_off;
                 }
-                fn A() => {
+                fn N() => {
                     state.is_new_overture = false;
                     state.arch_is_leg = !state.arch_is_leg;
                     root := get_component_by_name(@if(state.arch_is_leg, "leg", "overture"), finished_defs.components);

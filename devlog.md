@@ -1,4 +1,10 @@
 
+## (Jun 16) circuit 
+
+- i fear im going to need to actually track unpoweredness for each wire when you use switches
+  but as a starting point, statically record which ram pins got an automatic zero instead of a real wire. 
+  YAYYYYYY that also fixes tetris!!
+
 ## (Jun 15) circuit 
 
 - did the inlining version of bidirectional
@@ -14,6 +20,10 @@
   maybe the pairs are the custom_id?
 - draw the ascii part of the console at least 
 - tetris gets to the loading screen now
+- trying other ones. mandlelbrot works but why is there a moving dead square on mine. 
+  - also why does mine start in the middle and theirs at the top? if no assembly i was copying my maze program into random memory that happened to be the counter. 
+  - ohohoho, disconnected ram write pin isn't supposed to write zero. 
+- started playing with schematic hub api a bit in wireshark
 
 ## (Jun 14) circuit 
 
