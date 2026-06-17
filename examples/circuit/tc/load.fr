@@ -17,6 +17,8 @@ Circuit :: @struct {
     name: Str;
     arity: Ty(i64, i64) = (-1, -1);
     has_bidirectional_pins := false;
+    is_arch := false;
+    default_tick_rate: u32;
     
     compiled: ?ComponentId = .None;
     // used when referenced as a Custom Gate in another Circuit. 
@@ -103,6 +105,7 @@ load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64, []Loade
             @eprintln("failed to load [%]: %", path, msg);
             continue();
         });
+        info.is_arch = path.contains("architecture");
         dir := path.pop_path_segment();
         @debug_assert(dir.ends_with("/"));
         has_path_escapes :: import("@/examples/fetch.fr")'has_path_escapes;
@@ -205,7 +208,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         it := gates.index(i); 
         if i == c.gates.len {
             // new_false_wire CONST_INDEX is already remapped. TODO: this is more error prone than it needs to be
-            @assert(it.inputs.len == 0 && it.kind.id == 5, "CONST_INDEX HACK"); 
+            @assert(it.inputs.len == 0 && it.kind.id == { xx := CONST_INDEX; /*:compiler*/ xx.id }, "CONST_INDEX HACK"); 
             logical_to_circuit&.push(-1);
             continue();
         };
@@ -640,46 +643,19 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
     
     // all the places wires connect (to a component or to other wires). 
     wire_positions: HashMap(i64, *WireId) = init(temp());
-    wire_mid_positions: HashMap(i64, *WireId) = init(temp());
     enumerate c.wires& { wire_i, new |
         new.logical = (id = wire_i.trunc());
+        // the other nodes on the path are just for the visuals. 
         ends := @slice(new.path[0].pos, new.path[new.path.len - 1].pos);
-        
         for ends { end_pos |
             found := wire_positions&.get_or_insert(pos_key(end_pos), => new.logical&);
             if new.logical.id != found.id {
-                // when two graphical wires overlap they become one logical wire.
-                
-                // TODO: i think this is wrong, it has to be at the end of one of the wires. (but not both so still have to put all in the table). 
-                //       my COND component has this problem with the decoder3. 
-                
+                // when two graphical wires meet they become one logical wire.
                 each c.wires.slice(0, wire_i + 1) { old |  // :SLOW
                     if old.logical.id == new.logical.id {
                         old.logical.id = found.id;
                     };
                 };
-            };
-            if wire_mid_positions&.get(pos_key(end_pos)) { found |
-            if new.logical.id != found.id {
-                // when two graphical wires overlap they become one logical wire.
-                
-                // TODO: i think this is wrong, it has to be at the end of one of the wires. (but not both so still have to put all in the table). 
-                //       my COND component has this problem with the decoder3. 
-                
-                each c.wires.slice(0, wire_i + 1) { old |  // :SLOW
-                    if old.logical.id == new.logical.id {
-                        old.logical.id = found.id;
-                    };
-                };
-            };
-            };
-        };
-        
-        for new.path& { node |
-            p := node.pos;
-            range(0, node.length) { i |
-                wire_mid_positions&.get_or_insert(pos_key(p), => new.logical&);
-                p += node.direction;
             };
         };
     };
@@ -764,21 +740,21 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
             kind = (id = it.kind.zext()),
             param = param,
         );
-        
     };
     
     if new_false_wire { wire |  // there was a disconnected input pin
-        CONST_INDEX :: 5;  // TODO: :fragile!! get_component_by_name("const", @run defs.components.items())
         logic_gates&.push(
             outputs = a.alloc_init(WireId, 1, fn(_) => wire),
             inputs = empty(),
-            kind = (id = 5),
+            kind = CONST_INDEX,
             param = 0,
         );
     };
     
     (logic_gates, next_wire_id.zext())
 };
+
+CONST_INDEX :: get_component_by_name("const", @run defs.components.items());
 
 fn find_custom_impl(g_gate: *Circuit.Gate, circuits: []Circuit) ?*Circuit = {
     if circuits.find(fn(it) => it.id == g_gate.custom_id) { child |
@@ -920,7 +896,8 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
     // TODO: use the default clock speed 
     
     id := eat(CustomId); 
-    eat(u32); eat(i64); eat(i64); eat(bool); eat(u32);
+    eat(u32); eat(i64); eat(i64); eat(bool);
+    tick_rate := eat(u32);
     dependencies := eatN(u16, CustomId);
     eatN(u16, u8);  // description
     eat_point(); eat(u8); eat(bool); eat(u16);
@@ -1031,6 +1008,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
         dependencies = dependencies.shallow_copy(a),
         name = name,
         programs = programs.items(),
+        default_tick_rate = tick_rate,
     ))
 }
 

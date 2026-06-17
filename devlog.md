@@ -8,10 +8,14 @@
 - trying "QOI Image viewer"
   - added file input. some trial and error comparing its outputs to the game to get the indexing right. 
   - have to deal with collisions where a wire becomes two output wires when inlining 
+  - still doesn't work. 
 - im suspicious that my pre_read stuff is broken. i can see values on the wires that don't make sense and
   aren't what it gets if i print them inside the templates. so must be that they're changing on the second pass? 
-
-TODO: (tetris) rotate doesn't work on red and i think whatever they use for random numbers doesn't work. its always red or light blue. 
+- i was making find_pins way more concoluted by assuming the end of a wire could connect to a middle node of another wire. 
+- i was doing smaller rotations by masking the output which is wrong because it discards bits. oops. didn't help
+- from the assembly it looks like selectRandomTet mostly just calls GetTime, not a more fancy random number generator. 
+  so perhaps im just giving time in the wrong units? hmmm, `<<1` makes it look random (and also makes the red ones correctly rotate-able????). 
+  is there perhaps a common factor between 60fps and the number of tetrominos? that would be too good to be true. so yeah i've learned nothing from that. 
 
 ## (Jun 15) circuit 
 

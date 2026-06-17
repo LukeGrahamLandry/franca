@@ -56,7 +56,7 @@ CircuitNode :: @struct {
     component: ?ComponentId = .None;
 };
 
-has_dis :: @const_slice("overture", "leg", "OVERTURE", "LEG");
+has_dis :: @const_slice("overture", "leg", "OVERTURE", "LEG", "NANDverture");
 
 // :UGLY this whole thing needs to be rewritten. 
 // for now i just care about having enough visuals to see what's going on while debugging the evaluator. 
@@ -151,14 +151,37 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         (c.x, c.y * 1.5)
     };
     
-    sdtx.color = pack_rgba(0, 0, 0, 255);
+    sdtx.color = pack_rgba(255, 255, 255, 255);
     sdtx.pos = world_to_text_pos(vec2(0, height*3));
     sdtx.put(@tfmt("(paused=%, tick_rate=%, tick=%, keyboard=%) ", !state.auto_eval, state.ticks_per_eval, state.tick, state.keyboard_device_focused));
     
+    sdtx.color = pack_rgba(0, 0, 0, 255);
     sdtx.pos = vec2(0);
     sdtx.origin = world_to_text_pos(vec2(-width * 90, height * 10));
     sdtx.put(HELP);
     sdtx.origin = vec2(0);
+    
+    sdtx.color = pack_rgba(255, 255, 255, 255);
+    arch_list_count: f32 = 0;
+    selected_circuit := @if(state.tree.len == 0, -1, state.tree[0].diagram_circuit || -1);
+    // TODO: list them from the save dir even if don't ask for a specific one on cli
+    enumerate state.circuit { i, c |
+        continue :: local_return;
+        @if(!c.is_arch) continue();
+        
+        sdtx.pos = world_to_text_pos(vec2(0 * width, height * (5 + arch_list_count)));
+        p := world_to_text_pos(p);
+        hover := p.x > sdtx.pos.x && p.x < sdtx.pos.x + c.name.len.float().cast() && p.y > sdtx.pos.y && p.y < sdtx.pos.y + 1;
+        sdtx.color = pack_rgba(200, 200*int(i != selected_circuit), 200*int(!hover), 255);
+        sdtx.put(c.name);
+        arch_list_count += 1;
+        
+        if state.clicked && hover {
+            state.clicked = false;
+            state.dirty = true;
+            load_circuit_index(state, state.circuit, i, state.world.tc_file_loader_device, timestamp());
+        };
+    };
     
     sdtx.color = pack_rgba(255, 255, 255, 255);
     sdtx.pos = world_to_text_pos(vec2(0, height));
@@ -228,6 +251,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     
     sdtx.put(c.name);
+    sdtx.color = pack_rgba(0, 0, 0, 255);
     if c.gates.len == 0 {
         hover := p.y < pos.y && p.y > pos.y - height && p.x > 0 && p.x < 100;
         sdtx.pos = world_to_text_pos(vec2(0, 0));
@@ -576,6 +600,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sdtx.origin = world_to_text_pos(vec2(-90 * width, 30*height));
         sdtx.pos = vec2(0);
         
+        // TODO: allow multiple consoles. put this in the loop. 
         a, b := (text_to_world_pos(sdtx.origin), text_to_world_pos(sdtx.origin + vec2(80, 24)));
         s := abs(a - b);
         w: f32 = 0.03;
@@ -731,6 +756,7 @@ fn reset(state: *State) void = {
     if state.is_new_overture {
         ok := false;
         name := "";
+        @if(state.tree.len > 0)
         if state.tree[0].diagram_circuit { i |
             root_component := state.tree[0].component.unwrap();
             circuit := state.circuit[i]&;
@@ -923,7 +949,16 @@ fn load_path(state: *State, path: Str) void = {
         @eprintln("failed to load [%]", path);
         return();
     };
-    
+    load_circuit_index(state, circuits, root_index, tc_file_loader_device, start);
+}
+   
+fn load_circuit_index(state: *State, circuits: []Tc.Circuit, root_index: i64, tc_file_loader_device: []Tc.LoadedFile, start: i64) void = {
+    each circuits { c | 
+        c.compiled = .None;
+    };
+
+    state.tree&.clear();
+    a := state.circuit_arena&.borrow();
     components := @ref Component.list(a);
     components.push_all(finished_defs.components);
     Tc'compile_circuit(circuits, root_index, components, a);
@@ -966,6 +1001,7 @@ fn load_path(state: *State, path: Str) void = {
     state.is_new_overture = true;
     state.reset();
     state.find_keyboard();
+    state.ticks_per_eval = c.default_tick_rate.zext() / 60;
     
     // TODO: misleading because there can still be uncompiled jit-shims
     @eprintln("loaded in %ms", timestamp() - start);

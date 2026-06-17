@@ -51,7 +51,6 @@ it works well enough to run my overture/leg in the maze and a few things from th
 - assembler: mnemonics, constants 
 - need a better interface for choosing circuit/programs, showing memory contents
 - dropping file doesn't work in franca-web-playground (even when fixed will be annoying because need to feed it all the custom components individually)
-- find_pins takes 6000ms on NANDverture
 - etc.
 
 ## other todos

@@ -208,14 +208,12 @@ KeyboardData :: @struct(value: u16, up: bool, have_next: bool, want_next: bool, 
 // TODO: should be more careful about data sizes if they don't match expected. 
 //       but would know that when compiling so maybe just insert casts aot, not in the impls here. 
 //       stuff like what happens if you input something bigger than 8 bits into a Maker64. 
+// TODO: on riscv they're annoying about sign extending 32 bit values so extra important to mask the inputs
 // TODO: use 32 bit instructions instead of bit_and(0xFFFFFFFF)
-// TODO: all the io devices should just be treated like a memory and then the outer simulation deals with it between ticks. 
-//       the actual input/output pins need to be special to compile custom components. 
 // TODO: the registers/program here use more packed storage than the ones in ../defs.fr 
 //       so either need to unify them or have the ui know about both for showing ram/disassembly. 
 // TODO: move the impls of storage out? because they're different enough that it's annoying to have to search for them. 
 // TODO: carry flag, mul high. 
-// TODO: for the small width shifts, just masking the output isn't the same as mod wrapping the amount
 
 // these are in order by their ComponentKind value in the circuit.data format. 
 impl :: @struct {
@@ -275,6 +273,7 @@ Register64 :: with_pins(1, 3, .Device,
 );
 VirtualRegister64 :: todo();
 Switch8 :: Switch64;
+// TODO: the cmov one might be better because easier to keep things in registers
 Mux8 :: math(1, 3) { o, i | o[0] = i[1 + int(i[0] != 0)]; };
 Decoder1 :: math(2, 1) { o, i | o[] = (int(i[0] != 0), int(i[0] == 0)); };
 Decoder3 :: math(8, 4) { o, i | 
@@ -337,7 +336,12 @@ Timing :: with_pins(1, 1, .Device,
         };
     },
 );
-NoteSound :: todo();
+NoteSound :: with_pins(0, 3, .Device, 
+    fn(_) => 0,
+    fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 3)) void = {
+        // TODO
+    },
+);
 _57 :: todo();
 _58 :: todo();
 // TODO: character mode param
@@ -361,24 +365,19 @@ FileLoader :: with_pins(1, 2, .Device,
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 2), param: i64) void = {
         enable, offset := (i[0] != 0, i[1]);
         want_length := offset == -1;
-        if !enable || param == -1 {
-            o[0] = 0;
-            return();
-        };
-        if !param.ult(world.tc_file_loader_device.len) {
-            return println("malformed FileLoader");
-        };
-        file := world.tc_file_loader_device[param].data;
+        oob := !param.ult(world.tc_file_loader_device.len);  // (-1 means failed to read file)
+        file := @if(oob, "", world.tc_file_loader_device[param].data);
         o[0] = @if_else {
+            @if(!enable) => 0;
             @if(want_length) => file.len;
             @if(!offset.ult(file.len)) => 0;
+            @if((offset + 8).ult(file.len)) => file.rest(offset).peek_type(i64)[];
             @else => {
-                // :SLOW only do this for last 8 bytes
                 r: i64 = 0;
-                range(offset, min(offset + 8, file.len)) { i |
+                range_rev(offset, min(offset + 8, file.len)) { i |
                     r = r.shift_left(8).bit_or(file[i].zext());
                 };
-                r.byte_swap()  // TODO: lol just fix the loop
+                r
             };
         };
     },
@@ -443,8 +442,8 @@ Console :: with_pins(0, 1, .Device,
         world.instance += 1;
     },
 );
-Shl8 :: mask(8, Shl64);
-Shr8 :: mask(8, Shr64);
+Shl8 :: math(1, 2) { o, i | o[0] = i[0].shift_left(i[1].bit_and(0b111)).bit_and(0xff); }
+Shr8 :: math(1, 2) { o, i | o[0] = i[0].shift_right_logical(i[1].bit_and(0b111)); }
 Constant64 :: from_defs("const");
 Not64 :: math(1, 1) { o, i | o[0] = bit_not(i[0]); };
 Or64 :: Or;
@@ -474,8 +473,20 @@ NandNandLatch :: todo();
 NorNorLatch :: todo();
 LessU8 :: LessU64;
 LessI8 :: todo();
-DotMatrixDisplay :: todo();
-SegmentDisplay :: todo();
+DotMatrixDisplay :: with_pins(0, 4, .Device, 
+    fn(_) => 64,
+    fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 4)) void = {
+        world.instance += 1;
+        // TODO
+    },
+);
+SegmentDisplay :: with_pins(0, 2, .Device, 
+    fn(_) => 64,
+    fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 2)) void = {
+        world.instance += 1;
+        // TODO
+    },
+);
 Input16 :: Input64;
 Input32 :: Input64;
 Output16 :: with_pins(0, 1, .IO);
@@ -508,12 +519,16 @@ Add16 :: math(2, 3) { o, i |
     o[0] = bit_and(r, 0xFFFF); 
     o[1] = int(r > 0xFFFF);
 };
-Mul16 :: todo();
+Mul16 :: math(2, 2) { o, i |
+    r := i[0] * i[1];
+    o[0] = r.bit_and(0xFFFF); 
+    o[1] = r.shift_right_logical(16).bit_and(0xFFFF);
+};
 Equal16 :: Equal64;
 LessU16 :: LessU64;
 LessI16 :: todo();
-Shl16 :: mask(16, Shl64);
-Shr16 :: mask(16, Shr64);
+Shl16 :: math(1, 2) { o, i | o[0] = i[0].shift_left(i[1].bit_and(0b1111)).bit_and(0xffff); }
+Shr16 :: math(1, 2) { o, i | o[0] = i[0].shift_right_logical(i[1].bit_and(0b1111)); }
 Mux16 :: Mux8;
 Switch16 :: Switch64;
 Splitter16 :: make_split_bytes(2);
@@ -528,13 +543,21 @@ Or32 :: Or64;
 And32 :: And64;
 Xor32 :: Xor64;
 Neg32 :: mask(32, Neg64);
-Add32 :: todo();
-Mul32 :: todo();
+Add32 :: math(2, 3) { o, i | 
+    r := i[0] + i[1] + i[2];
+    o[0] = bit_and(r, 0xFFFFFFFF); 
+    o[1] = int(r > 0xFFFFFFFF);
+};
+Mul32 :: math(2, 2) { o, i |
+    r := i[0] * i[1];
+    o[0] = r.bit_and(0xFFFFFFFF); 
+    o[1] = r.shift_right_logical(32).bit_and(0xFFFFFFFF);
+};
 Equal32 :: todo();
 LessU32 :: todo();
 LessI32 :: todo();
-Shl32 :: mask(32, Shl64);
-Shr32 :: mask(32, Shr64);
+Shl32 :: math(1, 2) { o, i | o[0] = (@as(u32) i[0].trunc()).shift_left(i[1]).zext(); }
+Shr32 :: math(1, 2) { o, i | o[0] = (@as(u32) i[0].trunc()).shift_right_logical(i[1]).zext(); }
 Mux32 :: Mux8;
 Switch32 :: Switch64;
 Splitter32 :: make_split_bytes(4);
@@ -608,34 +631,35 @@ Rom :: todo();
 VirtualRom :: todo();
 SolutionRom :: todo();
 VirtualSolutionRom :: todo();
-DelayLine8 :: todo();
+DelayLine8 :: DelayLine64;
 VirtualDelayLine8 :: todo();
-DelayLine16 :: todo();
+DelayLine16 :: DelayLine64;
 VirtualDelayLine16 :: todo();
-DelayLine32 :: todo();
+DelayLine32 :: DelayLine64;
 VirtualDelayLine32 :: todo();
-DelayLine64 :: todo();
+DelayLine64 ::DelayLine1;
 VirtualDelayLine64 :: todo();
 RamDualLoad :: todo();
 VirtualRamDualLoad :: todo();
 Hdd :: todo();
 VirtualHdd :: todo();
 Network :: todo();
-Rol8 :: mask(8, Rol64);
-Rol16 :: mask(16, Rol64);
-Rol32 :: mask(32, Rol64);
+// TODO: test these
+Rol8 :: math(1, 2) { o, i | r := i[1].bit_and(0b111); o[0] = i[0].shift_left(r).bit_or(i[0].shift_right_logical(8 - r)).bit_and(0xff); }
+Rol16 :: math(1, 2) { o, i | r := i[1].bit_and(0b1111); o[0] = i[0].shift_left(r).bit_or(i[0].shift_right_logical(16 - r)).bit_and(0xffff); }
+Rol32 :: math(1, 2) { o, i | o[0] = (@as(u32) i[0].trunc()).rotate_left(i[1]).zext(); }
 Rol64 :: math(1, 2) { o, i | o[0] = i[0].rotate_left(i[1]); }
-Ror8 :: mask(8, Ror64);
-Ror16 :: mask(16, Ror64);
-Ror32 :: mask(32, Ror64);
+Ror8 :: math(1, 2) { o, i | r := i[1].bit_and(0b111); o[0] = i[0].shift_left(8 - r).bit_or(i[0].shift_right_logical(r)).bit_and(0xff); }
+Ror16 :: math(1, 2) { o, i | r := i[1].bit_and(0b1111); o[0] = i[0].shift_left(16 - r).bit_or(i[0].shift_right_logical(r)).bit_and(0xffff); }
+Ror32 :: math(1, 2) { o, i | o[0] = (@as(u32) i[0].trunc()).rotate_right(i[1]).zext(); }
 Ror64 :: math(1, 2) { o, i | o[0] = i[0].rotate_right(i[1]); }
 IndexerBit :: math_param(1, 1) { o, i, param | o[0] = int(i[0].bit_and(1.shift_left(param)) != 0); }
-IndexerByte :: todo();
-DivMod8 :: todo();
+IndexerByte :: math_param(1, 1) { o, i, param | o[0] = i[0].shift_right_logical(param * 8).bit_and(0xFF); }
+DivMod8 :: mask(8, DivMod64);
 DivMod16 :: mask(16, DivMod64);
-DivMod32 :: todo();
+DivMod32 :: mask(32, DivMod64);
 DivMod64 :: math(2, 2) { o, i |
-    if i[1] == 0 {  // TODO: the min int one too 
+    if i[1] == 0 || (i[0] == MIN_i64 && i[1] == -1) {
         o[] = (0, 0);
     } else {
         a, b := div_mod(i[0], i[1]);
@@ -650,9 +674,10 @@ LevelInput1 :: Input1;
 LevelInput8 :: todo();
 LevelOutput1 :: Output1;
 LevelOutput8 :: todo();
-Ashr8 :: mask(8, Ashr64);
-Ashr16 :: mask(16, Ashr64);
-Ashr32 :: mask(32, Ashr64);
+// TODO: these 8/16 are wrong. need to repeat the correct sign bit
+Ashr8 :: math(1, 2) { o, i | o[0] = i[0].shift_right_arithmetic(i[1].bit_and(0b111)).bit_and(0xff); }
+Ashr16 :: math(1, 2) { o, i | o[0] = i[0].shift_right_arithmetic(i[1].bit_and(0b1111)).bit_and(0xffff); }
+Ashr32 :: math(1, 2) { o, i | o[0] = (@as(u32) i[0].trunc()).shift_right_arithmetic(i[1]).zext(); }
 Ashr64 :: math(1, 2) { o, i | o[0] = i[0].shift_right_arithmetic(i[1]); }
 Bidirectional1 :: Bidirectional64;
 VirtualBidirectional1 :: todo();
@@ -673,6 +698,8 @@ pin_layouts :: @static @parse_pin_layouts(
     ((1, 0), (-1, 0), (-1, -1))),
 (("Counter16", "Counter32"),
     ((2, 0), (-2, 0), (-2, -1))),
+(("Counter64"),
+    ((3, 0), (-3, 0), (-3, 1))),
 (("Maker16"),
     ((1, 0), (-1, -1), (-1, 0))),
 (("Shl8", "Shr8", "Shl64", "Shr64", "Shl16", "Shr16", "Shl32", "Shr32", "Rol8", "Rol16", "Rol32", "Rol64", "Ror8", "Ror16", "Ror32", "Ror64", "Ashr8", "Ashr16", "Ashr32", "Ashr64"),
@@ -689,11 +716,13 @@ pin_layouts :: @static @parse_pin_layouts(
     ((1, -3), (1, -2), (1, -1), (1, 0), (1, 1), (1, 2), (1, 3), (1, 4), (-1, 0))),
 (("Splitter32"),
     ((1, -1), (1, 0), (1, 1), (1, 2), (-1, 0))),
+(("Splitter16"),
+    ((1, -1), (1, 0), (-1, 0))),
 (("Maker32"),
     ((1, 0), (-1, -1), (-1, 0), (-1, 1), (-1, 2))),
-(("Add8", "Add16", "Add64"),
+(("Add8", "Add16", "Add32", "Add64"),
     ((1, -1), (1, 0), (-1, -1), (-1, 1), (-1, 0))),
-(("DivMod64", "Mul64", "Mul8", "DivMod16"),
+(("DivMod64", "Mul64", "Mul8", "Mul16", "Mul32", "DivMod8", "DivMod16", "DivMod32"),
     ((1, -1), (1, 0), (-1, -1), (-1, 0))),
 (("And3", "Or3"), 
     ((2, 0), (-1, 1), (-1, 0), (-1, -1))),
@@ -703,6 +732,8 @@ pin_layouts :: @static @parse_pin_layouts(
     ((3, 0), (-3, -1), (-3, 0), (-3, 1))),
 (("Decoder3"),
     ((1, -3), (1, -2), (1, -1), (1, 0), (1, 1), (1, 2), (1, 3), (1, 4), (-1, -3), (-1, -2), (-1, -1), (0, -4))),
+(("Decoder1"),
+    ((1, 0), (1, 1), (-1, 0))),
 (("Timing"),
     ((1, 0), (0, -1))),
 (("Keyboard"),
@@ -715,7 +746,7 @@ pin_layouts :: @static @parse_pin_layouts(
     ((3, 0))),
 (("LevelInputArch"),
     ((1, 0), (0, 1))),
-(("Bidirectional64", "Bidirectional32", "Bidirectional16", "Bidirectional1"),
+(("Bidirectional1"),
     ((0, 1))),
 (("Output64"),
     ((-3, 0))),
@@ -733,7 +764,7 @@ pin_layouts :: @static @parse_pin_layouts(
     ((13, -7), (13, -6), (13, -5), (13, -4), (-13, -7), (-13, -6), (-13, -5), (-13, -4), (-13, -3), (-13, -2), (-13, -1))),
 (("Output8", "LevelOutput1Car", "LevelOutput1Sum", "Output1", "Halt", "LevelOutput1"),
     ((-1, 0))),
-(("Not64", "Neg64", "Not32", "Neg32", "IndexerBit", "Not", "Not8", "Neg8", "DelayLine1", "Neg16"),
+(("Not64", "Neg64", "Not32", "Neg32", "IndexerBit", "IndexerByte", "Not", "Not8", "Neg8", "DelayLine1", "Neg16"),
     ((1, 0), (-1, 0))),
 (("Output64z"),
     ((-3, 0), (0, 2))),
@@ -745,6 +776,14 @@ pin_layouts :: @static @parse_pin_layouts(
     ((2, 0), (-1, 1), (-1, -1))),
 (("FileLoader"), 
     ((4, 0), (-3, -1), (-4, 0))),
+(("NoteSound"), 
+    ((-2, 0), (-1, -1), (-2, 1))),
+(("DelayLine64"),
+    ((3, 0), (-3, 0))),
+(("SegmentDisplay"),
+    ((0, -2), (-1, -2))),
+(("DotMatrixDisplay"),
+    ((0, -2), (-1, -2), (-2, 0), (-2, -1))),
 );
 
 parse_pin_layouts :: fn(e: FatExpr) FatExpr #macro = {
