@@ -1,4 +1,10 @@
 
+## (Jun 17) circuit 
+
+- temporary ui for displays (7 segment and dot matrix).
+  bit of coordinate system hell for the latter because im dumb. 
+  unusable because they don't tile but at least can tell it's working. 
+
 ## (Jun 16) circuit 
 
 - i fear im going to need to actually track unpoweredness for each wire when you use switches

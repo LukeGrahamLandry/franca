@@ -40,6 +40,7 @@ State :: @struct {
     keyboard_device_focused: bool;
     keyboard_needs_update: bool;
     gfx_error_last_frame: bool;
+    halted_without_wire_values: bool;
     keyboard_data: ?*Tc.Builtin.KeyboardData;
     
     circuit: []Tc.Circuit;
@@ -65,11 +66,13 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     @if(!state.auto_eval)
     @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
     world := state.world&;
-    
+    halted_without_wire_values := false;
     have_logic := state.tree.len > 0 && state.tree[0].component.is_some();
     show_the_maze := !state.is_new_overture;
     @if(have_logic)
     if state.want_eval || state.auto_eval {
+        state.win_tick = .None;
+        break :: local_return;
     count := @if(state.auto_eval, state.ticks_per_eval, 1);
     root_component := state.tree[0].component.unwrap();
     range(0, count) { i |
@@ -77,8 +80,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         state.tick += 1;
         input := state.maze&.input();
         OUT: ?u8 = .None;
+        save_wire_values := i == count - 1;
         if state.is_new_overture {
-            save_wire_values := i == count - 1;
             world.instance = 0; 
             world.scratch.len = 0;
             
@@ -101,7 +104,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             world.save_wire_values = prev;
             OUT = @if(has_dis && values[1 + int(state.arch_is_leg)] != 0, (Some = values[0 + int(state.arch_is_leg)].trunc()), .None);
         } else {
-            OUT = tick_overture(world, root_component, input, false, i == count - 1);
+            OUT = tick_overture(world, root_component, input, false, save_wire_values);
         };
         out := OUT;
         if out { byte |
@@ -110,6 +113,16 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                 state.win_tick = (Some = state.tick);
                 state.auto_eval = false;
             }
+        };
+        
+        state.halted_without_wire_values = !save_wire_values;
+        if world.tc_halt_device {
+            world.tc_halt_device = false;
+            state.want_eval = false;
+            state.auto_eval = false;
+            state.halted_without_wire_values = !save_wire_values; 
+            state.win_tick = (Some = state.tick);
+            break();
         };
     };
     state.want_eval = false;
@@ -169,7 +182,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         continue :: local_return;
         @if(!c.is_arch) continue();
         
-        sdtx.pos = world_to_text_pos(vec2(0 * width, height * (5 + arch_list_count)));
+        sdtx.pos = world_to_text_pos(vec2(0 * width, height * (7 + arch_list_count)));
         p := world_to_text_pos(p);
         hover := p.x > sdtx.pos.x && p.x < sdtx.pos.x + c.name.len.float().cast() && p.y > sdtx.pos.y && p.y < sdtx.pos.y + 1;
         sdtx.color = pack_rgba(200, 200*int(i != selected_circuit), 200*int(!hover), 255);
@@ -206,12 +219,14 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             };
         };
     
-        value := wires[id.id.zext()];
+        ok := id.id.zext().ult(wires.len);
+        value := @if(!ok, 0, wires[id.id.zext()]);
         sdtx.color = colour&[int(value != 0)];
         sdtx.put(@tfmt("w%", id.id));
         sdtx.color = pack_rgba(150, 150, 150, 255);
         sdtx.put("=");
         // TODO: need to keep track of data size of each wire
+        @if(ok) 
         if state.is_new_overture {
             for_rev i64.cast_to_bytes(value&) { c |
                 push_hex_byte(out, c, false);
@@ -245,7 +260,9 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     
     pos := vec2(0, 0);
-    wires = world.scratch.items().subslice(wire_offset, c.wire_count);
+    if !state.halted_without_wire_values {
+        wires = world.scratch.items().subslice(wire_offset, c.wire_count);
+    };
     if state.show_wire_ref_lines {
         all_wire_positions = temp().alloc_zeroed(RawList(Vec2), wires.len);
     };
@@ -421,7 +438,13 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sdtx.pos = vec2(0, -1);
         sdtx.put(@tfmt("solved in % ticks", win_tick));
     };
-    };
+    } else {
+        if state.win_tick { win_tick |
+            sdtx.color = pack_rgba(50, 200, 150, 255);
+            sdtx.pos = world_to_text_pos(vec2(0, height*4));
+            sdtx.put(@tfmt("halted after % ticks", win_tick));
+        };
+    }
     
     sdtx.origin = vec2(0);
     
@@ -541,7 +564,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                     sdtx.pos = world_to_text_pos(b) + vec2(0, wire_hover_count);
                     sdtx.color = pack_rgba(255, 255, 255, 255);
                     sdtx.put(@tfmt("% (%, %) ", wire_i, it.pos.x, it.pos.y));
-                    @if(wire.logical.id.zext() < wires.len) show(wire.logical, true);
+                    @if(wire.logical.id != 0xFFFFFFFF) show(wire.logical, true);
                     wire_hover_count += 1;
                 };
                 sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
@@ -600,18 +623,17 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sdtx.origin = world_to_text_pos(vec2(-90 * width, 30*height));
         sdtx.pos = vec2(0);
         
-        // TODO: allow multiple consoles. put this in the loop. 
-        a, b := (text_to_world_pos(sdtx.origin), text_to_world_pos(sdtx.origin + vec2(80, 24)));
-        s := abs(a - b);
-        w: f32 = 0.03;
-        sgl.color = pack_rgba(20, 20, 20, 255);
-        sgl.line(a, a + vec2(s.x, 0), w);
-        sgl.line(a, a - vec2(0, s.y), w);
-        sgl.line(b, a + vec2(s.x, 0), w);
-        sgl.line(b, a - vec2(0, s.y), w);
-        
         enumerate c.gates { i, it |
             if world[it.kind].name == "Console" {  // TODO: do this by index
+                a, b := (text_to_world_pos(sdtx.origin + sdtx.pos), text_to_world_pos(sdtx.origin + sdtx.pos + vec2(80, 24)));
+                s := abs(a - b);
+                w: f32 = 0.03;
+                sgl.color = pack_rgba(20, 20, 20, 255);
+                sgl.line(a, a + vec2(s.x, 0), w);
+                sgl.line(a, a - vec2(0, s.y), w);
+                sgl.line(b, a + vec2(s.x, 0), w);
+                sgl.line(b, a - vec2(0, s.y), w);
+            
                 T :: Builtin.Settings.Console;
                 param: T = (repr = it.param.bitcast());
                 // TODO: colour and font
@@ -675,7 +697,43 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                     };
                     @default => println("TODO: console ram word size");
                 };
+                sdtx.pos.y -= 24;
             };
+            
+            if world[it.kind].name == "SegmentDisplay" {  // TODO: do this by index
+                w: f32 = 0.03;
+                s: f32 = 0.1;
+                colour_index := it.param.clamp(0, 3);
+                mask := world.storage[c.instance_offset_by_gate[i]];
+                base := text_to_world_pos(sdtx.origin + sdtx.pos);
+                empty := pack_rgba(0, 0, 0, 255);
+                range(0, 8) { i |  // TODO: make calling for_bits more convenient
+                    on := mask.bit_and(1.shift_left(i)) != 0;
+                    sgl.color = @if(on, segment_colours[colour_index], empty);
+                    da, db := segment_lines[i];
+                    a, b := (base + da*s * vec2(1, -1), base + db*s * vec2(1, -1));
+                    sgl.line(a, b, w);
+                };
+                sdtx.pos.y += 6;
+            };
+            
+            if world[it.kind].name == "DotMatrixDisplay" {
+                buf := world.storage.subslice(c.instance_offset_by_gate[i], 7*8*32/64);
+                buf := u32.reinterpret_bytes(buf.interpret_as_bytes());
+                
+                i := 0;
+                range(0, 8) { y |
+                    range(0, 6) { x |
+                        r, g, b := (buf[i].shift_right_logical(24).bit_and(0xFF), buf[i].shift_right_logical(16).bit_and(0xFF), buf[i].shift_right_logical(8).bit_and(0xFF));
+                        sdtx.color = pack_rgba(r.zext(), g.zext(), b.zext(), 255);
+                        sdtx.put("\x8F".index(0)[] - 3);  // bottom half solid square
+                        i += 1;
+                    };
+                    sdtx.pos += vec2(-6, 0.5);
+                };
+                sdtx.pos.y += 1;
+            };
+            // TODO: all these need to know the thing's rotation
         };
         sdtx.origin = vec2(0);
     };
@@ -704,7 +762,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.sg = sg; state.sapp = sapp;
     a := general_allocator();
     state.text&.setup(sg = sg, allocator = a, fonts = @slice(Sdtx.font.cpc), context = (char_buf_size = 10000));
-    state.draw&.setup(allocator = general_allocator(), sg = sg, max_vertices = 100_000);
+    state.draw&.setup(allocator = general_allocator(), sg = sg, max_vertices = 1_000_000);
     
     state.key_buffer = init(a, 64);
     init(state.world&, a, true);  // TODO: leaked when loading new circuit
@@ -1061,4 +1119,20 @@ key_order :: @const_slice(Sapp.Keycode.GRAVE_ACCENT, ._1, ._2, ._3, ._4, ._5, ._
     .CAPS_LOCK, .A, .S, .D, .F, .G, .H, .J, .K, .L, .SEMICOLON, .APOSTROPHE, .ENTER, 
     .LEFT_SHIFT, .Z, .X, .C, .V, .B, .N, .M, .COMMA, .PERIOD, .SLASH, 
     .LEFT_CONTROL, .LEFT_SUPER, .LEFT_ALT, .SPACE, .LEFT, .UP, .RIGHT, .DOWN,
+);
+segment_colours :: @const_slice(
+    pack_rgba(255, 255, 255, 255),
+    pack_rgba(255, 0, 0, 255),
+    pack_rgba(0, 255, 0, 255),
+    pack_rgba(255, 255, 0, 255),
+);
+segment_lines :: @const_slice(
+    (vec2(0, 0), vec2(1, 0)),
+    (vec2(1, 0), vec2(1, 1)),
+    (vec2(1, 1), vec2(1, 2)),
+    (vec2(1, 2), vec2(0, 2)),
+    (vec2(0, 2), vec2(0, 1)),
+    (vec2(0, 1), vec2(0, 0)),
+    (vec2(0, 1), vec2(1, 1)),
+    (vec2(1, 2), vec2(1.2, 2)),
 );

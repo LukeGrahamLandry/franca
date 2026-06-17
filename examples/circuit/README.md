@@ -36,11 +36,14 @@ it works well enough to run my overture/leg in the maze and a few things from th
 ## tc is INCOMPLETE
 
 - not all components are implemented / have pin positions transcribed
-  - also missing: 64 bit mul high, add overflow. 
+  - also missing: 64 bit mul high, add overflow. 8/16 arithmetic shift wrong. 
 - devices
-  - missing: network, hard disk, 7-segment, dot matrix, 
+  - missing: network, hdd, sprite display, sound
   - console: wrong font. data size 16/32? colour with data size 8?
   - keyboard: character mode param. click to focus instead of a keybind. 
+  - ram: 128/256 bit, duel load
+  - display: rotation
+- need to position the displays correctly because they can be tiled
 - the way i represent unpowered (hi-z) wires is sketchy
   - need to do it for disable pins of decode3/register/ram?
   - ram needs to not write if an input is unpowered? (rn only does that for fully disconnected)
@@ -55,6 +58,7 @@ it works well enough to run my overture/leg in the maze and a few things from th
 
 ## other todos
 
+- put world.instance in a local/parameter and don't increment it in the builtin impls
 - finish leg: memory, stack, call, shifts
 - make the defs language less painful
   - number literal instead of const()
@@ -76,6 +80,7 @@ it works well enough to run my overture/leg in the maze and a few things from th
 - less trash code. builtin.fr and gpu.fr are particularly bad.. 
 - deduplicate error checking between parse and load
 - show wire comments in the ui
+- my convert_to_ssa is real :SLOW on `Clock` (from the schematic hub). ~900ms
 
 ```
 // TODO: don't always recompile everything when loading a new circuit. it might reuse some custom components. 

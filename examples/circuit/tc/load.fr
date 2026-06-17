@@ -723,8 +723,19 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
             s0, s1 := (it.settings&[0], it.settings&[1]);
             param = s0;
             #use(Builtin.Settings);
-            if shape.name.starts_with("Ram") || shape.name.starts_with("Program") {
-                z_input_mask = z_input_mask.shift_right_logical(4+1+1+1);  // skip [4x out, load, store, addr]
+            if shape.name.starts_with("Ram") || shape.name.starts_with("Program") || shape.name == "Rom" {
+                if shape.name == "Rom" {
+                    // this still matters, dispite the name, there's a sandbox-only save pin 
+                    z_input_mask = z_input_mask.shift_right_logical(1+1+1+1);  // skip [1x out, load, store, addr]
+                    z_input_mask = z_input_mask.bit_or(0b1110);  // only one save pin
+                } else {
+                    z_input_mask = z_input_mask.shift_right_logical(4+1+1+1);  // skip [4x out, load, store, addr]
+                };
+                if s1 > 3 {
+                    @println("TODO: >64 bit data width index=%", s1);
+                    it.settings&[1] = 3;
+                    s1 = 3;
+                };
                 s: Ram = construct(storage_size = s0, word_size_index = s1, z_input_mask = z_input_mask);
                 param = s.repr.bitcast();
             };
@@ -773,7 +784,6 @@ fn get_arity(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit)
     };
     child.arity
 }
-
 
 fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, $body: @Fn(pin_index: i64, dx: i64, dy: i64) void) void = {
     // TODO: also pass in the []Circuit so it works for custom components
@@ -962,25 +972,24 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
     wire_count := eat(i64);
     wires&.reserve(wire_count);
     range(0, wire_count) { _ |
-        continue :: local_return;
         kind := eat(u8);
         colour := eat(u8);
-        n := eat(u16);
-        comment := in.subslice(i, n.zext());
-        i += n.zext(); 
+        comment := eatN(u16, u8);
         
         pos := eat_point();
+        path := Circuit.WireNode.list(a);
+        path&.push(pos = pos, direction = vec2(0), length = 0);
+        
         segment := eat(u8);
+        length := segment.bit_and(0b0001_1111);
         if segment == 0b0010_0000 {
-            x := eat(i16);
-            y := eat(i16);
-            continue();
+            // TODO: im suspicious that this doesn't work
+            // this is a "teleport wire". can't place it in the game but other programs that write save files can cheat on the layout.
+            pos := eat_point();
+            path&.push(pos = pos, direction = vec2(0), length = 0);
+            length = 0;
         };
         
-        path := Circuit.WireNode.list(a);
-        
-        path&.push(pos = pos, direction = vec2(0), length = 0);
-        length := segment.bit_and(0b0001_1111);
         while => length != 0 {
             direction := directions[segment.zext().shift_right_logical(5)];
             len: i64 = length.zext();
@@ -992,6 +1001,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
             segment = eat(u8);
             length = segment.bit_and(0b0001_1111);
         };
+        @if(path.len == 1) return(Err = "bad wire path length?");
         wires&.push(path = path.as_raw());
         
         for path { it |
