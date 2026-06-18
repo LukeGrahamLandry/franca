@@ -80,7 +80,6 @@ it works well enough to run my overture/leg in the maze and a few things from th
 - less trash code. builtin.fr and gpu.fr are particularly bad.. 
 - deduplicate error checking between parse and load
 - show wire comments in the ui
-- my convert_to_ssa is real :SLOW on `Clock` (from the schematic hub). ~900ms
 
 ```
 // TODO: don't always recompile everything when loading a new circuit. it might reuse some custom components. 

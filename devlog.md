@@ -1,4 +1,12 @@
 
+## (Jun 18) circuit
+
+- compile_gate was assuming youd never have to pre_read something while compiling for pre_read. 
+  wrong for "QOI Decoder Inner"'s BitMemory. that's why And3 in the ui had the wrong result, w19 was changing because was pre_read wrong. 
+- "Bad Apple" (the one with dot matrix) uses Decoder1 to check bottom bit of a larger number so need to `&1` not `!=0`
+- "BRAINFUCK PC EXTENDED" now correctly prints hello world but doesn't halt so keeps printing junk. 
+  program is supposed to be padded with zeros when you get to the end of the assembly, mine just wraps immediately. 
+
 ## (Jun 17) circuit 
 
 - temporary ui for displays (7 segment and dot matrix).

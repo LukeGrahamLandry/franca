@@ -420,13 +420,21 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
         return();
     };
     
-    if !self.doing_pre_read && self.c.storage_count > 0 {
-        for it.inputs { it |
-            if !self.wires_evaluated&.get(it.id.zext()) {
-                self.need_pre_read&.push(it);
+    if !self.doing_pre_read_local && self.c.storage_count > 0 {
+        X :: fn(it: WireId) => if !self.wires_evaluated&.get(it.id.zext()) {
+            self.need_pre_read&.push(it);
+        };
+        if self.doing_pre_read {
+            for child.inputs_for_pure_eval { i |
+                X(it.inputs[i]);
+            };
+        } else {
+            for it.inputs { it |
+                X(it);
             };
         };
         
+        prev := self.doing_pre_read;
         any_pre_read := self.need_pre_read.len != 0;
         if any_pre_read {
             @fmt(out, "world.doing_pre_read = %;\n", true);
@@ -464,7 +472,7 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
                 
                 self.compile_gate(gate_i);
                 
-                self.doing_pre_read = false;
+                self.doing_pre_read = prev;
                 self.doing_pre_read_local = false;
                 
                 each it.outputs { it |
@@ -474,7 +482,7 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
         };
         if any_pre_read {
             @fmt(out, "world.instance = instance + %;\n", self.c.instance_offset_by_gate[gate_i]);
-            @fmt(out, "world.doing_pre_read = %;\n", false);
+            @fmt(out, "world.doing_pre_read = %;\n", prev);
         };
     };
     name := child.name;
@@ -527,7 +535,6 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
         @fmt(out, "\n");
     };
     
-    @if(!self.doing_pre_read)
     for it.outputs { it |
         self.wires_evaluated&.set(it.id.zext());
     };
@@ -609,6 +616,7 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
             @fmt(out, "doing_pre_read, instance := (world.doing_pre_read, world.instance);\n");
             range(0, 2) { iter_i |
                 self.compile_order&.clear();
+                self.wires_evaluated&.clear();
             
                 doing_pre_read := iter_i == 0;
                 @fmt(out, "if %doing_pre_read {\n", @if(doing_pre_read, "", "!"));
