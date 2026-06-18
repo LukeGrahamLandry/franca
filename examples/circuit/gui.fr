@@ -48,7 +48,11 @@ State :: @struct {
     circuit_arena: Arena.Allocator;
     is_new_overture: bool;  // TODO: remove
     loaded_assembly: bool;
-    fr: ?CompCtx;
+    load_time: i64;
+    fr: ?Ty(CompCtx, *Qbe.Module);
+    loading: ?@struct(start_time: i64, done: u32 = 0, frame_count := 0, root_index: i64, started_compiling := false);
+    loader_thread: ?*Thread;
+    have_load_work_futex: u32;
 };
 
 CircuitNode :: @struct {
@@ -65,9 +69,32 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.check_movement();
     @if(!state.auto_eval)
     @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
+    sdtx := state.text.default_context&;
+    sgl := state.draw&;
+    need_draw := false;
+    
+    if state.loading& { it |
+        if it.done == 1 {
+            state.loading = .None;
+            if state.tree.len > 0 && state.tree[0].diagram_circuit.is_some() {
+                c := state.circuit[state.tree[0].diagram_circuit.Some]&; 
+                state.tree[0].component = c.compiled;
+            };
+            state.reset();
+        } else {
+            sdtx.desc.char_height = 8;
+            sdtx.desc.char_width = sdtx.desc.char_height / 2;
+            sdtx.canvas(sapp, 1);
+            sdtx.color = pack_rgba(255, 255, 255, 255);
+            sdtx.put(@tfmt("compiling %\nit's been % frames, % ms\nif you can read all this it's too slow!", state.circuit[it.root_index].name, it.frame_count, timestamp() - it.start_time));
+            it.frame_count += 1;
+            state.dirty = true;
+        };
+    };
+    
     world := state.world&;
     halted_without_wire_values := false;
-    have_logic := state.tree.len > 0 && state.tree[0].component.is_some();
+    have_logic := state.loading.is_none() && state.tree.len > 0 && state.tree[0].component.is_some();
     show_the_maze := !state.is_new_overture;
     @if(have_logic)
     if state.want_eval || state.auto_eval {
@@ -132,8 +159,6 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     screen_aspect := app_w / app_h;
     screen_scale := vec2(500 * sapp.dpi_scale) / vec2(app_w, app_h);
     
-    sdtx := state.text.default_context&;
-    
     if state.gfx_error_last_frame {
         sdtx.desc.char_height = 8;
         sdtx.desc.char_width = sdtx.desc.char_height / 2;
@@ -167,6 +192,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sdtx.color = pack_rgba(255, 255, 255, 255);
     sdtx.pos = world_to_text_pos(vec2(0, height*3));
     sdtx.put(@tfmt("(paused=%, tick_rate=%, tick=%, keyboard=%) ", !state.auto_eval, state.ticks_per_eval, state.tick, state.keyboard_device_focused));
+    @if(state.load_time != 0) sdtx.put(@tfmt("load_time=%ms", state.load_time));
     
     sdtx.color = pack_rgba(0, 0, 0, 255);
     sdtx.pos = vec2(0);
@@ -192,7 +218,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         if state.clicked && hover {
             state.clicked = false;
             state.dirty = true;
-            load_circuit_index(state, state.circuit, i, state.world.tc_file_loader_device, timestamp());
+            have_logic = false;
+            load_circuit_index_async(state, i, state.world.tc_file_loader_device, timestamp());
         };
     };
     
@@ -205,7 +232,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     all_wire_positions: []RawList(Vec2) = empty();
     hovered_wire_index: ?Ty(WireId, i64) = .None;
     
-    show :: fn(id: WireId, force_hover: bool) => {
+    show :: fn(id: WireId, force_hover: bool) => if have_logic {
         if state.show_wire_ref_lines {
             start := sdtx.pos;
             end := start + vec2(6, 1);
@@ -264,7 +291,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         wires = world.scratch.items().subslice(wire_offset, c.wire_count);
     };
     if state.show_wire_ref_lines {
-        all_wire_positions = temp().alloc_zeroed(RawList(Vec2), wires.len);
+        all_wire_positions = temp().alloc_zeroed(RawList(Vec2), c.wire_count);
     };
     
     sdtx.put(c.name);
@@ -274,6 +301,11 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sdtx.pos = world_to_text_pos(vec2(0, 0));
         sdtx.color = @if(hover, pack_rgba(0, 255, 0, 255), pack_rgba(255, 255, 0, 255));
         sdtx.put("output(intrinsic(input()));");
+        
+        // TODO
+        //instance := c.instance_offset_by_gate[gate_i];
+        //n := get_storage_count(world.components, c.gates[gate_i]&);
+        //dest := world.storage.subslice(instance, n);
         
         if state.clicked && hover && state.tree.len > 1 {
             _ := state.tree&.pop();
@@ -450,9 +482,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     // might get rid of this rendering but for now its all i can do with the tc circuits i load.
     // especially the hover stuff is just useful because i have to transcribe the pin positions before i can actually simulate it. 
-    sgl := state.draw&;
     
-    need_draw := false;
         sgl.defaults();
         sgl.viewport(0, 0, app_w, app_h, true);
         sgl.begin(.QUADS);
@@ -557,6 +587,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                 };
                 hover := p.y < b.y + W/2 && p.y > b.y - W/2 && p.x > b.x - W/2 && p.x < b.x + W/2;
                 if hovered_wire_index.is_some() && hovered_wire_index.Some._0.id == wire.logical.id && (i == 0 || i == wire.path.len - 1) {
+                    // TODO: these will be kinda useless because it doesn't reset wire_hover_count when for the next wire that's at a different x position. 
                     hover = true;
                 };
                 if hover {
@@ -570,6 +601,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                 sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
             };
         };
+        @if(state.loading.is_none() || state.loading.Some.started_compiling)
         each circuit.gates { it |
             info := Builtin'templates[it.kind.zext()];
             for_pins(info, it, state.circuit) { i, dx, dy |
@@ -627,12 +659,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             if world[it.kind].name == "Console" {  // TODO: do this by index
                 a, b := (text_to_world_pos(sdtx.origin + sdtx.pos), text_to_world_pos(sdtx.origin + sdtx.pos + vec2(80, 24)));
                 s := abs(a - b);
-                w: f32 = 0.03;
-                sgl.color = pack_rgba(20, 20, 20, 255);
-                sgl.line(a, a + vec2(s.x, 0), w);
-                sgl.line(a, a - vec2(0, s.y), w);
-                sgl.line(b, a + vec2(s.x, 0), w);
-                sgl.line(b, a - vec2(0, s.y), w);
+                sgl.color = pack_rgba(0, 0, 0, 255);
+                sgl.line(vec2(a.x, b.y + s.y/2), vec2(b.x, b.y + s.y/2), s.y);
             
                 T :: Builtin.Settings.Console;
                 param: T = (repr = it.param.bitcast());
@@ -756,6 +784,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 };
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    state.loading = .None;
+    state.loader_thread = .None;
     state.fr = .None;
     state.keyboard_data = .None;
     sapp.desc.enable_dragndrop = true;
@@ -894,16 +924,16 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             return();
         }
     
+        if pan_keys.index_of(fn(it) => it[] == event.key_code) { i |
+            s := state.pan_keys_pressed&;
+            s[] = s[].bit_xor(1.shift_left(i));
+        };
+        
         buf := state.key_buffer&;
         if state.keyboard_device_focused && buf.len() < buf.capacity() {
             buf.push_back((key = event.key_code, up = event.type == .KEY_UP), panicking_allocator);
             state.dirty = state.dirty || buf.len < 2;
             return();
-        };
-    
-        if pan_keys.index_of(fn(it) => it[] == event.key_code) { i |
-            s := state.pan_keys_pressed&;
-            s[] = s[].bit_xor(1.shift_left(i));
         };
     };
     
@@ -947,6 +977,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                     state.ticks_per_eval += tick_off;
                 }
                 fn N() => {
+                    state.load_time = 0;
                     state.is_new_overture = false;
                     state.arch_is_leg = !state.arch_is_leg;
                     root := get_component_by_name(@if(state.arch_is_leg, "leg", "overture"), finished_defs.components);
@@ -978,7 +1009,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
 
 pan_directions :: @const_slice(vec2(0, -1), vec2(1, 0), vec2(0, 1), vec2(-1, 0));
 pan_keys :: @const_slice(Sapp.Keycode.W, .A, .S, .D);
-fn check_movement(state: *State) void = if state.pan_keys_pressed != 0 {
+fn check_movement(state: *State) void = if state.pan_keys_pressed != 0 && !state.keyboard_device_focused {
     state.dirty = true;
     dir := vec2(0);
     range(0, 4) { i |
@@ -1007,62 +1038,98 @@ fn load_path(state: *State, path: Str) void = {
         @eprintln("failed to load [%]", path);
         return();
     };
-    load_circuit_index(state, circuits, root_index, tc_file_loader_device, start);
+    load_circuit_index_async(state, root_index, tc_file_loader_device, start);
 }
-   
-fn load_circuit_index(state: *State, circuits: []Tc.Circuit, root_index: i64, tc_file_loader_device: []Tc.LoadedFile, start: i64) void = {
+
+fn load_circuit_index_async(state: *State, root_index: i64, tc_file_loader_device: []Tc.LoadedFile, start: i64) void = {
+    @debug_assert(state.loading.is_none());
+    state.world.tc_file_loader_device = tc_file_loader_device;
+    state.loading = (Some = (start_time = start, root_index = root_index));
+    state.tree&.clear();
+    state.tree&.push(diagram_circuit = (Some = root_index));
+    if state.loader_thread.is_none() {
+        state.loader_thread = (Some = start_thread(State, fn(state) = {
+            while => state.have_load_work_futex == 1 {
+                load_circuit_index_worker(state);
+                u32.atomic_add(state.have_load_work_futex&, MAX_u32);
+                Futex'wait_while(state.have_load_work_futex&, fn(tmp) => tmp == 0);
+            };
+        }, state));
+    };
+    state.have_load_work_futex = 1;
+    Futex'wake(state.have_load_work_futex&, 1);
+}
+
+// should fine for the ui to show the diagram on the other thread while this compiles. 
+// there needs to not use the logical part while state.loading.is_some() and here needs to not push to state.tree. 
+fn load_circuit_index_worker(state: *State) void = {
+    loading := state.loading&.unwrap();
+    circuits, tc_file_loader_device, root_index := (state.circuit, state.world.tc_file_loader_device, loading.root_index);
     each circuits { c | 
         c.compiled = .None;
     };
 
-    state.tree&.clear();
     a := state.circuit_arena&.borrow();
     components := @ref Component.list(a);
+    // finished_defs don't need to be re-compiled every time because they'll already have it.fast_eval set from comptime. 
     components.push_all(finished_defs.components);
+    first_index_that_needs_fast_eval := components.len;
     Tc'compile_circuit(circuits, root_index, components, a);
+    loading.started_compiling = true;
     
-    @if(FEAT_RT_COMPILE, {
+    // either way need to set Component.compile_order for interp
+    src := compile_gates_source(components.items(), a, first_index_that_needs_fast_eval);
+    @if(FEAT_RT_COMPILE) {
     
-    if state.fr&.take() { fr |
+    @if(true) // TODO: sometimes skip and reuse the setup work (saves ~60ms)
+    if state.fr&.take() { fr, m |
+        fr'vtable'drop_qbe_module(Qbe.Module.raw_from_ptr(m));
         fr'vtable'destroy_compiler(fr.data);
     };
+    R :: import("@/examples/repl.fr").R;
+    R'start_profile();
     
     @if(state.fr.is_none())
     push_as_tls(.comptime, zeroed(rawptr)) {
-        v := import("@/examples/repl.fr")'R'init_driver_vtable();
+        v := R'init_driver_vtable();
         opts := v.default_build_options();
         opts.no_cache = true;
         fr := v.with(v'init_compiler(opts));
         make_and_resolve_and_compile_top_level(fr.data, fr.vtable, """ #include_std("lib/core.fr"); """, "-");
-        state.fr = (Some = fr);
+        m := fr.get_alloc().box_uninit(Qbe.Module);
+        init_default_module_dyn(m, fr.vtable, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly));
+        state.fr = (Some = (fr, m));
     };
-    fr := state.fr.unwrap();
+    fr, m := state.fr.unwrap();
 
     comptime_ctx := bit_cast_unchecked(Compiler, **rawptr, fr.data)[][];  // TODO: making everybody deal with this is kinda trash
     push_as_tls(.comptime, comptime_ctx) {
-        compile_gates(fr, components.items());
+        // more convoluted than just `compile_gates` because don't want to allow jit-shims (so timer will be accurite). 
+        // TODO: annoying that doing it this way does useless bake_relocatable_value
+        fid := create_function_for_value(fr, src, "dispatch");
+        {fr.vtable.emit_qbe_included}(Qbe.Module.raw_from_ptr(m), fr&, @slice(fid), .GiveMeTheCodeAndGiveItToMeRaw);
+        name := fr'vtable'mangle_name(fr.data, fid);
+        callee := m.get_addr(name).unwrap();
+        callee := bit_cast_unchecked(rawptr, @FnPtr() []rawptr, callee);
+        fast_eval := callee();
+        range(first_index_that_needs_fast_eval, components.len) { i |
+            components[i].fast_eval = fast_eval[i];
+        };
+        R'end_profile();
     };
-    }, { 
-        // else: no compile but still need to set Component.compile_order for interp
-        _ := compile_gates_source(components.items(), a);
-    });
+    };
     init(state.world&, a, true, components.items());
     state.world.tc_file_loader_device = tc_file_loader_device;
-    state.tree&.clear();
    
     c := circuits[root_index]&; 
-    state.tree&.push(
-        diagram_circuit = (Some = root_index),
-        component = c.compiled,
-    );
     state.arch_is_leg = c.name == "LEG";
     state.is_new_overture = true;
-    state.reset();
     state.find_keyboard();
     state.ticks_per_eval = c.default_tick_rate.zext() / 60;
     
-    // TODO: misleading because there can still be uncompiled jit-shims
-    @eprintln("loaded in %ms", timestamp() - start);
+    state.load_time = timestamp() - loading.start_time;
+    @eprintln("loaded in %ms", state.load_time);
+    loading.done = 1;
 }
 
 Tc :: import("@/examples/circuit/tc/load.fr");
@@ -1098,6 +1165,11 @@ fn read_memory(world: *World, root_component: ComponentId) []u8 = {
 }
 
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    if state.loader_thread { loader_thread |
+        state.have_load_work_futex = 999;
+        Futex'wake(state.have_load_work_futex&, 1);
+        loader_thread.join();
+    };
     state.text&.shutdown();
     drop(state.world&, general_allocator());
     // TODO: state.draw, state.circuit_arena
@@ -1113,6 +1185,10 @@ main :: fn() void = Easy'start(State);
 #use("@/examples/circuit/parse.fr");
 //Scenario :: Main.scenario;
 Scenario :: import("@/examples/circuit/scenario.fr");
+Qbe :: import("@/backend/lib.fr");
+ENABLE_TRACY :: Foreign.ENV.FRANCA_TRACY.get_environment_variable().is_some();  // ugh
+#use("@/lib/sys/threads.fr");
+Futex :: import("@/lib/sys/sync/futex.fr");
 
 key_order :: @const_slice(Sapp.Keycode.GRAVE_ACCENT, ._1, ._2, ._3, ._4, ._5, ._6, ._7, ._8, ._9, ._0, .MINUS, .EQUAL, .DELETE, 
     .TAB, .Q, .W, .E, .R, .T, .Y, .U, .I, .O, .P, .LEFT_BRACKET, .RIGHT_BRACKET, .BACKSLASH,

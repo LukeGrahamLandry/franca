@@ -4,6 +4,14 @@
 - temporary ui for displays (7 segment and dot matrix).
   bit of coordinate system hell for the latter because im dumb. 
   unusable because they don't tile but at least can tell it's working. 
+- the jitter on the first evaluation is insufferable so stop using the lazy compilation 
+  so no more jit-shims and its actually all loaded when it claims to be.  
+- make it work with FRANCA_TRACY=z so can see what's going on
+- put the compiler on another thread so you can at least look at the diagram while it compiles. 
+  tho that does go against my belief system of "if you need a loading bar it's too slow" 
+- Clock compile time being slow was fixed by not inlining everything into one gigantor function 
+  (previously i wasn't computing gate_sum for the tc ones so it was always less than arbitrary threshold of 30). 
+  so now all the ones i have are under 300ms and the loading screen is a bit silly but here we are. 
 
 ## (Jun 16) circuit 
 

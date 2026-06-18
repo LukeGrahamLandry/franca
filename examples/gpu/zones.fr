@@ -309,10 +309,12 @@ try_load_profile_data2 :: fn(a: Alloc, path: Str) Result(ZoneData, Str) = {
     scale: f32 = 10000;
     last_tid: u16 = 0xFFFF;
     last_track := zeroed(*WipTrack);
+    last_start: f32 = -1;
     while => text.len > size_of(ZoneFile.Entry)+1 {
         continue :: local_return;
         h := text&.pop_type(ZoneFile.Entry);
         name := text&.pop_slice(u8, h.name_length.zext());
+        @if(h.start > h.end || h.start < last_start) return(Err = @tfmt("zone bounds out of order (%)", name));
         
         if h.tid != last_tid {
             last_tid = h.tid;
@@ -320,7 +322,12 @@ try_load_profile_data2 :: fn(a: Alloc, path: Str) Result(ZoneData, Str) = {
             ::?*WipTrack;
             last_track = tracks.items().find(fn(it) => it.tid == h.tid) || {
                 tracks.push(events = Event.list(zone_count, a), tid = h.tid, stack = list(temp()));
-                tracks.index(tracks.len - 1)
+                it := tracks.index(tracks.len - 1);
+                // an extra at the bottom so you can easily see the total amount of time
+                it.stack&.push(0);
+                it.events&.push(zeroed(Event));
+                it.events[0].end = 999999999999.0;
+                it
             };
         };
         events, stack := (last_track.events&, last_track.stack&);
@@ -331,8 +338,6 @@ try_load_profile_data2 :: fn(a: Alloc, path: Str) Result(ZoneData, Str) = {
                 events[it[]].skip += events[i].skip;
             };
         };
-        // TODO: don't just crash for invalid input
-        @assert_le(h.start, h.end, "zone bounds out of order");
         
         if stack.last() { it |
             events[it[]].skip += 1;
@@ -347,9 +352,11 @@ try_load_profile_data2 :: fn(a: Alloc, path: Str) Result(ZoneData, Str) = {
             colour = h.colour.byte_swap().shift_right_logical(8),
         );
         stack.push(events.len - 1);
+        last_start = h.start;
     };
     out := a.alloc_init(Track, tracks.len, fn(i) => {
         it := tracks[i];
+        it.events[0] = (start = it.events[1].start, end = it.events[it.events.len - 1].end, name = "", depth = 0, colour = 0xFF444444, skip = it.events[0].skip);
         (events = it.events.items(), name = @afmt(a, "%", it.tid), max_depth = it.max_depth.float().cast())
     });
     

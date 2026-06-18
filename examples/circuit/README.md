@@ -86,7 +86,6 @@ it works well enough to run my overture/leg in the maze and a few things from th
 // TODO: don't always recompile everything when loading a new circuit. it might reuse some custom components. 
 //       and don't reset the state.fr every time because bootstrapping the comptime stuff takes ~50ms. just reset when arena is getting too full. 
 //       similarly don't bother recompiling the natives every time. import them from the host exe (if not inlinable). 
-// TODO: if i want to let you edit the circuit in the ui, move this loading to another thread 
-//       and have two copies that swap when you change something so it doesn't hang the ui while compiling the new one. 
-//       doesn't matter rn because biggest one i have is 100ms but once i support more complecated schmeatic hub things it will be a problem.  
+// TODO: if i want to let you edit the circuit in the ui, 
+//       have two copies that swap when you change something so it doesn't hang the ui while compiling the new one. 
 ```

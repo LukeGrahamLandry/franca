@@ -1,4 +1,4 @@
-
+- FRANCA_TRACY=z needs to be in the cache key for FRANCA_MORE_CACHE=1
 - make examples/web/serve.fr not slow as fuck
 - `a :: @as(i32) 1;` isn't the same as `a: i32 : 1;` 
   (the latter doesn't remember the type when you use it in a larger expression that would also work with i64). 

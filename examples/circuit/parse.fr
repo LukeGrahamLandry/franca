@@ -260,7 +260,7 @@ defs :: @static {
             storage_count = storage_count,
             wire_depth = wire_depth + wire_count,
             wire_sum = wire_sum + wire_count,
-            gate_sum = gate_sum + gates.len,
+            gate_sum = gate_sum,
             labels = labels.items(),
         );
         map&.insert(name, (id = components.len.trunc() - 1));
@@ -553,7 +553,7 @@ fn compile_component(self: *CompileGates, doing_pre_read: bool) void = {
 // so indexing with the Gate.(i,o) happens at compile time instead of run time. 
 // compiled fns call each other directly without going through the interpreter's calling convention. 
 compile_gates :: fn(fr: CompCtx, components: []Component) void = {
-    src := compile_gates_source(components, fr.get_alloc());
+    src := compile_gates_source(components, fr.get_alloc(), 0);
     // TODO: don't allow jit shims so load timer is more accurate? 
     fast_eval := compile_value(fr, []rawptr, src, "dispatch");
     enumerate components { i, it |
@@ -562,7 +562,7 @@ compile_gates :: fn(fr: CompCtx, components: []Component) void = {
 };
 
 // side effect: sets Component.compile_order which the interpreter needs
-compile_gates_source :: fn(components: []Component, a: Alloc) Str = {
+compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_needs_fast_eval: i64) Str = {
     out := @ref u8.list(components.len * 2000, a);
     @fmt(out, "{\n#use(\"@/examples/circuit/eval.fr\");\n#use(\"@/examples/circuit/parse.fr\");\n");
     
@@ -584,7 +584,7 @@ compile_gates_source :: fn(components: []Component, a: Alloc) Str = {
                 tc_index := i - defs.tc_components_offset;
                 shape := templates[tc_index]&;
                 if shape.fid.is_some() {
-                    @fmt(out, "% :: get_native(TcBuiltins.%);\n", mangle(components, i), shape.name);
+                    @fmt(out, "% :: TcBuiltins'get_native(TcBuiltins.%);\n", mangle(components, i), shape.name);
                     continue();
                 };
             };
@@ -625,7 +625,7 @@ compile_gates_source :: fn(components: []Component, a: Alloc) Str = {
     @fmt(out, "dispatch :: @const_slice(@as(rawptr) ");
     // TODO: only reference the ones actually needed from the top level thing? ie. not always defs if just using a tc circuit.
     range(0, components.len) { i |
-        if FEAT_COMPILE || components[i].gates.len == 0 {
+        if i >= first_index_that_needs_fast_eval && (FEAT_COMPILE || components[i].gates.len == 0) {
             @fmt(out, "%, ", mangle(components, i));
         } else {
             @fmt(out, "zeroed(rawptr), ");
@@ -857,6 +857,13 @@ Main :: import().examples.circuit;
 // same as import(src).var_name but can be called from outside. 
 // UNSAFE: T must have the right repr and `src` must be in fr.get_alloc(). 
 compile_value :: fn(fr: CompCtx, $T: Type, src: Str, var_name: Str) T #generic = {
+    fid := create_function_for_value(fr, src, var_name);
+    callee := fr.get_jitted(fid);
+    callee := bit_cast_unchecked(rawptr, @FnPtr() T, callee);
+    callee()
+};
+
+create_function_for_value :: fn(fr: CompCtx, src: Str, var_name: Str) FuncId = {
     v, c := (fr.vtable, fr.data);
     @assert(src.starts_with("{") && src.ends_with("};"), "compile_value wants block like import()");
     src := src.slice(1, src.len - 2);
@@ -876,10 +883,7 @@ compile_value :: fn(fr: CompCtx, $T: Type, src: Str, var_name: Str) T #generic =
         ), loc = loc)),
     )), loc = loc));
     func.resolve_scope = TOP_LEVEL_SCOPE;
-    fid := fr.intern_func(func&);
-    callee := fr.get_jitted(fid);
-    callee := bit_cast_unchecked(rawptr, @FnPtr() T, callee);
-    callee()
+    fr.intern_func(func&)
 };
 
 // TODO: maybe get rid of switch gate so it's always ssa
