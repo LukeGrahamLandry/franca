@@ -6,6 +6,11 @@
 - "Bad Apple" (the one with dot matrix) uses Decoder1 to check bottom bit of a larger number so need to `&1` not `!=0`
 - "BRAINFUCK PC EXTENDED" now correctly prints hello world but doesn't halt so keeps printing junk. 
   program is supposed to be padded with zeros when you get to the end of the assembly, mine just wraps immediately. 
+- i auto zero disconnected input pins but not pins connected to a wire that goes nowhere
+- ram output needs to be treated like a switch too, including being allowed to be on the same like as another switch
+- confused by where save file stores which program is selected. its not just the first one. 
+  are those key numbers in the data string with the links somehow? 
+  ohh they're level ids because in the game a bunch of levels use the same architecture so it needs to remember which program was used in each one. 
 
 ## (Jun 17) circuit 
 

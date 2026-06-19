@@ -17,6 +17,7 @@ Circuit :: @struct {
     name: Str;
     arity: Ty(i64, i64) = (-1, -1);
     has_bidirectional_pins := false;
+    has_arch_pins := false;
     is_arch := false;
     default_tick_rate: u32;
     
@@ -43,7 +44,8 @@ Circuit :: @struct {
         link_id: i64;
     };
     Program :: @struct {
-        key: i64;  // TODO: what is this?
+        SANDBOX_LEVEL_ID :: 86;
+        level_id: i64;
         name: Str;
         gate_index: i64;
         assembly: ?Str = .None;
@@ -117,8 +119,8 @@ load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64, []Loade
                 @println("Assembly path [%] is sketchy", it.name);
                 continue();
             };
-            // TODO: somehow have to look in subfolders
-            path := @tfmt("%%.assembly", dir, it.name);
+            // TODO: if i want to load for other levels, i need the mapping to names from https://turingcomplete.game/api_level_meta
+            path := @tfmt("%sandbox/%.assembly", dir, it.name);
             it.assembly = read_entire_file(a, path);
         };
         each info.gates { it |
@@ -207,7 +209,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     range(0, gates.len) { i |  // gate.push in this loop
         continue :: local_return;
         it := gates.index(i); 
-        if i == c.gates.len {
+        if i >= c.gates.len {
             // new_false_wire CONST_INDEX is already remapped. TODO: this is more error prone than it needs to be
             @assert(it.inputs.len == 0 && it.kind.id == { xx := CONST_INDEX; /*:compiler*/ xx.id }, "CONST_INDEX HACK"); 
             logical_to_circuit&.push(-1);
@@ -238,6 +240,26 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
             unimplemented = true;
         };
         
+        apply_switchable_pin :: fn(value, condition) => {  // :OutputNz
+            w := a.alloc_uninit(WireId, 3);
+            switchable_wire: WireId = (id = wire_count.trunc());
+            wire_count += 1;
+            
+            w[0] = value[];
+            w[1] = switchable_wire;
+            w[2] = condition[];
+            value[] = switchable_wire;
+            
+            S := @run get_component_by_name("switch1", defs.components.items()); 
+            gates&.push(kind = S, inputs = w.slice(1, 3), outputs = w.slice(0, 1));
+            extra_gates += 1;
+            it = gates.index(i);  // ^ can reallocate
+        };
+        
+        for shape.switches { pin |
+            apply_switchable_pin(it.outputs[pin.value_output_index]&, it.inputs[pin.condition_input_index]&);
+        };
+        
         @match(shape.body&) { 
             fn Unimplemented() => {
                 kill&.set(i);
@@ -245,24 +267,6 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 unimplemented = true;
             }
             fn IO() => {
-                // :OutputNz same thing as for Custom but not both outputs here 
-                if shape.name == "LevelInputArch" {  // TODO: registers also need this so should have a switchable_pins list on the Template perhaps
-                    w := a.alloc_uninit(WireId, 3);
-                    switchable_wire: WireId = (id = wire_count.trunc());
-                    wire_count += 1;
-                    
-                    value, condition := (it.outputs[0]&, it.inputs[0]&);
-                    w[0] = value[];
-                    w[1] = switchable_wire;
-                    w[2] = condition[];
-                    value[] = switchable_wire;
-                    
-                    S := @run get_component_by_name("switch1", defs.components.items()); 
-                    gates&.push(kind = S, inputs = w.slice(1, 3), outputs = w.slice(0, 1));
-                    extra_gates += 1;
-                    it = gates.index(i);  // ^ can reallocate
-                };
-                
                 kill&.set(i);
                 out&.push_all(it.inputs);
                 in&.push_all(it.outputs);
@@ -274,8 +278,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 is_switchable_output := shape.name.ends_with("z") && shape.name.starts_with("Output") && it.inputs.len == 2 && it.outputs.len == 0 && !is_input; 
                 if it.outputs.len + it.inputs.len > 1 {
                     if !is_switchable_output {
-                        @println("TODO: deal with pin layout for %", shape.name);
-                        // TODO: do i have to allow LevelInputArch (which is both in and out) nested in custom component? 
+                        c.has_arch_pins = true;
                         continue();
                     };
                     // :OutputNz ughhhhh this seems convoluted but i don't have a better idea rn. 
@@ -308,9 +311,6 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
             fn Native() => {
                 it.kind.id += defs.tc_components_offset.trunc();
             }
-            fn Constant() => {
-                it.kind = get_component_by_name("const", defs.components.items());
-            } 
             fn Custom() => {
                 child := find_custom_impl(original_gate, circuits) || {
                     // should be unreachable because of the `dependencies` in the data file. 
@@ -321,26 +321,18 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 };
                 it.kind = child.compiled.unwrap();
                 
-                // :OutputNz 
                 for child.switches { switchable_pin |
-                    w := a.alloc_uninit(WireId, 3);
-                    switchable_wire: WireId = (id = wire_count.trunc());
-                    wire_count += 1;
-                    
-                    value, condition := (it.outputs[switchable_pin.value_output_index]&, it.outputs[switchable_pin.condition_output_index]&);
-                    w[0] = value[];
-                    w[1] = switchable_wire;
-                    w[2] = condition[];
-                    value[] = switchable_wire;
-                    
-                    S := @run get_component_by_name("switch1", defs.components.items()); 
-                    gates&.push(kind = S, inputs = w.slice(1, 3), outputs = w.slice(0, 1));
-                    extra_gates += 1;
-                    it = gates.index(i);  // ^ can reallocate
+                    apply_switchable_pin(it.outputs[switchable_pin.value_output_index]&, it.outputs[switchable_pin.condition_output_index]&);
+                };
+                
+                if child.has_arch_pins {
+                    println("TODO: allow LevelInputArch/LevelOutputArch inside custom component?");
+                    unimplemented = true;
                 };
                 
                 @if(!unimplemented)
                 if child.has_bidirectional_pins {
+                    @println("(%) calls (%) with bidirectional pins", c.name, child.name);
                     kill&.set(i);
                     child_logical := child.compiled || {
                         @println("TODO: missing (%).compiled", child.name);
@@ -399,7 +391,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     logical_to_circuit&.push(-1);       // out
     new_gates, order := schedule_gates(c, gates, wire_count, a, out.items(), in.items(), components.items());
     gates := new_gates;
-    @assert_eq(logical_to_circuit.len, gates.len, "confused gate tracking");
+    @assert_eq(logical_to_circuit.len, gates.len, "confused gate tracking in (%)", c.name);
     
     enumerate order { i, o |
         gate_i := logical_to_circuit[o[]];
@@ -581,8 +573,10 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
                     switch_gates&.push(i);
                     changed = true;
                     for switch_gates { i |
-                        order&.push(i);
-                        done&.set(i);
+                        if !done&.get_set(i) {
+                            // TODO: why explain why it can already be done now that i added Template.SwitchablePin ??
+                            order&.push(i);
+                        }
                     };
                     for it.outputs { id |
                         ready&.set(id.id.zext());
@@ -663,6 +657,9 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
         };
     };
     
+    wire_read: DynamicBitSet = empty(temp());
+    wire_write: DynamicBitSet = empty(temp());
+    
     logic_gates := Component.Gate.list(c.gates.len, a);
     new_false_wire: ?WireId = .None;
     next_wire_id: u32 = c.wires.len.trunc();
@@ -688,6 +685,9 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
                     continue();
                 };
                 w[i] = l_wire;
+                
+                bits := @if(i < out_arity, wire_write&, wire_read&);
+                bits.set(l_wire.id.zext());
             };
         };
         
@@ -754,6 +754,18 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
             kind = (id = it.kind.zext()),
             param = param,
         );
+    };
+    
+    // wires connected to an input but going nowhere are treated the same as if the pin was disconnected (auto zero)
+    for wire_read& { i |  // TODO: logical operations on these bit sets
+        if !wire_write&.get(i) {
+            logic_gates&.push(
+                outputs = a.alloc_init(WireId, 1, fn(_) => (id = i.trunc())),
+                inputs = empty(),
+                kind = CONST_INDEX,
+                param = 0,
+            );
+        };
     };
     
     if new_false_wire { wire |  // there was a disconnected input pin
@@ -942,11 +954,9 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
         if kind == 94 || kind == 68 || kind == 64 {  // Program
             n := eat(u16);
             range(0, n.zext()) { _ |
-                programs&.push(
-                    key = eat(i64), 
-                    name = eatN(u16, u8).shallow_copy(a), 
-                    gate_index = gate_index,
-                );
+                key := eat(i64);
+                name := eatN(u16, u8).shallow_copy(a);
+                programs&.push(level_id = key, name = name, gate_index = gate_index);
             };
             
             if s1 == 0 {  // i guess it gets a default if you don't set it manually in the game?
@@ -986,7 +996,6 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
         segment := eat(u8);
         length := segment.bit_and(0b0001_1111);
         if segment == 0b0010_0000 {
-            // TODO: im suspicious that this doesn't work
             // this is a "teleport wire". can't place it in the game but other programs that write save files can cheat on the layout.
             pos := eat_point();
             path&.push(pos = pos, direction = vec2(0), length = 0);

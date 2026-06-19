@@ -43,6 +43,8 @@ it works well enough to run my overture/leg in the maze and a few things from th
   - keyboard: character mode param. click to focus instead of a keybind. 
   - ram: 128/256 bit, duel load
   - display: rotation
+  - probes
+  - halt: message (set on the gate)
 - need to position the displays correctly because they can be tiled
 - the way i represent unpowered (hi-z) wires is sketchy
   - need to do it for disable pins of decode3/register/ram?
@@ -51,9 +53,11 @@ it works well enough to run my overture/leg in the maze and a few things from th
   - using as both input/output depending on a switch probably won't work
   - makes the visualization confusing because i always inline the whole custom component
 - insert casts when wire width doesn't match required. 
-- assembler: mnemonics, constants 
+- assembler: mnemonics, constants, arithmetic
 - need a better interface for choosing circuit/programs, showing memory contents
+- pre_read mistakes would be a lot easier to debug if they were made explicit seperate operations in the trace display. 
 - dropping file doesn't work in franca-web-playground (even when fixed will be annoying because need to feed it all the custom components individually)
+- not all work without FEAT_RT_COMPILE?
 - etc.
 
 ## other todos
