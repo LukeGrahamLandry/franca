@@ -19,17 +19,18 @@ Component :: @struct {
     gates: []Gate;
     wire_count: i64;
     storage_count: i64; // use get_storage_count instead if it could be a tc/builtin
-    wire_depth: i64;  // recursive max wire_count of children
-    wire_sum: i64;    // like ^ but don't reset scratch for each child so can use it for visualization
-    gate_sum := 0;
     primitive_arity := (-1, -1); // (out, in)
     labels: []GateLabel = empty();
     fast_eval := zeroed(rawptr);
-    compile_order: []Op = empty();
+    compile_order := zeroed(Array([]Op, 2));
     has_param := false;
     
     usage: *Usage #use = zeroed(*Usage);
     Usage :: @struct {
+        wire_depth := 0;  // recursive max wire_count of children
+        wire_sum := 0;    // like ^ but don't reset scratch for each child so can use it for visualization
+        gate_sum := 0;
+        
         // indices in inputs of gates[0] that are needed to eval if not writing to delay() storage. 
         // TODO: just make this a StaticBitSet(64)
         inputs_for_pure_eval: []i64 = empty();
@@ -51,7 +52,7 @@ Component :: @struct {
     };
 };
 
-GateLabel :: @struct(name: Str, bit_size: i64, instance_offset: i64);
+GateLabel :: @struct(name: Str, bit_size: i64, gate_index: i64);
 
 ComponentId :: @struct(id: u32);
 WireId :: @struct(id: u32);
@@ -87,7 +88,7 @@ defs :: @static {
         
         components.push(
             name = name.str(), gates = empty(), 
-            wire_count = 0, wire_depth = 0, wire_sum = 0, gate_sum = 1,
+            wire_count = 0,
             storage_count = int(name == sym("delay")),
             primitive_arity = arity,
             has_param = name == sym("const"),
@@ -108,7 +109,6 @@ defs :: @static {
         block := it.expr.Block&;
         defs: HashMap(WireId, ComponentId) = init(temp());
         storage_count := 0;
-        wire_depth, wire_sum, gate_sum := (0, 0, 0);
         locations := Span.list(block.body.len, temp());
         ::AutoHash(WireId, TrivialHasher); ::AutoEq(WireId);
         
@@ -136,7 +136,7 @@ defs :: @static {
                 
                 if kind == sym("label") {
                     name, size := Ty(Str, i64).const_eval(call.arg[]);
-                    labels.push(name = name, bit_size = size, instance_offset = storage_count);
+                    labels.push(name = name, bit_size = size, gate_index = gates.len);
                     @ct_assert(out.len == 0, expr.loc, "label() must have no outputs");
                     continue();
                 };
@@ -179,9 +179,6 @@ defs :: @static {
                 || compile_error(@tfmt("undeclared component kind %", kind.str()), it.loc);
             child := components[kind.id.zext()]&;
             storage_count += child.storage_count;
-            wire_depth = max(wire_depth, child.wire_depth);
-            wire_sum += child.wire_sum;
-            gate_sum += child.gate_sum;
 
             if !is_io {
                 // give a better error message than array length mismatch when typechecking the generated code.
@@ -259,9 +256,6 @@ defs :: @static {
             gates = gates.items(),
             wire_count = wire_count,
             storage_count = storage_count,
-            wire_depth = wire_depth + wire_count,
-            wire_sum = wire_sum + wire_count,
-            gate_sum = gate_sum,
             labels = labels.items(),
         );
         map&.insert(name, (id = components.len.trunc() - 1));
@@ -299,6 +293,8 @@ calculate_usage :: fn(components: []Component, off: i64, a: Alloc) void = {
         c := components.index(i);
         c.usage = a.box_zeroed(Component.Usage);
         if c.gates.len == 0 {
+            c.gate_sum = 1;
+        
             @if(i < defs.tc_components_offset)
             if c.name == "delay" || c.name == "input" || c.name == "output" {
                 c.inputs_for_pure_eval = empty();
@@ -309,6 +305,18 @@ calculate_usage :: fn(components: []Component, off: i64, a: Alloc) void = {
             };
             continue();
         };
+        
+        gate_sum, wire_sum, wire_depth := (0, 0, 0);
+        each c.gates { it |
+            child := components[it.kind.id.zext()]&;
+            wire_sum += child.wire_sum;
+            wire_depth = max(wire_depth, child.wire_depth);
+            gate_sum += child.gate_sum;
+        };
+        c.wire_depth = wire_depth;
+        c.wire_sum = wire_sum + c.wire_count;
+        c.gate_sum = gate_sum;
+
         instance := 0;
         instance_offset_by_gate := a.alloc_zeroed(i64, c.gates.len);
         enumerate c.gates { i, it |
@@ -605,7 +613,7 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
             c = c, out = out, components = components,
             wires_evaluated = empty(temp()),
             need_pre_read = WireId.list(temp()),
-            compile_order = list(a),
+            compile_order = list(temp()),
         ); self := self&;
         
         out_n, in_n := (c.gates[c.gates.len - 1].inputs.len, c.gates[0].outputs.len);
@@ -617,18 +625,18 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
         if have_storage {
             @fmt(out, "doing_pre_read, instance := (world.doing_pre_read, world.instance);\n");
             range(0, 2) { iter_i |
-                self.compile_order&.clear();
                 self.wires_evaluated&.clear();
             
                 doing_pre_read := iter_i == 0;
                 @fmt(out, "if %doing_pre_read {\n", @if(doing_pre_read, "", "!"));
                 self.compile_component(doing_pre_read);
                 @fmt(out, "return();\n};\n");
+                self.c.compile_order&[iter_i] = self.compile_order.items().shallow_copy(a);
+                self.compile_order&.clear();
             };
         } else {
             self.compile_component(false);
         };
-        self.c.compile_order = self.compile_order.items();
         @fmt(out, "};\n");  // func
     };
     

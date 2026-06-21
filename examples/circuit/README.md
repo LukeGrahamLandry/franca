@@ -44,7 +44,6 @@ it works well enough to run my overture/leg in the maze and a few things from th
   - ram: 128/256 bit, duel load
   - display: rotation
   - probes
-  - halt: message (set on the gate)
 - need to position the displays correctly because they can be tiled
 - the way i represent unpowered (hi-z) wires is sketchy
   - need to do it for disable pins of decode3/register/ram?
@@ -57,7 +56,7 @@ it works well enough to run my overture/leg in the maze and a few things from th
 - need a better interface for choosing circuit/programs, showing memory contents
 - pre_read mistakes would be a lot easier to debug if they were made explicit seperate operations in the trace display. 
 - dropping file doesn't work in franca-web-playground (even when fixed will be annoying because need to feed it all the custom components individually)
-- not all work without FEAT_RT_COMPILE?
+- not all work without FEAT_RT_COMPILE? (tetris and qoi viewer) 
 - etc.
 
 ## other todos

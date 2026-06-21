@@ -401,14 +401,10 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     };
     
     // TODO: do this in calculate_usage instead of duplicating here and in parse for defs
-    storage_count, wire_sum, wire_depth := (0, 0, 0);
-    gate_sum := 0;
+    storage_count := 0;
     each gates { it |
         child := components[it.kind.id.zext()]&;
         storage_count += get_storage_count(components.items(), it);
-        wire_sum += child.wire_sum;
-        wire_depth = max(wire_depth, child.wire_depth);
-        gate_sum += child.gate_sum;
     };
 
     name := safe_name(c.name, a);
@@ -418,9 +414,6 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         name = name,
         wire_count = wire_count,
         storage_count = storage_count,
-        wire_depth = wire_depth,
-        wire_sum = wire_sum + wire_count,
-        gate_sum = gate_sum,
     );
     calculate_usage(components.items(), components.len - 1, a);
     find_links_for_lastest_component(c, components.items());
@@ -720,6 +713,9 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
         if shape.name == "Mul64" && z_input_mask.bit_and(2) != 0 {
             @println("TODO: Mul64 high for w%", w[1].id);
         };
+        if shape.name == "Ashr16" || shape.name == "Ashr8" {
+            @println("TODO: small sar");
+        };
         
         param := 0;
         if shape.has_param {
@@ -746,6 +742,13 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
                 s: Console = construct(colour = s0, font = s1, linked_ram_instance = 0/*:PatchConsoleLink*/, ram_word_size_index = 0);
                 param = s.repr.bitcast();
             }
+            if shape.name == "Halt" {
+                s: Builtin.Settings.Halt = construct(
+                    gate_i = gate_i,
+                    circ_i = ptr_diff(circuits.ptr, c),
+                );
+                param = s.repr.bitcast();
+            };
         };
         
         logic_gates&.push(

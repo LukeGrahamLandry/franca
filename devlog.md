@@ -1,4 +1,19 @@
 
+TODO: for riscv i think i finally need to do the casts when wire width changes
+
+## (Jun 20)
+
+- simplify eval wrappers a bit, halt msg, use other arena that can be reset, a few pins. 
+- can't let bidirectional pin be treated as a disconnected input
+
+## (Jun 19)
+
+- compile_order also needed for pre_eval now that it's allowed to be nested. only matters when !FEAT_COMPILE but still. 
+- fixed the `if false` compiler crash in eval: the end of phicopyref was looking at a jnz without targets somehow? 
+  dedupjmp does edgedel without updating idom which is sketchy i guess. 
+  works if set dead block's jmp to hlt so it doesn't look interesting as a place to infer phi value from. 
+  perhaps the problem is that im not killing phis in dead blocks early enough. it's just a bit annoying to think about because if they haven't been processed yet, the (non-phi) instructions might have been deduped in the table and need to move blocks. 
+
 ## (Jun 18) circuit
 
 - compile_gate was assuming youd never have to pre_read something while compiling for pre_read. 

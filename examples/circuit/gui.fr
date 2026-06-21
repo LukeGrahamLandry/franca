@@ -32,7 +32,7 @@ State :: @struct {
     maze: Scenario.Maze;
     arch_is_leg: bool;
     tick: i64;
-    win_tick: ?i64;
+    halt_message: List(u8);
     show_wire_ref_lines: bool;
     do_debug_action_this_frame: bool;
     pan_keys_pressed: i64;
@@ -99,7 +99,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     show_the_maze := !state.is_new_overture;
     @if(have_logic)
     if state.want_eval || state.auto_eval {
-        state.win_tick = .None;
+        state.halt_message&.clear();
         break :: local_return;
     count := @if(state.auto_eval, state.ticks_per_eval, 1);
     root_component := state.tree[0].component.unwrap();
@@ -111,45 +111,36 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         save_wire_values := i == count - 1;
         if state.is_new_overture {
             has_arch_pins := state.tree[0].diagram_circuit.is_some() && state.circuit[state.tree[0].diagram_circuit.Some].has_arch_pins;
-            world.instance = 0; 
-            world.scratch.len = 0;
-            
-            prev := world.save_wire_values;
-            @debug_assert(prev || !save_wire_values, "if init(save_wire_values=false), won't have preallocated enough");
-            world.save_wire_values = prev && save_wire_values;  
             values := @slice(0, 0, 0, @as(i64) input.zext());
-            
-            c := world[root_component]&;
             if !has_arch_pins {
                 values.len = 0;
             };
-            if !world.save_wire_values && get_compiled(world, root_component).is_some() {
-                eval_compiled(world, values, root_component, 0);
-            } else {
-                eval(world, values, root_component);
-            };
-            
-            world.save_wire_values = prev;
+            evaluate(world, values, root_component, 0, save_wire_values);
             OUT = @if(has_arch_pins && values[1 + int(state.arch_is_leg)] != 0, (Some = values[0 + int(state.arch_is_leg)].trunc()), .None);
         } else {
-            OUT = tick_overture(world, root_component, input, false, save_wire_values);
+            values := @slice(0, 0, 0, input.zext(), 0);
+            evaluate(world, values, root_component, 0, save_wire_values);
+            OUT = @if(values[1] != 0, (Some = values[0].trunc()), .None);
         };
         out := OUT;
         if out { byte |
             state.maze&.output(byte);
-            if state.maze.win && state.win_tick.is_none() {
-                state.win_tick = (Some = state.tick);
+            if state.maze.win && state.halt_message.len == 0 {
+                @fmt(state.halt_message&, "solved in % ticks", state.tick);
                 state.auto_eval = false;
             }
         };
         
         state.halted_without_wire_values = !save_wire_values;
-        if world.tc_halt_device {
-            world.tc_halt_device = false;
+        if world.tc_halt_device != -1 {
+            param: Tc.Builtin.Settings.Halt = (repr = world.tc_halt_device.bitcast());
+            msg := state.circuit[param.get(.circ_i)].gates[param.get(.gate_i)].data;
+            @fmt(state.halt_message&, "halted after % ticks: %", state.tick, msg);
+            
+            world.tc_halt_device = -1;
             state.want_eval = false;
             state.auto_eval = false;
             state.halted_without_wire_values = !save_wire_values; 
-            state.win_tick = (Some = state.tick);
             break();
         };
     };
@@ -216,7 +207,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sdtx.put(c.name);
         arch_list_count += 1;
         
-        if state.clicked && hover {
+        if state.clicked && hover && state.loading.is_none() {
             state.clicked = false;
             state.dirty = true;
             have_logic = false;
@@ -408,7 +399,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     root_component := state.world&[root_component]&;
     for root_component.labels { label |
         if label.name == "ip" && label.bit_size == 8 {
-            byte, bit := label.instance_offset.udiv_mod(8);
+            byte, bit := root_component.instance_offset_by_gate[label.gate_index].udiv_mod(8);
             if byte < memory.len && bit == 0 {
                 ip_index = byte;
             };
@@ -494,18 +485,14 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sdtx.origin = world_to_text_pos(vec2(-38 * width, (state.maze.map.len().float().cast())*width*2 + height*3));
     sdtx.pos = vec2(0);
     sdtx.put(maze_text.items());
-    
-    if state.win_tick { win_tick |
-        sdtx.pos = vec2(0, -1);
-        sdtx.put(@tfmt("solved in % ticks", win_tick));
     };
-    } else {
-        if state.win_tick { win_tick |
-            sdtx.color = pack_rgba(50, 200, 150, 255);
-            sdtx.pos = world_to_text_pos(vec2(0, height*4));
-            sdtx.put(@tfmt("halted after % ticks", win_tick));
-        };
-    }
+    
+    if state.halt_message.len != 0 {
+        sdtx.origin = world_to_text_pos(vec2(0, height*4));
+        sdtx.pos = vec2(0);
+        sdtx.color = pack_rgba(50, 200, 150, 255);
+        sdtx.put(state.halt_message.items());
+    };
     
     sdtx.origin = vec2(0);
     
@@ -755,7 +742,6 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                     };
                     @default => println("TODO: console ram word size");
                 };
-                sdtx.pos.y -= 24;
             };
             
             if world[it.kind].name == "SegmentDisplay" {  // TODO: do this by index
@@ -824,6 +810,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.text&.setup(sg = sg, allocator = a, fonts = @slice(Sdtx.font.cpc), context = (char_buf_size = 10000));
     state.draw&.setup(allocator = general_allocator(), sg = sg, max_vertices = 1_000_000);
     
+    state.halt_message = list(a);
     state.key_buffer = init(a, 64);
     init(state.world&, a, true);  // TODO: leaked when loading new circuit
     state.tree = list(a);
@@ -855,7 +842,7 @@ Defs :: import("@/examples/circuit/defs.fr");
 fn reset(state: *State) void = {
     state.maze = Scenario'Maze'new(Scenario.Maze.tc0);
     state.tick = 0;
-    state.win_tick = .None;
+    state.halt_message&.clear();
     
     world := state.world&;
     world.storage.set_zeroed();  // importantly resets ip,registers=0
@@ -864,7 +851,8 @@ fn reset(state: *State) void = {
     if !state.is_new_overture && state.tree.len > 0 && state.tree[0].component.is_some() {
         root_component := state.tree[0].component.unwrap();
     range(0, 256) { i |
-        tick_overture(world, root_component, program[i], true, false);
+        values := @slice(0, 0, 0, program[i].zext(), /*write program*/1);
+        evaluate(world, values, root_component, 0, false);
     };
     };
     world.scratch.len = world.scratch.cap;
@@ -902,7 +890,8 @@ fn reset(state: *State) void = {
         };
         
         state.loaded_assembly = ok;
-        @if(!ok)
+        // TODO: have a button for loading my own maze programs instead
+        //@if(!ok)
         if name == "LEG" || name == "OVERTURE" || name == "NANDverture" {
             off := @if(name == "NANDverture", 56, 1);  // HACK 
             world.storage.subslice(off, 256/8).interpret_as_bytes().copy_from(program);
@@ -1039,7 +1028,9 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             state.clicked = true;
         }
         fn FILES_DROPPED() => for event.drop { path |
-            state.load_path(path);
+            if state.loading.is_none() {
+                state.load_path(path);
+            };
         };
         @default => return();
     };
@@ -1059,19 +1050,21 @@ fn check_movement(state: *State) void = if state.pan_keys_pressed != 0 && !state
     state.pos += dir.normalize() * 0.05;
 };
 
-// TODO: if loading fails, reset state.world back to the constant ones because it points into the arena
-// TODO: i think there's a race where it unwraps tho
 fn load_path(state: *State, path: Str) void = {
+    @debug_assert(state.loading.is_none());
     @if(!FEAT_TC_CIRCUIT) return(eprintln("FEAT_TC_CIRCUIT is disabled"));
     start := timestamp();
     #use("@/lib/sys/fs.fr");
     in := read_entire_file(temp(), path) || return();
     state.circuit = empty();
+    state.world = zeroed(World);
+    state.tree&.clear();
     state.circuit_arena&.reset_retaining_capacity();
     a := state.circuit_arena&.borrow();
     
     // if it uses custom components, need to load everything to find them
     circuits, root_index, tc_file_loader_device := Tc'load_all_circuits(path, a);
+    @eprintln("found circuit diagrams in %ms; %mb;", timestamp() - start, state.circuit_arena&.current_used_size()/1024/1024);
     state.circuit = circuits;
     if circuits.len == 0 || root_index == -1 {
         state.circuit = empty();
@@ -1109,8 +1102,14 @@ fn load_circuit_index_worker(state: *State) void = {
     each circuits { c | 
         c.compiled = .None;
     };
-
-    a := state.circuit_arena&.borrow();
+    
+    a := @if(FEAT_RT_COMPILE, {
+        Franca'start_profile();
+        reset_jit(state.fr&);
+        fr, _ := state.fr.unwrap();
+        fr.get_alloc()
+    }, state.circuit_arena&.borrow());
+   
     components := @ref Component.list(a);
     // finished_defs don't need to be re-compiled every time because they'll already have it.fast_eval set from comptime. 
     components.push_all(finished_defs.components);
@@ -1121,28 +1120,7 @@ fn load_circuit_index_worker(state: *State) void = {
     // either way need to set Component.compile_order for interp
     src := compile_gates_source(components.items(), a, first_index_that_needs_fast_eval);
     @if(FEAT_RT_COMPILE) {
-    
-    @if(true) // TODO: sometimes skip and reuse the setup work (saves ~60ms)
-    if state.fr&.take() { fr, m |
-        fr'vtable'drop_qbe_module(Qbe.Module.raw_from_ptr(m));
-        fr'vtable'destroy_compiler(fr.data);
-    };
-    R :: import("@/examples/repl.fr").R;
-    R'start_profile();
-    
-    @if(state.fr.is_none())
-    push_as_tls(.comptime, zeroed(rawptr)) {
-        v := R'init_driver_vtable();
-        opts := v.default_build_options();
-        opts.no_cache = true;
-        fr := v.with(v'init_compiler(opts));
-        make_and_resolve_and_compile_top_level(fr.data, fr.vtable, """ #include_std("lib/core.fr"); """, "-");
-        m := fr.get_alloc().box_uninit(Qbe.Module);
-        init_default_module_dyn(m, fr.vtable, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly));
-        state.fr = (Some = (fr, m));
-    };
     fr, m := state.fr.unwrap();
-
     comptime_ctx := bit_cast_unchecked(Compiler, **rawptr, fr.data)[][];  // TODO: making everybody deal with this is kinda trash
     push_as_tls(.comptime, comptime_ctx) {
         // more convoluted than just `compile_gates` because don't want to allow jit-shims (so timer will be accurite). 
@@ -1156,7 +1134,7 @@ fn load_circuit_index_worker(state: *State) void = {
         range(first_index_that_needs_fast_eval, components.len) { i |
             components[i].fast_eval = fast_eval[i];
         };
-        R'end_profile();
+        Franca'end_profile();
     };
     };
     init(state.world&, a, true, components.items());
@@ -1170,6 +1148,26 @@ fn load_circuit_index_worker(state: *State) void = {
     @eprintln("loaded in %ms", state.load_time);
     loading.done = 1;
 }
+
+reset_jit :: fn(slot: *?Ty(CompCtx, *Qbe.Module)) void = {
+    @if(true) // TODO: sometimes skip and reuse the setup work (saves ~60ms)
+    if slot.take() { fr, m |
+        fr'vtable'drop_qbe_module(Qbe.Module.raw_from_ptr(m));
+        fr'vtable'destroy_compiler(fr.data);
+    };
+    
+    @if(slot[].is_none())
+    push_as_tls(.comptime, zeroed(rawptr)) {
+        v := Franca'init_driver_vtable();
+        opts := v.default_build_options();
+        opts.no_cache = true;
+        fr := v.with(v'init_compiler(opts));
+        make_and_resolve_and_compile_top_level(fr.data, fr.vtable, """ #include_std("lib/core.fr"); """, "-");
+        m := fr.get_alloc().box_uninit(Qbe.Module);
+        init_default_module_dyn(m, fr.vtable, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly));
+        slot[] = (Some = (fr, m));
+    };
+};
 
 Tc :: import("@/examples/circuit/tc/load.fr");
 Builtin :: Tc.Builtin;
@@ -1228,6 +1226,7 @@ Qbe :: import("@/backend/lib.fr");
 ENABLE_TRACY :: Foreign.ENV.FRANCA_TRACY.get_environment_variable().is_some();  // ugh
 #use("@/lib/sys/threads.fr");
 Futex :: import("@/lib/sys/sync/futex.fr");
+Franca :: import("@/examples/repl.fr").R;
 
 key_order :: @const_slice(Sapp.Keycode.GRAVE_ACCENT, ._1, ._2, ._3, ._4, ._5, ._6, ._7, ._8, ._9, ._0, .MINUS, .EQUAL, .DELETE, 
     .TAB, .Q, .W, .E, .R, .T, .Y, .U, .I, .O, .P, .LEFT_BRACKET, .RIGHT_BRACKET, .BACKSLASH,

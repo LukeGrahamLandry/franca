@@ -51,7 +51,7 @@ World :: @struct {
     save_wire_values: bool;
     pre_read_depth := 0;
     tc_file_loader_device: []Tc.LoadedFile;
-    tc_halt_device := false;
+    tc_halt_device := -1;
 };
 
 fn eval(world: *World, parent: []WireValue, it: *Component.Gate) void = {
@@ -84,10 +84,9 @@ fn eval(world: *World, parent: []WireValue, it: *Component.Gate) void = {
     };
     gates := c.gates.slice(1, c.gates.len - 1);
     doing_pre_read, instance := (world.doing_pre_read, world.instance);
-    // TODO: compiler crash if this is `false` (works if indirection through a #noinline function)? :compiler :fucked !!
-    if true {  // TODO: remove this block, im just documenting the bug^
-    if c.storage_count != 0 && !doing_pre_read && c.compile_order.len != 0 {
-        for c.compile_order.slice(1, c.compile_order.len - 1) { op |
+    if c.storage_count != 0 {
+        ops := c.compile_order&[int(!doing_pre_read)];
+        for ops.slice(1, ops.len - 1) { op |
             if op.pre_read {
                 world.doing_pre_read = true;
                 world.pre_read_depth += 1;
@@ -106,7 +105,6 @@ fn eval(world: *World, parent: []WireValue, it: *Component.Gate) void = {
         each gates { it |
             world.eval(wires, it);
         };
-    };
     };
     
     world.doing_pre_read = doing_pre_read;
@@ -197,34 +195,18 @@ fn index(world: *World, i: ComponentId) *Component = world.components.index(i.id
 fixwirevalue :: fn(a: []OldWireValue) []WireValue = 
     bit_cast_unchecked([]OldWireValue, []WireValue, a);
 
-fn tick_overture(world: *World, root_component: ComponentId, input: u8, write_program: bool, save_wire_values: bool) ?u8 = {
+fn evaluate(world: *World, values: []WireValue, kind: ComponentId, param: i64, save_wire_values: bool) void = {
     world.instance = 0; 
     world.scratch.len = 0;
-    
     prev := world.save_wire_values;
     @debug_assert(prev || !save_wire_values, "if init(save_wire_values=false), won't have preallocated enough");
-    world.save_wire_values = prev && save_wire_values;  
-    values := fixwirevalue @slice(@as(OldWireValue) (byte = input), (bit = write_program), (byte = 0), (bit = false), (bit = false));
-    out := @const_slice(@as(WireId) (id = 2), (id = 3), (id = 4));
-    name := world[root_component].name;
-    if name != "leg" {
-        out.len -= 1;
-    };
-    in := @const_slice(@as(WireId) (id = 0), (id = 1));
-    base_gate := @ref @as(Component.Gate) (
-        outputs = out, 
-        inputs = in,
-        kind = root_component, 
-        param = 0,
-    );
-    if !world.save_wire_values && get_compiled(world, base_gate.kind).is_some() {
-        eval_compiled(world, values, base_gate);
+    world.save_wire_values = save_wire_values;
+    if !save_wire_values && get_compiled(world, kind).is_some() {
+        eval_compiled(world, values, kind, param);
     } else {
-        eval(world, values, base_gate);
+        eval(world, values, kind, param);
     };
-    
     world.save_wire_values = prev;
-    @if(values[3] != 0, (Some = values[2].trunc()), .None)
 }
 
 // expose the compiled version with the intepreter's calling convention. 
@@ -261,13 +243,14 @@ fn eval_compiled(world: *World, values: []WireValue, kind: ComponentId, param: i
     values.slice(0, o_n)
 }
 
-fn eval(world: *World, values: []WireValue, kind: ComponentId) []i64 = {
+fn eval(world: *World, values: []WireValue, kind: ComponentId, param: i64) []i64 = {
     a := Arena'stack_alloc(size_of(WireId) * max_in_out_wires);
     o_n, i_n := world[kind]&.arity();
     it: Component.Gate = (
         inputs = a.alloc_init(WireId, i_n, fn(i) => (id = (i + o_n).trunc())),
         outputs = a.alloc_init(WireId, o_n, fn(i) => (id = i.trunc())),
         kind = kind,
+        param = param,
     );
     eval(world, values, it&);
     values.slice(0, o_n)
