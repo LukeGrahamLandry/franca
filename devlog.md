@@ -1,5 +1,10 @@
 
-TODO: for riscv i think i finally need to do the casts when wire width changes
+## (Jun 21)
+
+- insert casts when a wire width doesn't match what a gate expects. then don't have to defensively mask inputs in the natives. 
+
+TODO:
+- problem when bidirectional is disconnected in the parent because it gets the new_false_wire which can then gave multiple defs. 
 
 ## (Jun 20)
 

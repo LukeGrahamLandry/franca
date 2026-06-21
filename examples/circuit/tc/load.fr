@@ -25,6 +25,7 @@ Circuit :: @struct {
     // used when referenced as a Custom Gate in another Circuit. 
     // these are based on layout of the implementation. 
     pins: []Ty(i64, i64) = empty();
+    bit_width: []u8 = empty();
     switches: []SwitchablePin = empty();
     
     Wire :: @struct {
@@ -76,6 +77,7 @@ load_builtins :: fn(components: *List(Component), a: Alloc) void = {
         c.inputs_for_pure_eval = it.inputs_for_pure_eval;
         c.has_param = it.has_param;
         c.gate_sum = 1;
+        c.bit_width = it.bit_width;
         components.push(c);
     };
 }
@@ -203,6 +205,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     extra_gates := 0;
     kill: DynamicBitSet = empty(temp());
     in, out := (WireId.list(a), WireId.list(a));
+    bit_width := u8.list(a);
     output_pin_count := 0;
     // before: gates[_].kind.id is in just the tc range, now remap into `components`. 
     // after this can't access the TcBuiltins.Shape anymore so any required into needs to get transfered out. 
@@ -297,9 +300,11 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 x = (x.align_to(8) - OFF)/8;
                 y = (y.align_to(8) - OFF)/8;
                 insert(custom_pins&, dest, (x, y));
+                insert(bit_width&, dest, @if(bit_width.len == 0, 0, bit_width[0]));
                 
                 if is_switchable_output {
                     insert(custom_pins&, dest + 1, (HACK_NONE_PIN_POSITION, HACK_NONE_PIN_POSITION));
+                    insert(bit_width&, dest + 1, 1);
                     output_pin_count += 1;
                 };
                 
@@ -384,11 +389,15 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         @eprintln("something was unimplemented in (%)", c.name);
     };
     
+    bit_width := @if(!c.has_arch_pins, bit_width.items(), empty());
+    
     c.pins = custom_pins.items();
     c.switches = switches.items();
     push_inputs_outputs(gates&, out.items(), in.items());
     logical_to_circuit&.insert(0, -1);  // in
     logical_to_circuit&.push(-1);       // out
+    insert_bit_width_casts(components.items(), gates&, wire_count&, bit_width);
+    logical_to_circuit&.push_repeated(gates.len - logical_to_circuit.len, -1);
     new_gates, order := schedule_gates(c, gates, wire_count, a, out.items(), in.items(), components.items());
     gates := new_gates;
     @assert_eq(logical_to_circuit.len, gates.len, "confused gate tracking in (%)", c.name);
@@ -414,6 +423,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         name = name,
         wire_count = wire_count,
         storage_count = storage_count,
+        bit_width = bit_width,
     );
     calculate_usage(components.items(), components.len - 1, a);
     find_links_for_lastest_component(c, components.items());
@@ -464,6 +474,7 @@ find_links_for_lastest_component :: fn(c: *Circuit, components: []Component) voi
 // TODO: in the child: don't try to schedual gates and don't only treat bidirectional pins as output? 
 // TODO: instead of inlining, compile multiple versions for different sets of outputs that need different sets of inputs? that would be nicer to show in the ui. 
 inline_for_bidirectional_gates :: fn(child_logical: *Component, gates: *List(Component.Gate), wire_count: *i64, extra_gates: *i64, it: Component.Gate, a: Alloc) HashMap(WireId, WireId) = {
+    original_wire_count := wire_count[];
     child_gates := child_logical.gates.slice(1, child_logical.gates.len - 1);
     parent_out, parent_in := (it.outputs, it.inputs);
     child_out, child_in := (child_logical.gates[child_logical.gates.len - 1].inputs, child_logical.gates[0].outputs);
@@ -471,7 +482,8 @@ inline_for_bidirectional_gates :: fn(child_logical: *Component, gates: *List(Com
     //       but that doesn't really work because then you need to know which direction the wire goes and you don't for bidirectional pins which is the whole point of this operation. 
     map: HashMap(WireId, WireId) = init(temp());
     duplicates: HashMap(WireId, WireId) = init(temp());
-    
+
+    @assert_eq(child_out.len, parent_out.len, "inline bad arity?");
     range(0, parent_out.len) { i |
         prev := map&.insert(child_out[i], parent_out[i]);
         if prev { prev |
@@ -480,6 +492,7 @@ inline_for_bidirectional_gates :: fn(child_logical: *Component, gates: *List(Com
             @assert(x.is_none(), "TODO: multiple duplicates?");
         };
     };
+    @assert_eq(child_in.len, parent_in.len, "inline bad arity?");
     range(0, parent_in.len) { i |
         prev := map&.insert(child_in[i], parent_in[i]);
         @assert(prev.is_none(), "collision on input wire");
@@ -503,6 +516,7 @@ inline_for_bidirectional_gates :: fn(child_logical: *Component, gates: *List(Com
         gates.push(kind = gate.kind, outputs = out, inputs = in, param = gate.param);
         extra_gates[] += 1;
     };
+    @println("- inline added wires %..<%", original_wire_count, wire_count[]);
     duplicates
 }
 
@@ -780,6 +794,7 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
         );
     };
     
+    @if(c.wires.len != next_wire_id.zext()) @println("- added dead wires %..<%", c.wires.len, next_wire_id);
     (logic_gates, next_wire_id.zext())
 };
 
@@ -833,6 +848,80 @@ fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, 
         };
         i += 1;
     };
+}
+
+fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate), wire_count: *i64, bit_width: []u8) void = {
+    a := gates.gpa;
+    cast_id: ComponentId = (id = trunc(defs.tc_components_offset + templates.len() - 1));
+    @debug_assert_eq(components[cast_id.id.zext()].name, "SyntheticCast_FR");
+    width := temp().alloc_zeroed(u8, wire_count[]);
+    outputs, inputs := (gates[gates.len - 1].inputs, gates[0].outputs);
+    known := outputs.len + inputs.len == bit_width.len;
+    original_output_index := gates.len - 1;
+    @if(known)
+    enumerate inputs { i, id |
+        width[id.id.zext()] = bit_width[i + outputs.len];
+    };
+    
+    // TODO: remember inserted ones so don't do it redundantly if same wire/width combo is used multiple times
+    maybe_cast :: fn(want: u8, id: *WireId) => {
+        found := width[id.id.zext()];
+        if want < found && want != 0 {
+            old := id[];
+            new: WireId = (id = wire_count[].trunc());
+            wire_count[] += 1;
+            id[] = new;
+            @println("cast % => % (want=%, found=%)", old.id, new.id, want, found);
+            gates.push(
+                kind = cast_id,
+                inputs = a.alloc_init(WireId, 1, fn(_) => old),
+                outputs = a.alloc_init(WireId, 1, fn(_) => new),
+                param = want.zext(),
+            );
+        }
+    };
+    
+    range(1, original_output_index) { gate_i |
+        continue :: local_return;
+        gate := gates.index(gate_i);
+        bit_width := get_bit_width(components, gate);
+        @if(bit_width.len == 0) continue();
+        @if(components[gate.kind.id.zext()].name.starts_with("Bidirectional")) continue();  // TODO
+        enumerate gate.outputs { i, id |
+            width[id.id.zext()] = bit_width[i];
+        };
+        gate := gate[];
+        enumerate gate.inputs { i, id |
+            maybe_cast(bit_width[i + gate.outputs.len], id);
+        };
+    };
+    
+    @if(known)
+    enumerate outputs { i, id |
+        maybe_cast(bit_width[i], id);
+    };
+    
+    gates.items().swap(original_output_index, gates.len - 1);
+    @debug_assert_eq(components[gates[gates.len - 1].kind.id.zext()].name, "output");
+    n := gates.len - original_output_index - 1;
+    @if(n != 0) @println("- inserted % casts", n);
+}
+
+fn get_bit_width(components: []Component, it: *Component.Gate) []u8 = {
+    tc := defs.tc_components_offset; 
+    kind: i64 = it.kind.id.zext();
+    if !FEAT_TC_CIRCUIT || kind < tc || kind >= tc + Tc.Builtin.templates.len() {
+        return components[kind].bit_width;
+    };
+    shape := Tc.Builtin.templates[kind - tc]&;
+    special := @const_slice("RamFast", "Ram", "RamDualLoad", "Program");
+    if special.contains(shape.name) {
+        param: Builtin.Settings.Ram = (repr = it.param.bitcast());
+        i := param.word_size();
+        println("TODO: get_bit_width");
+        return empty();
+    };
+    shape.bit_width
 }
 
 // it's used in function name when compiled so important not to let a circuit be named "x :: evil(); y"
