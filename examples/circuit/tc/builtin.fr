@@ -44,7 +44,7 @@ templates :: {
         it.name = str(name);
         it.inputs_for_pure_eval = ast_alloc().alloc_init(i64, it.in_arity, fn(i) => i);
         
-        if it.name.starts_with("Counter") || it.name == "Keyboard" || it.name.starts_with("Register") {
+        if it.name.starts_with("Counter") || it.name == "Keyboard" || it.name.starts_with("Register") || it.name.starts_with("DelayLine") {
             it.inputs_for_pure_eval = empty();
         };
         
@@ -137,7 +137,7 @@ math_param :: fn($out_arity: i64, $in_arity: i64, $fid: FuncId) *Template = {
 mask :: fn($bits: i64, $child: *Template) *Template = {
     // TODO: infer a useful name
     wrapped :: (fn(w: *World, o: *Array(WireValue, child.out_arity), i: *Array(WireValue, child.in_arity)) void = {
-        (@run child.fid.unwrap())(w, o, i);
+        @inline ((@run child.fid.unwrap())(w, o, i));
         inline_range(0, child.out_arity) { I |
             o[I] = bit_and(o[I], 1.shift_left(bits) - 1);
         };
@@ -154,8 +154,8 @@ mask :: fn($bits: i64, $child: *Template) *Template = {
 
 // TODO: way too much paste
 mask_param :: fn($bits: i64, $child: *Template) *Template = {
-    wrapped :: (fn(w: *World, o: *Array(WireValue, child.out_arity), i: *Array(WireValue, child.in_arity), param: i64) void = {
-        (@run child.fid.unwrap())(w, o, i, param);
+    wrapped :: (fn(w: *World, o: *Array(WireValue, child.out_arity), i: *Array(WireValue, child.in_arity), param: i64, instance: i64, doing_pre_read: bool) void = {
+        @inline ((@run child.fid.unwrap())(w, o, i, param, instance, doing_pre_read));
         inline_range(0, child.out_arity) { I |
             o[I] = bit_and(o[I], 1.shift_left(bits) - 1);
         };
@@ -252,14 +252,13 @@ Counter8 :: mask_param(8, Counter64);
 VirtualCounter8 :: todo();
 Counter64 :: with_pins(1, 2, .Device, 
     fn(_) => 8*8,
-    fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 2), param: i64) void = {
+    fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 2), param: i64, instance: i64, doing_pre_read: bool) void = {
         value, set := (i[0], i[1] != 0);
-        slot := world.storage[world.instance]&;
+        slot := world.storage[instance]&;
         o[0] = slot[]; 
-        if !world.doing_pre_read {
+        if !doing_pre_read {
             slot[] = @if(set, value, slot[] + param);
         };
-        world.instance += 1;
     },
 );
 VirtualCounter64 :: todo();
@@ -277,14 +276,13 @@ Register8RedPlus :: todo();
 VirtualRegister8RedPlus :: todo();
 Register64 :: with_pins(1, 3, .Device, 
     fn(_) => 8*8,
-    fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 3)) void = {
+    fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 3), instance: i64, doing_pre_read: bool) void = {
         _load, save, value := (i[0] != 0, i[1] != 0, i[2]);
-        slot := world.storage[world.instance]&;
+        slot := world.storage[instance]&;
         o[0] = slot[];
-        if !world.doing_pre_read && save {
+        if !doing_pre_read && save {
             slot[] = value;
         };
-        world.instance += 1;
     },
 );
 VirtualRegister64 :: todo();
@@ -370,15 +368,14 @@ _58 :: todo();
 // out: (event waiting, key value, key up)
 Keyboard :: with_pins(3, 1, .Device, 
     fn(_) => 64,
-    fn(world: *World, o: *Array(i64, 3), i: *Array(i64, 1), _: i64) void = {
+    fn(world: *World, o: *Array(i64, 3), i: *Array(i64, 1), _: i64, instance: i64, doing_pre_read: bool) void = {
         read_next := i[0] != 0;
         @assert_eq(size_of(KeyboardData), size_of(WireValue));
-        data := bit_cast_unchecked(*WireValue, *KeyboardData, world.storage.index(world.instance));
-        world.instance += 1;
+        data := bit_cast_unchecked(*WireValue, *KeyboardData, world.storage.index(instance));
         o[] = (int(data.have_next > 0 || data.prev_value != 0), data.prev_value.int(), data.prev_up.int());
         if read_next {
             o[] = (int(data.have_next > 0 || data.value != 0), data.value.int(), data.up.int());
-            if !world.doing_pre_read {
+            if !doing_pre_read {
                 data.prev_value = data.value;
                 data.prev_up = data.up;
                 data.valid = false;
@@ -398,7 +395,7 @@ FileLoader :: with_pins(1, 2, .Device,
             @if(!enable) => 0;
             @if(want_length) => file.len;
             @if(!offset.ult(file.len)) => 0;
-            @if((offset + 8).ult(file.len)) => file.rest(offset).peek_type(i64)[];
+            @if((offset + 8).ule(file.len)) => file.rest(offset).peek_type(i64)[];
             @else => {
                 r: i64 = 0;
                 range_rev(offset, min(offset + 8, file.len)) { i |
@@ -410,13 +407,12 @@ FileLoader :: with_pins(1, 2, .Device,
     },
 );
 Halt :: with_pins(0, 1, .Device, 
-    fn(_) => 64,
+    fn(_) => 0,
     fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 1), param: i64) void = {
         halt := i[0] != 0;
-        if halt && !world.doing_pre_read {
+        if halt {
             world.tc_halt_device = param;
         };
-        world.instance += 1;
     },
 );
 WireCluster :: todo();
@@ -453,25 +449,33 @@ Custom :: todo();
 VirtualCustom :: todo();
 Program :: with_pins(4, 1, .Device,
     Ram.compute_storage.unwrap(),
-    fn(world: *World, o: *Array(i64, 4), i: *Array(i64, 1), param: i64) void = {
-        (@run Ram'fid.unwrap())(world, o, @ref @as(Array(i64, 7)) (1, 0, i[0], 0, 0, 0, 0), param);
+    fn(world: *World, o: *Array(i64, 4), i: *Array(i64, 1), param: i64, instance: i64, doing_pre_read: bool) void = {
+        @inline ((@run Ram'fid.unwrap())(world, o, @ref @as(Array(i64, 7)) (1, 0, i[0], 0, 0, 0, 0), param, instance, doing_pre_read));
     },
 );
-DelayLine1 :: from_defs("delay");
+DelayLine1 :: with_pins(1, 1, .Device, 
+    fn(_) => 64,
+    fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 1), instance: i64, doing_pre_read: bool) void = {
+        slot := world.storage[instance]&;
+        o[0] = slot[];
+        if !doing_pre_read {
+            slot[] = i[0];
+        };
+    },
+);
 VirtualDelayLine1 :: todo();
 // settings; [0]=0..=1 colour mode, [1]=0..=2 font index [cp850, cp437, cp910]
 // i[0] = offset in linked ram 
 Console :: with_pins(0, 1, .Device,
     fn(_) => 8*8,
-    fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 1), _: i64) void = {
+    fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 1), _: i64, instance: i64, _doing_pre_read: bool) void = {
         offset := i[0];
-        world.storage[world.instance] = offset;  // embeder needs to look here and at the param and render it somehow
-        world.instance += 1;
+        world.storage[instance] = offset;  // embeder needs to look here and at the param and render it somehow
     },
 );
 Shl8 :: math(1, 2) { o, i | o[0] = i[0].shift_left(i[1].bit_and(0b111)).bit_and(0xff); }
 Shr8 :: math(1, 2) { o, i | o[0] = i[0].shift_right_logical(i[1].bit_and(0b111)); }
-Constant64 :: from_defs("const");
+Constant64 :: math_param(1, 0) { o, i, param | o[0] = param; }
 Not64 :: math(1, 1) { o, i | o[0] = bit_not(i[0]); };
 Or64 :: Or;
 And64 :: And;
@@ -502,12 +506,10 @@ LessU8 :: LessU64;
 LessI8 :: todo();
 DotMatrixDisplay :: with_pins(0, 4, .Device, 
     fn(_) => 48*32*2,
-    fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 4), param: i64) void = {
+    fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 4), param: i64, instance: i64, _: bool) void = {
         coloumn_major_pixels := param == 1;  // TODO
-        @debug_assert(!world.doing_pre_read, "don't need to preread something without outputs");
         n := 48*32*2/64;
-        buf := world.storage.subslice(world.instance, n);
-        world.instance += n;
+        buf := world.storage.subslice(instance, n);
         enable, pixel_mask, colour := (i[1].bit_and(1) == 1 && i[3].bit_and(1) == 1, i[0], i[2]);
         @if(!enable) return();
         flush := pixel_mask.shift_right_logical(56) == 1;
@@ -539,10 +541,9 @@ DotMatrixDisplay :: with_pins(0, 4, .Device,
 // each bit enables one segment
 SegmentDisplay :: with_pins(0, 2, .Device, 
     fn(_) => 64,
-    fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 2), param: i64) void = {
-        @debug_assert(!world.doing_pre_read, "don't need to preread something without outputs");
-        world.storage[world.instance] = @if(i[1] == 0, 0, i[0]);
-        world.instance += 1;
+    fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 2), param: i64, instance: i64, doing_pre_read: bool) void = {
+        @debug_assert(!doing_pre_read, "don't need to preread something without outputs");
+        world.storage[instance] = @if(i[1] == 0, 0, i[0]);
     },
 );
 Input16 :: Input64;
@@ -591,7 +592,7 @@ Mux16 :: Mux8;
 Switch16 :: Switch64;
 Splitter16 :: make_split_bytes(2);
 Maker16 :: make_from_bytes(2);
-Register16 :: mask(16, Register64);
+Register16 :: Register64;
 VirtualRegister16 :: todo();
 Counter16 :: mask_param(16, Counter64);
 VirtualCounter16 :: todo();
@@ -620,7 +621,7 @@ Mux32 :: Mux8;
 Switch32 :: Switch64;
 Splitter32 :: make_split_bytes(4);
 Maker32 :: make_from_bytes(4);
-Register32 :: mask(32, Register64);
+Register32 :: Register64;
 VirtualRegister32 :: todo();
 Counter32 :: mask_param(32, Counter64);
 VirtualCounter32 :: todo();
@@ -643,7 +644,7 @@ Ram :: with_pins(4, 7, .Device,
         param: Settings.Ram = (repr = it.param.bitcast());
         param.get(.storage_size) * param.word_size() * 8
     },
-    fn(world: *World, o: *Array(i64, 4), i: *Array(i64, 7), param: i64) void = {
+    fn(world: *World, o: *Array(i64, 4), i: *Array(i64, 7), param: i64, instance: i64, doing_pre_read: bool) void = {
         param: Settings.Ram = (repr = param.bitcast());
         word_size_index, storage_size := (param.get(.word_size_index), param.get(.storage_size));
         word_size := param.word_size();
@@ -652,7 +653,7 @@ Ram :: with_pins(4, 7, .Device,
         inputs := i.items().rest(3);
         
         n := (storage_size * word_size).ualign_to(8).udiv(8);
-        bytes := interpret_as_bytes(world.storage.subslice(world.instance, n));
+        bytes := interpret_as_bytes(world.storage.subslice(instance, n));
         
         // :SLOW
         impl :: fn($T: Type) => {
@@ -663,7 +664,7 @@ Ram :: with_pins(4, 7, .Device,
                     slot := data[a]&;
                     o[I] = slot[].int();
                     z := param.get(.z_input_mask).bit_and(1.shift_left(I)) != 0;
-                    if !world.doing_pre_read && save && !z {
+                    if !doing_pre_read && save && !z {
                         slot[] = @if(@run(T == i64), inputs[I], inputs[I].trunc());
                     }
                 } else {
@@ -678,8 +679,6 @@ Ram :: with_pins(4, 7, .Device,
             @case(3) => impl(i64);
             @default => unreachable();
         };
-        
-        world.instance += n;
     },
 );
 
@@ -690,9 +689,9 @@ RamFast :: Ram;
 VirtualRamFast :: todo();
 Rom :: with_pins(1, 4, .Device,
     Ram.compute_storage.unwrap(),
-    fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 4), param: i64) void = {
+    fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 4), param: i64, instance: i64, doing_pre_read: bool) void = {
         O := zeroed(Array(i64, 4));
-        (@run Ram'fid.unwrap())(world, O&, @ref @as(Array(i64, 7)) (i[0], i[1], i[2], i[3], 0, 0, 0), param);
+        @inline ((@run Ram'fid.unwrap())(world, O&, @ref @as(Array(i64, 7)) (i[0], i[1], i[2], i[3], 0, 0, 0), param, instance, doing_pre_read));
         o[0] = O&[0];
     },
 );
@@ -710,14 +709,14 @@ VirtualDelayLine64 :: todo();
 // ugh, kinda paste from the other one but not really
 RamDualLoad :: with_pins(2, 6, .Device,
     Ram.compute_storage.unwrap(),
-    fn(world: *World, o: *Array(i64, 2), i: *Array(i64, 6), param: i64) void = {
+    fn(world: *World, o: *Array(i64, 2), i: *Array(i64, 6), param: i64, instance: i64, doing_pre_read: bool) void = {
         _load0, save, a0, value, _load1, a1 := (i[0] != 0, i[1] != 0, i[2], i[3], i[4] != 0, i[5]);
         param: Settings.Ram = (repr = param.bitcast());
         word_size_index, storage_size := (param.get(.word_size_index), param.get(.storage_size));
         word_size := param.word_size();
         
         n := (storage_size * word_size).ualign_to(8).udiv(8);
-        bytes := interpret_as_bytes(world.storage.subslice(world.instance, n));
+        bytes := interpret_as_bytes(world.storage.subslice(instance, n));
         a := @slice(a0, a1);
         // :SLOW
         impl :: fn($T: Type) => {
@@ -727,7 +726,7 @@ RamDualLoad :: with_pins(2, 6, .Device,
                     slot := data[a[]]&;
                     o[I] = slot[].int();
                     // TODO: technically should still be checking z_input_mask probably but since there's only one store slot it's a skill issue to ask for save without giving a value. (if change here, need to fix in find_pins too)
-                    if !world.doing_pre_read && save && I == 0 {
+                    if !doing_pre_read && save && I == 0 {
                         slot[] = @if(@run(T == i64), value, value.trunc());
                     }
                 } else {
@@ -743,7 +742,6 @@ RamDualLoad :: with_pins(2, 6, .Device,
             @default => unreachable();
         };
         
-        world.instance += n;
     },
 );
 VirtualRamDualLoad :: todo();
@@ -979,7 +977,10 @@ get_width_data :: fn(it: *Template) []u8 = {
     @if(it.name == "Splitter32") return(@slice(0x08, 0x08, 0x08, 0x08, 0x20) a);
     @if(it.name == "Maker64") return(@slice(0x40, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08) a);
     @if(it.name == "Splitter64") return(@slice(0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x40) a);
-    
+    if it.name.starts_with("Add") {
+        i := suffix_int(it.name).unwrap();
+        return @slice(i, 0x01, 0x01, i, i) a;
+    }
     empty()
 }
 

@@ -300,7 +300,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 x = (x.align_to(8) - OFF)/8;
                 y = (y.align_to(8) - OFF)/8;
                 insert(custom_pins&, dest, (x, y));
-                insert(bit_width&, dest, @if(bit_width.len == 0, 0, bit_width[0]));
+                insert(bit_width&, dest, @if(shape.bit_width.len == 0, 0, shape.bit_width[0]));
                 
                 if is_switchable_output {
                     insert(custom_pins&, dest + 1, (HACK_NONE_PIN_POSITION, HACK_NONE_PIN_POSITION));
@@ -397,6 +397,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     logical_to_circuit&.insert(0, -1);  // in
     logical_to_circuit&.push(-1);       // out
     insert_consts_for_dead_wires(components.items(), gates&);
+    @if(!c.has_arch_pins) @debug_assert_eq(bit_width.len, custom_pins.len);
     // TODO: doing this so late means it won't know widths for things that are from_defs() so maybe should just get rid of from_defs, it's only 5 things.
     insert_bit_width_casts(components.items(), gates&, wire_count&, bit_width);
     logical_to_circuit&.push_repeated(gates.len - logical_to_circuit.len, -1);
@@ -618,7 +619,8 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
     n := 0;
     range_rev(0, order.len) { i |
         it := gates[order[i]]&;
-        if get_storage_count(components, it) != 0 {
+        all_inputs_needed := components[it.kind.id.zext()].inputs_for_pure_eval.len != it.inputs.len;
+        if get_storage_count(components, it) != 0 && it.outputs.len != 0 && all_inputs_needed {
             x := order&.ordered_remove(i).unwrap();
             order&.push(x);
             n += 1;
@@ -829,6 +831,7 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
     width := temp().alloc_zeroed(u8, wire_count[]);
     outputs, inputs := (gates[gates.len - 1].inputs, gates[0].outputs);
     known := outputs.len + inputs.len == bit_width.len;
+    @if(!known) println("TODO: missing some io sizes?");
     original_output_index := gates.len - 1;
     @if(known)
     enumerate inputs { i, id |
@@ -1013,9 +1016,8 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
         vec2(x.intcast().float().cast(), y.intcast().float().cast())
     };
     fail :: fn(s) => return(Err = s);
-    // TODO: use the default clock speed 
     
-    id := eat(CustomId); 
+    circuit_id := eat(CustomId); 
     eat(u32); eat(i64); eat(i64); eat(bool);
     tick_rate := eat(u32);
     dependencies := eatN(u16, CustomId);
@@ -1045,6 +1047,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
         if kind == 92 {  // Custom
             custom_id = eat(CustomId);
             custom_pos = eat_point();
+            @if(custom_id.id == circuit_id.id) return(Err = "recursive custom component");
         };
         if kind == 94 || kind == 68 || kind == 64 {  // Program
             n := eat(u16);
@@ -1120,7 +1123,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
     (Ok = (
         wires = wires.items(), 
         gates = gates.items(), 
-        id = id,
+        id = circuit_id,
         min = min_pos, max = max_pos,
         dependencies = dependencies.shallow_copy(a),
         name = name,

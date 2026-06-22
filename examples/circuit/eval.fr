@@ -90,17 +90,16 @@ fn eval(world: *World, parent: []WireValue, it: *Component.Gate) void = {
             if op.pre_read {
                 world.doing_pre_read = true;
                 world.pre_read_depth += 1;
-                prev := world.instance;
                 world.instance = instance + c.instance_offset_by_gate[op.gate_i];
                 world.eval(wires, c.gates.index(op.gate_i));
-                world.instance = prev;
                 world.pre_read_depth -= 1;
             } else {
-                @debug_assert_eq(world.instance, instance + c.instance_offset_by_gate[op.gate_i], "instance_offset_by_gate?");
+                world.instance = instance + c.instance_offset_by_gate[op.gate_i];
                 world.doing_pre_read = false;
                 world.eval(wires, c.gates.index(op.gate_i));
             };
         };
+        world.instance = instance + c.instance_offset_by_gate[c.gates.len - 1];
     } else {
         each gates { it |
             world.eval(wires, it);
@@ -119,6 +118,7 @@ fn eval(world: *World, parent: []WireValue, it: *Component.Gate) void = {
     };
 }
 
+// TODO: get rid of these impls and just use the tc builtins
 primitives :: @struct {
     #arity(1, 2)
     nand :: fn(world, parent, it) = {
@@ -228,17 +228,29 @@ fn eval_compiled(world: *World, parent: []WireValue, it: *Component.Gate) void =
 // values is (uninit outputs, inputs)
 fn eval_compiled(world: *World, values: []WireValue, kind: ComponentId, param: i64) []i64 = {
     child := world[kind]&;
+    storage_count := get_storage_count(world.components, kind, param);
     compiled := get_compiled(world, kind)
         || @panic("expected eval_compiled gate to have fast_eval for (%)", child.name);
     o_n, i_n := child.arity();
     @assert_eq(o_n + i_n, values.len, "arity error calling compiled gate %", child.name);  
     // SAFETY: *Array(T, N) has same repr as *T. compile_gates chooses N based on Gate arity. 
     if child.has_param {  // TODO: this is stupid. only matters on wasm. should probably just always add a junk param:i64 in the compiler instead. 
-        compiled := bit_cast_unchecked(rawptr, @FnPtr(*World, *WireValue, *WireValue, i64) void, compiled);
-        compiled(world, values.ptr, values.ptr.offset(o_n), param);
+                          //       the junk would also fix needing to know for storage without param to shift the arg. 
+        if storage_count != 0 {
+            compiled := bit_cast_unchecked(rawptr, @FnPtr(*World, *WireValue, *WireValue, i64, i64, bool) void, compiled);
+            compiled(world, values.ptr, values.ptr.offset(o_n), param, world.instance, world.doing_pre_read);
+        } else {    
+            compiled := bit_cast_unchecked(rawptr, @FnPtr(*World, *WireValue, *WireValue, i64) void, compiled);
+            compiled(world, values.ptr, values.ptr.offset(o_n), param);
+        }
     } else {
-        compiled := bit_cast_unchecked(rawptr, @FnPtr(*World, *WireValue, *WireValue) void, compiled);
-        compiled(world, values.ptr, values.ptr.offset(o_n));
+        if storage_count != 0 {
+            compiled := bit_cast_unchecked(rawptr, @FnPtr(*World, *WireValue, *WireValue, i64, bool) void, compiled);
+            compiled(world, values.ptr, values.ptr.offset(o_n), world.instance, world.doing_pre_read);
+        } else {
+            compiled := bit_cast_unchecked(rawptr, @FnPtr(*World, *WireValue, *WireValue) void, compiled);
+            compiled(world, values.ptr, values.ptr.offset(o_n));
+        }
     };
     values.slice(0, o_n)
 }

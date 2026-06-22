@@ -396,16 +396,20 @@ calculate_usage :: fn(components: []Component, off: i64, a: Alloc) void = {
     };
 }
 
-fn get_storage_count(components: []Component, it: *Component.Gate) i64 = {
+
+fn get_storage_count(components: []Component, it: *Component.Gate) i64 = 
+    get_storage_count(components, it.kind, it.param);
+
+fn get_storage_count(components: []Component, kind: ComponentId, param: i64) i64 = {
     tc := defs.tc_components_offset; 
-    kind: i64 = it.kind.id.zext();
+    kind: i64 = kind.id.zext();
     if !FEAT_TC_CIRCUIT || kind < tc || kind >= tc + Tc.Builtin.templates.len() {
         return components[kind].storage_count;
     };
     shape := Tc.Builtin.templates[kind - tc]&;
     @debug_assert(!shape.body&.is(.Def));
     if shape.compute_storage { compute_storage |
-        n := compute_storage(param = it.param).ualign_to(64).udiv(64);
+        n := compute_storage(param = param).ualign_to(64).udiv(64);
         return n;
     };
     0
@@ -426,6 +430,7 @@ CompileGates :: @struct {
     failed := false;
 };
 
+// TODO: arrange for builtins to have const known param/doing_pre_read
 fn compile_gate(self: *CompileGates, gate_i: i64) void = {
     out := self.out;
     it := self.c.gates[gate_i]&;
@@ -433,10 +438,6 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
     child_storage_count := get_storage_count(self.components, it);
     
     if !self.c.gates_needed_for_pure_eval&.get(gate_i) && self.doing_pre_read && !self.doing_pre_read_local {
-        if child_storage_count != 0 {
-            // can test that this matters by adding a random memory1 whose output isn't used somewhere in another ramN component. 
-            @fmt(out, "world.instance += %;\n", child_storage_count);
-        };
         return();
     };
 
@@ -461,10 +462,6 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
         };
         
         prev := self.doing_pre_read;
-        any_pre_read := self.need_pre_read.len != 0;
-        if any_pre_read {
-            @fmt(out, "world.doing_pre_read = %;\n", true);
-        };
         while => self.need_pre_read.len > 0 {
             wire := self.need_pre_read[self.need_pre_read.len - 1];
             // :SLOW should compute wireid -> defining gate once and reuse
@@ -491,8 +488,6 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
             if !changed {
                 self.need_pre_read&.ordered_retain(fn(wire) => !it.outputs.contains(fn(it) => it.id == wire.id));
                 
-                instance := self.c.instance_offset_by_gate[gate_i];
-                @fmt(out, "world.instance = instance + %;\n", instance);
                 self.doing_pre_read = true;
                 self.doing_pre_read_local = true;
                 
@@ -506,16 +501,12 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
                 };
             };
         };
-        if any_pre_read {
-            @fmt(out, "world.instance = instance + %;\n", self.c.instance_offset_by_gate[gate_i]);
-            @fmt(out, "world.doing_pre_read = %;\n", prev);
-        };
     };
     name := child.name;
     if name == "switch1" {
         name = "switch8";
     };
-    simple := name != "switch8" && name != "delay" && name != "const";
+    simple := name != "switch8";
     if simple && name != "input" {
         @fmt(out, "o := @uninitialized Array(WireValue, %);\n", it.outputs.len);
         if it.inputs.len != 0 {
@@ -539,16 +530,18 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
     @switch(name) {
         @case("input") => @fmt(out, "o := in[];\n");
         @case("output") => @fmt(out, "out[] = i;\n");
-        @case("const") => @if(result_used) @fmt(out, "w% = (%);\n", it.outputs[0].id, it.param);
         @case("switch8") => @if(result_used) @fmt(out, "if w% != 0 {| w% = w%; };\n", it.inputs[1].id, it.outputs[0].id, it.inputs[0].id);
-        @case("delay") => @if(result_used) @fmt(out, "w% = eval_delay_gate(world, w%, %);\n", it.outputs[0].id, it.inputs[0].id, self.doing_pre_read);
         @default => {
-            if child_storage_count == 0 && child.gate_sum < 30 {
+            if child.gate_sum < 30 && child.name != "DotMatrixDisplay" {
                 @fmt(out, "@inline ");
             };
             @fmt(out, "%(world, o&, i&", mangle(self.components, it.kind.id.zext()));
             @if(child.has_param) @fmt(out, ", %", it.param);
+            @if(child_storage_count != 0) @fmt(out, ", instance + %, %", self.c.instance_offset_by_gate[gate_i], self.doing_pre_read);
             @fmt(out, ");\n");
+            
+            @if(self.doing_pre_read) @debug_assert_ne(it.outputs.len, 0, "no need to pre_read something without outputs");
+            @if(self.doing_pre_read_local) @if(child_storage_count != 0) @debug_assert_ne(it.inputs.len, child.inputs_for_pure_eval.len, "no need to pre_read something that needs all inputs: %", child.name);
         };
     };
     if simple && it.outputs.len > 0 && !discard_outputs {
@@ -633,14 +626,17 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
             compile_order = list(temp()),
         ); self := self&;
         
+        @debug_assert(!c.has_param, "only builtins have param");
         out_n, in_n := (c.gates[c.gates.len - 1].inputs.len, c.gates[0].outputs.len);
-        @fmt(out, "% :: fn(world: *World, out: *Array(WireValue, %), in: *Array(WireValue, %)) void ", mangle(components, i), out_n, in_n);
+        have_storage := self.c.storage_count != 0;
+        @fmt(out, "% :: fn(world: *World, out: *Array(WireValue, %), in: *Array(WireValue, %)", mangle(components, i), out_n, in_n);
+        // TODO: signeture will be wrong if computed storage=0 (ex. has a ram with settings[0]=0)
+        @if(have_storage) @fmt(out, ", instance: i64, doing_pre_read: bool");
+        @fmt(out, ") void ");
         @if(false) @fmt(out, """ #log_ir("Rh") """);
         @fmt(out, "= {\n");
         
-        have_storage := self.c.storage_count != 0;
         if have_storage {
-            @fmt(out, "doing_pre_read, instance := (world.doing_pre_read, world.instance);\n");
             range(0, 2) { iter_i |
                 self.wires_evaluated&.clear();
             
@@ -713,6 +709,8 @@ DefsBuiltins :: @struct {
     nand :: TcBuiltins'get_native(TcBuiltins.Nand);
     byte_split :: get_native(TcBuiltins.Splitter8);
     byte_make :: get_native(TcBuiltins.Maker8);
+    delay :: get_native(TcBuiltins.DelayLine1);
+    const :: TcBuiltins'get_native(TcBuiltins.Constant64);
 };
 
 AsmOverture :: @rec @struct {
@@ -868,7 +866,7 @@ print_components :: fn(components: []Component) void = {
                 @fmt(out, "w%, ", it.id);
             };
             out.len -= 2 * int(out.items().ends_with(", "));
-            @if(components[it.kind.id.zext()].name == "const") @fmt(out, "%", it.param);
+            @if(components[it.kind.id.zext()].has_param) @fmt(out, "%", it.param);
             @fmt(out, ");\n");
         };
         if it.gates.len == 0 {

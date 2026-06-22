@@ -7,6 +7,11 @@
   but the console is still garbled nonsense so i would have had to try these things trying to fix that anyway. not that they helped. 
 - i was just doing console wrong when no colour but memory is 64 bit. it's 8 chars per 64 bit slot not just the bottom byte. 
 - trying to make the keyboard output persist in the right way
+- lol after all that talk about with width casts, i broke it with last minute attempt to gracefully allow missing entries. 
+- lifted world.(instance, doing_pre_read) into arguments in the compiled code. 
+  A: instance in argument instead of world field, B: @inline things with storage but few gates. 
+  ms for leg solve maze: xx=50, xB=43, Ax=76, AB=27.
+  the extra inlining does hurt compile time tho. tetris 120->140 but riscv 205->715. just not doing it for DotMatrixDisplay -> 260 which is reasonable again. 
 
 ## (Jun 21)
 
