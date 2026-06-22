@@ -42,6 +42,7 @@ State :: @struct {
     gfx_error_last_frame: bool;
     halted_without_wire_values: bool;
     keyboard_data: ?*Tc.Builtin.KeyboardData;
+    keyboard_character_mode: bool;
     
     circuit: []Tc.Circuit;
     circuit_index: i64;
@@ -316,7 +317,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                     };
                     sdtx.color = pack_rgba(255, 255, 255, 255);
                     sdtx.put(@tfmt("\n(storage_count=%, instance=%, param=%)\n", n, instance, fmt_hex(it.param)));
-                    data := world.storage.subslice(instance, n);
+                    data := world.storage.subslice(instance, n.min(4096));
                     for data { value |
                         sdtx.put(@tfmt("%\n", fmt_hex(value)));
                     };
@@ -681,16 +682,17 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             
                 T :: Builtin.Settings.Console;
                 param: T = (repr = it.param.bitcast());
-                // TODO: colour and font
-                // TODO: i think i also need to know the data size of the ram (rn assumes 64) and should bounds check anyway so maybe delay the instance conversion to here
-                // TODO: graceful error if world.storage.subslice is oob
+                // TODO: font https://int10h.org/oldschool-pc-fonts/fontlist/font?ibm_bios-2y
+                // TODO: need to bounds check offset against the size of the ram so maybe delay the instance conversion to here
                 offset := world.storage[c.instance_offset_by_gate[i]];
                 
-                @switch(param.get(.ram_word_size_index)) {
-                    @case(0) => {
-                        // TODO: if colour mode am i supposed to be reading 8 bytes at a time? 
+                bytes_per_char := @if(param.get(.colour) == 0, 1, 8);
+                // TODO: for non-colour,non-64 offset doesn't have to be a multiple of 8
+                data := world.storage.subslice(param.get(.linked_ram_instance) + offset*bytes_per_char/8, 80*24*bytes_per_char/8);
+                
+                if param.get(.colour) == 0 {
+                        data := data.interpret_as_bytes();
                         sdtx.color = pack_rgba(255, 255, 255, 255);
-                        data := world.storage.subslice(param.get(.linked_ram_instance) + offset, 80*24/8).interpret_as_bytes();
                         range(0, 24) { y |
                             range(0, 80) { x |
                                 value := data[y*80 + x];
@@ -703,20 +705,13 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                             sdtx.pos.x = 0;
                             sdtx.pos.y += 1;
                         };
-                    };
-                    @case(3) => {
-                        data := world.storage.subslice(param.get(.linked_ram_instance) + offset, 80*24);
+                } else {
                         range(0, 24) { y |
                             range(0, 80) { x |
                                 value := data[y*80 + x];
-                                if param.get(.colour) == 0 {
-                                    value = value.bit_and(0xFF).bit_or(0x00_000000_FFFFFF_00);
-                                };
-                                
                                 sdtx.color = pack_rgba(value.shift_right_logical(48).bit_and(0xFF), value.shift_right_logical(40).bit_and(0xFF), value.shift_right_logical(32).bit_and(0xFF), 255);
                                 my_solid_char := "\x8F".index(0)[];
                                 sdtx.put(my_solid_char);
-                                // TODO: use the right same font as them https://int10h.org/oldschool-pc-fonts/fontlist/font?ibm_bios-2y
                                 char: u8 = value.trunc();
                                 if char == 220 { // HACK bottom half square that tetris uses
                                     char = my_solid_char - 3;
@@ -740,8 +735,6 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                             sdtx.pos.y += 1;
                         };
                     };
-                    @default => println("TODO: console ram word size");
-                };
             };
             
             if world[it.kind].name == "SegmentDisplay" {  // TODO: do this by index
@@ -904,23 +897,30 @@ fn service_keyboard_device(state: *State) void = {
     buf := state.key_buffer&;
     @if(buf.len == 0 && !state.keyboard_needs_update) return();
     if state.keyboard_needs_update {
-        data.value = 0;
-        data.up = false;
-        state.keyboard_needs_update = false;
+        //state.keyboard_needs_update = false;
         state.dirty = true;
     };
-    if buf.len > 0 && data.want_next {
+    if buf.len == 0 && !data.valid {
+        data.value = 0;
+        data.up = false;
+    };
+    if buf.len > 0 && !data.valid {
         key := buf[0].key;
-        key := (key_order.index_of(fn(it) => it[] == key) || -13) + 13;
+        key := if state.keyboard_character_mode {
+            // TODO
+            @as(i64) zext(@as(u16) key)
+        } else {
+            (key_order.index_of(fn(it) => it[] == key) || -13) + 13
+        };
         
         data.value = key.trunc();
         data.up = buf[0].up;
-        data.want_next = false;
+        data.valid = true;
         _ := buf.pop_front();
         state.dirty = true;
         state.keyboard_needs_update = true;
     };
-    data.have_next = buf.len > 0;
+    data.have_next = buf.len.trunc();
 }
 
 // TODO: allow multiple?
@@ -935,6 +935,7 @@ fn find_keyboard(state: *State) void = {
     instance := c.instance_offset_by_gate[gate_i];
     data := bit_cast_unchecked(*WireValue, *Tc.Builtin.KeyboardData, world.storage.index(instance));
     state.keyboard_data = (Some = data);
+    state.keyboard_character_mode = c.gates[gate_i].param != 0;
 }
 
 #use("@/lib/collections/deque.fr");
@@ -963,6 +964,9 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             state.dirty = state.dirty || buf.len < 2;
             return();
         };
+    };
+    if event.key_repeat && state.keyboard_device_focused {
+        return();
     };
     
     @match(event.type) {
@@ -1161,6 +1165,7 @@ reset_jit :: fn(slot: *?Ty(CompCtx, *Qbe.Module)) void = {
         v := Franca'init_driver_vtable();
         opts := v.default_build_options();
         opts.no_cache = true;
+        opts.set_unsafe(!@run safety_check_enabled(.DebugAssertions));
         fr := v.with(v'init_compiler(opts));
         make_and_resolve_and_compile_top_level(fr.data, fr.vtable, """ #include_std("lib/core.fr"); """, "-");
         m := fr.get_alloc().box_uninit(Qbe.Module);
@@ -1228,7 +1233,7 @@ ENABLE_TRACY :: Foreign.ENV.FRANCA_TRACY.get_environment_variable().is_some();  
 Futex :: import("@/lib/sys/sync/futex.fr");
 Franca :: import("@/examples/repl.fr").R;
 
-key_order :: @const_slice(Sapp.Keycode.GRAVE_ACCENT, ._1, ._2, ._3, ._4, ._5, ._6, ._7, ._8, ._9, ._0, .MINUS, .EQUAL, .DELETE, 
+key_order :: @const_slice(Sapp.Keycode.GRAVE_ACCENT, ._1, ._2, ._3, ._4, ._5, ._6, ._7, ._8, ._9, ._0, .MINUS, .EQUAL, .BACKSPACE, 
     .TAB, .Q, .W, .E, .R, .T, .Y, .U, .I, .O, .P, .LEFT_BRACKET, .RIGHT_BRACKET, .BACKSLASH,
     .CAPS_LOCK, .A, .S, .D, .F, .G, .H, .J, .K, .L, .SEMICOLON, .APOSTROPHE, .ENTER, 
     .LEFT_SHIFT, .Z, .X, .C, .V, .B, .N, .M, .COMMA, .PERIOD, .SLASH, 

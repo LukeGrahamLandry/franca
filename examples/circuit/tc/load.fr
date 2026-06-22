@@ -396,6 +396,8 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     push_inputs_outputs(gates&, out.items(), in.items());
     logical_to_circuit&.insert(0, -1);  // in
     logical_to_circuit&.push(-1);       // out
+    insert_consts_for_dead_wires(components.items(), gates&);
+    // TODO: doing this so late means it won't know widths for things that are from_defs() so maybe should just get rid of from_defs, it's only 5 things.
     insert_bit_width_casts(components.items(), gates&, wire_count&, bit_width);
     logical_to_circuit&.push_repeated(gates.len - logical_to_circuit.len, -1);
     new_gates, order := schedule_gates(c, gates, wire_count, a, out.items(), in.items(), components.items());
@@ -664,11 +666,7 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
         };
     };
     
-    wire_read: DynamicBitSet = empty(temp());
-    wire_write: DynamicBitSet = empty(temp());
-    
     logic_gates := Component.Gate.list(c.gates.len, a);
-    new_false_wire: ?WireId = .None;
     next_wire_id: u32 = c.wires.len.trunc();
     enumerate c.gates& { gate_i, it |
         continue :: local_return;
@@ -692,9 +690,6 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
                     continue();
                 };
                 w[i] = l_wire;
-                
-                bits := @if(i < out_arity, wire_write&, wire_read&);
-                bits.set(l_wire.id.zext());
             };
         };
         
@@ -705,26 +700,20 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
         out, in := (w.slice(0, out_arity), w.rest(out_arity));
         
         // compiler requires all pins be connected to a wire.
+        // see insert_consts_for_dead_wires()
         z_input_mask := 0;
         enumerate w { i, it |
-            @if(it.id == 0xFFFFFFFF) 
-            if i < out_arity {  // output (discarded)
+            if it.id == 0xFFFFFFFF {
                 it[] = (id = next_wire_id);
                 next_wire_id += 1;
-            } else {  // input (false)
-                if new_false_wire.is_none() {
-                    new_false_wire = (Some = (id = next_wire_id));
-                    next_wire_id += 1;
-                }
-                it[] = new_false_wire.unwrap();
                 z_input_mask = z_input_mask.bit_or(1.shift_left(i));
-            };
+            }
         };
         
-        if shape.name == "Add64" && z_input_mask.bit_and(2) != 0 {
+        if shape.name == "Add64" && z_input_mask.bit_and(2) == 0 {
             @println("TODO: Add64 overflow flag for w%", w[1].id);
         };
-        if shape.name == "Mul64" && z_input_mask.bit_and(2) != 0 {
+        if shape.name == "Mul64" && z_input_mask.bit_and(2) == 0 {
             @println("TODO: Mul64 high for w%", w[1].id);
         };
         if shape.name == "Ashr16" || shape.name == "Ashr8" {
@@ -750,6 +739,10 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
                     s1 = 3;
                 };
                 s: Ram = construct(storage_size = s0, word_size_index = s1, z_input_mask = z_input_mask);
+                @println("storage_size = %", s0);
+                if !shape.name.starts_with("Program") {
+                    s&.set(.storage_size, s.get(.storage_size).align_to(s.word_size()) / s.word_size());
+                };
                 param = s.repr.bitcast();
             };
             if shape.name == "Console" {
@@ -770,27 +763,6 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
             inputs = in,
             kind = (id = it.kind.zext()),
             param = param,
-        );
-    };
-    
-    // wires connected to an input but going nowhere are treated the same as if the pin was disconnected (auto zero)
-    for wire_read& { i |  // TODO: logical operations on these bit sets
-        if !wire_write&.get(i) {
-            logic_gates&.push(
-                outputs = a.alloc_init(WireId, 1, fn(_) => (id = i.trunc())),
-                inputs = empty(),
-                kind = CONST_INDEX,
-                param = 0,
-            );
-        };
-    };
-    
-    if new_false_wire { wire |  // there was a disconnected input pin
-        logic_gates&.push(
-            outputs = a.alloc_init(WireId, 1, fn(_) => wire),
-            inputs = empty(),
-            kind = CONST_INDEX,
-            param = 0,
         );
     };
     
@@ -905,6 +877,37 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
     @debug_assert_eq(components[gates[gates.len - 1].kind.id.zext()].name, "output");
     n := gates.len - original_output_index - 1;
     @if(n != 0) @println("- inserted % casts", n);
+}
+
+// this can't be in find_pins because it has to be after bidirectional components are inlined
+insert_consts_for_dead_wires :: fn(components: []Component, gates: *List(Component.Gate)) void = {
+    original_output_index := gates.len - 1;
+    a := gates.gpa;
+    wire_read: DynamicBitSet = empty(temp());
+    wire_write: DynamicBitSet = empty(temp());
+    each gates { gate |
+        for gate.inputs { id |
+            wire_read&.set(id.id.zext());
+        };
+        for gate.outputs { id |
+            wire_write&.set(id.id.zext());
+        };
+    };
+    
+    // wires connected to an input but going nowhere are treated the same as if the pin was disconnected (auto zero)
+    for wire_read& { i |  // TODO: logical operations on these bit sets
+        if !wire_write&.get(i) {
+            gates.push(
+                outputs = a.alloc_init(WireId, 1, fn(_) => (id = i.trunc())),
+                inputs = empty(),
+                kind = CONST_INDEX,
+                param = 0,
+            );
+        };
+    };
+    
+    gates.items().swap(original_output_index, gates.len - 1);
+    @debug_assert_eq(components[gates[gates.len - 1].kind.id.zext()].name, "output");
 }
 
 fn get_bit_width(components: []Component, it: *Component.Gate) []u8 = {

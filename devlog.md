@@ -1,10 +1,16 @@
+## (Jun 22)
+
+- problem when bidirectional is disconnected in the parent because it gets the new_false_wire which can then gave multiple defs. 
+  fixed by delaying inserting zeros on unwritten wires until the end. 
+- clearly another classic blunder where i edited the circuit in the game. 
+  the chess board worked already and before the casts stuff too. 
+  but the console is still garbled nonsense so i would have had to try these things trying to fix that anyway. not that they helped. 
+- i was just doing console wrong when no colour but memory is 64 bit. it's 8 chars per 64 bit slot not just the bottom byte. 
+- trying to make the keyboard output persist in the right way
 
 ## (Jun 21)
 
 - insert casts when a wire width doesn't match what a gate expects. then don't have to defensively mask inputs in the natives. 
-
-TODO:
-- problem when bidirectional is disconnected in the parent because it gets the new_false_wire which can then gave multiple defs. 
 
 ## (Jun 20)
 

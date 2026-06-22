@@ -29,6 +29,8 @@ Template :: @struct {
 };
 Pin :: Ty(i64, i64);
 
+// TODO: don't allow preread if inputs_for_pure_eval.len == input_arity
+
 templates :: {
     out := (*Template).list(ast_alloc());
     S := Type.scope_of(impl);
@@ -46,7 +48,7 @@ templates :: {
             it.inputs_for_pure_eval = empty();
         };
         
-        if it.name == "LevelInputArch" || it.name.starts_with("Register") || it.name == "Rom" || it.name == "Timing" {
+        if it.name == "LevelInputArch" || it.name.starts_with("Register") || it.name == "Rom" || it.name == "Timing" || it.name == "FileLoader" {
             it.switches = (@slice(@as(Template.SwitchablePin) (value_output_index = 0, condition_input_index = 0))).shallow_copy(ast_alloc());
         };
         if it.name == "RamFast" || it.name == "Ram" {
@@ -62,7 +64,7 @@ templates :: {
         //    it.switches = ast_alloc().alloc_init(Template.SwitchablePin, 8, fn(i) => (value_output_index = i, condition_input_index = 3));
         //}
         
-        it.has_param = it.has_param || it.name.starts_with("Constant") || it.name.starts_with("Counter") || it.name == "Program" || it.name == "Console" || it.name.starts_with("Ram") || it.name.starts_with("Indexer") || it.name == "FileLoader" || it.name.ends_with("Display") || it.name == "Rom" || it.name == "Halt";
+        it.has_param = it.has_param || it.name.starts_with("Constant") || it.name.starts_with("Counter") || it.name == "Program" || it.name == "Console" || it.name.starts_with("Ram") || it.name.starts_with("Indexer") || it.name == "FileLoader" || it.name.ends_with("Display") || it.name == "Rom" || it.name == "Halt" || it.name == "Keyboard";
         
         if name == sym("Custom") {
             it.body = .Custom;
@@ -223,12 +225,8 @@ fn get_native(a: *Template) FuncId = {
     a.fid || @panic("bad get_native (%)", a.name)
 }
 
-KeyboardData :: @struct(value: u16, up: bool, have_next: bool, want_next: bool, _ := zeroed(Array(u8, 3)));
+KeyboardData :: @struct(up: bool, prev_up: bool, value: u16, prev_value: u16, have_next: u8, valid: bool);
 
-// TODO: should be more careful about data sizes if they don't match expected. 
-//       but would know that when compiling so maybe just insert casts aot, not in the impls here. 
-//       stuff like what happens if you input something bigger than 8 bits into a Maker64. 
-// TODO: on riscv they're annoying about sign extending 32 bit values so extra important to mask the inputs
 // TODO: use 32 bit instructions instead of bit_and(0xFFFFFFFF)
 // TODO: the registers/program here use more packed storage than the ones in ../defs.fr 
 //       so either need to unify them or have the ui know about both for showing ram/disassembly. 
@@ -372,14 +370,19 @@ _58 :: todo();
 // out: (event waiting, key value, key up)
 Keyboard :: with_pins(3, 1, .Device, 
     fn(_) => 64,
-    fn(world: *World, o: *Array(i64, 3), i: *Array(i64, 1)) void = {
+    fn(world: *World, o: *Array(i64, 3), i: *Array(i64, 1), _: i64) void = {
         read_next := i[0] != 0;
         @assert_eq(size_of(KeyboardData), size_of(WireValue));
         data := bit_cast_unchecked(*WireValue, *KeyboardData, world.storage.index(world.instance));
         world.instance += 1;
-        o[] = (data.have_next.int(), data.value.int(), data.up.int());
-        if read_next && !world.doing_pre_read {
-            data.want_next = true;
+        o[] = (int(data.have_next > 0 || data.prev_value != 0), data.prev_value.int(), data.prev_up.int());
+        if read_next {
+            o[] = (int(data.have_next > 0 || data.value != 0), data.value.int(), data.up.int());
+            if !world.doing_pre_read {
+                data.prev_value = data.value;
+                data.prev_up = data.up;
+                data.valid = false;
+            };
         };
     },
 );
@@ -756,7 +759,7 @@ Ror8 :: math(1, 2) { o, i | r := i[1].bit_and(0b111); o[0] = i[0].shift_left(8 -
 Ror16 :: math(1, 2) { o, i | r := i[1].bit_and(0b1111); o[0] = i[0].shift_left(16 - r).bit_or(i[0].shift_right_logical(r)).bit_and(0xffff); }
 Ror32 :: math(1, 2) { o, i | o[0] = (@as(u32) i[0].trunc()).rotate_right(i[1]).zext(); }
 Ror64 :: math(1, 2) { o, i | o[0] = i[0].rotate_right(i[1]); }
-IndexerBit :: math_param(1, 1) { o, i, param | o[0] = int(i[0].bit_and(1.shift_left(param)) != 0); }
+IndexerBit :: math_param(1, 1) { o, i, param | o[0] = i[0].shift_right_logical(param).bit_and(1); }
 IndexerByte :: math_param(1, 1) { o, i, param | o[0] = i[0].shift_right_logical(param * 8).bit_and(0xFF); }
 DivMod8 :: mask(8, DivMod64);
 DivMod16 :: mask(16, DivMod64);
@@ -850,7 +853,7 @@ pin_layouts :: @static @parse_pin_layouts(
 (("Timing"),
     ((1, 0), (0, -1))),
 (("Keyboard"),
-    ((1, -4), (2, -2), (2, -1), (-2, -2))),
+    ((1, -3), (2, -2), (2, -1), (-2, -2))),
 (("Input1", "Input8", "LevelInput1"),
     ((1, 0))),
 (("Input16", "Input32"),
