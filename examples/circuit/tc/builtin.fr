@@ -59,10 +59,6 @@ templates :: {
             it.switches = ast_alloc().alloc_init(Template.SwitchablePin, 2, fn(i) => (value_output_index = i, condition_input_index = i*4));
             it.inputs_for_pure_eval = @const_slice(2, 5);
         };
-        // TODO: is this needed?
-        //if it.name == "Decoder3" {
-        //    it.switches = ast_alloc().alloc_init(Template.SwitchablePin, 8, fn(i) => (value_output_index = i, condition_input_index = 3));
-        //}
         
         it.has_param = it.has_param || it.name.starts_with("Constant") || it.name.starts_with("Counter") || it.name == "Program" || it.name == "Console" || it.name.starts_with("Ram") || it.name.starts_with("Indexer") || it.name == "FileLoader" || it.name.ends_with("Display") || it.name == "Rom" || it.name == "Halt" || it.name == "Keyboard";
         
@@ -89,17 +85,14 @@ WireValue :: i64;
 
 Settings :: @struct {
     Ram :: @bit_fields(
-        storage_size := 58,
-        word_size_index := 2,
-        // there are four value input pins but only one store enable pin. 
-        // most of the time a disconnected pin is treated as a zero value but a ram allows you to write one slot without extra zeroes.
-        z_input_mask := 4,
+        storage_size := 60,
+        word_size_index := 3,
+        is_program := 1,
     );
     Console :: @bit_fields(
         colour := 1, 
         font := 2, 
-        ram_word_size_index := 2, 
-        linked_ram_instance := 59,
+        linked_ram_instance := 61,
     );
     Halt :: @bit_fields(
         circ_i := 32,
@@ -107,7 +100,7 @@ Settings :: @struct {
     );
 };
 
-fn word_size(param: Settings.Ram) i64 = (@const_slice(1, 2, 4, 8))[param.get(.word_size_index)];
+fn word_size(param: Settings.Ram) i64 = 1.shift_left(param.get(.word_size_index)); // [1, 2, 4, 8, 16, 32]
 
 math :: fn($out_arity: i64, $in_arity: i64, $fid: FuncId) *Template = {
     // TODO: infer a useful name
@@ -346,11 +339,11 @@ Timing :: with_pins(1, 1, .Device,
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 1)) void = {
         enable := i[0] != 0;
         o[0] = if enable {
-            // TODO: cache on world for the whole tick in case they have multiple clocks for some reason. 
-            //       also then caller could set it early and make it deterministic for testing. 
-            it := zeroed(TimeSpec);
-            Posix'clock_gettime(Posix.CLOCK.REALTIME, it&);
-            it.seconds*US_PER_S + it.nanoseconds/NS_PER_US
+            world.timestamp_us || {
+                x := realtime_us();
+                world.timestamp_us = (Some = x);
+                x
+            }
         } else {
             0
         };
@@ -364,7 +357,6 @@ NoteSound :: with_pins(0, 3, .Device,
 );
 _57 :: todo();
 _58 :: todo();
-// TODO: character mode param
 // out: (event waiting, key value, key up)
 Keyboard :: with_pins(3, 1, .Device, 
     fn(_) => 64,
@@ -542,7 +534,6 @@ DotMatrixDisplay :: with_pins(0, 4, .Device,
 SegmentDisplay :: with_pins(0, 2, .Device, 
     fn(_) => 64,
     fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 2), param: i64, instance: i64, doing_pre_read: bool) void = {
-        @debug_assert(!doing_pre_read, "don't need to preread something without outputs");
         world.storage[instance] = @if(i[1] == 0, 0, i[0]);
     },
 );
@@ -638,7 +629,8 @@ Xnor32 :: mask(32, Xor64);
 Nand64 :: math(1, 2) { o, i | o[0] = i[0].bit_and(i[1]).bit_not(); };
 Nor64 :: math(1, 2) { o, i | o[0] = i[0].bit_or(i[1]).bit_not(); };
 Xnor64 :: math(1, 2) { o, i | o[0] = i[0].bit_xor(i[1]).bit_not(); };
-// settings; [0] is size, [1] is data width as index in [8,16,32,64]
+// settings; [0] is size, [1] is data width as index in [8,16,32,64,128,256]
+// the extra wires are only used in 128/256 bit modes.
 Ram :: with_pins(4, 7, .Device,
     fn(it) => {
         param: Settings.Ram = (repr = it.param.bitcast());
@@ -655,16 +647,15 @@ Ram :: with_pins(4, 7, .Device,
         n := (storage_size * word_size).ualign_to(8).udiv(8);
         bytes := interpret_as_bytes(world.storage.subslice(instance, n));
         
-        // :SLOW
-        impl :: fn($T: Type) => {
+        impl :: fn($T: Type, N: i64) => {
             data := T.reinterpret_bytes(bytes);
-            range(0, 4) { I |
-                a := address + I;
+            count := @if(param.get(.is_program) == 1, 4, N);
+            range(0, count) { I |
+                a := address*N + I;
                 if a.ult(storage_size) {
                     slot := data[a]&;
                     o[I] = slot[].int();
-                    z := param.get(.z_input_mask).bit_and(1.shift_left(I)) != 0;
-                    if !doing_pre_read && save && !z {
+                    if !doing_pre_read && save {
                         slot[] = @if(@run(T == i64), inputs[I], inputs[I].trunc());
                     }
                 } else {
@@ -673,10 +664,12 @@ Ram :: with_pins(4, 7, .Device,
             };
         };
         @switch(word_size_index) {
-            @case(0) => impl(u8);
-            @case(1) => impl(u16);
-            @case(2) => impl(u32);
-            @case(3) => impl(i64);
+            @case(0) => impl(u8, 1);
+            @case(1) => impl(u16, 1);
+            @case(2) => impl(u32, 1);
+            @case(3) => impl(i64, 1);
+            @case(4) => impl(i64, 2);
+            @case(5) => impl(i64, 4);
             @default => unreachable();
         };
     },
@@ -725,7 +718,6 @@ RamDualLoad :: with_pins(2, 6, .Device,
                 if a[].ult(storage_size) {
                     slot := data[a[]]&;
                     o[I] = slot[].int();
-                    // TODO: technically should still be checking z_input_mask probably but since there's only one store slot it's a skill issue to ask for save without giving a value. (if change here, need to fix in find_pins too)
                     if !doing_pre_read && save && I == 0 {
                         slot[] = @if(@run(T == i64), value, value.trunc());
                     }
@@ -739,6 +731,7 @@ RamDualLoad :: with_pins(2, 6, .Device,
             @case(1) => impl(u16);
             @case(2) => impl(u32);
             @case(3) => impl(i64);
+            // 4,5 => not enough pins
             @default => unreachable();
         };
         
@@ -766,7 +759,7 @@ DivMod64 :: math(2, 2) { o, i |
     if i[1] == 0 || (i[0] == MIN_i64 && i[1] == -1) {
         o[] = (0, 0);
     } else {
-        a, b := div_mod(i[0], i[1]);
+        a, b := udiv_mod(i[0], i[1]);
         o[0] = a;
         o[1] = b;
     };

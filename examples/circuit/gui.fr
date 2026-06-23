@@ -54,6 +54,10 @@ State :: @struct {
     loading: ?@struct(start_time: i64, done: u32 = 0, frame_count := 0, root_index: i64, started_compiling := false);
     loader_thread: ?*Thread;
     have_load_work_futex: u32;
+    prev_timestamp_us: i64;
+    frame_time_history: RawDeque(i64);
+    frame_time_history_sum: i64;
+    eval_last_frame: bool;
 };
 
 CircuitNode :: @struct {
@@ -68,8 +72,10 @@ has_dis :: @const_slice("overture", "leg", "OVERTURE", "LEG", "NANDverture");
 // for now i just care about having enough visuals to see what's going on while debugging the evaluator. 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.check_movement();
-    @if(!state.auto_eval)
-    @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
+    if !state.auto_eval && Easy'should_skip_frame(sapp, state.dirty&) {
+        state.eval_last_frame = false;
+        return();
+    };
     sdtx := state.text.default_context&;
     sgl := state.draw&;
     need_draw := false;
@@ -98,13 +104,38 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     halted_without_wire_values := false;
     have_logic := state.loading.is_none() && state.tree.len > 0 && state.tree[0].component.is_some();
     show_the_maze := !state.is_new_overture;
-    @if(have_logic)
-    if state.want_eval || state.auto_eval {
+    
+    eval_this_frame := have_logic && (state.want_eval || state.auto_eval);
+    eval_last_frame := state.eval_last_frame;
+    state.eval_last_frame = eval_this_frame;
+    
+    if eval_this_frame {
         state.halt_message&.clear();
         break :: local_return;
+        prev_timestamp := state.prev_timestamp_us;
+        this_timestamp := realtime_us();
+        state.prev_timestamp_us = this_timestamp;
+        delta_time := this_timestamp - prev_timestamp;
+        if eval_last_frame {
+            if state.frame_time_history&.len() == state.frame_time_history&.capacity() {
+                old_delta_time := state.frame_time_history&.pop_front().unwrap();
+                state.frame_time_history_sum -= old_delta_time;
+            };
+            state.frame_time_history_sum += delta_time;
+            state.frame_time_history&.push_back(delta_time, panicking_allocator);
+            // TODO: could also use this to throttle the tick rate down so don't drop frames if the circuit is too big. 
+        } else {
+            delta_time = 0;
+            prev_timestamp = this_timestamp;
+        };
+        
     count := @if(state.auto_eval, state.ticks_per_eval, 1);
     root_component := state.tree[0].component.unwrap();
     range(0, count) { i |
+        // the idea here is to spread the times evenly instead of all the ticks being grouped together each frame with 16ms gaps.
+        clock := prev_timestamp + delta_time*i/count;
+        state.world.timestamp_us = (Some = clock);
+        
         state.service_keyboard_device();
         state.tick += 1;
         input := state.maze&.input();
@@ -184,7 +215,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     sdtx.color = pack_rgba(255, 255, 255, 255);
     sdtx.pos = world_to_text_pos(vec2(0, height*3));
-    sdtx.put(@tfmt("(paused=%, tick_rate=%, tick=%, keyboard=%) ", !state.auto_eval, state.ticks_per_eval, state.tick, state.keyboard_device_focused));
+    frame_time := state.frame_time_history_sum / state.frame_time_history&.len();
+    sdtx.put(@tfmt("(paused=%, tick_rate=%, tick=%, keyboard=%, frame_time=%ms) ", !state.auto_eval, state.ticks_per_eval, state.tick, state.keyboard_device_focused, frame_time/1000));
     @if(state.load_time != 0) sdtx.put(@tfmt("load_time=%ms", state.load_time));
     
     sdtx.color = pack_rgba(0, 0, 0, 255);
@@ -805,6 +837,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     state.halt_message = list(a);
     state.key_buffer = init(a, 64);
+    state.frame_time_history = init(a, 128);
     init(state.world&, a, true);  // TODO: leaked when loading new circuit
     state.tree = list(a);
     state.tree&.push(
@@ -814,6 +847,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.ticks_per_eval = 1;
     state.recenter();
     state.reset();
+    state.prev_timestamp_us = realtime_us();
     
     state.circuit_arena = init(general_allocator(), 1.shift_left(16));
     for cli_args() { path |
@@ -833,6 +867,9 @@ fn recenter(state: *State) void = {
 
 Defs :: import("@/examples/circuit/defs.fr");
 fn reset(state: *State) void = {
+    state.frame_time_history_sum = 0;
+    state.frame_time_history&.clear();
+
     state.maze = Scenario'Maze'new(Scenario.Maze.tc0);
     state.tick = 0;
     state.halt_message&.clear();
@@ -907,7 +944,7 @@ fn service_keyboard_device(state: *State) void = {
     if buf.len > 0 && !data.valid {
         key := buf[0].key;
         key := if state.keyboard_character_mode {
-            // TODO
+            // TODO: lower case, etc.
             @as(i64) zext(@as(u16) key)
         } else {
             (key_order.index_of(fn(it) => it[] == key) || -13) + 13
@@ -1146,7 +1183,8 @@ fn load_circuit_index_worker(state: *State) void = {
    
     c := circuits[root_index]&; 
     state.arch_is_leg = c.name == "LEG";
-    state.ticks_per_eval = c.default_tick_rate.zext() / 60;
+    // the game ui lets you ask for as slow as 0.1hz (10 seconds per tick), so the number in the save file is scaled by 10
+    state.ticks_per_eval = max(c.default_tick_rate.zext() / 10 / 60, 1);
     
     state.load_time = timestamp() - loading.start_time;
     @eprintln("loaded in %ms", state.load_time);

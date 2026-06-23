@@ -468,7 +468,6 @@ find_links_for_lastest_component :: fn(c: *Circuit, components: []Component) voi
             T :: Builtin.Settings.Console;
             param: T = (repr = logical_gate.param.bitcast());
             param&.set(.linked_ram_instance, instance);
-            param&.set(.ram_word_size_index, ram.settings&[1]);
             logical_gate.param = param.repr.bitcast();  // :PatchConsoleLink
         };
     };
@@ -620,7 +619,7 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
     range_rev(0, order.len) { i |
         it := gates[order[i]]&;
         all_inputs_needed := components[it.kind.id.zext()].inputs_for_pure_eval.len != it.inputs.len;
-        if get_storage_count(components, it) != 0 && it.outputs.len != 0 && all_inputs_needed {
+        if get_storage_count(components, it) != 0 { // TODO: :NotReorderingTheseBreaksOvertureLegNandverture && it.outputs.len != 0 && all_inputs_needed {
             x := order&.ordered_remove(i).unwrap();
             order&.push(x);
             n += 1;
@@ -728,27 +727,20 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
             param = s0;
             #use(Builtin.Settings);
             if shape.name.starts_with("Ram") || shape.name.starts_with("Program") || shape.name == "Rom" {
-                if shape.name == "Rom" {
-                    // this still matters, dispite the name, there's a sandbox-only save pin 
-                    z_input_mask = z_input_mask.shift_right_logical(1+1+1+1);  // skip [1x out, load, store, addr]
-                    z_input_mask = z_input_mask.bit_or(0b1110);  // only one save pin
-                } else {
-                    z_input_mask = z_input_mask.shift_right_logical(4+1+1+1);  // skip [4x out, load, store, addr]
-                };
-                if s1 > 3 {
-                    @println("TODO: >64 bit data width index=%", s1);
+                big_pins := shape.name == "Ram" || shape.name == "RamLatency" || shape.name == "RamFast";
+                if s1 > 3 && !big_pins {
+                    @println("% doesn't allow >64 bit data width index=%", shape.name, s1);
                     it.settings&[1] = 3;
                     s1 = 3;
                 };
-                s: Ram = construct(storage_size = s0, word_size_index = s1, z_input_mask = z_input_mask);
-                @println("storage_size = %", s0);
+                s: Ram = construct(storage_size = s0, word_size_index = s1, is_program = int(shape.name.starts_with("Program")));
                 if !shape.name.starts_with("Program") {
                     s&.set(.storage_size, s.get(.storage_size).align_to(s.word_size()) / s.word_size());
                 };
                 param = s.repr.bitcast();
             };
             if shape.name == "Console" {
-                s: Console = construct(colour = s0, font = s1, linked_ram_instance = 0/*:PatchConsoleLink*/, ram_word_size_index = 0);
+                s: Console = construct(colour = s0, font = s1, linked_ram_instance = 0/*:PatchConsoleLink*/);
                 param = s.repr.bitcast();
             }
             if shape.name == "Halt" {

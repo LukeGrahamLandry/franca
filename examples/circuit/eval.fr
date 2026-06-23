@@ -52,6 +52,7 @@ World :: @struct {
     pre_read_depth := 0;
     tc_file_loader_device: []Tc.LoadedFile;
     tc_halt_device := -1;
+    timestamp_us: ?i64 = .None;
 };
 
 fn eval(world: *World, parent: []WireValue, it: *Component.Gate) void = {
@@ -79,34 +80,32 @@ fn eval(world: *World, parent: []WireValue, it: *Component.Gate) void = {
     
     inputs, outputs := (c.gates[0].outputs, c.gates[c.gates.len - 1].inputs);
     @debug_assert_eq(inputs.len, it.inputs.len, "eval input arity %", c.name);
+    
+    #use("@/lib/collections/bit_set.fr");
+    write: DynamicBitSet = empty(temp());
     range(0, inputs.len) { i |
         wires[inputs[i].id.zext()] = parent[it.inputs[i].id.zext()];
+        write&.set(inputs[i].id.zext());
     };
     gates := c.gates.slice(1, c.gates.len - 1);
-    doing_pre_read, instance := (world.doing_pre_read, world.instance);
     if c.storage_count != 0 {
+        doing_pre_read, instance := (world.doing_pre_read, world.instance);
         ops := c.compile_order&[int(!doing_pre_read)];
         for ops.slice(1, ops.len - 1) { op |
-            if op.pre_read {
-                world.doing_pre_read = true;
-                world.pre_read_depth += 1;
-                world.instance = instance + c.instance_offset_by_gate[op.gate_i];
-                world.eval(wires, c.gates.index(op.gate_i));
-                world.pre_read_depth -= 1;
-            } else {
-                world.instance = instance + c.instance_offset_by_gate[op.gate_i];
-                world.doing_pre_read = false;
-                world.eval(wires, c.gates.index(op.gate_i));
-            };
+            world.instance = instance + c.instance_offset_by_gate[op.gate_i];
+            world.doing_pre_read = op.pre_read;
+            world.pre_read_depth += int(op.pre_read);
+            world.eval(wires, c.gates.index(op.gate_i));
+            world.pre_read_depth -= int(op.pre_read);
         };
         world.instance = instance + c.instance_offset_by_gate[c.gates.len - 1];
+        world.doing_pre_read = doing_pre_read;
     } else {
         each gates { it |
             world.eval(wires, it);
         };
     };
     
-    world.doing_pre_read = doing_pre_read;
     @debug_assert_eq(outputs.len, it.outputs.len, "eval output arity %", c.name);
     range(0, outputs.len) { i |
         parent[it.outputs[i].id.zext()] = wires[outputs[i].id.zext()];
@@ -207,6 +206,7 @@ fn evaluate(world: *World, values: []WireValue, kind: ComponentId, param: i64, s
         eval(world, values, kind, param);
     };
     world.save_wire_values = prev;
+    world.timestamp_us = .None;
 }
 
 // expose the compiled version with the intepreter's calling convention. 
@@ -288,6 +288,12 @@ fn find_component(world: *World, name: Str) ?ComponentId = {
     kind := world.components.index_of(fn(it) => it.name == name)
         || return(.None);
     (Some = (id = kind.trunc()))
+}
+
+realtime_us :: fn() i64 = {
+    it := zeroed(TimeSpec);
+    Posix'clock_gettime(Posix.CLOCK.REALTIME, it&);
+    it.seconds*US_PER_S + it.nanoseconds/NS_PER_US
 }
 
 // TODO: show error if a switch doesn't have exactly one true input?

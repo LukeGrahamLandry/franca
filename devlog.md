@@ -1,3 +1,8 @@
+
+## (Jun 23)
+
+- oops, i was doing signed instead of unsigned division. now tetris and snake work all the way. 
+
 ## (Jun 22)
 
 - problem when bidirectional is disconnected in the parent because it gets the new_false_wire which can then gave multiple defs. 
@@ -12,6 +17,13 @@
   A: instance in argument instead of world field, B: @inline things with storage but few gates. 
   ms for leg solve maze: xx=50, xB=43, Ax=76, AB=27.
   the extra inlining does hurt compile time tho. tetris 120->140 but riscv 205->715. just not doing it for DotMatrixDisplay -> 260 which is reasonable again. 
+- fixed eval skiping a useful gate in when no inputs are needed for pre_read. so now all seems to work without FEAT_COMPILE too. 
+- experimenting with lying about times so they're more evenly spread out over the frame. 
+  was hoping that would help the tetris random numbers but didn't seem to. 
+  so could get rid of it but i do think it makes more sense this way. plus means don't have to clock_gettime every tick. 
+- i guessed wrong about how ram works. on the normal data widths you only get to use one of the value pins. 
+  when it's 128/256 it uses 2/4 pins to fit the whole value. which then also means i can get rid of the 
+  insane z_input_mask thing i was doing. this makes a lot more sense. 
 
 ## (Jun 21)
 

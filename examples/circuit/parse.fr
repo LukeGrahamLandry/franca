@@ -488,6 +488,7 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
             if !changed {
                 self.need_pre_read&.ordered_retain(fn(wire) => !it.outputs.contains(fn(it) => it.id == wire.id));
                 
+                @debug_assert(!self.doing_pre_read_local);
                 self.doing_pre_read = true;
                 self.doing_pre_read_local = true;
                 
@@ -540,8 +541,9 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
             @if(child_storage_count != 0) @fmt(out, ", instance + %, %", self.c.instance_offset_by_gate[gate_i], self.doing_pre_read);
             @fmt(out, ");\n");
             
-            @if(self.doing_pre_read) @debug_assert_ne(it.outputs.len, 0, "no need to pre_read something without outputs");
-            @if(self.doing_pre_read_local) @if(child_storage_count != 0) @debug_assert_ne(it.inputs.len, child.inputs_for_pure_eval.len, "no need to pre_read something that needs all inputs: %", child.name);
+            // TODO :NotReorderingTheseBreaksOvertureLegNandverture  
+            //@if(self.doing_pre_read) @debug_assert_ne(it.outputs.len, 0, "no need to pre_read something without outputs");
+            //@if(self.doing_pre_read_local) @if(child_storage_count != 0) @debug_assert_ne(it.inputs.len, child.inputs_for_pure_eval.len, "no need to pre_read something that needs all inputs: %", child.name);
         };
     };
     if simple && it.outputs.len > 0 && !discard_outputs {
@@ -644,6 +646,12 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
                 @fmt(out, "if %doing_pre_read {\n", @if(doing_pre_read, "", "!"));
                 self.compile_component(doing_pre_read);
                 @fmt(out, "return();\n};\n");
+                
+                // eval() skips one so input always needs to be first even if all inputs unused.
+                if self.compile_order[0].gate_i != 0 {
+                    self.compile_order&.insert(0, (gate_i = 0, pre_read = false));
+                };
+                
                 self.c.compile_order&[iter_i] = self.compile_order.items().shallow_copy(a);
                 self.compile_order&.clear();
             };
@@ -843,6 +851,7 @@ AsmLeg :: @rec @struct {
     };
 };
 
+// TODO: ?? :Compiler?
 main :: fn() void = 
     print_components(@run defs.components.items());
 
