@@ -35,8 +35,6 @@ it works well enough to run my overture/leg in the maze and a few things from th
 
 ## tc is INCOMPLETE
 
-- not all components are implemented / have pin positions transcribed
-  - also missing: 64 bit mul high, add overflow. 8/16 arithmetic shift wrong. 
 - devices
   - missing: network, hdd, sprite display, sound
   - console: wrong font
@@ -44,6 +42,7 @@ it works well enough to run my overture/leg in the maze and a few things from th
   - display: rotation
   - probes
   - latency ram
+- Mul64 high
 - need to position the displays correctly because they can be tiled
 - bidirectional pins are sketchy 
   - using as both input/output depending on a switch probably won't work
@@ -56,6 +55,8 @@ it works well enough to run my overture/leg in the maze and a few things from th
 
 ## other todos
 
+- i don't think im doing the keyboard right. ex. mandelbrot is behind a key sometimes?
+- use f64 for pos/zoom in ui because it gets jerky scrolled down far in the trace for big circuits
 - finish leg: memory, stack, call, shifts
 - make the defs language less painful
   - number literal instead of const()
@@ -78,6 +79,7 @@ it works well enough to run my overture/leg in the maze and a few things from th
 - deduplicate error checking between parse and load
 - show wire comments in the ui
 - :NotReorderingTheseBreaksOvertureLegNandverture
+- don't be checking names of components all the time (at least also check the ids are in the builtin range)
 
 ```
 // TODO: don't always recompile everything when loading a new circuit. it might reuse some custom components. 

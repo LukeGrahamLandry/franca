@@ -24,6 +24,7 @@ Component :: @struct {
     fast_eval := zeroed(rawptr);
     compile_order := zeroed(Array([]Op, 2));
     has_param := false;
+    is_switch := false;
     bit_width: []u8 = empty();
     
     usage: *Usage #use = zeroed(*Usage);
@@ -93,6 +94,7 @@ defs :: @static {
             storage_count = int(name == sym("delay")),
             primitive_arity = arity,
             has_param = name == sym("const"),
+            is_switch = name.str().starts_with("switch"),
         );
         map&.insert(name, (id = components.len.trunc() - 1));
         f := F.get_constant(S, name)
@@ -196,9 +198,7 @@ defs :: @static {
                 prev := defs&.insert(id, kind);
                 @if(!(id& == @ref NONE))
                 if prev { prev |
-                    name0, name1 := (child.name, components[prev.id.zext()].name);
-                    switch := @const_slice("switch1", "switch8");
-                    ok := switch.contains(name0) && switch.contains(name1);
+                    ok := child.is_switch && components[prev.id.zext()].is_switch;
                     @ct_assert(ok, it.loc, "multiple defs: w%", id.id);
                 };
             };
@@ -370,11 +370,11 @@ calculate_usage :: fn(components: []Component, off: i64, a: Alloc) void = {
             for it.outputs { id |
                 prev := def_kind&.insert(id, it.kind);
                 if prev { prev |
-                    a := components[it.kind.id.zext()].name;
-                    b := components[prev.id.zext()].name;
-                    if !(a.starts_with("switch") && b.starts_with("switch")) {
+                    a := components[it.kind.id.zext()]&;
+                    b := components[prev.id.zext()]&;
+                    if !(a.is_switch && b.is_switch) {
                         // TODO: needs to be a hard error but then needs to know how bidirectional pins work
-                        @println("TODO: [%] w% multiple defs must be switch (%, %)", c.name, id.id, b, a);
+                        @println("TODO: [%] w% multiple defs must be switch (%, %)", c.name, id.id, b.name, a.name);
                     }
                 };
             };
@@ -407,7 +407,6 @@ fn get_storage_count(components: []Component, kind: ComponentId, param: i64) i64
         return components[kind].storage_count;
     };
     shape := Tc.Builtin.templates[kind - tc]&;
-    @debug_assert(!shape.body&.is(.Def));
     if shape.compute_storage { compute_storage |
         n := compute_storage(param = param).ualign_to(64).udiv(64);
         return n;
@@ -443,7 +442,7 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
 
     // TODO: for things with storage that were already pre_read, also compile a version that only does the writes and propagates not needing outputs
     discard_outputs := !self.doing_pre_read && it.outputs.len > 0 && self.wires_evaluated&.get(it.outputs[0].id.zext());
-    if discard_outputs && child_storage_count == 0 && !child.name.starts_with("switch") {
+    if discard_outputs && child_storage_count == 0 && !child.is_switch {
         return();
     };
     
@@ -504,7 +503,7 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
         };
     };
     name := child.name;
-    if name == "switch1" {
+    if child.is_switch {
         name = "switch8";
     };
     simple := name != "switch8";

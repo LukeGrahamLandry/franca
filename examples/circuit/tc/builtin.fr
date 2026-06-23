@@ -44,7 +44,7 @@ templates :: {
         it.name = str(name);
         it.inputs_for_pure_eval = ast_alloc().alloc_init(i64, it.in_arity, fn(i) => i);
         
-        if it.name.starts_with("Counter") || it.name == "Keyboard" || it.name.starts_with("Register") || it.name.starts_with("DelayLine") {
+        if it.name.starts_with("Counter") || it.name == "Keyboard" || it.name.starts_with("Register") || it.name.starts_with("DelayLine") || it.name == "BitMemory" {
             it.inputs_for_pure_eval = empty();
         };
         
@@ -70,11 +70,12 @@ templates :: {
             it.callee = current_compiler_context().get_jitted(fid);
         };
         
+        it.bit_width = get_width_data(it);
         if pin_layouts.get(it.name) { pins |
             it.pins = pins;
             @assert_eq(it.pins.len, it.in_arity + it.out_arity, "pin count (%)", it.name);
+            @assert_eq(it.bit_width.len, it.pins.len, "width count (%)", it.name);
         };
-        it.bit_width = get_width_data(it);
         out&.push(it);
     };
     out.items()
@@ -324,8 +325,19 @@ Maker8 :: math(1, 8) { o, in |
 };
 Splitter64 :: make_split_bytes(8);
 Maker64 :: make_from_bytes(8);
+// TODO: now that there's only one, just remove it
 FullAdder :: from_defs("full_add");
-BitMemory :: from_defs("memory1");
+BitMemory :: with_pins(1, 2, .Device, 
+    fn(_) => 64,
+    fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 2), instance: i64, doing_pre_read: bool) void = {
+        value, save := (i[0], i[1] != 0);
+        slot := world.storage[instance]&;
+        o[0] = slot[];
+        if !doing_pre_read && save {
+            slot[] = i[0];
+        };
+    },
+);
 VirtualBitMemory :: todo();
 _53 :: todo();
 Decoder2 :: math(4, 2) { o, i | 
@@ -445,14 +457,10 @@ Program :: with_pins(4, 1, .Device,
         @inline ((@run Ram'fid.unwrap())(world, o, @ref @as(Array(i64, 7)) (1, 0, i[0], 0, 0, 0, 0), param, instance, doing_pre_read));
     },
 );
-DelayLine1 :: with_pins(1, 1, .Device, 
-    fn(_) => 64,
+DelayLine1 :: with_pins(1, 1, .Device,
+    BitMemory.compute_storage.unwrap(),
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 1), instance: i64, doing_pre_read: bool) void = {
-        slot := world.storage[instance]&;
-        o[0] = slot[];
-        if !doing_pre_read {
-            slot[] = i[0];
-        };
+        @inline ((@run BitMemory'fid.unwrap())(world, o, @ref @as(Array(i64, 2)) (i[0], 1), instance, doing_pre_read));
     },
 );
 VirtualDelayLine1 :: todo();
@@ -474,9 +482,9 @@ And64 :: And;
 Xor64 :: Xor;
 Neg64 :: math(1, 1) { o, i | o[0] = -i[0]; };
 Add64 :: math(2, 3) { o, i | 
-    r := i[0] + i[1] + i[2];
-    o[0] = r; 
-    o[1] = 0;  // TODO: overflow
+    r := i[1] + i[2];
+    o[0] = r + i[0]; 
+    o[1] = int(r.ult(i[1]).or((i[0] == 1).and(o[0] == 0)));
 };
 Mul64 :: math(2, 2) { o, i |
     o[0] = i[0] * i[1]; 
@@ -488,7 +496,7 @@ LessI64 :: math(1, 2) { o, i | o[0] = int(lt(i[0], i[1])); };
 Shl64 :: math(1, 2) { o, i | o[0] = i[0].shift_left(i[1]); };
 Shr64 :: math(1, 2) { o, i | o[0] = i[0].shift_right_logical(i[1]); };
 Mux64 :: Mux8;
-Switch64 :: from_defs("switch1");
+Switch64 :: math(1, 2) { o, i | panic("unreachable: switch is magic in the compiler"); };
 ProbeMemoryBit :: todo();
 ProbeMemoryWord :: todo();
 AndOrLatch :: todo();
@@ -502,7 +510,7 @@ DotMatrixDisplay :: with_pins(0, 4, .Device,
         coloumn_major_pixels := param == 1;  // TODO
         n := 48*32*2/64;
         buf := world.storage.subslice(instance, n);
-        enable, pixel_mask, colour := (i[1].bit_and(1) == 1 && i[3].bit_and(1) == 1, i[0], i[2]);
+        enable, pixel_mask, colour := (i[1] != 0 && i[3] != 0, i[0], i[2]);
         @if(!enable) return();
         flush := pixel_mask.shift_right_logical(56) == 1;
         
@@ -777,9 +785,8 @@ LevelInput1 :: Input1;
 LevelInput8 :: todo();
 LevelOutput1 :: Output1;
 LevelOutput8 :: todo();
-// TODO: these 8/16 are wrong. need to repeat the correct sign bit
-Ashr8 :: math(1, 2) { o, i | o[0] = i[0].shift_right_arithmetic(i[1].bit_and(0b111)).bit_and(0xff); }
-Ashr16 :: math(1, 2) { o, i | o[0] = i[0].shift_right_arithmetic(i[1].bit_and(0b1111)).bit_and(0xffff); }
+Ashr8 :: math(1, 2) { o, i | o[0] = sign_extend(i[0], 7).shift_right_arithmetic(i[1].bit_and(0b111)).bit_and(0xff); }
+Ashr16 :: math(1, 2) { o, i | o[0] = sign_extend(i[0], 15).shift_right_arithmetic(i[1].bit_and(0b1111)).bit_and(0xffff); }
 Ashr32 :: math(1, 2) { o, i | o[0] = (@as(u32) i[0].trunc()).shift_right_arithmetic(i[1]).zext(); }
 Ashr64 :: math(1, 2) { o, i | o[0] = i[0].shift_right_arithmetic(i[1]); }
 Bidirectional1 :: Bidirectional64;
@@ -909,8 +916,8 @@ pin_layouts :: @static @parse_pin_layouts(
 
 get_width_data :: fn(it: *Template) []u8 = {
     a := ast_alloc();
-    all_one :: @const_slice("BitMemory", "And3", "Or3", "FullAdder", "Decoder3", "Decoder1", "Decoder2", "On", "Off", "Halt");
-    all_suffix :: @const_slice("DelayLine", "Input", "Output", "Bidirectional", "Shl", "Shr", "Rol", "Ror", "And", "Or", "Xor", "Nand", "Xnor", "Nor", "Not", "Constant", "DivMod", "Mul", "Neg");
+    all_one :: @const_slice("BitMemory", "And3", "Or3", "FullAdder", "Decoder3", "Decoder1", "Decoder2", "On", "Off", "Halt", "LevelOutput1Sum", "LevelOutput1Car");
+    all_suffix :: @const_slice("DelayLine", "Input", "Output", "Bidirectional", "Shl", "Shr", "Ashr", "Rol", "Ror", "And", "Or", "Xor", "Nand", "Xnor", "Nor", "Not", "Constant", "DivMod", "Mul", "Neg", "LevelInput", "LevelOutput");
     cmp_suffix :: @const_slice("Equal", "LessU", "LessI");
     suffix_int :: fn(s: Str) ?u8 = {
         i := s.len - 1;
@@ -920,23 +927,25 @@ get_width_data :: fn(it: *Template) []u8 = {
         };
         (Some = s.rest(i+1).parse_int().trunc())
     };
+    pin_count := it.in_arity + it.out_arity;
     if all_one.contains(it.name) {
-        return a.alloc_init(u8, it.pins.len, fn(_) => 1);
+        return a.alloc_init(u8, pin_count, fn(_) => 1);
     }
     for all_suffix { prefix |
         if suffix_int(it.name) { i |
             if it.name.starts_with(prefix) {
-                return a.alloc_init(u8, it.pins.len, fn(_) => i);
+                return a.alloc_init(u8, pin_count, fn(_) => i);
             };
         };
         if it.name == prefix {
-            return a.alloc_init(u8, it.pins.len, fn(_) => 1);
+            return a.alloc_init(u8, pin_count, fn(_) => 1);
         }
     };
+    
     for cmp_suffix { prefix |
         if it.name.starts_with(prefix) {
             i := suffix_int(it.name).unwrap();
-            it.bit_width = @slice(0x01, i, i) a;
+            return @slice(0x01, i, i) a;
         }
     };
     if it.name.starts_with("Output") && it.name.ends_with("z") {
@@ -974,24 +983,23 @@ get_width_data :: fn(it: *Template) []u8 = {
         i := suffix_int(it.name).unwrap();
         return @slice(i, 0x01, 0x01, i, i) a;
     }
+    
+    @if(it.name == "Timing") return(@slice(0x40, 0x01) a);
+    @if(it.name == "Console") return(@slice(0x40) a);
+    @if(it.name == "Keyboard") return(@slice(0x01, 0x10, 0x01, 0x01) a);
+    @if(it.name == "SegmentDisplay") return(@slice(0x08, 0x01) a);
+    @if(it.name == "DotMatrixDisplay") return(@slice(0x40, 0x01, 0x20, 0x01) a);
+    @if(it.name == "NoteSound") return(@slice(0x40, 0x40, 0x40) a);  // TODO
+    @if(it.name == "SpriteDisplay") return(@slice(0x40, 0x40, 0x40, 0x40) a);  // TODO
+    
+    i := 0x40;  // :SpecialOutputBitWidth
+    @if(it.name == "Ram" || it.name == "RamFast") return(@slice(i, i, i, i, 0x01, 0x01, 0x40, i, i, i, i) a);
+    @if(it.name == "Program") return(@slice(i, i, i, i, 0x40) a);
+    @if(it.name == "Rom") return(@slice(i, 0x01, 0x01, 0x40, i) a);
+    @if(it.name == "RamDualLoad") return(@slice(i, i, 0x01, 0x01, 0x40, i, 0x01, 0x40) a);
+    
     empty()
 }
-
-// TODO: widths for these
-/*
-(("Add8", "Add16", "Add32", "Add64"),
-(("Timing"),
-(("Keyboard"),
-(("Program"),
-(("Console"),
-(("RamFast", "Ram"),
-(("RamDualLoad"),
-(("Rom"),
-(("NoteSound"), 
-(("SegmentDisplay"),
-(("DotMatrixDisplay"),
-(("SpriteDisplay"),
-*/
 
 parse_pin_layouts :: fn(e: FatExpr) FatExpr #macro = {
     result: HashMap(Str, []Pin) = init(ast_alloc());

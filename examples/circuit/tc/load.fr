@@ -78,6 +78,7 @@ load_builtins :: fn(components: *List(Component), a: Alloc) void = {
         c.has_param = it.has_param;
         c.gate_sum = 1;
         c.bit_width = it.bit_width;
+        c.is_switch = it.name.starts_with("Switch");
         components.push(c);
     };
 }
@@ -201,6 +202,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     builtin_count := defs.tc_components_offset + templates.len();
     @assert_ge(components.len, builtin_count, "TODO: be more flexible about adding new ones");
         
+    @debug_assert_eq(components[{ xx := CONST_INDEX; /*:compiler*/ xx.id.zext() }].name, "Off");
     logical_to_circuit := i64.list(gates.len, temp());
     extra_gates := 0;
     kill: DynamicBitSet = empty(temp());
@@ -243,7 +245,17 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
             unimplemented = true;
         };
         
-        apply_switchable_pin :: fn(value, condition) => {  // :OutputNz
+        apply_switchable_pin :: fn(value, condition, bit_width) => {  // :OutputNz
+            S := @const_slice(
+                (@as(u8)1, get_component_by_name("Switch1", finished_defs.components)),
+                (8, get_component_by_name("Switch8", finished_defs.components)),
+                (16, get_component_by_name("Switch16", finished_defs.components)),
+                (32, get_component_by_name("Switch32", finished_defs.components)),
+                (64, get_component_by_name("Switch64", finished_defs.components)),
+            );
+            S := S.find(fn(it) => it._0 == bit_width) || S[4]&;
+            S := S._1;
+        
             w := a.alloc_uninit(WireId, 3);
             switchable_wire: WireId = (id = wire_count.trunc());
             wire_count += 1;
@@ -253,15 +265,17 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
             w[2] = condition[];
             value[] = switchable_wire;
             
-            S := @run get_component_by_name("switch1", defs.components.items()); 
             gates&.push(kind = S, inputs = w.slice(1, 3), outputs = w.slice(0, 1));
             extra_gates += 1;
             it = gates.index(i);  // ^ can reallocate
         };
         
-        for shape.switches { pin |
-            apply_switchable_pin(it.outputs[pin.value_output_index]&, it.inputs[pin.condition_input_index]&);
-        };
+        if shape.switches.len != 0 {
+            widths := get_bit_width(shape, it.param);
+            for shape.switches { pin |
+                apply_switchable_pin(it.outputs[pin.value_output_index]&, it.inputs[pin.condition_input_index]&, widths[pin.value_output_index]);
+            };
+        }
         
         @match(shape.body&) { 
             fn Unimplemented() => {
@@ -271,6 +285,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
             }
             fn IO() => {
                 kill&.set(i);
+                @if(shape.name == "LevelScreen") continue();
                 out&.push_all(it.inputs);
                 in&.push_all(it.outputs);
                 
@@ -327,7 +342,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 it.kind = child.compiled.unwrap();
                 
                 for child.switches { switchable_pin |
-                    apply_switchable_pin(it.outputs[switchable_pin.value_output_index]&, it.outputs[switchable_pin.condition_output_index]&);
+                    apply_switchable_pin(it.outputs[switchable_pin.value_output_index]&, it.outputs[switchable_pin.condition_output_index]&, child.bit_width[switchable_pin.value_output_index]);
                 };
                 
                 if child.has_arch_pins {
@@ -428,6 +443,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         storage_count = storage_count,
         bit_width = bit_width,
     );
+    c.bit_width = bit_width;
     calculate_usage(components.items(), components.len - 1, a);
     find_links_for_lastest_component(c, components.items());
 }
@@ -567,7 +583,7 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
                 
                 // :SLOW
                 // TODO: turn switches into a more sane phi representation so its ssa?
-                if ok && (kind.name == "switch1" || kind.name == "switch8") {
+                if ok && kind.is_switch {
                     enumerate gates { x, jt |
                         if jt.outputs.len == 1 && jt.outputs[0].id == it.outputs[0].id {
                             @if(x != i) switch_gates&.push(x);
@@ -700,25 +716,16 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
         
         out, in := (w.slice(0, out_arity), w.rest(out_arity));
         
-        // compiler requires all pins be connected to a wire.
+        if shape.name == "Mul64" && out[1].id != 0xFFFFFFFF {
+            @println("TODO: Mul64 high for w%", w[1].id);
+        };
+        
         // see insert_consts_for_dead_wires()
-        z_input_mask := 0;
         enumerate w { i, it |
             if it.id == 0xFFFFFFFF {
                 it[] = (id = next_wire_id);
                 next_wire_id += 1;
-                z_input_mask = z_input_mask.bit_or(1.shift_left(i));
             }
-        };
-        
-        if shape.name == "Add64" && z_input_mask.bit_and(2) == 0 {
-            @println("TODO: Add64 overflow flag for w%", w[1].id);
-        };
-        if shape.name == "Mul64" && z_input_mask.bit_and(2) == 0 {
-            @println("TODO: Mul64 high for w%", w[1].id);
-        };
-        if shape.name == "Ashr16" || shape.name == "Ashr8" {
-            @println("TODO: small sar");
         };
         
         param := 0;
@@ -764,7 +771,7 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
     (logic_gates, next_wire_id.zext())
 };
 
-CONST_INDEX :: get_component_by_name("const", @run defs.components.items());
+CONST_INDEX :: get_component_by_name("Off", @run finished_defs.components);
 
 fn find_custom_impl(g_gate: *Circuit.Gate, circuits: []Circuit) ?*Circuit = {
     if circuits.find(fn(it) => it.id == g_gate.custom_id) { child |
@@ -830,15 +837,38 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
         width[id.id.zext()] = bit_width[i + outputs.len];
     };
     
-    // TODO: remember inserted ones so don't do it redundantly if same wire/width combo is used multiple times
+    // before schedule gates so won't be in order
+    range(1, original_output_index) { gate_i |
+        continue :: local_return;
+        gate := gates.index(gate_i);
+        bit_width := get_bit_width(components, gate);
+        @if(bit_width.len == 0) continue();
+        @if(components[gate.kind.id.zext()].name.starts_with("Bidirectional")) continue();  // TODO
+        enumerate gate.outputs { i, id |
+            width[id.id.zext()] = bit_width[i];
+        };
+    };
+    
+    K :: Ty(WireId, u8);
+    ::AutoEq(K); ::AutoHash(K, TrivialHasher);
+    casts: HashMap(K, WireId) = init(temp());
+    
     maybe_cast :: fn(want: u8, id: *WireId) => {
+        break :: local_return;
         found := width[id.id.zext()];
+        @if(found == 0) @println("TODO: unknown wire size w%", id.id);
         if want < found && want != 0 {
             old := id[];
+            if get(casts&, (old, want)) { new |
+                id[] = new;
+                break();
+            };
+            
             new: WireId = (id = wire_count[].trunc());
             wire_count[] += 1;
             id[] = new;
             @println("cast % => % (want=%, found=%)", old.id, new.id, want, found);
+            casts&.insert((old, want), new);
             gates.push(
                 kind = cast_id,
                 inputs = a.alloc_init(WireId, 1, fn(_) => old),
@@ -854,9 +884,6 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
         bit_width := get_bit_width(components, gate);
         @if(bit_width.len == 0) continue();
         @if(components[gate.kind.id.zext()].name.starts_with("Bidirectional")) continue();  // TODO
-        enumerate gate.outputs { i, id |
-            width[id.id.zext()] = bit_width[i];
-        };
         gate := gate[];
         enumerate gate.inputs { i, id |
             maybe_cast(bit_width[i + gate.outputs.len], id);
@@ -896,7 +923,6 @@ insert_consts_for_dead_wires :: fn(components: []Component, gates: *List(Compone
                 outputs = a.alloc_init(WireId, 1, fn(_) => (id = i.trunc())),
                 inputs = empty(),
                 kind = CONST_INDEX,
-                param = 0,
             );
         };
     };
@@ -911,13 +937,24 @@ fn get_bit_width(components: []Component, it: *Component.Gate) []u8 = {
     if !FEAT_TC_CIRCUIT || kind < tc || kind >= tc + Tc.Builtin.templates.len() {
         return components[kind].bit_width;
     };
-    shape := Tc.Builtin.templates[kind - tc]&;
-    special := @const_slice("RamFast", "Ram", "RamDualLoad", "Program");
-    if special.contains(shape.name) {
-        param: Builtin.Settings.Ram = (repr = it.param.bitcast());
-        i := param.word_size();
-        println("TODO: get_bit_width");
-        return empty();
+    shape := Tc.Builtin.templates[kind - tc];
+    get_bit_width(shape, it.param)
+}
+
+fn get_bit_width(shape: *Tc.Builtin.Template, param: i64) []u8 = {
+    special := @const_slice("RamFast", "Ram", "RamDualLoad", "Program", "Rom");
+    @if(shape.has_param && shape.name == "SyntheticCast_FR") return(@slice(0x40, param.trunc()) temp());  // can see this while inserting casts after inlining a custom component. 
+    if shape.has_param && special.contains(shape.name) {
+        // :SpecialOutputBitWidth
+        // inputs don't matter because writes truncate in the impl so oversized 64 bits from get_width_data is fine.
+        // outputs would be fine oversized but doing it right here avoids inserting useless casts. 
+        param: Builtin.Settings.Ram = (repr = param.bitcast());
+        size: u8 = param.word_size().min(64).trunc();
+        out := shape.bit_width.shallow_copy(temp());
+        range(0, shape.out_arity) { i |
+            out[i] = size;
+        };
+        return out;
     };
     shape.bit_width
 }
