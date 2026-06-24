@@ -1,4 +1,9 @@
 
+## (Jun 24)
+
+- ram was bounds checking address in i64 units against storage_size in data width units
+- bit more character mode keyboard and tcmips works
+
 ## (Jun 23)
 
 - oops, i was doing signed instead of unsigned division. now tetris and snake work all the way. 
@@ -6,6 +11,7 @@
 - my casts were still wrong. since it's done before schedule_gates, can't just look in order. 
   also the inserted switches for z pins need to know their size. 
   - now it actually does make a difference. tcmips gets to the loading screen. 
+- bit of overkill tracking wire usage to make me feel better about asm for umulh
 
 ## (Jun 22)
 

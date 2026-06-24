@@ -36,7 +36,7 @@ State :: @struct {
     show_wire_ref_lines: bool;
     do_debug_action_this_frame: bool;
     pan_keys_pressed: i64;
-    key_buffer: RawDeque(@struct(key: Sapp.Keycode, up: bool));
+    key_buffer: RawDeque(@struct(key: Sapp.Keycode, up: bool, shift: bool));
     keyboard_device_focused: bool;
     keyboard_needs_update: bool;
     gfx_error_last_frame: bool;
@@ -719,11 +719,10 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                 offset := world.storage[c.instance_offset_by_gate[i]];
                 
                 bytes_per_char := @if(param.get(.colour) == 0, 1, 8);
-                // TODO: for non-colour,non-64 offset doesn't have to be a multiple of 8
-                data := world.storage.subslice(param.get(.linked_ram_instance) + offset*bytes_per_char/8, 80*24*bytes_per_char/8);
+                data := world.storage.interpret_as_bytes();
+                data := data.subslice(param.get(.linked_ram_instance)*8 + offset*bytes_per_char, 80*24*bytes_per_char);
                 
                 if param.get(.colour) == 0 {
-                        data := data.interpret_as_bytes();
                         sdtx.color = pack_rgba(255, 255, 255, 255);
                         range(0, 24) { y |
                             range(0, 80) { x |
@@ -738,20 +737,25 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                             sdtx.pos.y += 1;
                         };
                 } else {
+                        data := i64.reinterpret_bytes(data);
                         range(0, 24) { y |
                             range(0, 80) { x |
                                 value := data[y*80 + x];
                                 sdtx.color = pack_rgba(value.shift_right_logical(48).bit_and(0xFF), value.shift_right_logical(40).bit_and(0xFF), value.shift_right_logical(32).bit_and(0xFF), 255);
                                 my_solid_char := "\x8F".index(0)[];
-                                sdtx.put(my_solid_char);
+                                if sdtx.color != 0xff000000 {  // there's already a black background, don't bother
+                                    sdtx.put(my_solid_char);
+                                    sdtx.pos.x -= 1;
+                                }
                                 char: u8 = value.trunc();
                                 if char == 220 { // HACK bottom half square that tetris uses
                                     char = my_solid_char - 3;
                                 };
                                 if char != 0 {
-                                    sdtx.pos.x -= 1;
                                     sdtx.color = pack_rgba(value.shift_right_logical(24).bit_and(0xFF), value.shift_right_logical(16).bit_and(0xFF), value.shift_right_logical(8).bit_and(0xFF), 255);
                                     sdtx.put(char);
+                                } else {
+                                    sdtx.pos.x += 1;
                                 }
                                 
                                 start := sdtx.origin + sdtx.pos - vec2(1, 0);
@@ -766,7 +770,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                             sdtx.pos.x = 0;
                             sdtx.pos.y += 1;
                         };
-                    };
+                };
             };
             
             if world[it.kind].name == "SegmentDisplay" {  // TODO: do this by index
@@ -944,8 +948,33 @@ fn service_keyboard_device(state: *State) void = {
     if buf.len > 0 && !data.valid {
         key := buf[0].key;
         key := if state.keyboard_character_mode {
-            // TODO: lower case, etc.
-            @as(i64) zext(@as(u16) key)
+            c := @as(i64) zext(@as(u16) key);
+            if c < 127 && c.trunc().is_ascii_alpha() && !buf[0].shift {
+                c = c.trunc().ascii_to_lower().zext();
+            };
+            
+            c = @match(key) {
+                fn ENTER() => 5;
+                fn BACKSPACE() => 4;
+                fn LEFT_SHIFT() => 21;
+                fn RIGHT_SHIFT() => 21;
+                fn LEFT() => 15;
+                fn UP() => 16;
+                fn RIGHT() => 17;
+                fn DOWN() => 18;
+                @default => c;
+            };
+            
+            if buf[0].shift {
+                shift_transforms := "1!2@3#4$5%6^7&8*9(0)-_=+[{]}\\|;:'\",<.>/?";
+                range(0, shift_transforms.len/2) { i |
+                    if c == shift_transforms[i*2].zext() {
+                        c = shift_transforms[i*2 + 1].zext();
+                    };
+                };
+            };
+            
+            c
         } else {
             (key_order.index_of(fn(it) => it[] == key) || -13) + 13
         };
@@ -997,7 +1026,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         
         buf := state.key_buffer&;
         if state.keyboard_device_focused && buf.len() < buf.capacity() {
-            buf.push_back((key = event.key_code, up = event.type == .KEY_UP), panicking_allocator);
+            buf.push_back((key = event.key_code, up = event.type == .KEY_UP, shift = event.modifiers.get(.shift) != 0), panicking_allocator);
             state.dirty = state.dirty || buf.len < 2;
             return();
         };

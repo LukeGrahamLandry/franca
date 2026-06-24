@@ -550,16 +550,9 @@ fn push_inputs_outputs(gates: *List(Component.Gate), out: []WireId, in: []WireId
 }
 
 schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, a: Alloc, out: []WireId, in: []WireId, components: []Component) Ty(List(Component.Gate), []i64) = {
-    // TODO: compiler needs to delay all writes until after all reads, not just do them in order unless forced to preread. 
-    //defining_gate := temp().alloc_zeroed(i64, wire_count);  // [WireId]
     order := i64.list(temp());
     ready: DynamicBitSet = empty(temp()); // [WireId]
     done: DynamicBitSet = empty(temp());  // [index in gates]
-    //enumerate gates { i, it |
-    //    for it.outputs { id |
-    //        defining_gate[id.id.zext()] = i;
-    //    };
-    //};
     
     // inputs/outputs are fixed at start/end
     order&.push(0);
@@ -715,10 +708,7 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
         };
         
         out, in := (w.slice(0, out_arity), w.rest(out_arity));
-        
-        if shape.name == "Mul64" && out[1].id != 0xFFFFFFFF {
-            @println("TODO: Mul64 high for w%", w[1].id);
-        };
+        second_output_is_unused := out.len >= 2 && out[1].id == 0xFFFFFFFF;
         
         // see insert_consts_for_dead_wires()
         enumerate w { i, it |
@@ -757,6 +747,11 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
                 );
                 param = s.repr.bitcast();
             };
+            if shape.name == "Mul64" {
+                @if(!second_output_is_unused && query_current_arch() == .wasm32) @println("TODO: mul64 high wasm");
+                s: Builtin.Settings.Mul64 = construct(need_high = int(!second_output_is_unused));
+                param = s.repr.bitcast();
+            }
         };
         
         logic_gates&.push(
@@ -823,6 +818,7 @@ fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, 
     };
 }
 
+// TODO: what if a bidirectional pin is given too big a value?
 fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate), wire_count: *i64, bit_width: []u8) void = {
     a := gates.gpa;
     cast_id: ComponentId = (id = trunc(defs.tc_components_offset + templates.len() - 1));
@@ -842,10 +838,11 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
         continue :: local_return;
         gate := gates.index(gate_i);
         bit_width := get_bit_width(components, gate);
-        @if(bit_width.len == 0) continue();
-        @if(components[gate.kind.id.zext()].name.starts_with("Bidirectional")) continue();  // TODO
+        name := components[gate.kind.id.zext()].name;
+        @if(bit_width.len == 0) continue(@println("TODO: missing widths for %", name));
         enumerate gate.outputs { i, id |
-            width[id.id.zext()] = bit_width[i];
+            // multiple switches of different sizes might ouput to the same wire
+            width[id.id.zext()] = max(bit_width[i], width[id.id.zext()]);
         };
     };
     
@@ -883,7 +880,6 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
         gate := gates.index(gate_i);
         bit_width := get_bit_width(components, gate);
         @if(bit_width.len == 0) continue();
-        @if(components[gate.kind.id.zext()].name.starts_with("Bidirectional")) continue();  // TODO
         gate := gate[];
         enumerate gate.inputs { i, id |
             maybe_cast(bit_width[i + gate.outputs.len], id);
@@ -899,6 +895,8 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
     @debug_assert_eq(components[gates[gates.len - 1].kind.id.zext()].name, "output");
     n := gates.len - original_output_index - 1;
     @if(n != 0) @println("- inserted % casts", n);
+    
+    // TODO: save `widths` and use it when rendering wire values in the ui
 }
 
 // this can't be in find_pins because it has to be after bidirectional components are inlined

@@ -42,7 +42,7 @@ it works well enough to run my overture/leg in the maze and a few things from th
   - display: rotation
   - probes
   - latency ram
-- Mul64 high
+- Mul64 high on wasm
 - need to position the displays correctly because they can be tiled
 - bidirectional pins are sketchy 
   - using as both input/output depending on a switch probably won't work

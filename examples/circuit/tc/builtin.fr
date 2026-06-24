@@ -60,7 +60,7 @@ templates :: {
             it.inputs_for_pure_eval = @const_slice(2, 5);
         };
         
-        it.has_param = it.has_param || it.name.starts_with("Constant") || it.name.starts_with("Counter") || it.name == "Program" || it.name == "Console" || it.name.starts_with("Ram") || it.name.starts_with("Indexer") || it.name == "FileLoader" || it.name.ends_with("Display") || it.name == "Rom" || it.name == "Halt" || it.name == "Keyboard";
+        it.has_param = it.has_param || it.name.starts_with("Constant") || it.name.starts_with("Counter") || it.name == "Program" || it.name == "Console" || it.name.starts_with("Ram") || it.name.starts_with("Indexer") || it.name == "FileLoader" || it.name.ends_with("Display") || it.name == "Rom" || it.name == "Halt" || it.name == "Keyboard" || it.name == "Mul64";
         
         if name == sym("Custom") {
             it.body = .Custom;
@@ -99,6 +99,7 @@ Settings :: @struct {
         circ_i := 32,
         gate_i := 32,
     );
+    Mul64 :: @bit_fields(need_high := 1, _ := 63);
 };
 
 fn word_size(param: Settings.Ram) i64 = 1.shift_left(param.get(.word_size_index)); // [1, 2, 4, 8, 16, 32]
@@ -225,7 +226,6 @@ KeyboardData :: @struct(up: bool, prev_up: bool, value: u16, prev_value: u16, ha
 // TODO: the registers/program here use more packed storage than the ones in ../defs.fr 
 //       so either need to unify them or have the ui know about both for showing ram/disassembly. 
 // TODO: move the impls of storage out? because they're different enough that it's annoying to have to search for them. 
-// TODO: carry flag, mul high. 
 
 // these are in order by their ComponentKind value in the circuit.data format. 
 impl :: @struct {
@@ -285,11 +285,9 @@ Switch8 :: Switch64;
 Mux8 :: math(1, 3) { o, i | o[0] = i[1 + int(i[0] != 0)]; };
 Decoder1 :: math(2, 1) { o, i | o[] = (i[0].bit_and(1).bit_xor(1), i[0].bit_and(1)); };
 Decoder3 :: math(8, 4) { o, i | 
+    o[] = (0, 0, 0, 0, 0, 0, 0, 0);
     n := @or(i[0], i[1].shift_left(1), i[2].shift_left(2));
-    n := @if(i[3] == 0, n, -1);  // disable bit
-    inline_range(0, 8) { i |
-        o[i] = int(n == i);
-    };
+    o[n] = i[3].bit_xor(1);
 };
 Constant8 :: Constant64;
 Not8 :: mask(8, Not64);
@@ -486,9 +484,14 @@ Add64 :: math(2, 3) { o, i |
     o[0] = r + i[0]; 
     o[1] = int(r.ult(i[1]).or((i[0] == 1).and(o[0] == 0)));
 };
-Mul64 :: math(2, 2) { o, i |
+// this paramater is a tad silly but i don't want to teach the backend about umulh just for this one thing 
+// and doing it in assembly isn't inlinable so since often it won't be used, note that in a way that will be 
+// const-known after inlining so the branch can be folded away and don't have to spill things when just using the low part. 
+// (i don't have a way to promise the compiler that an AsmFunction is pure / no caller saved registers).  
+Mul64 :: math_param(2, 2) { o, i, param |
+    param: Settings.Mul64 = (repr = param.bitcast());
     o[0] = i[0] * i[1]; 
-    o[1] = 0; // TODO: upper half
+    o[1] = @if(param.get(.need_high) == 1, multiply_high_u64(i[0], i[1]), 0);
 };
 Equal64 :: math(1, 2) { o, i | o[0] = int(eq(i[0], i[1])); };
 LessU64 :: math(1, 2) { o, i | o[0] = int(ult(i[0], i[1])); };
@@ -651,6 +654,10 @@ Ram :: with_pins(4, 7, .Device,
         
         _load, save, address := (i[0] != 0, i[1] != 0, i[2]);
         inputs := i.items().rest(3);
+        if !address.ult(storage_size) {
+            o[] = (0,0,0,0);
+            return();
+        };
         
         n := (storage_size * word_size).ualign_to(8).udiv(8);
         bytes := interpret_as_bytes(world.storage.subslice(instance, n));
@@ -660,15 +667,11 @@ Ram :: with_pins(4, 7, .Device,
             count := @if(param.get(.is_program) == 1, 4, N);
             range(0, count) { I |
                 a := address*N + I;
-                if a.ult(storage_size) {
                     slot := data[a]&;
                     o[I] = slot[].int();
                     if !doing_pre_read && save {
                         slot[] = @if(@run(T == i64), inputs[I], inputs[I].trunc());
                     }
-                } else {
-                    o[I] = 0;
-                };
             };
         };
         @switch(word_size_index) {
@@ -764,7 +767,7 @@ DivMod8 :: mask(8, DivMod64);
 DivMod16 :: mask(16, DivMod64);
 DivMod32 :: mask(32, DivMod64);
 DivMod64 :: math(2, 2) { o, i |
-    if i[1] == 0 || (i[0] == MIN_i64 && i[1] == -1) {
+    if i[1] == 0 {
         o[] = (0, 0);
     } else {
         a, b := udiv_mod(i[0], i[1]);
@@ -1027,3 +1030,19 @@ parse_pin_layouts :: fn(e: FatExpr) FatExpr #macro = {
     }
     @literal result.raw
 };
+
+multiply_high_u64 :: AsmFunction(fn(a: i64, b: i64) i64 = (), { #use("@/backend/arm64/bits.fr"); @const_slice(
+    @bits(0b1, 0b00, 0b1, 0b101, 0b1, 0b1, 0b10, @as(u5) x1, 0b0, 0b11111, @as(u5) x0, @as(u5) x0),  // UMULH
+    ret(),
+)}, (fn(out) #use("@/backend/amd64/bits.fr") = @asm_x64(  // rdi, rsi -> rax
+    encode_bin(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rdi),
+    encode_extended_op(ModrmMode.Direct, 0xF7, 4, X86Reg.rsi),  // MUL: rdx:rax = rax*rsi
+    encode_bin(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rdx),
+    PrimaryOp.Ret,
+) out), (fn(out) = {
+    // TODO: this one's going to be a nightmare i fear
+    out.push_all(@slice(0x00, 0x42, 0x00, 0x0B)); // wasm { 0 locals. i64.const(0). end.
+}), { #use("@/backend/rv64/bits.fr"); @const_slice(
+    R(0b0000001, RvReg.A1.bits(), RvReg.A0.bits(), 0b011, RvReg.A0.bits(), .op), // MULHU
+    jalr(.RA, 0, .Zero),
+)});
