@@ -36,18 +36,22 @@ it works well enough to run my overture/leg in the maze and a few things from th
 ## tc is INCOMPLETE
 
 - devices
-  - missing: network, hdd, sprite display, sound
+  - missing: network, hdd, sound
   - console: wrong font
   - keyboard: character mode param. click to focus instead of a keybind. 
   - display: rotation
   - probes
   - latency ram
+  - initial data from (id number).rom,.hdd file
+  - sprite display: positioning is wrong
+  - dot display: wrong default colour
 - Mul64 high on wasm
-- need to position the displays correctly because they can be tiled
 - bidirectional pins are sketchy 
   - using as both input/output depending on a switch probably won't work
   - makes the visualization confusing because i always inline the whole custom component
-- assembler: mnemonics, constants, arithmetic
+- assembler
+  - expressions with spaces in them are wrong
+  - what happens when a label is definied multiple times
 - need a better interface for choosing circuit/programs, showing memory contents
 - pre_read mistakes would be a lot easier to debug if they were made explicit seperate operations in the trace display. 
 - dropping file doesn't work in franca-web-playground (even when fixed will be annoying because need to feed it all the custom components individually)
@@ -55,6 +59,13 @@ it works well enough to run my overture/leg in the maze and a few things from th
 
 ## other todos
 
+- "str scratch frame"
+- from schematic hub
+  - screenvurture: "H" as char literal in expression
+  - 32b to dot matrix: doesn't show anything. idk
+  - ASM computer 64 bit: Hdd, RamLatency
+  - ploter: use-before-def without memory w27
+  - HLL-Interpreter: use-before-def without memory
 - i don't think im doing the keyboard right. ex. mandelbrot is behind a key sometimes?
 - use f64 for pos/zoom in ui because it gets jerky scrolled down far in the trace for big circuits
 - finish leg: memory, stack, call, shifts
@@ -80,6 +91,9 @@ it works well enough to run my overture/leg in the maze and a few things from th
 - show wire comments in the ui
 - :NotReorderingTheseBreaksOvertureLegNandverture
 - don't be checking names of components all the time (at least also check the ids are in the builtin range)
+- it's annoying that you can't see the wire values if it halts on a tick that was evaled in fast mode. 
+  delay all writes to the end somehow so can rerun the tick in slow mode after knowing it will halt?
+- if i keep morale long enough i want to do save_breaker too (simplex, isa, etc.)...
 
 ```
 // TODO: don't always recompile everything when loading a new circuit. it might reuse some custom components. 

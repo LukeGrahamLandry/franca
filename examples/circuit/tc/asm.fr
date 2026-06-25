@@ -1,68 +1,296 @@
 
-// TODO: rest of the fucking owl
-//       operators := "+-*/%|&^";
-assemble :: fn(out: *List(u8), in: Str, word_size: i64) Result(void, Str) = {
-    line := 1;
+Token :: @tagged(
+    Op: i64,
+    Left,
+    Right,
+    Int: i64,
+    Bytes: Str,
+    Ident: Str,
+    Label,
+    Const,
+    Eof,
+    Err: Str,
+    Whitespace,
+);
+
+Parse :: @struct {
+    in: Str;
+    line: i64;
+    constants: HashMap(Str, i64);
+    out: *List(u8);
+    out_start: i64;
+    word_size: i64;
+    token: ?Token;
+    is_first_pass := true;
+    need_second_pass_for_labels := false;
+};
+
+operators :: "+-*/%|&^";
+evaluators :: @const_slice(@as(@FnPtr(i64, i64) i64) add, sub, mul, udiv, umod, bit_or, bit_and, bit_xor);
+
+assemble :: fn(out: *List(u8), in: Str, word_size: i64, mnemonics: Str) Result(void, Str) = {
+    self: Parse = (in=in,line=1,word_size=word_size,out=out,constants=init(temp()),out_start=out.len,token=.None); self := self&;
+    parse_mnemonics(self.constants&, mnemonics);
+    // labels can be used in arithmetic so can't just do a simple patching thing
+    range(0, 2) { iter |
+        self.is_first_pass = iter == 0;
+        ok := self.is_first_pass || self.need_second_pass_for_labels;
+        if ok {
+            self.line = 1;
+            self.in = in;
+            self.out.len = self.out_start;
+            self.token = .None;
+        };
+        @if(ok) dowhile {
+            t := self.next();
+            @match(t) {
+                fn Eof() => ();
+                fn Err(msg) => return(Err = msg);
+                fn Bytes(s) => {
+                    out.push_all(s);
+                    while => (self.out.len - self.out_start).umod(self.word_size) != 0 {
+                        self.out.push(0);
+                    };
+                }
+                fn Whitespace() => ();
+                @default => {
+                    if @is(t&.tag(), .Const, .Label) {
+                        is_label := t&.is(.Label);
+                        t := self.next();
+                        @if(!t&.is(.Whitespace)) return(Err = "need space after keyword");
+                        t := self.next();
+                        @if(!t&.is(.Ident)) return(Err = @tfmt("TODO: expected name after 'const' found % on line %", t&.tag(), self.line));
+                        name := t.Ident;
+                        value := if is_label {
+                            (self.out.len - self.out_start) / word_size
+                        } else {
+                            t := self.next();
+                            @if(!t&.is(.Whitespace)) return(Err = "need space after keyword");
+                        
+                            @try(self.parse_expression(self.next())) return
+                        };
+                        prev := self.constants&.insert(name, value);
+                        // TODO: am i really supposed to just allow this? 
+                        //@if(self.is_first_pass && prev.is_some()) return(Err = @tfmt("redeclared: '%' on line %", name, self.line));
+                        @if(self.is_first_pass && prev.is_some()) @println("warning: redeclared: '%' on line %", name, self.line);
+                    } else {
+                        value := @try(self.parse_expression(t)) return;
+                        range(0, self.word_size) { _ |
+                            out.push(value.trunc());
+                            value = value.shift_right_logical(8);
+                        };
+                    };
+                };
+            };
+            !t&.is(.Eof)
+        };
+    };
+    .Ok
+};
+
+fn parse_expression(self: *Parse, t: Token) Result(i64, Str) = {
+    value := @try(self.parse_unary(t)) return;
     
+    // TODO: do i need operator precidence?
+    dowhile {
+        t := self.next();
+        @match(t) {
+            fn Op(i) => {
+                rhs := @try(self.parse_unary(self.next())) return;
+                value = evaluators[i](value, rhs);
+                true
+            } 
+            // TODO: this is fucking stuipd
+            //      whitespace doesn't end the expression unless the operator is a minus sign and the thing is a literal. 
+            
+            @default => {
+                self.token = (Some = t);
+                false
+            };
+        }
+    };
+    
+    (Ok = value)
+}
+
+fn parse_unary(self: *Parse, t: Token) Result(i64, Str) = {
+    value := @match(t) {
+        fn Int(value) => value;
+        fn Ident(name) => {
+            value := self.constants&.get(name) || {
+                // am i seriously supposed to just allow junk?
+                //@if(!self.is_first_pass) return(Err = @tfmt("undeclared ident '%' on line %", name, self.line));
+                @if(!self.is_first_pass) @println("warning: undeclared ident '%' on line %", name, self.line);
+                self.need_second_pass_for_labels = true;
+                0
+            };
+            value
+        }
+        fn Op(i) => {
+            @run @assert_eq(operators[1], "-".ascii());
+            @if(i != 1) return(Err = @tfmt("expected expression but found infix operator [%] on line %", i, self.line));
+            -(@try(self.parse_expression(self.next())) return)
+        };
+        fn Err(msg) => return(Err = msg);
+        fn Left() => {
+            value := @try(self.parse_expression(self.next())) return;
+            t := self.next();
+            @if(!t&.is(.Right)) return(Err = "missing closed paren");
+            value
+        }
+        @default => return(Err = @tfmt("expected expression found %", t&.tag()));
+    };
+    (Ok = value)
+}
+
+fn next(self: *Parse) Token = {
+    if self.token&.take() { t |
+        return t;
+    };
+    in := self.in;
+    had_whitespace := false;
     while => in.len > 0 {
         continue :: local_return;
-        
         if in[0] == "#".ascii() {
             while => in.len > 0 && in[0] != "\n".ascii() {
                 in = in.rest(1);
             };
-            line += 1;
+            self.line += 1;
+            had_whitespace = true;
             continue();
         };
         
-        if in[0].is_ascii_whitespace() {
-            line += int(in[0] == "\n".ascii());
+        // `const x = y` is the same as `const x y`
+        if in[0].is_ascii_whitespace() || in[0] == "=".ascii() {
+            self.line += int(in[0] == "\n".ascii());
             in = in.rest(1);
+            had_whitespace = true;
             continue();
+        };
+        if had_whitespace {
+            self.in = in;
+            return(.Whitespace);
+        };
+       
+        if in.starts_with("0b") { 
+            return(Err = "TODO: binary literals");
         };
         
         if in.starts_with("0x") {
-            @if(word_size != 8) return(Err = "TODO: non 8-byte hex");
             in = in.rest(2);
-            @if(in.len < 16) return(Err = @tfmt("expected 8 bytes of hex on line %", line));
             value := 0;
-            range(0, 16) { _ |
+            n := 0;
+            while => in.len > 0 && hex_digit(in[0]).is_some() {
                 value *= 16;
-                value += hex_digit(in[0]) 
-                    || return(Err = @tfmt("invalid hex char % on line %", in[0], line));
+                value += hex_digit(in[0]).unwrap();
                 in = in.rest(1);
+                n += 1;
             };
-            out.reserve_type(i64)[] = value;
-            continue();
+            @if(n > 16) return(Err = "too many hex chars");
+            self.in = in;
+            return(Int = value);
         };
         
         if in[0] == "\"".ascii() {
-            @if(word_size != 1) return(Err = "TODO: non 1-byte string");
+            start := 1;
             i := 1;
+            chunks := Str.list(temp());
             while => i < in.len && in[i] != "\"".ascii() {
+                @if(in[0] == "\n".ascii()) return(Err = "multiline string literal");
                 i += 1;
+                if in[i-1] == "\\".ascii() && i < in.len {
+                    c := in[i];
+                    s := in.slice(start, i-1);
+                    i += 1;
+                    start = i;
+                    chunks&.push(s);
+                    // TODO: other escapes?
+                    s := @switch(c) {
+                        @case("0".ascii()) => "\0";
+                        @case("n".ascii()) => "\n";
+                        @case("r".ascii()) => "\r";
+                        @case("\"".ascii()) => "\"";
+                        @case("\\".ascii()) => "\\";
+                        @default => {
+                            @println("TODO: unknown asm string escape sequence %", c);
+                            ""
+                        };
+                    };
+                    chunks&.push(s);
+                };
             };
-            out.push_all(in.slice(1, i));
-            in = in.rest(i+1);
-            continue();
+            s := in.slice(start, i);
+            if chunks.len != 0 {
+                chunks&.push(s);
+                out := u8.list(temp());
+                for chunks { s |
+                    out&.push_all(s);
+                };
+                s = out.items();
+            };
+            
+            self.in = in.rest(i+1);
+            return(Bytes = s);
         };
         
-        negative := in[0] == "-".ascii();
-        in = in.rest(int(negative));
-        @if(in.len == 0) return(Err = "ended with '-'");
+        range(0, operators.len()) { i |
+            if in[0] == operators[i] {
+                self.in = in.rest(1);
+                return(Op = i);
+            }
+        };
+        
+        if in[0] == "(".ascii() {
+            self.in = in.rest(1);
+            return(.Left);
+        }
+        if in[0] == ")".ascii() {
+            self.in = in.rest(1);
+            return(.Right);
+        }
+        
         if in[0].is_ascii_digit() {
             value, remaining := convert_number(in, 10, dec_digit);
-            in = remaining;
-            value *= @if(negative, -1, 1);
-            range(0, word_size) { _ |
-                out.push(value.trunc());
-                value = value.shift_right_logical(8);
-            };
-            continue();
+            if !(remaining.len > 0 && (remaining[0].is_ascii_alpha() || remaining[0] ==  "_".ascii())) {
+                self.in = remaining;
+                return(Int = value);
+            }
         };
         
-        return(Err = @tfmt("found invalid char % on line %", in[0], line));
+        if in[0].is_ascii_alpha() || "_.".contains(in[0])  || in[0].is_ascii_digit() {
+            i := 0;
+            while => i < in.len && (in[i].is_ascii_alpha() || "_.".contains(in[i]) || in[i].is_ascii_digit()) {
+                i += 1;
+            };
+            s := in.slice(0, i);
+            self.in = in.rest(i);
+            @if(s == "label") return(.Label);
+            @if(s == "const") return(.Const);
+            return(Ident = s);
+        };
+        
+        return(Err = @tfmt("found invalid char %", in[0],));
     };
+    .Eof
+}
 
-    .Ok
-};
+parse_mnemonics :: fn(constants: *HashMap(Str, i64), mnemonics: Str) void = {
+    while => mnemonics.len > 0 {
+        i := 0;
+        while => i < mnemonics.len && mnemonics[i] != " ".ascii() {
+            i += 1;
+        };
+        name := mnemonics.slice(0, i);
+        mnemonics = mnemonics.rest(i + 1);
+        
+        negative := mnemonics.starts_with("-");
+        mnemonics = mnemonics.rest(int(negative));
+        value, remaining := convert_number(mnemonics, 10, dec_digit);
+        value *= @if(negative, -1, 1);
+        if remaining.len > 0 && remaining[0] != "\n".ascii() {
+            println("TODO: malformed parse_mnemonics??");
+        }
+        mnemonics = remaining.rest(int(remaining != ""));
+        constants.insert(name, value);
+    };
+}

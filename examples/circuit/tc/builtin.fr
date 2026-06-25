@@ -93,7 +93,8 @@ Settings :: @struct {
     Console :: @bit_fields(
         colour := 1, 
         font := 2, 
-        linked_ram_instance := 61,
+        linked := 1,
+        linked_ram_instance := 60,
     );
     Halt :: @bit_fields(
         circ_i := 32,
@@ -221,6 +222,7 @@ fn get_native(a: *Template) FuncId = {
 }
 
 KeyboardData :: @struct(up: bool, prev_up: bool, value: u16, prev_value: u16, have_next: u8, valid: bool);
+SpriteData :: @struct(src_x: u16, src_y: u16, w: u16, h: u16, dest_x: u16, dest_y: u16);
 
 // TODO: use 32 bit instructions instead of bit_and(0xFFFFFFFF)
 // TODO: the registers/program here use more packed storage than the ones in ../defs.fr 
@@ -506,7 +508,7 @@ AndOrLatch :: todo();
 NandNandLatch :: todo();
 NorNorLatch :: todo();
 LessU8 :: LessU64;
-LessI8 :: todo();
+LessI8 :: math(1, 2) { o, i | o[0] = int(lt(i[0].sign_extend(7), i[1].sign_extend(7))); }
 DotMatrixDisplay :: with_pins(0, 4, .Device, 
     fn(_) => 48*32*2,
     fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 4), param: i64, instance: i64, _: bool) void = {
@@ -587,7 +589,7 @@ Mul16 :: math(2, 2) { o, i |
 };
 Equal16 :: Equal64;
 LessU16 :: LessU64;
-LessI16 :: todo();
+LessI16 :: math(1, 2) { o, i | o[0] = int(lt(i[0].sign_extend(15), i[1].sign_extend(15))); }
 Shl16 :: math(1, 2) { o, i | o[0] = i[0].shift_left(i[1].bit_and(0b1111)).bit_and(0xffff); }
 Shr16 :: math(1, 2) { o, i | o[0] = i[0].shift_right_logical(i[1].bit_and(0b1111)); }
 Mux16 :: Mux8;
@@ -776,10 +778,26 @@ DivMod64 :: math(2, 2) { o, i |
     };
 };
 SpriteDisplay :: with_pins(0, 4, .Device,
-    fn(it) => 0,
-    fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 4), param: i64) void = {
+    fn(it) => size_of(SpriteData) * 256 * 8,
+    fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 4), _0: i64, instance: i64, _1: bool) void = {
         command, sprite, position, size := (i[0], i[1], i[2], i[3]);
-        // TODO
+        data := world.storage.subslice(instance, size_of(SpriteData) * 256);
+        data := SpriteData.reinterpret_bytes(data.interpret_as_bytes());
+        @switch(command) {
+            @case(1) => {
+                s := data[sprite]&;
+                s.src_x = position.shift_right_logical(16).trunc();
+                s.src_y = position.trunc();
+                s.w = size.trunc();
+                s.h = size.shift_right_logical(16).trunc();
+            };
+            @case(2) => {
+                s := data[sprite]&;
+                s.dest_x = position.trunc();
+                s.dest_y = position.shift_right_logical(16).trunc();
+            };
+            @default => ();
+        };
     },
 );
 ConfigDelay :: todo();
@@ -807,7 +825,7 @@ SyntheticCast_FR :: math_param(1, 1) { o, i, p | o[0] = i[0].bit_and(1.shift_lef
 };
 
 pin_layouts :: @static @parse_pin_layouts(
-(("Or8", "Equal8", "LessU8", "Xor8", "And8", "Equal64", "Or64", "And64", "Xor64", "LessU64", "LessI64", "Or16", "Equal16", "Or32", "And32", "Xor32", "Nand8", "Nor8", "Xnor8", "Nand16", "Nor16", "Xnor16", "Nand32", "Nor32", "Xnor32", "Nand64", "Nor64", "Xnor64", "Equal32", "LessU32", "LessI32"),
+(("Or8", "Equal8", "LessU8", "LessI8", "Xor8", "And8", "Equal64", "Or64", "And64", "Xor64", "LessU64", "LessI64", "Or16", "Equal16", "LessU16", "LessI16", "Or32", "And32", "Xor32", "Nand8", "Nor8", "Xnor8", "Nand16", "Nor16", "Xnor16", "Nand32", "Nor32", "Xnor32", "Nand64", "Nor64", "Xnor64", "Equal32", "LessU32", "LessI32"),
     ((1, 0), (-1, -1), (-1, 0))),
 (("Counter8"),
     ((1, 0), (-1, 0), (-1, -1))),
@@ -993,7 +1011,7 @@ get_width_data :: fn(it: *Template) []u8 = {
     @if(it.name == "SegmentDisplay") return(@slice(0x08, 0x01) a);
     @if(it.name == "DotMatrixDisplay") return(@slice(0x40, 0x01, 0x20, 0x01) a);
     @if(it.name == "NoteSound") return(@slice(0x40, 0x40, 0x40) a);  // TODO
-    @if(it.name == "SpriteDisplay") return(@slice(0x40, 0x40, 0x40, 0x40) a);  // TODO
+    @if(it.name == "SpriteDisplay") return(@slice(0x08, 0x08, 0x20, 0x20) a);
     
     i := 0x40;  // :SpecialOutputBitWidth
     @if(it.name == "Ram" || it.name == "RamFast") return(@slice(i, i, i, i, 0x01, 0x01, 0x40, i, i, i, i) a);

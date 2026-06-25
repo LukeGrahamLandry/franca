@@ -11,6 +11,7 @@ Circuit :: @struct {
     wires: []Wire;
     gates: []Gate;
     programs: []Program;
+    mnemonics := "";
     min: Vec2;
     max: Vec2;
     dependencies: []CustomId;
@@ -50,6 +51,7 @@ Circuit :: @struct {
         name: Str;
         gate_index: i64;
         assembly: ?Str = .None;
+        assembled: ?[]u8 = .None;
     };
     
     SwitchablePin :: @struct {
@@ -116,6 +118,10 @@ load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64, []Loade
         @debug_assert(dir.ends_with("/"));
         has_path_escapes :: import("@/examples/fetch.fr")'has_path_escapes;
         
+        if read_entire_file(a, @tfmt("%assembly.data", dir)) { it |
+            info.mnemonics = it;
+        };
+        
         each info.programs { it |
             continue :: local_return;
             if has_path_escapes(it.name) {
@@ -128,7 +134,7 @@ load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64, []Loade
         };
         each info.gates { it |
             continue :: local_return;
-            if templates[it.kind.zext()].name != "FileLoader" {
+            if templates[it.kind.zext()].name != "FileLoader" && templates[it.kind.zext()].name != "SpriteDisplay" {
                 continue();
             };
             file_index := it.settings&[0]&;
@@ -137,6 +143,8 @@ load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64, []Loade
                 @println("FileLoader path [%] is sketchy", it.data);
                 continue();
             };
+            @if(it.data == "") continue();  // none selected
+            
             path := @tfmt("%%", dir, it.data);
             data := read_entire_file(a, path) || {
                 @println("- failed to read [%] for file loader in [%]", path, name);
@@ -459,10 +467,14 @@ find_links_for_lastest_component :: fn(c: *Circuit, components: []Component) voi
                 @println("TODO: console without logical_gate_index can't update param for linked component");
                 continue();
             };
+            // TODO: can id be negative?
             custom_string := it.data;
             linked0, s := convert_number(custom_string, 10, dec_digit);
             if s.len == custom_string.len {
-                println("console string didn't start with a number so can't find linked component");
+                if custom_string != "" {
+                    println("console string didn't start with a number so can't find linked component");
+                    println(custom_string);
+                };
                 continue();
             };
             
@@ -484,6 +496,7 @@ find_links_for_lastest_component :: fn(c: *Circuit, components: []Component) voi
             T :: Builtin.Settings.Console;
             param: T = (repr = logical_gate.param.bitcast());
             param&.set(.linked_ram_instance, instance);
+            param&.set(.linked, 1);
             logical_gate.param = param.repr.bitcast();  // :PatchConsoleLink
         };
     };
@@ -513,7 +526,11 @@ inline_for_bidirectional_gates :: fn(child_logical: *Component, gates: *List(Com
     @assert_eq(child_in.len, parent_in.len, "inline bad arity?");
     range(0, parent_in.len) { i |
         prev := map&.insert(child_in[i], parent_in[i]);
-        @assert(prev.is_none(), "collision on input wire");
+        //@assert(prev.is_none(), "collision on input wire");
+        if prev { prev |
+            x := duplicates&.insert(prev, parent_in[i]);
+            @assert(x.is_none(), "TODO: multiple duplicates?");
+        };
     };
     
     fix_wire :: fn(child_wire: WireId) WireId => {
@@ -733,11 +750,13 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
                 s: Ram = construct(storage_size = s0, word_size_index = s1, is_program = int(shape.name.starts_with("Program")));
                 if !shape.name.starts_with("Program") {
                     s&.set(.storage_size, s.get(.storage_size).align_to(s.word_size()) / s.word_size());
+                } else {
+                    ensure_assembled_and_update_size(c, s&, gate_i, a);
                 };
                 param = s.repr.bitcast();
             };
             if shape.name == "Console" {
-                s: Console = construct(colour = s0, font = s1, linked_ram_instance = 0/*:PatchConsoleLink*/);
+                s: Console = construct(colour = s0, font = s1, linked = 0, linked_ram_instance = 0/*:PatchConsoleLink*/);
                 param = s.repr.bitcast();
             }
             if shape.name == "Halt" {
@@ -764,6 +783,25 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
     
     @if(c.wires.len != next_wire_id.zext()) @println("- added dead wires %..<%", c.wires.len, next_wire_id);
     (logic_gates, next_wire_id.zext())
+};
+
+fn ensure_assembled_and_update_size(circuit: *Circuit, s: *Builtin.Settings.Ram, gate_i: i64, a: Alloc) void = {
+    asm := circuit.programs.find(fn(it) => it.level_id == Circuit.Program.SANDBOX_LEVEL_ID && it.gate_index == gate_i) 
+        || return(@println("TODO: missing program assembly for gate[%]", gate_i));
+    word_size := s[].word_size();
+    if asm.assembled.is_none() {
+        if asm.assembly { in |
+            out := @ref u8.list(s[].get(.storage_size) * word_size, a);
+            Tc'Asm'assemble(out, in, word_size, circuit.mnemonics).or(fn(msg) => {
+                @println("failed to assemble (%): %", asm.name, msg);
+                return();
+            });
+            asm.assembled = (Some = out.items());
+        };
+    };
+    if asm.assembled { out |
+        s.set(.storage_size, out.len.align_to(word_size) / word_size);
+    };
 };
 
 CONST_INDEX :: get_component_by_name("Off", @run finished_defs.components);
@@ -799,8 +837,6 @@ fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, 
         p := gate.mystery_spice_minus_fifteen_for_custom_pins;
         dx = p.x.cast().int() + 15;
         dy = p.y.cast().int() + 15;
-        
-        // TODO: use gate.custom_pos for something?
     };
     
     rot: i64 = gate.rotation.zext();

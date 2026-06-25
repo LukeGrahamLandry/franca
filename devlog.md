@@ -1,10 +1,28 @@
 
-## (Jun 24)
+## (Jun 25) circuit
+
+- sprite commands. bit of coordinate system hell. 
+
+## (Jun 24) circuit
 
 - ram was bounds checking address in i64 units against storage_size in data width units
 - bit more character mode keyboard and tcmips works
+- use component positions for the displays so you get the tiling properly
+- started doing sprites but the things i can find to test it need more asm parsing so need to do that first. 
+- the assembly language is kinda odd. 
+  - either im doing something terribly wrong or the settings that i thought was program size is junk. 
+    i guess it doesn't matter, there's no need to delay parsing the asm until after compiling the circuit. 
+    its only off by one so i'd certainly believe im just making a mistake in parsing.
+    notably it's in SmolCaveAdventure.Strings which has an undefinined variable which it appears im just supposed to ignore (outputting zero for it is wrong). 
+  - i appear to be wrong about the whitespace thing? it just keeps parsing if it's in the middle of an expression. 
+    `sram+ii tileMap + (0 * tileMapWidth) + 0 1` is three elements i think. 
+    i guess just by convention everyone puts no spaces so it's not insane. 
+    but it is still whitespace sensitive because of negative literals. 
+    this is... not how i would design it... to put it mildly. 
+  - the manual says "LABEL assigns a name to the byte offset of the line" which isn't true if the data size isn't set to 8.
+- don't do ctrl_char for the console. kinda out growing debugtext here, maybe should switch to just doing it in the texture with the right font? 
 
-## (Jun 23)
+## (Jun 23) circuit
 
 - oops, i was doing signed instead of unsigned division. now tetris and snake work all the way. 
 - did widths for rams
@@ -13,7 +31,7 @@
   - now it actually does make a difference. tcmips gets to the loading screen. 
 - bit of overkill tracking wire usage to make me feel better about asm for umulh
 
-## (Jun 22)
+## (Jun 22) circuit
 
 - problem when bidirectional is disconnected in the parent because it gets the new_false_wire which can then gave multiple defs. 
   fixed by delaying inserting zeros on unwritten wires until the end. 
@@ -35,16 +53,16 @@
   when it's 128/256 it uses 2/4 pins to fit the whole value. which then also means i can get rid of the 
   insane z_input_mask thing i was doing. this makes a lot more sense. 
 
-## (Jun 21)
+## (Jun 21) circuit
 
 - insert casts when a wire width doesn't match what a gate expects. then don't have to defensively mask inputs in the natives. 
 
-## (Jun 20)
+## (Jun 20) circuit
 
 - simplify eval wrappers a bit, halt msg, use other arena that can be reset, a few pins. 
 - can't let bidirectional pin be treated as a disconnected input
 
-## (Jun 19)
+## (Jun 19) circuit
 
 - compile_order also needed for pre_eval now that it's allowed to be nested. only matters when !FEAT_COMPILE but still. 
 - fixed the `if false` compiler crash in eval: the end of phicopyref was looking at a jnz without targets somehow? 
