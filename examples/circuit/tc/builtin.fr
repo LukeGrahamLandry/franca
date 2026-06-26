@@ -17,19 +17,9 @@ Template :: @struct {
         condition_input_index: i64;
     };
     
-    Body :: @tagged(
-        Unimplemented: void,
-        Def: Str,  // use nand based implementation from ../defs.fr
-        Native,
-        // pins become memory that's accessed by the embedder (ie. ram/screen/keyboard)
-        Device,
-        IO,      // pins compile to function arguments
-        Custom,
-    );
+    Body :: @enum(Unimplemented, Native, IO, Custom);
 };
 Pin :: Ty(i64, i64);
-
-// TODO: don't allow preread if inputs_for_pure_eval.len == input_arity
 
 templates :: {
     out := (*Template).list(ast_alloc());
@@ -166,31 +156,16 @@ mask_param :: fn($bits: i64, $child: *Template) *Template = {
     ))
 };
 
-from_defs :: fn(name: Str) *Template = {
-    it := defs.components.find(fn(it) => it.name == name)
-        || @panic("missing (%) in defs.fr", name);
-    #use("@/examples/circuit/parse.fr");
-    o, i := it.arity();
-    ast_alloc().boxed(Template, (
-        in_arity = i, 
-        out_arity = o, 
-        body = (Def = name),
-    ))
-}
-fn with_pins(o: i64, i: i64, body: Template.Body) = {
-    ast_alloc().boxed(Template, (
-        in_arity = i, 
-        out_arity = o, 
-        body = body,
-    ))
+fn io(o: i64, i: i64) = {
+    ast_alloc().boxed(Template, (in_arity = i,  out_arity = o, body = .IO))
 }
 
 InstanceInfo :: @struct(param: i64);
-fn with_pins(o: i64, i: i64, body: Template.Body, compute_storage: @FnPtr(it: InstanceInfo) i64, fid: FuncId) = {
+fn device(o: i64, i: i64, compute_storage: @FnPtr(it: InstanceInfo) i64, fid: FuncId) = {
     ast_alloc().boxed(Template, (
         in_arity = i, 
         out_arity = o, 
-        body = body,
+        body = .Native,
         fid = (Some = fid),
         compute_storage = (Some = compute_storage),
     ))
@@ -246,7 +221,7 @@ Xor :: math(1, 2) { o, i | o[0] = i[0].bit_xor(i[1]); };
 Xnor :: mask(1, Xnor64);
 Counter8 :: mask_param(8, Counter64);
 VirtualCounter8 :: todo();
-Counter64 :: with_pins(1, 2, .Device, 
+Counter64 :: device(1, 2, 
     fn(_) => 8*8,
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 2), param: i64, instance: i64, doing_pre_read: bool) void = {
         value, set := (i[0], i[1] != 0);
@@ -270,7 +245,7 @@ Register8Red :: todo();
 VirtualRegister8Red :: todo();
 Register8RedPlus :: todo();
 VirtualRegister8RedPlus :: todo();
-Register64 :: with_pins(1, 3, .Device, 
+Register64 :: device(1, 3, 
     fn(_) => 8*8,
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 3), instance: i64, doing_pre_read: bool) void = {
         _load, save, value := (i[0] != 0, i[1] != 0, i[2]);
@@ -325,9 +300,13 @@ Maker8 :: math(1, 8) { o, in |
 };
 Splitter64 :: make_split_bytes(8);
 Maker64 :: make_from_bytes(8);
-// TODO: now that there's only one, just remove it
-FullAdder :: from_defs("full_add");
-BitMemory :: with_pins(1, 2, .Device, 
+FullAdder :: math(2, 3) { o, i |
+    w4 := bit_xor(i[0], i[1]);
+    w6 := bit_or(bit_and(w4, i[2]), bit_and(i[0], i[1]));
+    w7 := bit_xor(w4, i[2]);
+    o[] = (w7, w6);
+};
+BitMemory :: device(1, 2, 
     fn(_) => 64,
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 2), instance: i64, doing_pre_read: bool) void = {
         value, save := (i[0], i[1] != 0);
@@ -346,7 +325,7 @@ Decoder2 :: math(4, 2) { o, i |
         o[i] = int(n == i);
     };
 };
-Timing :: with_pins(1, 1, .Device, 
+Timing :: device(1, 1, 
     fn(_) => 0,
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 1)) void = {
         enable := i[0] != 0;
@@ -361,7 +340,7 @@ Timing :: with_pins(1, 1, .Device,
         };
     },
 );
-NoteSound :: with_pins(0, 3, .Device, 
+NoteSound :: device(0, 3, 
     fn(_) => 0,
     fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 3)) void = {
         // TODO
@@ -370,7 +349,7 @@ NoteSound :: with_pins(0, 3, .Device,
 _57 :: todo();
 _58 :: todo();
 // out: (event waiting, key value, key up)
-Keyboard :: with_pins(3, 1, .Device, 
+Keyboard :: device(3, 1, 
     fn(_) => 64,
     fn(world: *World, o: *Array(i64, 3), i: *Array(i64, 1), _: i64, instance: i64, doing_pre_read: bool) void = {
         read_next := i[0] != 0;
@@ -388,7 +367,7 @@ Keyboard :: with_pins(3, 1, .Device,
     },
 );
 
-FileLoader :: with_pins(1, 2, .Device, 
+FileLoader :: device(1, 2, 
     fn(_) => 0,
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 2), param: i64) void = {
         enable, offset := (i[0] != 0, i[1]);
@@ -410,7 +389,7 @@ FileLoader :: with_pins(1, 2, .Device,
         };
     },
 );
-Halt :: with_pins(0, 1, .Device, 
+Halt :: device(0, 1, 
     fn(_) => 0,
     fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 1), param: i64) void = {
         halt := i[0] != 0;
@@ -420,23 +399,23 @@ Halt :: with_pins(0, 1, .Device,
     },
 );
 WireCluster :: todo();
-LevelScreen :: with_pins(0, 0, .IO);
+LevelScreen :: io(0, 0);
 Program8_1 :: todo();
 Program8_1Red :: todo();
 _66 :: todo();
 _67 :: todo();
 Program8_4 :: todo();
 LevelGate :: todo();
-Input1 :: with_pins(1, 0, .IO);
+Input1 :: io(1, 0, );
 LevelInput2Pin :: todo();
 LevelInput3Pin :: todo();
 LevelInput4Pin :: todo();
 LevelInputConditions :: todo();
 Input8 :: Input1;
-Input64 :: with_pins(1, 0, .IO);
+Input64 :: io(1, 0, );
 LevelInputCode :: todo();
-LevelInputArch :: with_pins(1, 1, .IO);
-Output1 :: with_pins(0, 1, .IO);
+LevelInputArch :: io(1, 1, );
+Output1 :: io(0, 1, );
 LevelOutput1Sum :: Output1;
 LevelOutput1Car :: Output1;
 _82 :: todo();
@@ -445,19 +424,19 @@ LevelOutput2Pin :: todo();
 LevelOutput3Pin :: todo();
 LevelOutput4Pin :: todo();
 Output8 :: Output1;
-Output64 :: with_pins(0, 1, .IO);
-LevelOutputArch :: with_pins(0, 2, .IO);
+Output64 :: io(0, 1, );
+LevelOutputArch :: io(0, 2, );
 LevelOutputCounter :: todo();
 _91 :: todo();
 Custom :: todo();
 VirtualCustom :: todo();
-Program :: with_pins(4, 1, .Device,
+Program :: device(4, 1,
     Ram.compute_storage.unwrap(),
     fn(world: *World, o: *Array(i64, 4), i: *Array(i64, 1), param: i64, instance: i64, doing_pre_read: bool) void = {
         @inline ((@run Ram'fid.unwrap())(world, o, @ref @as(Array(i64, 7)) (1, 0, i[0], 0, 0, 0, 0), param, instance, doing_pre_read));
     },
 );
-DelayLine1 :: with_pins(1, 1, .Device,
+DelayLine1 :: device(1, 1,
     BitMemory.compute_storage.unwrap(),
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 1), instance: i64, doing_pre_read: bool) void = {
         @inline ((@run BitMemory'fid.unwrap())(world, o, @ref @as(Array(i64, 2)) (i[0], 1), instance, doing_pre_read));
@@ -466,7 +445,7 @@ DelayLine1 :: with_pins(1, 1, .Device,
 VirtualDelayLine1 :: todo();
 // settings; [0]=0..=1 colour mode, [1]=0..=2 font index [cp850, cp437, cp910]
 // i[0] = offset in linked ram 
-Console :: with_pins(0, 1, .Device,
+Console :: device(0, 1,
     fn(_) => 8*8,
     fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 1), _: i64, instance: i64, _doing_pre_read: bool) void = {
         offset := i[0];
@@ -509,7 +488,7 @@ NandNandLatch :: todo();
 NorNorLatch :: todo();
 LessU8 :: LessU64;
 LessI8 :: math(1, 2) { o, i | o[0] = int(lt(i[0].sign_extend(7), i[1].sign_extend(7))); }
-DotMatrixDisplay :: with_pins(0, 4, .Device, 
+DotMatrixDisplay :: device(0, 4, 
     fn(_) => 48*32*2,
     fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 4), param: i64, instance: i64, _: bool) void = {
         coloumn_major_pixels := param == 1;  // TODO
@@ -544,7 +523,7 @@ DotMatrixDisplay :: with_pins(0, 4, .Device,
     },
 );
 // each bit enables one segment
-SegmentDisplay :: with_pins(0, 2, .Device, 
+SegmentDisplay :: device(0, 2, 
     fn(_) => 64,
     fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 2), param: i64, instance: i64, doing_pre_read: bool) void = {
         world.storage[instance] = @if(i[1] == 0, 0, i[0]);
@@ -552,7 +531,7 @@ SegmentDisplay :: with_pins(0, 2, .Device,
 );
 Input16 :: Input64;
 Input32 :: Input64;
-Output16 :: with_pins(0, 1, .IO);
+Output16 :: io(0, 1, );
 Output32 :: Output64;
 _128 :: todo();
 _129 :: todo();
@@ -570,7 +549,7 @@ Output1z :: Output64z;
 Output8z :: Output64z;
 Output16z :: Output64z;
 Output32z :: Output64z;
-Output64z :: with_pins(0, 2, .IO);
+Output64z :: io(0, 2, );
 Constant16 :: Constant64;
 Not16 :: mask(16, Not64);
 Or16 :: mask(16, Or64);
@@ -644,7 +623,7 @@ Nor64 :: math(1, 2) { o, i | o[0] = i[0].bit_or(i[1]).bit_not(); };
 Xnor64 :: math(1, 2) { o, i | o[0] = i[0].bit_xor(i[1]).bit_not(); };
 // settings; [0] is size, [1] is data width as index in [8,16,32,64,128,256]
 // the extra wires are only used in 128/256 bit modes.
-Ram :: with_pins(4, 7, .Device,
+Ram :: device(4, 7,
     fn(it) => {
         param: Settings.Ram = (repr = it.param.bitcast());
         param.get(.storage_size) * param.word_size() * 8
@@ -693,7 +672,7 @@ RamLatency :: todo();
 VirtualRamLatency :: todo();
 RamFast :: Ram;
 VirtualRamFast :: todo();
-Rom :: with_pins(1, 4, .Device,
+Rom :: device(1, 4,
     Ram.compute_storage.unwrap(),
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 4), param: i64, instance: i64, doing_pre_read: bool) void = {
         O := zeroed(Array(i64, 4));
@@ -713,7 +692,7 @@ VirtualDelayLine32 :: todo();
 DelayLine64 ::DelayLine1;
 VirtualDelayLine64 :: todo();
 // ugh, kinda paste from the other one but not really
-RamDualLoad :: with_pins(2, 6, .Device,
+RamDualLoad :: device(2, 6,
     Ram.compute_storage.unwrap(),
     fn(world: *World, o: *Array(i64, 2), i: *Array(i64, 6), param: i64, instance: i64, doing_pre_read: bool) void = {
         _load0, save, a0, value, _load1, a1 := (i[0] != 0, i[1] != 0, i[2], i[3], i[4] != 0, i[5]);
@@ -777,7 +756,7 @@ DivMod64 :: math(2, 2) { o, i |
         o[1] = b;
     };
 };
-SpriteDisplay :: with_pins(0, 4, .Device,
+SpriteDisplay :: device(0, 4,
     fn(it) => size_of(SpriteData) * 256 * 8,
     fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 4), _0: i64, instance: i64, _1: bool) void = {
         command, sprite, position, size := (i[0], i[1], i[2], i[3]);
@@ -818,7 +797,7 @@ Bidirectional16 :: Bidirectional64;
 VirtualBidirectional16 :: todo();
 Bidirectional32 :: Bidirectional64;
 VirtualBidirectional32 :: todo();
-Bidirectional64 :: with_pins(1, 0, .IO);
+Bidirectional64 :: io(1, 0, );
 VirtualBidirectional64 :: todo();
 // this needs to be last and isn't in the file format
 SyntheticCast_FR :: math_param(1, 1) { o, i, p | o[0] = i[0].bit_and(1.shift_left(p) - 1); }

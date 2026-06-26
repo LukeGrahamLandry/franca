@@ -285,7 +285,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
             };
         }
         
-        @match(shape.body&) { 
+        @match(shape.body) { 
             fn Unimplemented() => {
                 kill&.set(i);
                 @eprintln("TODO: not implemented (%)", shape.name);
@@ -332,9 +332,6 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 };
                 
                 output_pin_count += int(!is_input); 
-            }
-            fn Def(name) => {
-                it.kind = get_component_by_name(name[], defs.components.items());
             }
             fn Native() => {
                 it.kind.id += defs.tc_components_offset.trunc();
@@ -387,9 +384,6 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                     };
                 };
             } 
-            fn Device() => {
-                it.kind.id += defs.tc_components_offset.trunc();
-            } 
         };
         
         if !kill&.get(i) {
@@ -421,7 +415,6 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     logical_to_circuit&.push(-1);       // out
     insert_consts_for_dead_wires(components.items(), gates&);
     @if(!c.has_arch_pins) @debug_assert_eq(bit_width.len, custom_pins.len);
-    // TODO: doing this so late means it won't know widths for things that are from_defs() so maybe should just get rid of from_defs, it's only 5 things.
     insert_bit_width_casts(components.items(), gates&, wire_count&, bit_width);
     logical_to_circuit&.push_repeated(gates.len - logical_to_circuit.len, -1);
     new_gates, order := schedule_gates(c, gates, wire_count, a, out.items(), in.items(), components.items());
@@ -435,20 +428,12 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         };
     };
     
-    // TODO: do this in calculate_usage instead of duplicating here and in parse for defs
-    storage_count := 0;
-    each gates { it |
-        child := components[it.kind.id.zext()]&;
-        storage_count += get_storage_count(components.items(), it);
-    };
-
     name := safe_name(c.name, a);
     c.compiled = (Some = (id = components.len.trunc()));
     components.push(
         gates = gates.items(),
         name = name,
         wire_count = wire_count,
-        storage_count = storage_count,
         bit_width = bit_width,
     );
     c.bit_width = bit_width;
@@ -753,6 +738,10 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
                 } else {
                     ensure_assembled_and_update_size(c, s&, gate_i, a);
                 };
+                
+                // :NonZeroStorage don't allow storage_count=0 because then compiler won't pass `instance` and signeture will be wrong. 
+                s&.set(.storage_size, max(s.get(.storage_size), 1));
+                
                 param = s.repr.bitcast();
             };
             if shape.name == "Console" {

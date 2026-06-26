@@ -18,7 +18,7 @@ Component :: @struct {
     name: Str;
     gates: []Gate;
     wire_count: i64;
-    storage_count: i64; // use get_storage_count instead if it could be a tc/builtin
+    storage_count := 0; // use get_storage_count instead if it could be a tc/builtin
     primitive_arity := (-1, -1); // (out, in)
     labels: []GateLabel = empty();
     fast_eval := zeroed(rawptr);
@@ -64,28 +64,15 @@ GateId :: @struct(id: u32);
 defs :: @static {
     components := @ref Component.list(ast_alloc());
     map: HashMap(Symbol, ComponentId) = init(temp());
-    
-    // TODO: can't import the file that is the top level scope like this. 
-    //       so can't have this work with a main function in both parse.fr and eval.fr. 
-    Eval :: import("@/examples/circuit/eval.fr");
-    S := Type.scope_of(Eval.primitives);
-    F :: @FnPtr(world: *Eval.World, parent: []Eval.WireValue, it: *Component.Gate) void;
-    prims := @ref F.list(ast_alloc());
-    prim_arity := @ref Ty(i64, i64).list(ast_alloc());
+
+    //User := Main.defs;
+    User :: import("@/examples/circuit/defs.fr");
+    S := Type.scope_of(DefsBuiltins);
     for get_constants(S) { name |
-        arity := (-1, -1);
-        if !(name == sym("input") || name == sym("output")) {
-            fid := FuncId.get_constant(S, name)
-                || @panic("expected % to be a function", str(name));
-            func := get_function_ast(fid, true, false, false, false);
-            tag := func.annotations.find(fn(it) => it.name == sym("arity"))
-                || @panic("missing #arity for %", str(name));
-            arity = Ty(i64, i64).const_eval(tag.args);
-            @ct_assert(arity._0 + arity._1 <= max_in_out_wires, func.loc, "intrinsic has too many in_out wires");
-        };
+        shape := (*TcBuiltins.Template).get_constant(S, name)
+            || @panic("missing %", str(name));
+        arity := (shape.out_arity, shape.in_arity);
         
-        //User := Main.defs;
-        User :: import("@/examples/circuit/defs.fr");
         @ct_assert(get_constant(User, name).is_none(), @source_location(), "defs has conflict with builtin name: %", name.str());
         
         components.push(
@@ -97,12 +84,15 @@ defs :: @static {
             is_switch = name.str().starts_with("switch"),
         );
         map&.insert(name, (id = components.len.trunc() - 1));
-        f := F.get_constant(S, name)
-            || panic("");
-        prims.push(f);
     };
     
-    S := import("@/examples/circuit/defs.fr");
+    s := @slice("input", "output");
+    for s { name |
+        map&.insert(sym(name), (id = components.len.trunc()));
+        components.push(name = name, gates = empty(), wire_count = 0);
+    };
+    
+    S := User;
     for get_constants(S) { name |
         continue :: local_return;
         it := FatExpr.get_constant(S, name) || continue();
@@ -111,11 +101,7 @@ defs :: @static {
         @ct_assert(it.expr&.is(.Block), it.loc, "expected block body");
         block := it.expr.Block&;
         defs: HashMap(WireId, ComponentId) = init(temp());
-        storage_count := 0;
-        locations := Span.list(block.body.len, temp());
         ::AutoHash(WireId, TrivialHasher); ::AutoEq(WireId);
-        
-        use_before_def := @ref Ty(WireId, Span).list(temp());
         
         for str(name) { c |
             ok := c.is_ascii_alpha() || c.is_ascii_digit() || c == "_".ascii();
@@ -180,50 +166,20 @@ defs :: @static {
             is_io := kind == sym("input") || kind == sym("output");
             kind := map&.get(kind)
                 || compile_error(@tfmt("undeclared component kind %", kind.str()), it.loc);
-            child := components[kind.id.zext()]&;
-            storage_count += child.storage_count;
-
-            if !is_io {
-                // give a better error message than array length mismatch when typechecking the generated code.
-                o, i := child.arity();
-                @ct_assert(o == out.len && i == in.len, it.loc, "arity error");
-            };
             
             for in { id |
-                if !defs&.get(id).is_some() {
-                    push(use_before_def, (id, it.loc));
-                };
+                @ct_assert(!(id& == @ref NONE), it.loc, "'_' (discard) cannot be used as an input");
             };
             for out { id |
-                prev := defs&.insert(id, kind);
-                @if(!(id& == @ref NONE))
-                if prev { prev |
-                    ok := child.is_switch && components[prev.id.zext()].is_switch;
-                    @ct_assert(ok, it.loc, "multiple defs: w%", id.id);
-                };
+                defs&.insert(id, kind);
             };
             
-            locations&.push(it.loc);
             gates.push(kind = kind, inputs = in.items(), outputs = out.items(), param = param);
         };
         
         @ct_assert(gates.len >= 2, it.loc, "must have at least input() and output()");
         @ct_assert(components[gates[0].kind.id.zext()].name == "input", it.loc, "first gate must be input");
         @ct_assert(components[gates[gates.len - 1].kind.id.zext()].name == "output", it.loc, "last gate must be output");
-        
-        // can't check in the main loop because of memory
-        enumerate gates { i, it |
-            for it.inputs { id |
-                @ct_assert(!(id& == @ref NONE), locations[i], "'_' (discard) cannot be used as an input");
-                @ct_assert(defs&.get(id).is_some(), locations[i], "use undefined: w%", id.id);
-            };
-        };
-        for use_before_def { id, loc |
-            if defs&.get(id) { def_kind |
-                def_has_memory := components[def_kind.id.zext()].storage_count > 0;
-                @ct_assert(def_has_memory, loc, "use before def: w%", id.id);
-            };
-        };
         
         wire_count := 0;
         had_placeholder := defs&.remove(NONE).is_some();
@@ -256,19 +212,14 @@ defs :: @static {
             name = name.str(),
             gates = gates.items(),
             wire_count = wire_count,
-            storage_count = storage_count,
             labels = labels.items(),
         );
         map&.insert(name, (id = components.len.trunc() - 1));
-        
-        o_n, i_n := components[components.len - 1]&.arity();
-        @ct_assert(o_n + i_n <= max_in_out_wires, it.loc, "component has too many in+out wires (% > %)", o_n + i_n, max_in_out_wires);
     };
     NONE :WireId: (id = 0xFFFFFFFF);
     
     @anon_literal(
         components = components[],
-        primitives = prims.items(),
         tc_components_offset = components.len(),
     )
 }
@@ -308,15 +259,23 @@ calculate_usage :: fn(components: []Component, off: i64, a: Alloc) void = {
         };
         
         gate_sum, wire_sum, wire_depth := (0, 0, 0);
-        each c.gates { it |
+        storage_count := 0;
+        enumerate c.gates { i, it |
             child := components[it.kind.id.zext()]&;
             wire_sum += child.wire_sum;
             wire_depth = max(wire_depth, child.wire_depth);
             gate_sum += child.gate_sum;
+            storage_count += get_storage_count(components, it);
+            if i != 0 && i != c.gates.len - 1 {
+                // give a better error message than array length mismatch when typechecking the generated code.
+                o, i := child.arity();
+                @assert(o == it.outputs.len && i == it.inputs.len, "arity error calling gate[%] (%) in (%)", i, child.name, c.name);
+            };
         };
-        c.wire_depth = wire_depth;
+        c.wire_depth = wire_depth + c.wire_count;
         c.wire_sum = wire_sum + c.wire_count;
-        c.gate_sum = gate_sum;
+        c.gate_sum = gate_sum + c.gates.len;
+        c.storage_count = storage_count;
 
         instance := 0;
         instance_offset_by_gate := a.alloc_zeroed(i64, c.gates.len);
@@ -335,6 +294,8 @@ calculate_usage :: fn(components: []Component, off: i64, a: Alloc) void = {
         
         needed: DynamicBitSet = empty(temp());
         out_gate, in_gate := (c.gates[c.gates.len - 1]&, c.gates[0]&);
+        o_n, i_n := (out_gate.inputs.len, in_gate.outputs.len);
+        @assert_le(o_n + i_n, max_in_out_wires, "component (%) has too many in+out wires", c.name);
         
         gates_needed: DynamicBitSet = empty(a);
         gates_needed&.set(c.gates.len - 1);
@@ -364,7 +325,6 @@ calculate_usage :: fn(components: []Component, off: i64, a: Alloc) void = {
             changed
         };
         
-        // TODO: don't redundantly do this in defs parsing
         def_kind: HashMap(WireId, ComponentId) = init(temp());
         each c.gates { it |
             for it.outputs { id |
@@ -555,6 +515,13 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
         @fmt(out, "\n");
     };
     
+    @if(!self.doing_pre_read) for it.inputs { it |
+        if !self.wires_evaluated&.get(it.id.zext()) {
+            @println("TODO: use-before-def without memory w% in (%).", it.id, self.c.name);
+            self.failed = true;
+        };
+    };
+    
     for it.outputs { it |
         self.wires_evaluated&.set(it.id.zext());
     };
@@ -603,7 +570,7 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
             tc_end := defs.tc_components_offset + templates.len();
             if i < tc_start {
             if defs_builtin_names.contains(c.name) {
-                @fmt(out, "% :: DefsBuiltins.%;\n", mangle(components, i), c.name);
+                @fmt(out, "% :: TcBuiltins'get_native(DefsBuiltins.%);\n", mangle(components, i), c.name);
                 continue();
             };
             };
@@ -629,9 +596,8 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
         
         @debug_assert(!c.has_param, "only builtins have param");
         out_n, in_n := (c.gates[c.gates.len - 1].inputs.len, c.gates[0].outputs.len);
-        have_storage := self.c.storage_count != 0;
+        have_storage := self.c.storage_count != 0;  // :NonZeroStorage 
         @fmt(out, "% :: fn(world: *World, out: *Array(WireValue, %), in: *Array(WireValue, %)", mangle(components, i), out_n, in_n);
-        // TODO: signeture will be wrong if computed storage=0 (ex. has a ram with settings[0]=0)
         @if(have_storage) @fmt(out, ", instance: i64, doing_pre_read: bool");
         @fmt(out, ") void ");
         @if(false) @fmt(out, """ #log_ir("Rh") """);
@@ -713,11 +679,13 @@ defs_builtin_names :: {
 };
 
 DefsBuiltins :: @struct {
-    nand :: TcBuiltins'get_native(TcBuiltins.Nand);
-    byte_split :: get_native(TcBuiltins.Splitter8);
-    byte_make :: get_native(TcBuiltins.Maker8);
-    delay :: get_native(TcBuiltins.DelayLine1);
-    const :: TcBuiltins'get_native(TcBuiltins.Constant64);
+    nand :: TcBuiltins.Nand;
+    byte_split :: TcBuiltins.Splitter8;
+    byte_make :: TcBuiltins.Maker8;
+    delay :: TcBuiltins.DelayLine1;
+    const :: TcBuiltins.Constant64;
+    switch1 :: TcBuiltins.Switch1;
+    switch8 :: TcBuiltins.Switch8;
 };
 
 AsmOverture :: @rec @struct {

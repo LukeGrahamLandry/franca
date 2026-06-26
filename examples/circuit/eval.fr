@@ -30,10 +30,6 @@ fn drop(world: *World, a: Alloc) void = {
     world[] = zeroed(World);
 }
 
-OldWireValue :: @struct {
-    value: (@union(bit: bool, byte: u8)) #use;
-    _pad := zeroed(Array(u8, 7));
-};
 WireValue :: i64;
 
 World :: @struct {
@@ -57,28 +53,20 @@ World :: @struct {
 
 fn eval(world: *World, parent: []WireValue, it: *Component.Gate) void = {
     c := world[it.kind]&;
-    // can't just early return here on (doing_pre_read&&storage_count==0) 
-    // ex. memory8 needs to use make_byte to write its output. 
     
     if c.is_switch {
-        return primitives'switch8(world, parent, it);
+        return eval_switch(world, parent, it);
     };
     
-    @if(FEAT_TC_CIRCUIT) if it.kind.id > defs.tc_components_offset.trunc() && c.gates.len == 0 {
+    if c.gates.len == 0 {
         eval_compiled(world, parent, it);
         return();
-    };
-    
-    if c.wire_count == 0 {
-        f := defs.primitives[it.kind.id.zext()];
-        return f(world, parent, it);
     };
     
     if world.doing_pre_read && get_compiled(world, it.kind).is_some() {
         eval_compiled(world, parent, it);
         return();
     };
-    
     wires := world.scratch(c.wire_count);
     wires.set_zeroed();  // switches with none enabled default to zero TODO: could just do it for those specific wires, compile the list like compile_order etc. 
     
@@ -121,55 +109,13 @@ fn eval(world: *World, parent: []WireValue, it: *Component.Gate) void = {
     };
 }
 
-// TODO: get rid of these impls and just use the tc builtins
-primitives :: @struct {
-    #arity(1, 2)
-    nand :: fn(world, parent, it) = {
-        in, out := (it.inputs, it.outputs);
-        a, b := (parent[in[0].id.zext()] != 0, parent[in[1].id.zext()] != 0);
-        parent[out[0].id.zext()] = int(a.int().bit_and(b.int()) == 0);
+eval_switch :: fn(world: *World, parent: []WireValue, it: *Component.Gate) = {
+    in, out := (it.inputs, it.outputs);
+    a, b := (parent[in[0].id.zext()], parent[in[1].id.zext()] != 0);  // value, cond
+    if b {
+        parent[out[0].id.zext()] = a;
     };
-    input :: fn(world, parent, it) = panic("only one input allowed");
-    output :: fn(world, parent, it) = panic("only one output allowed");
-    #arity(8, 1)
-    byte_split :: fn(world, parent, it) = {
-        in, out := (it.inputs, it.outputs);
-        r := parent[in[0].id.zext()];
-        inline_range(0, 8) { i |
-            parent[out[i].id.zext()] = int(r.bit_and(1.shift_left(i)) != 0);
-        };
-    };
-    #arity(1, 8)
-    byte_make :: fn(world, parent, it) = {
-        in, out := (it.inputs, it.outputs);
-        r := 0;
-        inline_range(0, 8) { i |
-            r = r.bit_or(parent[in[i].id.zext()].shift_left(i));
-        };
-        parent[out[0].id.zext()] = r;
-    };
-    #arity(1, 0)
-    const :: fn(world, parent, it) = {
-        out, param := (it.outputs, it.param);
-        parent[out[0].id.zext()] = param;
-    };
-    // TODO: detect same wire being written by multiple switches in the same tick
-    // TODO: detect use before all writes done
-    switch1 :: switch8;
-    #arity(1, 2)
-    switch8 :: fn(world, parent, it) = {
-        in, out := (it.inputs, it.outputs);
-        a, b := (parent[in[0].id.zext()], parent[in[1].id.zext()] != 0);  // value, cond
-        if b {
-            parent[out[0].id.zext()] = a;
-        };
-    };
-    #arity(1, 1)
-    delay :: fn(world, parent, it) = {
-        in, out := (it.inputs, it.outputs);
-        parent[out[0].id.zext()] = eval_delay_gate(world, parent[in[0].id.zext()], world.doing_pre_read);
-    };
-}
+};
 
 fn eval_delay_gate(world: *World, input: WireValue, doing_pre_read: bool) WireValue #inline = {
     @debug_assert_ult(world.instance, world.storage.len, "must preallocate storage_count");
@@ -194,9 +140,6 @@ fn unscratch(world: *World, wires: []WireValue) void #inline = {
 }
 
 fn index(world: *World, i: ComponentId) *Component = world.components.index(i.id.zext()); 
-
-fixwirevalue :: fn(a: []OldWireValue) []WireValue = 
-    bit_cast_unchecked([]OldWireValue, []WireValue, a);
 
 fn evaluate(world: *World, values: []WireValue, kind: ComponentId, param: i64, save_wire_values: bool) void = {
     world.instance = 0; 
