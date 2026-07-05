@@ -1,3 +1,5 @@
+- terminal: put quotes when dropping a file that has spaces in the path
+- life: zoom is shakey
 - move for_bits and the non-resizing but dynamic bit sets to bit_set.fr
 - FRANCA_TRACY=z needs to be in the cache key for FRANCA_MORE_CACHE=1
 - make examples/web/serve.fr not slow as fuck

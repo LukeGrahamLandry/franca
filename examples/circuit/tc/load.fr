@@ -43,7 +43,7 @@ Circuit :: @struct {
         settings: Array(i64, 2);
         data: []u8;
         logical_gate_index := -1;
-        link_id: i64;
+        link_id: i64;  // ram.link_id is referenced by console.data. `{rom.link_id}.rom` file has init data. 
     };
     Program :: @struct {
         SANDBOX_LEVEL_ID :: 86;
@@ -134,7 +134,19 @@ load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64, []Loade
         };
         each info.gates { it |
             continue :: local_return;
-            if templates[it.kind.zext()].name != "FileLoader" && templates[it.kind.zext()].name != "SpriteDisplay" {
+            name := templates[it.kind.zext()].name;
+            
+            check_file("Rom", "rom");
+            check_file("Hdd", "hdd");
+            check_file :: fn(kind, ext) => if name == kind {
+                it.data = "";
+                if read_entire_file(a, @tfmt("%%.%", dir, it.link_id, ext)) { data |
+                    it.data = data;
+                };
+                continue();
+            };
+            
+            if name != "FileLoader" && name != "SpriteDisplay" {
                 continue();
             };
             file_index := it.settings&[0]&;
@@ -209,7 +221,11 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     // TODO: when doing runtime need to be careful not to bake before setting fast_eval pointer
     builtin_count := defs.tc_components_offset + templates.len();
     @assert_ge(components.len, builtin_count, "TODO: be more flexible about adding new ones");
-        
+    // TODO: don't be comparing strings all the time and then this doesn't matter :SLOW
+    if components.items().slice(0, builtin_count).contains(fn(it) => it.name == c.name) {
+        @println("TODO: name collides with builtin: '%'", c.name);
+    };
+    
     @debug_assert_eq(components[{ xx := CONST_INDEX; /*:compiler*/ xx.id.zext() }].name, "Off");
     logical_to_circuit := i64.list(gates.len, temp());
     extra_gates := 0;
@@ -238,6 +254,12 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         
         if shape.name.starts_with("Probe") {
             // TODO
+            kill&.set(i);
+            continue();
+        }
+        
+        if shape.name.starts_with("Buffer") {
+            // HLL-Interpreter's DEC 4 has one of these. it seems to be invisible in the game? and i can't find it in the menus. does nothing? TODO: is this fine?
             kill&.set(i);
             continue();
         }
@@ -301,7 +323,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 is_input := it.outputs.len != 0;
                 dest := @if(is_input, custom_pins.len, output_pin_count);
                 
-                is_switchable_output := shape.name.ends_with("z") && shape.name.starts_with("Output") && it.inputs.len == 2 && it.outputs.len == 0 && !is_input; 
+                is_switchable_output := shape.name.ends_with("z") && shape.name.starts_with("Output") && it.inputs.len == 2 && it.outputs.len == 0;
                 if it.outputs.len + it.inputs.len > 1 {
                     if !is_switchable_output {
                         c.has_arch_pins = true;
@@ -381,6 +403,9 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                         };
                         X(in);
                         X(out);
+                        each c.wires { it |
+                            X(it.logical&.slice(1));
+                        };
                     };
                 };
             } 
@@ -705,7 +730,13 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
             };
         };
         
-        if no_pins && shape.name != "LevelScreen" && !shape.name.starts_with("Probe") {
+        allow_no_pins := !no_pins                // :notforcorrectness
+            || shape.name == "LevelScreen"       // just visual in the campaign
+            || shape.name.starts_with("Probe")   // not yet implemented
+            || shape.name.starts_with("Buffer")  // does nothing?
+            || shape.name == "Custom"            // might just be for a visual block
+        ;
+        if no_pins && !allow_no_pins {
             @eprintln("TODO: % has no pins", shape.name);
         };
         
@@ -737,6 +768,12 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
                     s&.set(.storage_size, s.get(.storage_size).align_to(s.word_size()) / s.word_size());
                 } else {
                     ensure_assembled_and_update_size(c, s&, gate_i, a);
+                };
+                if shape.name == "Rom" {
+                    size := s.get(.storage_size) * s.word_size();
+                    @if(size > it.data.len) @println("TODO: rom file too large for storage");
+                    @if(size < it.data.len) @println("TODO: rom file too small for storage");
+                    it.data = it.data.slice(0, min(size, it.data.len));
                 };
                 
                 // :NonZeroStorage don't allow storage_count=0 because then compiler won't pass `instance` and signeture will be wrong. 
@@ -770,7 +807,6 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
         );
     };
     
-    @if(c.wires.len != next_wire_id.zext()) @println("- added dead wires %..<%", c.wires.len, next_wire_id);
     (logic_gates, next_wire_id.zext())
 };
 
@@ -814,7 +850,6 @@ fn get_arity(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit)
 }
 
 fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, $body: @Fn(pin_index: i64, dx: i64, dy: i64) void) void = {
-    // TODO: also pass in the []Circuit so it works for custom components
     pins := shape.pins;
     dx, dy := (0, 0);
     if shape.name == "Custom" {
@@ -863,8 +898,10 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
         continue :: local_return;
         gate := gates.index(gate_i);
         bit_width := get_bit_width(components, gate);
-        name := components[gate.kind.id.zext()].name;
-        @if(bit_width.len == 0) continue(@println("TODO: missing widths for %", name));
+        c := components[gate.kind.id.zext()]&;
+        name := c.name;
+        o_n, i_n := c.arity();
+        @if(bit_width.len != o_n + i_n) continue(@println("TODO: missing widths for %", name));
         enumerate gate.outputs { i, id |
             // multiple switches of different sizes might ouput to the same wire
             width[id.id.zext()] = max(bit_width[i], width[id.id.zext()]);
@@ -889,7 +926,7 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
             new: WireId = (id = wire_count[].trunc());
             wire_count[] += 1;
             id[] = new;
-            @println("cast % => % (want=%, found=%)", old.id, new.id, want, found);
+            // @println("cast % => % (want=%, found=%)", old.id, new.id, want, found);
             casts&.insert((old, want), new);
             gates.push(
                 kind = cast_id,
@@ -980,6 +1017,34 @@ fn get_bit_width(shape: *Tc.Builtin.Template, param: i64) []u8 = {
         return out;
     };
     shape.bit_width
+}
+
+// this only does the ones with explicit starting values. caller must world.storage.set_zeroed() first for the rest. 
+set_initial_data :: fn(world: *World, circuits: []Tc.Circuit, root: ComponentId, instance: i64) void = {
+    c := world[root]&;
+    @if(c.storage_count == 0 || c.gates.len == 0) return();
+    circuit := circuits.find(fn(it) => it.compiled.is_some() && it.compiled.Some.id == root.id) || return();
+    
+    enumerate circuit.gates { c_gate_i, c_gate |
+        continue :: local_return;
+        gate_i := c_gate.logical_gate_index;
+        @if(gate_i == -1) continue();
+        gate := c.gates[gate_i]&;
+        instance := instance + c.instance_offset_by_gate[gate_i];
+        set_initial_data(world, circuits, gate.kind, instance);  // might be a rom inside a custom component
+        n := get_storage_count(world.components, gate);
+        dest := world.storage.subslice(instance, n);
+        src := @switch(world[gate.kind].name) {
+            @case("Rom") => c_gate.data;
+            @case("Program") => {
+                asm := circuit.programs.find(fn(it) => it.level_id == Tc.Circuit.Program.SANDBOX_LEVEL_ID && it.assembled.is_some() && it.gate_index == c_gate_i) 
+                    || continue(@println("TODO: missing program assembly for gate[%]", gate_i));
+                asm.assembled.unwrap()
+            };
+            @default => continue();
+        };
+        dest.interpret_as_bytes().slice(0, src.len).copy_from(src);
+    };
 }
 
 // it's used in function name when compiled so important not to let a circuit be named "x :: evil(); y"

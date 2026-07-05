@@ -1,4 +1,15 @@
 
+## (Jul 4)
+
+- just ignore BufferN components. fixes "HLL-Interpreter"
+- don't spam logs for CC no pins. ex. plotter's filler is just used for making the CC render solid in the game. 
+- init program/rom data inside nested CC (not just arch). fixes "32b to dot matrix"
+
+## (Jun 30)
+
+- load .rom file with initial data. 
+  - wasted a bit of time with "rom image loader v1" looking wrong just because i wasn't using the right font for the solid rectangles.
+
 ## (Jun 25) circuit
 
 - sprite commands. bit of coordinate system hell. 

@@ -51,7 +51,6 @@ State :: @struct {
     circuit_index: i64;
     circuit_arena: Arena.Allocator;
     is_new_overture: bool;  // TODO: remove
-    loaded_assembly: bool;
     load_time: i64;
     fr: ?Ty(CompCtx, *Qbe.Module);
     loading: ?@struct(start_time: i64, done: u32 = 0, frame_count := 0, root_index: i64, started_compiling := false);
@@ -665,7 +664,9 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                     sdtx.pos = world_to_text_pos(b) + vec2(0, wire_hover_count);
                     sdtx.color = pack_rgba(255, 255, 255, 255);
                     sdtx.put(@tfmt("% (%, %) ", wire_i, it.pos.x, it.pos.y));
-                    @if(wire.logical.id != 0xFFFFFFFF) show(wire.logical, true);
+                    if !circuit.has_bidirectional_pins {
+                        @if(wire.logical.id != 0xFFFFFFFF) show(wire.logical, true);
+                    };
                     wire_hover_count += 1;
                 };
                 sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
@@ -789,7 +790,10 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                                 if char == 220 { // HACK bottom half square that tetris uses
                                     char = my_solid_char - 3;
                                 };
-                                if char != 0 && char != "\n".ascii() && char != "\t".ascii() && char != "\r".ascii() {
+                                if char == 0xDB {
+                                    char = my_solid_char;
+                                };
+                                if char != 0 && char != "\n".ascii() && char != "\t".ascii() && char != "\r".ascii() && char != 255 {
                                     sdtx.color = pack_rgba(value.shift_right_logical(24).bit_and(0xFF), value.shift_right_logical(16).bit_and(0xFF), value.shift_right_logical(8).bit_and(0xFF), 255);
                                     sdtx.put(char);
                                 } else {
@@ -977,37 +981,18 @@ fn reset(state: *State) void = {
     world.scratch.len = world.scratch.cap;
     world.scratch.items().set_zeroed();
     
-    state.loaded_assembly = false;
+    @if(state.tree.len > 0)
+    if state.tree[0].component { root |
+        Tc'set_initial_data(world, state.circuit, root, 0);
+    };
+    
     if state.is_new_overture {
-        ok := false;
         name := "";
-        @if(state.tree.len > 0)
-        @if(state.tree[0].component.is_some())
         if state.tree[0].diagram_circuit { i |
-            root_component := state.tree[0].component.unwrap();
-            circuit := state.circuit[i]&;
-            name = circuit.name;
-            c := world[root_component]&;
-            enumerate circuit.gates { c_gate_i, c_gate |
-                continue :: local_return;
-                gate_i := c_gate.logical_gate_index;
-                @if(gate_i == -1) continue();
-                gate := c.gates[gate_i]&;
-                @if(world[gate.kind].name != "Program") continue();
-                asm := circuit.programs.find(fn(it) => it.level_id == Tc.Circuit.Program.SANDBOX_LEVEL_ID && it.assembled.is_some() && it.gate_index == c_gate_i) 
-                    || continue(@println("TODO: missing program assembly for gate[%]", gate_i));
-                asm := asm.assembled.unwrap();
-                instance := c.instance_offset_by_gate[gate_i];
-                n := get_storage_count(world.components, gate);
-                dest := world.storage.subslice(instance, n);
-                dest.interpret_as_bytes().slice(0, asm.len).copy_from(asm);
-                ok = true;
-            };
+            name = state.circuit[i].name;
         };
         
-        state.loaded_assembly = ok;
         // TODO: have a button for loading my own maze programs instead
-        //@if(!ok)
         if name == "LEG" || name == "OVERTURE" || name == "NANDverture" {
             off := @if(name == "NANDverture", 56, 1);  // HACK 
             world.storage.subslice(off, 256/8).interpret_as_bytes().copy_from(program);

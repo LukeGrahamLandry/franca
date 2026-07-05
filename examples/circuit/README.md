@@ -26,6 +26,7 @@ it's all built up from those and simulated faithfully so you can click into sub-
 
 - <https://turingcomplete.game>
 - <https://github.com/Stuffe/save_monger/tree/22fa398d95c3d3a0b5e88a80e9daee613cab1823>
+- <https://github.com/LukeGrahamLandry/TuringCompleteSchematicArchive>
 
 circuit.data save files from TuringComplete.Game (v6 / 0.1059 beta). 
 those files have the positions of wires/gates which i convert into the same graph representation as the `defs` language. 
@@ -33,21 +34,19 @@ in this mode there are many more builtin gates (ex. a 64 bit xor compiles to one
 
 it works well enough to run my overture/leg in the maze and a few things from the schematic hub (mandelbrot and tetris). 
 
-## tc is INCOMPLETE
+## TODO
 
 - devices
   - missing: network, hdd, sound
   - console: wrong font
   - keyboard: character mode param. click to focus instead of a keybind. 
   - display: rotation
-  - probes
-  - latency ram
-  - initial data from (id number).rom,.hdd file
+  - probes (they render internal values on the outside of custom components)
+  - latency ram, Stack
   - sprite display: positioning is wrong
   - dot display: wrong default colour
 - Mul64 high on wasm
 - bidirectional pins are sketchy 
-  - using as both input/output depending on a switch probably won't work
   - makes the visualization confusing because i always inline the whole custom component
 - assembler
   - expressions with spaces in them are wrong
@@ -55,17 +54,13 @@ it works well enough to run my overture/leg in the maze and a few things from th
 - need a better interface for choosing circuit/programs, showing memory contents
 - pre_read mistakes would be a lot easier to debug if they were made explicit seperate operations in the trace display. 
 - dropping file doesn't work in franca-web-playground (even when fixed will be annoying because need to feed it all the custom components individually)
-- etc.
-
-## other todos
-
+- needs the franca library folder available at runtime
 - "str scratch frame"
 - from schematic hub
   - screenvurture: "H" as char literal in expression
-  - 32b to dot matrix: doesn't show anything. idk
   - ASM computer 64 bit: Hdd, RamLatency
-  - ploter: use-before-def without memory w27
-  - HLL-Interpreter: use-before-def without memory
+  - ploter: SR-Latch: use-before-def ("Allow circular recipies")
+- the game has a setting ("Allow circular recipies") to idiom-regognise a few shapes of circular dependencies and convert to (AndOrLatch,NandNandLatch,NorNorLatch)
 - i don't think im doing the keyboard right. ex. mandelbrot is behind a key sometimes?
 - use f64 for pos/zoom in ui because it gets jerky scrolled down far in the trace for big circuits
 - finish leg: memory, stack, call, shifts
@@ -74,7 +69,6 @@ it works well enough to run my overture/leg in the maze and a few things from th
   - nested expressions
   - variable names
   - speed mode that cheats and implements components with native instructions (like tc) instead of nand gates
-- tc: do they have an api for the schematic hub?
 - tc: at top level sort by type of IO maybe so don't have to add random offsets in the evaluator depending on the arch. ie in my overture and leg input and output are swapped because the order in save file is arbitrary. 
 - compile a version with save_wire_values so can get rid of the interpreter? 
   (when running the defs.fr one. tc import will probably always do that)
@@ -88,13 +82,27 @@ it works well enough to run my overture/leg in the maze and a few things from th
 - option to do scenario test on circuit.data
 - less trash code. builtin.fr and gpu.fr are particularly bad.. 
 - deduplicate error checking between parse and load
-- show wire comments in the ui
+- handle all load errors gracefully. show in ui instead of log. also still try to show the circuit diagram just don't allow running it. 
+- don't spam "multiple defs must be switch" for bidirectional pins
+- show wire comments/colours in the ui
+- auto throttle tick rate to keep a sane frame rate even if you ask for something too high. (also report number in Hz instead of per frame so it's easy to compare to the game)
 - :NotReorderingTheseBreaksOvertureLegNandverture
 - don't be checking names of components all the time (at least also check the ids are in the builtin range)
 - it's annoying that you can't see the wire values if it halts on a tick that was evaled in fast mode. 
   delay all writes to the end somehow so can rerun the tick in slow mode after knowing it will halt?
-- if i keep morale long enough i want to do save_breaker too (simplex, isa, etc.)...
-
+- use 32 bit instructions instead of bit_and(0xFFFFFFFF)
+- tc2
+  - outputs don't coerce z so need to check if that wire is a switch and compile to two outputs like the old OutputNz did
+  - memory is extended with load/store ports that are applied in order so need to represent a new type of dependency
+  - new pin positions, more sizes of wires (1-64)
+  - components have configurable (sometimes auto?) wire size
+  - isa: assembly parser generator thingy https://github.com/Stuffe/isa_spec
+  - si: language the level tests are written in. 
+    - not needed for just running circuits but makes the whole thing much more inspiring because 
+      i could auto test it by just pointing it at my own solutions to the game. 
+    - also then could run other people's custom levels. 
+      i like the idea of my thing being a way to have headless ci tests for user campaigns. 
+  - have to decide if i care about keeping support for the old version
 ```
 // TODO: don't always recompile everything when loading a new circuit. it might reuse some custom components. 
 //       and don't reset the state.fr every time because bootstrapping the comptime stuff takes ~50ms. just reset when arena is getting too full. 
