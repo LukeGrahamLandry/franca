@@ -1,0 +1,227 @@
+// TODO: add this to auto test. 
+// TODO: less spam printing
+// TODO: keyboard_input, maze
+
+fn run_tests(harness: *Harness) void = {
+    harness.load("BMP file loader enhanced")
+        .run(15_999).then_halt("Done");
+    harness.load("QOI Image viewer")
+        .run(3_841).then_halt("");
+    harness.load("BRAINFUCK PC EXTENDED")
+        .run(478).then_halt("")
+        .console("Hello, World!");
+    harness.load("LEG ARCHITECTURE 5 - console display")
+        .run(40_000).console("2\n3\n5\n7\n11");
+    harness.load("RISC-V")
+        .run(300_000).console("White to play:");
+    harness.load("RISC-V CPU")
+        .run(10_000).console("Hello World! compiled application!!");
+    harness.load("Smol Cave Adventure")
+        .run(500).console("Welcome to Smol Cave Adventure!");
+    harness.load("HLL-Interpreter")
+        .run(10_000).console("Hello, World!");
+    harness.load("Tetris")
+        .run(10_000_000, true)  // TODO: time depends on clock randomness for what pieces get chosen
+        .halted("End of program execution.");
+    
+    /*
+    harness.load("TCMIPS")
+        .run(_)
+        .keyboard_input("hash hello\n")
+        .run(_)
+        .console_contains(@tfmt("sha256: %", Sha256'hex("hello")));
+    
+    harness.load("NANDverture").maze();
+    
+    // TODO: add my overture and leg with maze programs to the archive just because the more the merrier
+    harness.load("OVERTURE").maze();
+    harness.load("LEG").maze();
+    
+    */
+    
+    // these idk a convient test to do but can still run a few ticks to make sure it compiles ok
+    visual :: @const_slice(
+        "7 Segment Display",
+        "Clock", 
+        "32b to Dot Matrix", 
+        "Snake Game", 
+        "ASCII Bad Apple 10fps", 
+        "rom image loader v1", 
+        "Conways Game Of Life 16x16 Soup", 
+        "Matrix Display Playground",
+    );
+    for visual { it |
+        harness.load(it).run(100);
+    };
+}
+
+main :: fn() void = {
+    root := import("@/examples/fetch.fr")'group(
+        url = "https://github.com/LukeGrahamLandry/TuringCompleteSchematicArchive/archive/3406327a0e1f2b6fcf866a153e54cf6d18432767.tar.gz", 
+        legacy = "ca786e0c870ff1ae81f20173ca4514b09863f50b8a94906883b4e501f5d61f9e",
+    );
+
+    name := "Tetris";
+    path := @tfmt("%/v6/schematics/architecture/%/circuit.data", root, name);
+    circuits, _, tc_file_loader_device := Tc'load_all_circuits(path, temp());
+    harness := @ref @as(Harness) (
+        temp = temp().mark(),
+        circuits = circuits,
+        world = zeroed(World),
+        tc_file_loader_device = tc_file_loader_device,
+        msg = list(general_allocator()),
+    );
+    reset_jit(harness.fr&);
+    
+    harness.run_tests();
+    
+    destroy_jit(harness.fr&);
+    @if(harness.prev_msg_len == harness.msg.len) @fmt(harness.msg&, " [ok]\n");
+    println(harness.msg.items());
+    @assert_eq(harness.error, 0, "failed some tc tests");
+    harness.msg&.drop();
+}
+
+Harness :: @struct {
+    world: World;
+    circuits: []Tc.Circuit;
+    temp: Alloc.Mark;
+    msg: List(u8);
+    error := 0;
+    prev_msg_len := 0;
+    fr: CachedCompilerEnv = ();
+    tc_file_loader_device: []Tc.LoadedFile;
+    root: ?ComponentId = .None;
+};
+
+fn load(self: *Harness, name: Str) *Harness = {
+    temp().reset(self.temp);
+    if self.prev_msg_len == self.msg.len {
+        @fmt(self.msg&, " [ok]");
+    } else {
+        self.error += 1;
+    };
+    @fmt(self.msg&, "\n(%):", name);
+    self.prev_msg_len = self.msg.len;
+    
+    // TODO: shouldn't need to reset every time but every call to emit_qbe_included gets a new MainThreadPump
+    //       which assumes nothing is compiled yet so even tho the generated code is in a new scope, things it calls aren't and you get things like
+    //       "panic! Assertion Failed: 'eq__2238' already has an entry in the inline cache. these should both look like pointers: 6308266032 5637149392" :CantReuseCompilerLikeThis
+    reset_jit(self.fr&);
+    
+    each self.circuits { it |
+        it.compiled = .None;
+    };
+    root_index := self.circuits.index_of(fn(it) => it.name == name)
+        || @panic("missing load(%)", name);
+    
+    a := temp();
+    components := @ref Component.list(a);
+    components.push_all(finished_defs.components);
+    Tc'compile_circuit(self.circuits, root_index, components, a);
+    jit_circuit(self.fr&, components.items(), a);
+    init(self.world&, a, true, components.items());
+    self.world.tc_file_loader_device = self.tc_file_loader_device;
+    
+    self.root = self.circuits[root_index].compiled;
+    kind := self.root || {
+        @fmt(self.msg&, "\n- failed to compile");
+        return self;
+    };
+    Tc'set_initial_data(self.world&, self.circuits, kind, 0);
+    self
+}
+
+fn run(self: *Harness, ticks: i64) *Harness = self.run(ticks, false);
+fn run(self: *Harness, ticks: i64, allow_halt: bool) *Harness = {
+    kind := self.root || return(self);
+    o_n, i_n := self.world&[kind]&.arity();
+    values := temp().alloc_zeroed(WireValue, o_n + i_n);
+    range(0, ticks) { i |
+        evaluate(self.world&, values, kind, 0, false);
+        
+        if get_halt_message(self.world&, self.circuits) { msg |
+            if !allow_halt {
+                @fmt(self.msg&, "\n- halted on tick % (%)", i, msg);
+            };
+            return self;
+        };
+    };
+    self
+}
+
+fn then_halt(self: *Harness, expect: Str) *Harness = self.run(1, true).halted(expect);
+fn halted(self: *Harness, expect: Str) *Harness = {
+    msg := get_halt_message(self.world&, self.circuits) || {
+        @fmt(self.msg&, "\n- expected halt");
+        return self;
+    };
+    if msg != expect {
+        @fmt(self.msg&, "\n- halted with wrong message expected (%) but found (%)", expect, msg);
+    };
+    self
+}
+
+fn get_halt_message(world: *World, circuits: []Tc.Circuit) ?Str = {
+    if world.tc_halt_device == -1 {
+        return(.None);
+    };
+    param: Tc.Builtin.Settings.Halt = (repr = world.tc_halt_device.bitcast());
+    msg := circuits[param.get(.circ_i)].gates[param.get(.gate_i)].data;
+    (Some = msg)
+}
+
+fn console(self: *Harness, msg: Str) *Harness = {
+    for_consoles self { data |
+        @if(data.starts_with(msg)) return(self);
+    };
+    @fmt(self.msg&, "\n- missing console message (%)", msg);
+    self
+}
+
+fn console_contains(self: *Harness, msg: Str) *Harness = {
+    for_consoles self { data |
+        @if(data.contains(msg)) return(self);
+    };
+    @fmt(self.msg&, "\n- missing console message (%)", msg);
+    self
+}
+
+fn for_consoles(self: *Harness, $body: @Fn(data: Str) void) void = {
+    root, world := (self.root || return(), self.world&);
+    circuit := self.circuits.find(fn(it) => it.compiled.is_some() && it.compiled.Some.id == root.id).unwrap();
+    c := world[root];
+    
+    each circuit.gates { gate |
+        continue :: local_return;
+        i := gate.logical_gate_index;
+        @if(i == -1) continue();
+        it := c.gates[i]&;
+        
+        if world[it.kind].name == "Console" {  // TODO: do this by index
+            T :: Tc.Builtin.Settings.Console;
+            param: T = (repr = it.param.bitcast());
+            @if(param.get(.linked) == 0) continue();
+            offset := world.storage[c.instance_offset_by_gate[i]];
+            bytes_per_char := @if(param.get(.colour) == 0, 1, 8);
+            data := world.storage.interpret_as_bytes();
+            data := data.subslice(param.get(.linked_ram_instance)*8 + offset*bytes_per_char, 80*24*bytes_per_char);
+            body(data);
+        };
+    };
+} 
+
+fn keyboard_input(self: *Harness, text: Str) *Harness = {
+    // TODO
+    self
+}
+
+
+fn maze(self: *Harness) *Harness = {
+    #use("@/examples/circuit/scenario.fr");
+    // TODO: load the right program instead of SANDBOX_LEVEL_ID
+    self
+}
+
+#use("@/examples/circuit/eval.fr");
+#use("@/examples/circuit/parse.fr");

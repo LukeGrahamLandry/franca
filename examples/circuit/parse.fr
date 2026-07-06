@@ -218,6 +218,7 @@ defs :: @static {
     };
     NONE :WireId: (id = 0xFFFFFFFF);
     
+    components.gpa = panicking_allocator;
     @anon_literal(
         components = components[],
         tc_components_offset = components.len(),
@@ -228,6 +229,7 @@ finished_defs :: @static {
     components := defs.components&;
     a := ast_alloc();
     calculate_usage(components.items(), 0, a);
+    components.gpa = a;
     @if(FEAT_TC_CIRCUIT) Tc'load_builtins(components, a);
     components.gpa = panicking_allocator;
     @if(false) print_components(components.items());
@@ -240,6 +242,7 @@ Tc :: import("@/examples/circuit/tc/load.fr");
 TcBuiltins :: Tc.Builtin.impl;
 
 calculate_usage :: fn(components: []Component, off: i64, a: Alloc) void = {
+    @assert_lt(components.len, MAX_u32, "too many components");
     range(off, components.len) { i |
         continue :: local_return;
         c := components.index(i);
@@ -258,6 +261,7 @@ calculate_usage :: fn(components: []Component, off: i64, a: Alloc) void = {
             continue();
         };
         
+        @assert_lt(c.gates.len, MAX_u32, "too many gates");
         gate_sum, wire_sum, wire_depth := (0, 0, 0);
         storage_count := 0;
         enumerate c.gates { i, it |
@@ -489,6 +493,7 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
     result_used := it.outputs.len > 0 && self.c.wires_used&.get(it.outputs[0].id.zext());
     @switch(name) {
         @case("input") => @fmt(out, "o := in[];\n");
+        // TODO: this compiles to an extra blit if it's larger than the threshold for :ThisSureIsABigBlit
         @case("output") => @fmt(out, "out[] = i;\n");
         @case("switch8") => @if(result_used) @fmt(out, "if w% != 0 {| w% = w%; };\n", it.inputs[1].id, it.outputs[0].id, it.inputs[0].id);
         @default => {
@@ -898,3 +903,63 @@ create_function_for_value :: fn(fr: CompCtx, src: Str, var_name: Str) FuncId = {
 // TODO: maybe get rid of switch gate so it's always ssa
 // TODO: compile pre_read version as a seperate function and call it directly instead of branching.
 // TODO: allow defs.fr to access tc/builtin.fr
+// TODO: move the part that's just for defs seperate from the compilation that tc also needs
+
+Qbe :: import("@/backend/lib.fr");
+Franca :: import("@/examples/repl.fr").R;
+CachedCompilerEnv :: @struct(it: ?Ty(CompCtx, *Qbe.Module) = .None);
+
+jit_circuit :: fn(slot: *CachedCompilerEnv, components: []Component, a: Alloc) void = {
+    // finished_defs don't need to be re-compiled every time because they'll already have it.fast_eval set from comptime. 
+    first_index_that_needs_fast_eval := finished_defs.components.len();
+    
+    // either way need to set Component.compile_order for interp
+    src := compile_gates_source(components, a, first_index_that_needs_fast_eval);
+    @if(FEAT_RT_COMPILE) {
+    fr, m := slot.it.unwrap();
+    comptime_ctx := bit_cast_unchecked(Compiler, **rawptr, fr.data)[][];  // TODO: making everybody deal with this is kinda trash
+    push_as_tls(.comptime, comptime_ctx) {
+        // more convoluted than just `compile_gates` because don't want to allow jit-shims (so timer will be accurite). 
+        // TODO: annoying that doing it this way does useless bake_relocatable_value
+        fid := create_function_for_value(fr, src, "dispatch");
+        {fr.vtable.emit_qbe_included}(Qbe.Module.raw_from_ptr(m), fr&, @slice(fid), .GiveMeTheCodeAndGiveItToMeRaw);
+        name := fr'vtable'mangle_name(fr.data, fid);
+        callee := m.get_addr(name).unwrap();
+        callee := bit_cast_unchecked(rawptr, @FnPtr() []rawptr, callee);
+        fast_eval := callee();
+        range(first_index_that_needs_fast_eval, components.len) { i |
+            components[i].fast_eval = fast_eval[i];
+        };
+        Franca'end_profile();
+    };
+    };
+}
+
+destroy_jit :: fn(slot: *CachedCompilerEnv) void = 
+    if slot.it&.take() { fr, m |
+        fr'vtable'drop_qbe_module(Qbe.Module.raw_from_ptr(m));
+        fr'vtable'destroy_compiler(fr.data);
+    };
+
+reset_jit :: fn(slot: *CachedCompilerEnv) void = {    
+    if true {
+        // TODO: sometimes skip and reuse the setup work (saves ~60ms) but :CantReuseCompilerLikeThis
+        destroy_jit(slot);
+    };
+    slot := slot.it&;
+    Franca'start_profile();
+    
+    @if(slot[].is_none())
+    push_as_tls(.comptime, zeroed(rawptr)) {
+        v := Franca'init_driver_vtable();
+        opts := v.default_build_options();
+        opts.no_cache = true;
+        //opts.set_unsafe(!@run safety_check_enabled(.DebugAssertions));
+        opts.set_unsafe(true);
+        fr := v.with(v'init_compiler(opts));
+        make_and_resolve_and_compile_top_level(fr.data, fr.vtable, """ #include_std("lib/core.fr"); """, "-");
+        m := fr.get_alloc().box_uninit(Qbe.Module);
+        init_default_module_dyn(m, fr.vtable, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly));
+        slot[] = (Some = (fr, m));
+    };
+};

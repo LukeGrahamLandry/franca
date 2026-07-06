@@ -41,7 +41,6 @@ State :: @struct {
     pan_keys_pressed: i64;
     key_buffer: RawDeque(@struct(key: Sapp.Keycode, up: bool, shift: bool));
     keyboard_device_focused: bool;
-    keyboard_needs_update: bool;
     gfx_error_last_frame: bool;
     halted_without_wire_values: bool;
     keyboard_data: ?*Tc.Builtin.KeyboardData;
@@ -52,7 +51,7 @@ State :: @struct {
     circuit_arena: Arena.Allocator;
     is_new_overture: bool;  // TODO: remove
     load_time: i64;
-    fr: ?Ty(CompCtx, *Qbe.Module);
+    fr: CachedCompilerEnv;
     loading: ?@struct(start_time: i64, done: u32 = 0, frame_count := 0, root_index: i64, started_compiling := false);
     loader_thread: ?*Thread;
     have_load_work_futex: u32;
@@ -912,7 +911,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.loading = .None;
     state.loader_thread = .None;
-    state.fr = .None;
+    state.fr = (it = .None);
     state.keyboard_data = .None;
     sapp.desc.enable_dragndrop = true;
     state.sg = sg; state.sapp = sapp;
@@ -1003,11 +1002,6 @@ fn reset(state: *State) void = {
 fn service_keyboard_device(state: *State) void = {
     data := state.keyboard_data || return();
     buf := state.key_buffer&;
-    @if(buf.len == 0 && !state.keyboard_needs_update) return();
-    if state.keyboard_needs_update {
-        //state.keyboard_needs_update = false;
-        state.dirty = true;
-    };
     if buf.len == 0 && !data.valid {
         data.value = 0;
         data.up = false;
@@ -1052,7 +1046,6 @@ fn service_keyboard_device(state: *State) void = {
         data.valid = true;
         _ := buf.pop_front();
         state.dirty = true;
-        state.keyboard_needs_update = true;
     };
     data.have_next = buf.len.trunc();
 }
@@ -1240,39 +1233,18 @@ fn load_circuit_index_worker(state: *State) void = {
     };
     
     a := @if(FEAT_RT_COMPILE, {
-        Franca'start_profile();
         reset_jit(state.fr&);
-        fr, _ := state.fr.unwrap();
+        fr, _ := state.fr.it.unwrap();
         fr.get_alloc()
     }, state.circuit_arena&.borrow());
    
     components := @ref Component.list(a);
-    // finished_defs don't need to be re-compiled every time because they'll already have it.fast_eval set from comptime. 
     components.push_all(finished_defs.components);
-    first_index_that_needs_fast_eval := components.len;
     Tc'compile_circuit(circuits, root_index, components, a);
     loading.started_compiling = true;
     
-    // either way need to set Component.compile_order for interp
-    src := compile_gates_source(components.items(), a, first_index_that_needs_fast_eval);
-    @if(FEAT_RT_COMPILE) {
-    fr, m := state.fr.unwrap();
-    comptime_ctx := bit_cast_unchecked(Compiler, **rawptr, fr.data)[][];  // TODO: making everybody deal with this is kinda trash
-    push_as_tls(.comptime, comptime_ctx) {
-        // more convoluted than just `compile_gates` because don't want to allow jit-shims (so timer will be accurite). 
-        // TODO: annoying that doing it this way does useless bake_relocatable_value
-        fid := create_function_for_value(fr, src, "dispatch");
-        {fr.vtable.emit_qbe_included}(Qbe.Module.raw_from_ptr(m), fr&, @slice(fid), .GiveMeTheCodeAndGiveItToMeRaw);
-        name := fr'vtable'mangle_name(fr.data, fid);
-        callee := m.get_addr(name).unwrap();
-        callee := bit_cast_unchecked(rawptr, @FnPtr() []rawptr, callee);
-        fast_eval := callee();
-        range(first_index_that_needs_fast_eval, components.len) { i |
-            components[i].fast_eval = fast_eval[i];
-        };
-        Franca'end_profile();
-    };
-    };
+    jit_circuit(state.fr&, components.items(), a);
+    
     init(state.world&, a, true, components.items());
     state.world.tc_file_loader_device = tc_file_loader_device;
    
@@ -1286,28 +1258,6 @@ fn load_circuit_index_worker(state: *State) void = {
     @eprintln("loaded in %ms", state.load_time);
     loading.done = 1;
 }
-
-reset_jit :: fn(slot: *?Ty(CompCtx, *Qbe.Module)) void = {
-    @if(true) // TODO: sometimes skip and reuse the setup work (saves ~60ms)
-    if slot.take() { fr, m |
-        fr'vtable'drop_qbe_module(Qbe.Module.raw_from_ptr(m));
-        fr'vtable'destroy_compiler(fr.data);
-    };
-    
-    @if(slot[].is_none())
-    push_as_tls(.comptime, zeroed(rawptr)) {
-        v := Franca'init_driver_vtable();
-        opts := v.default_build_options();
-        opts.no_cache = true;
-        //opts.set_unsafe(!@run safety_check_enabled(.DebugAssertions));
-        opts.set_unsafe(true);
-        fr := v.with(v'init_compiler(opts));
-        make_and_resolve_and_compile_top_level(fr.data, fr.vtable, """ #include_std("lib/core.fr"); """, "-");
-        m := fr.get_alloc().box_uninit(Qbe.Module);
-        init_default_module_dyn(m, fr.vtable, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly));
-        slot[] = (Some = (fr, m));
-    };
-};
 
 // TODO: if there were to be a sandbox escape in this program it would probably be by passing untrusted bytes to stb_image.
 fn load_atlas_part1(state: *State, c: *Tc.Circuit) void = {
@@ -1408,6 +1358,7 @@ fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         Futex'wake(state.have_load_work_futex&, 1);
         loader_thread.join();
     };
+    destroy_jit(state.fr&);
     state.text&.shutdown();
     drop(state.world&, general_allocator());
     sg.destroy_pipeline(state.pipe&);;
@@ -1425,11 +1376,9 @@ main :: fn() void = Easy'start(State);
 #use("@/examples/circuit/parse.fr");
 //Scenario :: Main.scenario;
 Scenario :: import("@/examples/circuit/scenario.fr");
-Qbe :: import("@/backend/lib.fr");
 ENABLE_TRACY :: Foreign.ENV.FRANCA_TRACY.get_environment_variable().is_some();  // ugh
 #use("@/lib/sys/threads.fr");
 Futex :: import("@/lib/sys/sync/futex.fr");
-Franca :: import("@/examples/repl.fr").R;
 
 key_order :: @const_slice(Sapp.Keycode.GRAVE_ACCENT, ._1, ._2, ._3, ._4, ._5, ._6, ._7, ._8, ._9, ._0, .MINUS, .EQUAL, .BACKSPACE, 
     .TAB, .Q, .W, .E, .R, .T, .Y, .U, .I, .O, .P, .LEFT_BRACKET, .RIGHT_BRACKET, .BACKSLASH,

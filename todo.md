@@ -1,5 +1,14 @@
+- see todo comments:
+  - life/README.md
+  - circuit/README.md
+  - web/(get,serve).fr
+- use bubblewrap more
+  - more fine grained settings. ie. enforce that the no-deps tests don't try to fetch anything, etc.
+  - always run the with-deps tests in the sandbox? especially the ones that depend on other people's binaries (wuffs,tc,wasm4)
+  - write my own enough of a shell for the luajit popen tests. 
+    - deduplicate parsing between that and examples/gpu/terminal.fr and examples/os/init.fr
+  - make an example of the exploit that --new-session avoids (just because it's fun to document that sort of thing in examples/toy)
 - terminal: put quotes when dropping a file that has spaces in the path
-- life: zoom is shakey
 - move for_bits and the non-resizing but dynamic bit sets to bit_set.fr
 - FRANCA_TRACY=z needs to be in the cache key for FRANCA_MORE_CACHE=1
 - make examples/web/serve.fr not slow as fuck

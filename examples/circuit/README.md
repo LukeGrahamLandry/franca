@@ -54,11 +54,13 @@ it works well enough to run my overture/leg in the maze and a few things from th
 - need a better interface for choosing circuit/programs, showing memory contents
 - pre_read mistakes would be a lot easier to debug if they were made explicit seperate operations in the trace display. 
 - dropping file doesn't work in franca-web-playground (even when fixed will be annoying because need to feed it all the custom components individually)
+- web have gallery from my archive of the old schematic hub
 - needs the franca library folder available at runtime
 - "str scratch frame"
 - from schematic hub
   - screenvurture: "H" as char literal in expression
   - ASM computer 64 bit: Hdd, RamLatency
+  - matrix display playground: fails safety check
   - ploter: SR-Latch: use-before-def ("Allow circular recipies")
 - the game has a setting ("Allow circular recipies") to idiom-regognise a few shapes of circular dependencies and convert to (AndOrLatch,NandNandLatch,NorNorLatch)
 - i don't think im doing the keyboard right. ex. mandelbrot is behind a key sometimes?
@@ -91,11 +93,19 @@ it works well enough to run my overture/leg in the maze and a few things from th
 - it's annoying that you can't see the wire values if it halts on a tick that was evaled in fast mode. 
   delay all writes to the end somehow so can rerun the tick in slow mode after knowing it will halt?
 - use 32 bit instructions instead of bit_and(0xFFFFFFFF)
+- arm has nice merged (and,or)+shift in one instruction
+- option to see generated source or -d logging in the ui
+  - ^ would be nicer if i factor out examples/gpu/terminal.fr into a reusable textbox widgit and use that (also for showing ram contents). 
+    the other option would just be rendering the whole sapp thingy into a texture which might be less annoying than infecting everything in the terminal with positioning code. 
 - tc2
   - outputs don't coerce z so need to check if that wire is a switch and compile to two outputs like the old OutputNz did
+    ;actually it's more convoluted than that, output pins are bidirectional pins now (ie they can be used as inputs or both depending on switches). 
+    so maybe should figure out a nicer way to compile bidirectional pins first. 
+    but the common case will be that the wire connecting to an output pin doesn't connect to any input pins of any components inside the CC so then it can be compiled the easy way. 
   - memory is extended with load/store ports that are applied in order so need to represent a new type of dependency
-  - new pin positions, more sizes of wires (1-64)
+  - new pin positions, more sizes of wires
   - components have configurable (sometimes auto?) wire size
+    - some of the logic ones can go up to 2048 bit but the concatenators don't seem to work so i don't really understand
   - isa: assembly parser generator thingy https://github.com/Stuffe/isa_spec
   - si: language the level tests are written in. 
     - not needed for just running circuits but makes the whole thing much more inspiring because 
@@ -110,3 +120,6 @@ it works well enough to run my overture/leg in the maze and a few things from th
 // TODO: if i want to let you edit the circuit in the ui, 
 //       have two copies that swap when you change something so it doesn't hang the ui while compiling the new one. 
 ```
+- for a long time i've had the vague idea of a game where you're exploring a 3d maze and have to collect
+  circuit components and spend them to solve puzzles (like build more complex gates) to unlock doors
+  but the wire layout matters because they become paths in the 3d world. 
