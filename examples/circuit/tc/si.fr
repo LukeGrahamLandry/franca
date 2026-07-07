@@ -1,0 +1,70 @@
+// this is a transpiler from (the language the game writes the level tests in) to franca. 
+// i got the syntax/builtins are just from looking at in the test.si files in the game's "campaign" folder.
+//
+// each level's Input,Output types are implicitly defined based on the corresponding circuit.data. 
+//
+// a quirk of my language (franca; not tc's si) is there's a lot of special identifiers that aren't 
+// technically keywords but will be very confusing if you shadow something the compiler wants to reference. 
+// so just to be safe, user identifiers are mangled with a "s_" prefix to make sure they can't collide with anything important. 
+// also helps sandbox in that you can't access unsafe things (like pointer arithmetic, import(), inline assembly, etc.)
+// even if im not careful about checking for undeclared identifers in this frontend. 
+//
+
+// rt :: import("@/examples/circuit/tc/si_runtime.fr"); // .(constants, callbacks)
+
+Ast :: @rec @tagged(
+    Declare: @struct(name: Str, value: *Ast),
+    While: @struct(cond: *Ast, body: *Ast),
+    Block: @struct(stmts: []*Ast),
+    Function: @struct {
+        args: []StructItem;
+        ret_type: *Ast,
+        body: *Ast,
+    },
+    Return: *Ast,
+    Assign: @struct(place: *Ast, value: *Ast),
+    Switch: @struct(value: *ast, cases: []SwitchCase),
+    If: @struct(cond: *Ast, then: *Ast, else: *Ast),
+    Comment: Str,
+    
+    GetVar: @struct(name: Str, kind: VarKind),
+    Cast: @struct(type: *Ast, value: *Ast),
+    Literal: @struct(value: i64, size: i64),
+    Binary: @struct(lhs: *Ast, rhs: *Ast, op: OperatorToken, assign: bool),
+    Call: @struct(f: *Ast, arg: []*Ast),
+    StringLiteral: Str,
+    StringInterpolate: @struct(parts: []Str, values: []*Ast),   // `literal {variable}`
+    Struct: @struct(type: *Ast, items: []StructItem),
+    FieldAccess: @struct(place: *Ast, name: Str),
+    Array: []*Ast,
+    Type: *TypeConst,
+    VoidValue,
+    ImplicitSelf,
+    ImplicitGlobal,
+);
+
+TypeConst :: @rec @tagged(
+    Int: @struct(bits: i64, signed: bool),
+    Array: @struct(inner: *TypeConst, len: i64),
+    Function: @struct(args: []*TypeConst, ret: *TypeConst),
+    String,
+    Bool,
+    Void,
+);
+StructItem :: @struct(name: Str, value: *Ast);
+SwitchCase :: @struct(value: *Ast, body: *Ast);
+OperatorToken :: @enum(u8) (
+    @"<<", @">>", @"!=", @"==", @">=", @"<=", @"||", @"&&", 
+    @"+", @"-", @"*", @"/", @"%", @"^", @"|", @"&", @"<", @">", "~",
+    @"[", @"]", @"(", @")", @":", "?", @".", @"{", @"}", 
+);
+Keyword :: @enum(u8) (def, const, var, let);
+
+Token :: @tagged(
+    Identifier: Str,
+    String: @struct(value: Str, interpolate: bool),
+    Operator: @struct(op: OperatorToken, assign: bool),
+    Int: i64,
+    EndStmt,
+    Keyword: Keyword,
+);

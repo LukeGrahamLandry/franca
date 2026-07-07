@@ -94,6 +94,7 @@ it works well enough to run my overture/leg in the maze and a few things from th
   delay all writes to the end somehow so can rerun the tick in slow mode after knowing it will halt?
 - use 32 bit instructions instead of bit_and(0xFFFFFFFF)
 - arm has nice merged (and,or)+shift in one instruction
+- something that dumps raw circuit.data as readable-ish text
 - option to see generated source or -d logging in the ui
   - ^ would be nicer if i factor out examples/gpu/terminal.fr into a reusable textbox widgit and use that (also for showing ram contents). 
     the other option would just be rendering the whole sapp thingy into a texture which might be less annoying than infecting everything in the terminal with positioning code. 

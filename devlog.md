@@ -1,4 +1,11 @@
 
+## (Jul 6)
+
+- 
+- a bit of a waste of time because i don't need it for running the fun things from the schmatic hub, 
+  but i think im going to start 2.1 with a frontend for the level tests language. then my own campaign solutions are a good start for autotests, 
+  and i get to continue my break from staring at pin positions which im kinda tired of. 
+
 ## (Jul 4)
 
 - just ignore BufferN components. fixes "HLL-Interpreter"
