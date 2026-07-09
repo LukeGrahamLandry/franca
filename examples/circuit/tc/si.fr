@@ -13,22 +13,23 @@
 // rt :: import("@/examples/circuit/tc/si_runtime.fr"); // .(constants, callbacks)
 
 Ast :: @rec @tagged(
-    Declare: @struct(name: Str, value: *Ast),
+    Declare: @struct(name: Str, value: *Ast, kind: Keyword),
     While: @struct(cond: *Ast, body: *Ast),
-    Block: @struct(stmts: []*Ast),
+    Block: @struct(body: []*Ast),
     Function: @struct {
         args: []StructItem;
         ret_type: *Ast;
         body: *Ast;
+        name: Str;
     },
     Return: *Ast,
     Assign: @struct(place: *Ast, value: *Ast),
-    Switch: @struct(value: *ast, cases: []SwitchCase),
+    Switch: @struct(value: *Ast, cases: []SwitchCase),
     If: @struct(cond: *Ast, then: *Ast, else: *Ast),
     
-    GetVar: @struct(name: Str, kind: VarKind),
+    GetVar: @struct(name: Str),
     Cast: @struct(type: *Ast, value: *Ast),
-    Literal: @struct(value: i64, size: i64),
+    Literal: @struct(value: i64),
     Binary: @struct(lhs: *Ast, rhs: *Ast, op: OperatorToken, assign: bool),
     Call: @struct(f: *Ast, arg: []*Ast),
     StringLiteral: Str,
@@ -37,6 +38,7 @@ Ast :: @rec @tagged(
     FieldAccess: @struct(place: *Ast, name: Str),
     Array: []*Ast,
     Type: *TypeConst,
+    GetType: *Ast,
     VoidValue,
     ImplicitSelf,
     ImplicitGlobal,
@@ -58,12 +60,12 @@ OperatorToken :: @enum(u8) (
     @"[", @"]", @"(", @")", @":", "?", @".", @"{", @"}", 
     @"=", @",", @"!", @"$", 
 );
-Keyword :: @enum(u8) (def, const, var, let, if, while, switch);
+Keyword :: @enum(u8) (def, const, var, let, if, elif, else, while, switch, return);
 
 Token :: @tagged(
     Ident: Str,
     String: @struct(value: Str, interpolate: bool),
-    Operator: @struct(op: OperatorToken, assign: bool),
+    Op: @struct(op: OperatorToken, assign: bool),
     Int: i64,
     EndStmt,
     Keyword: Keyword,
@@ -76,6 +78,12 @@ Self :: @struct {
     i := 0;
     line := 1;
     lexer_is_in_interpolation := false;
+    lexer_indentation_level := 0;
+    token: ?Token = .None;
+    
+    arena: Alloc;
+    out: *List(u8);
+    statement_indent := 0;
 };
 
 main :: fn() void = {
@@ -88,26 +96,517 @@ main :: fn() void = {
         @println("==== % ====", it.name);
         if read_entire_file(temp(), path) { src |
             out := @ref u8.list(temp());
-            compile(src, out);
+            res := compile(src, out);
+            println(out.items());
+            @if_let(res) fn Err(msg) => panic(msg);
         };
     };
 }
 
-compile :: fn(src: Str, out: *List(u8)) void = {
+compile :: fn(src: Str, out: *List(u8)) Result(void, Str) = {
     self: Self = (
         src = src,
+        out = out,
+        arena = temp(),
     ); self := self&;
     
+    res := self.parse_block(false);
+    @match(res) {
+        fn Err(msg) => return(Err = @tfmt("[line %] %", self.line, msg));
+        fn Ok(ast) => {
+            self.emit(ast);
+            println(self.out.items());
+        };
+    };
+    
+    .Ok
+}
+
+fn parse_block(self: *Self, expect_brace: bool) Result(*Ast, Str) = {
+    stmts := @ref list(*Ast, self.arena);
     loop {
-        t := self.token();
-        @println("t=% line=%", t&.tag(), self.line);
-        @if(t&.is(.Eof)) return();
-        @assert(!t&.is(.Err));
+        continue :: local_return;
+        t := self.peek();
+        
+        // TEMPORARY
+        //@if(false)
+        if stmts.pop() { ast | 
+            self.emit(ast);
+            println(self.out.items());
+            self.out.clear();
+        };
+        
+        if expect_brace {
+            if t&.is(.Op) && t.Op.op == .@"}" {
+                self.pop();
+                return(Ok = self.node(Block = (body = stmts.items())));
+            };
+        };
+        
+        @match(t) {
+            fn Eof() => @if(!expect_brace) return(Ok = self.node(Block = (body = stmts.items())));
+            fn Keyword(keyword) => {
+                if @is(keyword, .const, .var, .let) {
+                    self.pop();
+                    name := @try(self.eat_ident()) return;
+                    @try(self.eat(.@"=")) return;
+                    value := @try(self.parse_expr()) return;
+                    stmts.push(self.node(Declare = (value = value, name = name, kind = keyword)));
+                    continue();
+                };
+                @match(keyword) {
+                    fn def() => {
+                        stmts.push(@try(self.parse_def()) return);
+                        continue()
+                    }
+                    fn return() => {
+                        self.pop();
+                        t := self.peek();
+                        value := @if(!t&.is(.EndStmt) && !(t&.is(.Op) && t.Op.op == .@"}"), 
+                            @try(self.parse_expr()) return, 
+                            self.node(.VoidValue));
+                        stmts.push(self.node(Return = value));
+                        continue()
+                    }
+                    fn if() => {
+                        self.pop();
+                        stmts.push(@try(self.parse_if_body()) return);
+                        continue();
+                    }
+                    fn while() => {
+                        self.pop();
+                        cond := @try(self.parse_expr()) return;
+                        @try(self.eat(.@"{")) return;
+                        body := @try(self.parse_block(true)) return;
+                        stmts.push(self.node(While = (cond = cond, body = body)));
+                        continue();
+                    }
+                    fn switch() => {
+                        self.pop();
+                        inspect := @try(self.parse_expr()) return;
+                        cases := @ref SwitchCase.list(self.arena);
+                        t := self.pop();
+                        @if(!t&.is(.EndStmt)) return(Err = "expected new line before switch case");
+                        
+                        lexer_indentation_level := self.lexer_indentation_level;
+                        dowhile {
+                            value := @try(self.parse_expr()) return;
+                            @try(self.eat(.@"{")) return;
+                            body := @try(self.parse_block(true)) return;
+                            cases.push(value = value, body = body);
+                            t := self.pop();
+                            @if(!t&.is(.EndStmt)) return(Err = "expected new line after switch case");
+                            self.lexer_indentation_level == lexer_indentation_level
+                        };
+                        
+                        stmts.push(self.node(Switch = (value = inspect, cases = cases.items())));
+                        continue();
+                    }
+                    @default => ();
+                };
+                
+            }
+            fn EndStmt() => {
+                self.pop();
+                continue();
+            }
+            @default => (@match(self.parse_expr()) {
+                fn Ok(lhs) => {
+                    t := self.peek();
+                    @if_let(t) fn Op(it) => if it.assign || it.op == .@"=" {
+                        self.pop();
+                        rhs := @try(self.parse_expr()) return;
+                        lhs = self.node(Binary = (lhs = lhs, rhs = rhs, op = it.op, assign = it.assign));
+                    };
+                
+                    stmts.push(lhs);
+                    continue();
+                }
+                fn Err(msg) => return(Err = msg);
+            });
+        };
+        return(Err = @tfmt("(stmt) unexpected token %", t&.tag()));
+    }
+}
+
+
+fn parse_if_body(self: *Self) Result(*Ast, Str) = {
+    cond := @try(self.parse_expr()) return;
+    @try(self.eat(.@"{")) return;
+    then := @try(self.parse_block(true)) return;
+    
+    else := self.node(.VoidValue);
+    t := self.peek();
+    if t&.is(.Keyword) {
+        if @is(t.Keyword, .elif, .else) {
+            self.pop();
+            
+            else = @match(t.Keyword) {
+                fn elif() => @try(self.parse_if_body()) return
+                fn else() => {
+                    @try(self.eat(.@"{")) return;
+                    @try(self.parse_block(true)) return
+                }
+                @default => unreachable();
+            };
+        }
+    };
+    (Ok = self.node(If = (cond = cond, then = then, else = else)))
+}
+
+
+fn parse_expr(self: *Self) Result(*Ast, Str) = self.parse_expr(0);
+fn parse_expr(self: *Self, current_prec: i64) Result(*Ast, Str) = {
+    t := self.peek();
+    lhs := @match(t) {
+        fn Int(value) => {
+            self.pop();
+            self.node(Literal = (value = value))
+        }
+        fn String(it) => {
+            yield :: local_return;
+            self.pop();
+            if it.interpolate {
+                // TODO: the precidence is wrong for `@ref (*Ast).list(self.arena)` :compiler
+                parts, args := (@ref Str.list(self.arena), @ref list(*Ast, self.arena));
+                while => it.interpolate {
+                    parts.push(it.value);
+                    args.push(@try(self.parse_expr()) return);
+                    t := self.pop();
+                    @if(!t&.is(.String)) return(Err = "malformed string interpolation");
+                    it = t.String;
+                };
+                parts.push(it.value);
+                yield self.node(StringInterpolate = (parts = parts.items(), values = args.items()));
+            }
+            self.node(StringLiteral = it.value)
+        }
+        fn Ident(it) => {
+            self.pop();
+            @if_else {
+                @if(it[0] == ".".ascii()) => self.node(FieldAccess = (
+                    place = self.node(.ImplicitSelf),
+                    name = it.rest(1),
+                ));
+                // TODO: somehow do the unfortunate cast syntax
+                @else => self.node(GetVar = (name = it));
+            }
+        }
+        fn Op(it) => {
+            yield :: local_return;
+            self.pop();
+            if it.op == .@"(" {
+                e := @try(self.parse_call_args(.@")")) return;
+                e := @if(e.len == 1, e[0], self.node(Block = (body = e)));
+                yield e;
+            };
+            if it.op == .@"[" {
+                e := @try(self.parse_call_args(.@"]")) return;
+                e := @if(e.len == 1, e[0], self.node(Block = (body = e)));
+                yield e;
+            };
+            if it.op == .@"<" {
+                name := @try(self.eat_ident()) return;
+                @try(self.eat(.@">")) return;
+                e := self.node(GetVar = (name = name));
+                e := self.node(GetType = e);
+                yield e;
+            };
+            if it.op == .@"{" {
+                yield @try(self.parse_block(true)) return;
+            };
+            
+            if !@is(it.op, .@"-", .@"!", .@"~", .@"&", .@"$") {
+                return(Err = @tfmt("invalid unary operator %", it.op));
+            };
+            next_prec := get_prec(it.op, true);
+            arg := @try(self.parse_expr(next_prec)) return;
+            self.node(Binary = (lhs = arg, rhs = self.node(.VoidValue), op = it.op, assign = false))
+        }
+        @default => return(Err = @tfmt("(expr) unexpected token %", t&.tag()));
+    };
+    dowhile {
+        continue :: local_return;
+        done := true;
+        t := self.peek();
+        @if_let(t) fn Op(it) => if !it.assign {
+            next_prec := get_prec(it.op, false);
+            if next_prec != -1 && current_prec < next_prec {
+                self.pop();
+                if it.op == .@"(" {
+                    args := @try(self.parse_call_args(.@")")) return;
+                    lhs = self.node(Call = (f = lhs, arg = args));
+                    continue(true);
+                };
+                next_prec = @if(it.op == .@"[", 0, next_prec);
+                rhs := @try(self.parse_expr(next_prec)) return;
+                @if(it.op == .@"[") @try(self.eat(.@"]")) return;
+                
+                if it.op == .@"?" {
+                    @try(self.eat(.@":")) return;
+                    else := @try(self.parse_expr(next_prec)) return;
+                    lhs = self.node(If = (cond = lhs, then = rhs, else = else));
+                } else {
+                    lhs = self.node(Binary = (lhs = lhs, rhs = rhs, op = it.op, assign = false));
+                };
+                
+                done = false;
+            };
+        };
+        !done
+    };;
+    
+    (Ok = lhs)
+}
+
+fn parse_call_args(self: *Self, terminator: OperatorToken) Result([]*Ast, Str) = {
+    args := @ref list(*Ast, self.arena);
+    loop {
+        t := self.peek();
+        if t&.is(.EndStmt) {
+            self.pop();
+            t = self.peek();
+        };
+        if t&.is(.Op) && t.Op.op == terminator {
+            @try(self.eat(terminator)) return;
+            return(Ok = args.items());
+        };
+    
+        arg := @try(self.parse_expr()) return;
+        args.push(arg);
+        t := self.peek();
+        if t&.is(.EndStmt) {
+            self.pop();
+            t = self.peek();
+        };
+        @if(!t&.is(.Op)) return(Err = "expected ',' or ')' in arguments");
+        
+        if t&.is(.Op) && t.Op.op == terminator {
+            @try(self.eat(terminator)) return;
+            return(Ok = args.items());
+        };
+        @try(self.eat(.@",")) return;
     };
 }
 
 
-fn token(self: *Self) Token = {
+fn parse_def(self: *Self) Result(*Ast, Str) = {
+    self.pop();
+    name := @try(self.eat_ident()) return;
+    @try(self.eat(.@"(")) return;
+    
+    args := @ref StructItem.list(self.arena);
+    dowhile {
+        t := self.peek();
+        if t&.is(.Ident) {
+            name := @try(self.eat_ident()) return;
+            @try(self.eat(.@":")) return;
+            type := @try(self.parse_expr()) return;
+            args.push(name = name, value = type);
+            t := self.peek();
+            end := t&.is(.Op) && t.Op.op == .@")";
+            @if(!end) @try(self.eat(.@",")) return;
+        };
+        t&.is(.Ident)
+    };
+    @try(self.eat(.@")")) return;
+    
+    t := self.peek();
+    brace := t&.is(.Op) && t.Op.op == .@"{";
+    ret := @if(brace,
+        self.node(.VoidValue),
+        @try(self.parse_expr()) return);
+    @try(self.eat(.@"{")) return;
+    body := @try(self.parse_block(true)) return;
+    
+    (Ok = self.node(Function = (
+        args = args.items(),
+        ret_type = ret,
+        body = body,
+        name = name,
+    )))
+}
+
+// TODO
+fn get_prec(op: OperatorToken, unary: bool) i64 = {
+    @match(op) {
+        fn @"<<"() => 6;
+        fn @">>"() => 6;
+        fn @"!="() => 3;
+        fn @"==" () => 3;
+        fn @">="() => 4;
+        fn @"<="() => 4;
+        fn @"||"() => 2;
+        fn @"&&"() => 2;
+        fn @"+"() => 7;
+        fn @"-"() => @if(unary, 9, 7);
+        fn @"*"() => 8;
+        fn @"/"() => 8;
+        fn @"%"() => 8;
+        fn @"^"() => 5;
+        fn @"|"() => 5;
+        fn @"&"() => 5;
+        fn @"<"() => 4;
+        fn @">"() => 4;
+        fn @"["() => 10;
+        fn @"?"() => 1;
+        fn @"."() => 10;
+        fn @"("() => 10;
+        @default => -1;
+    }
+}
+
+fn eat(self: *Self, expect: OperatorToken) Result(void, Str) = {
+    t := self.pop();
+    @if(!t&.is(.Op) && t.Op.op != .@"=") return(Err = @tfmt("expected '%' after declaration", expect));
+    .Ok
+}
+
+fn eat_ident(self: *Self) Result(Str, Str) = {
+    name := self.pop();
+    @if(!name&.is(.Ident)) return(Err = "expected ident");
+    (Ok = name.Ident)
+}
+
+fn node(self: *Self, ast: Ast) *Ast = self.arena.boxed(Ast, ast);
+
+fn emit(self: *Self, ast: *Ast) void = {
+    ::tagged_derive(Ast);  // HACK: @rec
+    o := self.out;
+    o.push_repeated(self.statement_indent * 4, " ".ascii());
+    @match(ast) {
+        fn Declare(it) => {
+            @fmt(o, "% :% ", it.name, @if(it.kind == .const, ":", "="));
+            self.emit_expr(it.value);
+        }
+        fn Return(value) => {
+            @fmt(o, "return(");
+            self.emit_expr(value[]);
+            @fmt(o, ")");
+        }
+        fn Function(it) => {
+            @fmt(o, "% :: fn(self: *Self, ", it.name);
+            for it.args { it |
+                @fmt(o, "%: ", it.name);
+                self.emit_expr(it.value);
+                @fmt(o, ", ");
+            };
+            @fmt(o, ") ");
+            self.emit_expr(it.ret_type);
+            @fmt(o, " = {\n");
+            self.emit(it.body);
+        }
+        fn Block(it) => {
+            self.statement_indent += 1;
+            for it.body { it |
+                self.emit(it);
+            };
+            self.statement_indent -= 1;
+            o.push_repeated(self.statement_indent * 4, " ".ascii());
+            @fmt(o, "}");
+        }
+        fn If(it) => {
+            @fmt(o, "if ");
+            self.emit_expr(it.cond);
+            @fmt(o, " {\n");
+            self.emit(it.then);
+            o.push_repeated(self.statement_indent * 4, " ".ascii());
+            @fmt(o, " else {\n");
+            self.emit(it.then);
+            @fmt(o, "}");
+        }
+        fn While(it) => {
+            @fmt(o, "while => ");
+            self.emit_expr(it.cond);
+            @fmt(o, " {\n");
+            self.emit(it.body);
+            @fmt(o, "}");
+        }
+        
+        fn Switch(it) => {
+            @fmt(o, "@switch(");
+            self.emit_expr(it.value);
+            @fmt(o, ") {\n");
+            for it.cases { it |
+                o.push_repeated(self.statement_indent.add(1) * 4, " ".ascii());
+                @fmt(o, "@case(");
+                self.emit_expr(it.value);
+                @fmt(o, ") => ");
+                self.emit(it.body);
+            };
+            @fmt(o, "@default => (); \n}");
+        }
+        @default => self.emit_expr(ast);
+    };
+    @fmt(o, ";\n");
+}
+
+
+fn emit_expr(self: *Self, ast: *Ast) void = {
+    o := self.out;
+    @match(ast) {
+        fn GetVar(it) => @fmt(o, "get(%)", it.name);
+        fn Literal(it) => @fmt(o, "%", it.value);
+        fn ImplicitSelf() => @fmt(o, "self");
+        fn Binary(it) => {
+            @fmt(o, "binary(");
+            self.emit_expr(it.lhs);
+            @fmt(o, ", '%', ", it.op);
+            self.emit_expr(it.rhs);
+            @fmt(o, ")");
+        }
+        fn FieldAccess(it) => {
+            self.emit_expr(it.place);
+            @fmt(o, ".%", it.name);
+        }
+        fn Call(it) => {
+            @fmt(o, "call(");
+            self.emit_expr(it.f);
+            @fmt(o, ", (");
+            for it.arg { it |
+                self.emit_expr(it);
+                @fmt(o, ",");
+            };
+            @fmt(o, "))");
+        }
+        fn Block(it) => {
+            @fmt(o, "(");
+            for it.body { it |
+                self.emit_expr(it);
+                @fmt(o, ",");
+            };
+            @fmt(o, ")");
+        }
+        fn VoidValue() => @fmt(o, "()");
+        fn StringLiteral(it) => @fmt(o, "\"%\"", it);
+        fn StringInterpolate(it) => {
+            @fmt(o, "new_string_builder().push(\"%\"", it.parts[0]);
+            range(0, it.values.len) { i |
+                @fmt(o, ".push(");
+                self.emit_expr(it.values[i]);
+                @fmt(o, ").push(\"%\")", it.parts[i + 1]);
+            };
+        }
+        @default => @fmt(o, "@run panic(\"TODO: emit_expr \%\", \"%\");", ast.tag());
+    };
+}
+
+fn peek(self: *Self) Token = {
+    if self.token { it |
+        return it;
+    };
+    t := self.lex_new_token();
+    self.token = (Some = t);
+    t
+}
+    
+fn pop(self: *Self) Token = {
+    t := self.peek();
+    self.token = .None;
+    t
+}
+
+fn lex_new_token(self: *Self) Token = {
     @if(self.i >= self.src.len) return(.Eof);
     start := self.i;
     s := self.src.rest(self.i);
@@ -116,7 +615,7 @@ fn token(self: *Self) Token = {
         while => self.i < self.src.len && !self.src.rest(self.i).starts_with("\n") {
             self.i += 1;
         };
-        return self.token();
+        return self.lex_new_token();
     };
     
     if s.starts_with("/*") {
@@ -130,7 +629,7 @@ fn token(self: *Self) Token = {
             self.i += 1;
         };
         self.i += 2;
-        return self.token();
+        return self.lex_new_token();
     };
     
     if s[0] == ".".ascii() && (s[1].is_ascii_alpha() || s[1] == "_".ascii()) {
@@ -164,7 +663,7 @@ fn token(self: *Self) Token = {
                 i := self.i + name.len;
                 is_update := updatable && i < self.src.len && self.src[i] == "=".ascii();
                 self.i = i + int(is_update);
-                return(Operator = (op = it, assign = is_update));
+                return(Op = (op = it, assign = is_update));
             };
         };
     };
@@ -204,14 +703,18 @@ fn token(self: *Self) Token = {
     };
     
     if s[0].is_ascii_whitespace() {
+        had_new_line := false;
         while => self.i < self.src.len && self.src[self.i].is_ascii_whitespace() {
             self.i += 1;
+            self.lexer_indentation_level += int(had_new_line);
             if self.src[self.i - 1] == "\n".ascii() {
                 self.line += 1;
-                return(.EndStmt);
+                self.lexer_indentation_level = 0;
+                had_new_line = true;
             };
         };
-        return self.token();
+        
+        return @if(had_new_line, .EndStmt, self.lex_new_token());
     };
     
     (Err = "unexpected character")
