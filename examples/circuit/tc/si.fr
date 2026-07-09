@@ -18,14 +18,13 @@ Ast :: @rec @tagged(
     Block: @struct(stmts: []*Ast),
     Function: @struct {
         args: []StructItem;
-        ret_type: *Ast,
-        body: *Ast,
+        ret_type: *Ast;
+        body: *Ast;
     },
     Return: *Ast,
     Assign: @struct(place: *Ast, value: *Ast),
     Switch: @struct(value: *ast, cases: []SwitchCase),
     If: @struct(cond: *Ast, then: *Ast, else: *Ast),
-    Comment: Str,
     
     GetVar: @struct(name: Str, kind: VarKind),
     Cast: @struct(type: *Ast, value: *Ast),
@@ -57,14 +56,204 @@ OperatorToken :: @enum(u8) (
     @"<<", @">>", @"!=", @"==", @">=", @"<=", @"||", @"&&", 
     @"+", @"-", @"*", @"/", @"%", @"^", @"|", @"&", @"<", @">", "~",
     @"[", @"]", @"(", @")", @":", "?", @".", @"{", @"}", 
+    @"=", @",", @"!", @"$", 
 );
-Keyword :: @enum(u8) (def, const, var, let);
+Keyword :: @enum(u8) (def, const, var, let, if, while, switch);
 
 Token :: @tagged(
-    Identifier: Str,
+    Ident: Str,
     String: @struct(value: Str, interpolate: bool),
     Operator: @struct(op: OperatorToken, assign: bool),
     Int: i64,
     EndStmt,
     Keyword: Keyword,
+    Eof,
+    Err: Str,
 );
+
+Self :: @struct {
+    src: Str;
+    i := 0;
+    line := 1;
+    lexer_is_in_interpolation := false;
+};
+
+main :: fn() void = {
+    path := "/Users/luke/Library/Application Support/Steam/steamapps/common/Turing Complete/campaign";
+    #use("@/lib/sys/fs.fr");
+    dirs := collect_directory_ordered(path, temp(), temp())
+        || @panic("missing %", path);
+    for dirs { it | 
+        path := @tfmt("%/%/test.si", path, it.name);
+        @println("==== % ====", it.name);
+        if read_entire_file(temp(), path) { src |
+            out := @ref u8.list(temp());
+            compile(src, out);
+        };
+    };
+}
+
+compile :: fn(src: Str, out: *List(u8)) void = {
+    self: Self = (
+        src = src,
+    ); self := self&;
+    
+    loop {
+        t := self.token();
+        @println("t=% line=%", t&.tag(), self.line);
+        @if(t&.is(.Eof)) return();
+        @assert(!t&.is(.Err));
+    };
+}
+
+
+fn token(self: *Self) Token = {
+    @if(self.i >= self.src.len) return(.Eof);
+    start := self.i;
+    s := self.src.rest(self.i);
+    
+    if s.starts_with("//") {
+        while => self.i < self.src.len && !self.src.rest(self.i).starts_with("\n") {
+            self.i += 1;
+        };
+        return self.token();
+    };
+    
+    if s.starts_with("/*") {
+        self.i += 2;
+        // TODO: do they nest?
+        // TODO: count as statement terminator if it spans multiple lines?
+        while => self.i < self.src.len && !self.src.rest(self.i).starts_with("*/") {
+            if self.src[self.i] == "\n".ascii() {
+                self.line += 1;
+            };
+            self.i += 1;
+        };
+        self.i += 2;
+        return self.token();
+    };
+    
+    if s[0] == ".".ascii() && (s[1].is_ascii_alpha() || s[1] == "_".ascii()) {
+        self.i += 2;
+        return self.lex_ident(start);
+    };
+
+    if s[0] == "#".ascii() && (s[1].is_ascii_alpha() || s[1] == "_".ascii()) {
+        self.i += 2;
+        return self.lex_ident(start);
+    };
+    
+    if s[0].is_ascii_alpha() || s[0] == "_".ascii() {
+        return self.lex_ident(start);
+    };
+    
+    doing_string_interpolation := false;
+    if true {
+        break :: local_return;
+        
+        // :SLOW
+        for_enum OperatorToken { it |
+            name := it.name_str();
+            if s.starts_with(name) {
+                if it == .@"}" && self.lexer_is_in_interpolation {
+                    doing_string_interpolation = true;
+                    break();
+                };
+            
+                updatable := @is(it, .@"+", .@"-", .@"*", .@"/", .@"%", .@"^", .@"|", .@"&");
+                i := self.i + name.len;
+                is_update := updatable && i < self.src.len && self.src[i] == "=".ascii();
+                self.i = i + int(is_update);
+                return(Operator = (op = it, assign = is_update));
+            };
+        };
+    };
+    
+    @if(s.starts_with("0x")) return(self.lex_int(16, hex_digit));
+    @if(s.starts_with("0b")) return(self.lex_int(2, bin_digit));
+    @if(s[0].is_ascii_digit()) return(self.lex_int(10, dec_digit));
+    
+    if s[0] == "\"".ascii() {
+        self.i += 1;
+        // TODO: do they have backslash escapes?
+        while => self.i < self.src.len && self.src[self.i] != "\"".ascii() {
+            self.i += 1;
+        };
+        self.i += 1;
+        s := self.src.slice(start + 1, self.i - 1);
+        return(String = (value = s, interpolate = false));
+    };
+    
+    if s[0] == "`".ascii() || doing_string_interpolation {
+        self.i += 1;
+        while => self.i < self.src.len {
+            self.i += 1;
+            if self.src[self.i - 1] == "`".ascii() {
+                self.lexer_is_in_interpolation = false;
+                s := self.src.slice(start + 1, self.i - 1);
+                return(String = (value = s, interpolate = false));
+            };
+            
+            if self.src[self.i - 1] == "{".ascii() {
+                self.lexer_is_in_interpolation = true;
+                s := self.src.slice(start + 1, self.i);
+                return(String = (value = s, interpolate = true));
+            };
+        };
+        return(Err = "unterminated string interpolation")
+    };
+    
+    if s[0].is_ascii_whitespace() {
+        while => self.i < self.src.len && self.src[self.i].is_ascii_whitespace() {
+            self.i += 1;
+            if self.src[self.i - 1] == "\n".ascii() {
+                self.line += 1;
+                return(.EndStmt);
+            };
+        };
+        return self.token();
+    };
+    
+    (Err = "unexpected character")
+}
+
+fn lex_ident(self: *Self, start: i64) Token = {
+    while => self.i < self.src.len && (self.src[self.i].is_ascii_alpha() || self.src[self.i] == "_".ascii() || self.src[self.i].is_ascii_digit()) {
+        self.i += 1;
+    };
+    s := self.src.slice(start, self.i);
+    
+    // :SLOW
+    for_enum Keyword { it |
+        if s == it.name_str() {
+            return(Keyword = it);
+        };
+    };
+    
+    return(Ident = s);
+}
+
+bin_digit :: fn(cc: u8) ?i64 = {
+    c: i64 = cc.zext();
+    if(c < "0".char() || c > "1".char(), => return(.None));
+    (Some = c - "0".char())
+}
+
+fn lex_int(self: *Self, $base: i64, $digit: @Fn(c: u8) ?i64) Token = {
+    i := self.i + int(base != 10) * 2;
+    s := self.src;
+    total := 0;
+    if true {
+        break :: local_return;
+        while => i < s.len {
+            if s[i] != "_".ascii() {
+                d := digit(s[i]) || break();
+                total *= base;
+                total += d;
+            };
+            i += 1;
+        };
+    };
+    self.i = i;
+    (Int = total)
+}
