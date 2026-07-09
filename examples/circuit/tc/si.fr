@@ -3,6 +3,7 @@
 //
 // each level's Input,Output types are implicitly defined based on the corresponding circuit.data. 
 //
+// TODO:
 // a quirk of my language (franca; not tc's si) is there's a lot of special identifiers that aren't 
 // technically keywords but will be very confusing if you shadow something the compiler wants to reference. 
 // so just to be safe, user identifiers are mangled with a "s_" prefix to make sure they can't collide with anything important. 
@@ -34,7 +35,7 @@ Ast :: @rec @tagged(
     Call: @struct(f: *Ast, arg: []*Ast),
     StringLiteral: Str,
     StringInterpolate: @struct(parts: []Str, values: []*Ast),   // `literal {variable}`
-    Struct: @struct(type: *Ast, items: []StructItem),
+    StructLiteral: @struct(type: *Ast, fields: []StructItem),
     FieldAccess: @struct(place: *Ast, name: Str),
     Array: []*Ast,
     Type: *TypeConst,
@@ -80,6 +81,7 @@ Self :: @struct {
     lexer_is_in_interpolation := false;
     lexer_indentation_level := 0;
     token: ?Token = .None;
+    parser_is_in_signeture := false;
     
     arena: Alloc;
     out: *List(u8);
@@ -91,9 +93,9 @@ main :: fn() void = {
     #use("@/lib/sys/fs.fr");
     dirs := collect_directory_ordered(path, temp(), temp())
         || @panic("missing %", path);
-    for dirs { it | 
+    enumerate dirs { i, it | 
         path := @tfmt("%/%/test.si", path, it.name);
-        @println("==== % ====", it.name);
+        @println("==== %. % ====", i, it.name);
         if read_entire_file(temp(), path) { src |
             out := @ref u8.list(temp());
             res := compile(src, out);
@@ -113,10 +115,7 @@ compile :: fn(src: Str, out: *List(u8)) Result(void, Str) = {
     res := self.parse_block(false);
     @match(res) {
         fn Err(msg) => return(Err = @tfmt("[line %] %", self.line, msg));
-        fn Ok(ast) => {
-            self.emit(ast);
-            println(self.out.items());
-        };
+        fn Ok(ast) => self.emit(ast);
     };
     
     .Ok
@@ -128,14 +127,6 @@ fn parse_block(self: *Self, expect_brace: bool) Result(*Ast, Str) = {
         continue :: local_return;
         t := self.peek();
         
-        // TEMPORARY
-        //@if(false)
-        if stmts.pop() { ast | 
-            self.emit(ast);
-            println(self.out.items());
-            self.out.clear();
-        };
-        
         if expect_brace {
             if t&.is(.Op) && t.Op.op == .@"}" {
                 self.pop();
@@ -143,72 +134,66 @@ fn parse_block(self: *Self, expect_brace: bool) Result(*Ast, Str) = {
             };
         };
         
-        @match(t) {
-            fn Eof() => @if(!expect_brace) return(Ok = self.node(Block = (body = stmts.items())));
+        stmt := @match(t) {
+            fn Eof() => {
+                @if(!expect_brace) return(Ok = self.node(Block = (body = stmts.items())));
+                return(Err = "unterminated block")
+            }
             fn Keyword(keyword) => {
-                if @is(keyword, .const, .var, .let) {
-                    self.pop();
-                    name := @try(self.eat_ident()) return;
-                    @try(self.eat(.@"=")) return;
-                    value := @try(self.parse_expr()) return;
-                    stmts.push(self.node(Declare = (value = value, name = name, kind = keyword)));
-                    continue();
-                };
+                self.pop();
                 @match(keyword) {
-                    fn def() => {
-                        stmts.push(@try(self.parse_def()) return);
-                        continue()
-                    }
+                    fn def() => @try(self.parse_def()) return;
                     fn return() => {
-                        self.pop();
                         t := self.peek();
                         value := @if(!t&.is(.EndStmt) && !(t&.is(.Op) && t.Op.op == .@"}"), 
                             @try(self.parse_expr()) return, 
                             self.node(.VoidValue));
-                        stmts.push(self.node(Return = value));
-                        continue()
+                        self.node(Return = value)
                     }
                     fn if() => {
-                        self.pop();
-                        stmts.push(@try(self.parse_if_body()) return);
-                        continue();
+                        @try(self.parse_if_body()) return
                     }
                     fn while() => {
-                        self.pop();
                         cond := @try(self.parse_expr()) return;
                         @try(self.eat(.@"{")) return;
                         body := @try(self.parse_block(true)) return;
-                        stmts.push(self.node(While = (cond = cond, body = body)));
-                        continue();
+                        self.node(While = (cond = cond, body = body))
                     }
                     fn switch() => {
-                        self.pop();
                         inspect := @try(self.parse_expr()) return;
                         cases := @ref SwitchCase.list(self.arena);
-                        t := self.pop();
+                        t := self.peek();
                         @if(!t&.is(.EndStmt)) return(Err = "expected new line before switch case");
                         
+                        // :WhitespaceSensitive because switch statements have no delimiters...
                         lexer_indentation_level := self.lexer_indentation_level;
                         dowhile {
+                            self.pop();
                             value := @try(self.parse_expr()) return;
                             @try(self.eat(.@"{")) return;
                             body := @try(self.parse_block(true)) return;
                             cases.push(value = value, body = body);
-                            t := self.pop();
+                            t := self.peek();
                             @if(!t&.is(.EndStmt)) return(Err = "expected new line after switch case");
                             self.lexer_indentation_level == lexer_indentation_level
                         };
                         
-                        stmts.push(self.node(Switch = (value = inspect, cases = cases.items())));
-                        continue();
+                        self.node(Switch = (value = inspect, cases = cases.items()))
                     }
-                    @default => ();
-                };
-                
+                    @default => {
+                        if !@is(keyword, .const, .var, .let) {
+                            return(Err = @tfmt("(stmt) unexpected token %", t&.tag()));
+                        }
+                        name := @try(self.eat_ident()) return;
+                        @try(self.eat(.@"=")) return;
+                        value := @try(self.parse_expr()) return;
+                        self.node(Declare = (value = value, name = name, kind = keyword))
+                    };
+                }
             }
             fn EndStmt() => {
                 self.pop();
-                continue();
+                continue()
             }
             @default => (@match(self.parse_expr()) {
                 fn Ok(lhs) => {
@@ -219,13 +204,18 @@ fn parse_block(self: *Self, expect_brace: bool) Result(*Ast, Str) = {
                         lhs = self.node(Binary = (lhs = lhs, rhs = rhs, op = it.op, assign = it.assign));
                     };
                 
-                    stmts.push(lhs);
-                    continue();
+                    lhs
                 }
                 fn Err(msg) => return(Err = msg);
             });
         };
-        return(Err = @tfmt("(stmt) unexpected token %", t&.tag()));
+        stmts.push(stmt);
+        
+        // this doesn't matter but is nice for catching mistakes if mess up eating operators. 
+        t := self.peek();
+        if !t&.is(.EndStmt) && !t&.is(.Eof) && !(t&.is(.Op) && t.Op.op == .@"}") {
+            return(Err = "expected newline after statement");
+        };
     }
 }
 
@@ -288,7 +278,25 @@ fn parse_expr(self: *Self, current_prec: i64) Result(*Ast, Str) = {
                     place = self.node(.ImplicitSelf),
                     name = it.rest(1),
                 ));
-                // TODO: somehow do the unfortunate cast syntax
+                // this cast syntax is a bit unfortunate
+                @if(self.is_type_name(it)) => {
+                    yield :: local_return;
+                    e := self.node(GetVar = (name = it));
+                    t := self.peek();
+                    if t&.is(.Op) && @is(t.Op.op, .@",", .@":", .@")", .@"{") {
+                        if !self.parser_is_in_signeture && t.Op.op == .@"{" {
+                            self.eat(.@"{").unwrap();
+                            fields := @try(self.parse_struct_items(.@"}")) return;
+                            yield self.node(StructLiteral = (type = e, fields = fields));
+                        };
+                        yield e;
+                    };
+                    value := @try(self.parse_expr()) return;
+                    self.node(Cast = (
+                        type = e,
+                        value = value,
+                    ))
+                };
                 @else => self.node(GetVar = (name = it));
             }
         }
@@ -359,14 +367,16 @@ fn parse_expr(self: *Self, current_prec: i64) Result(*Ast, Str) = {
     (Ok = lhs)
 }
 
+// TODO: is the naming convention enforced or do i need to keep a symbol table like c does?
+fn is_type_name(self: *Self, name: Str) bool = {
+    is_ascii_upper :: fn(c: u8) bool = c >= "A".ascii() && c <= "Z".ascii();
+    is_ascii_upper(name[0]) && name.len > 1 && !is_ascii_upper(name[1])
+}
+
 fn parse_call_args(self: *Self, terminator: OperatorToken) Result([]*Ast, Str) = {
     args := @ref list(*Ast, self.arena);
     loop {
-        t := self.peek();
-        if t&.is(.EndStmt) {
-            self.pop();
-            t = self.peek();
-        };
+        t := self.peek_optional_newline();
         if t&.is(.Op) && t.Op.op == terminator {
             @try(self.eat(terminator)) return;
             return(Ok = args.items());
@@ -374,11 +384,7 @@ fn parse_call_args(self: *Self, terminator: OperatorToken) Result([]*Ast, Str) =
     
         arg := @try(self.parse_expr()) return;
         args.push(arg);
-        t := self.peek();
-        if t&.is(.EndStmt) {
-            self.pop();
-            t = self.peek();
-        };
+        t := self.peek_optional_newline();
         @if(!t&.is(.Op)) return(Err = "expected ',' or ')' in arguments");
         
         if t&.is(.Op) && t.Op.op == terminator {
@@ -389,27 +395,40 @@ fn parse_call_args(self: *Self, terminator: OperatorToken) Result([]*Ast, Str) =
     };
 }
 
+fn peek_optional_newline(self: *Self) Token = {
+    t := self.peek();
+    if t&.is(.EndStmt) {
+        self.pop();
+        t = self.peek();
+    };
+    t
+}
 
-fn parse_def(self: *Self) Result(*Ast, Str) = {
-    self.pop();
-    name := @try(self.eat_ident()) return;
-    @try(self.eat(.@"(")) return;
-    
+fn parse_struct_items(self: *Self, terminator: OperatorToken) Result([]StructItem, Str) = {
     args := @ref StructItem.list(self.arena);
     dowhile {
-        t := self.peek();
+        t := self.peek_optional_newline();
         if t&.is(.Ident) {
             name := @try(self.eat_ident()) return;
             @try(self.eat(.@":")) return;
             type := @try(self.parse_expr()) return;
             args.push(name = name, value = type);
-            t := self.peek();
-            end := t&.is(.Op) && t.Op.op == .@")";
+            t := self.peek_optional_newline();
+            end := t&.is(.Op) && t.Op.op == terminator;
             @if(!end) @try(self.eat(.@",")) return;
         };
         t&.is(.Ident)
     };
-    @try(self.eat(.@")")) return;
+    
+    @try(self.eat(terminator)) return;
+    (Ok = args.items())
+}
+
+fn parse_def(self: *Self) Result(*Ast, Str) = {
+    self.parser_is_in_signeture = true;
+    name := @try(self.eat_ident()) return;
+    @try(self.eat(.@"(")) return;
+    args := @try(self.parse_struct_items(.@")")) return;
     
     t := self.peek();
     brace := t&.is(.Op) && t.Op.op == .@"{";
@@ -417,10 +436,11 @@ fn parse_def(self: *Self) Result(*Ast, Str) = {
         self.node(.VoidValue),
         @try(self.parse_expr()) return);
     @try(self.eat(.@"{")) return;
+    self.parser_is_in_signeture = false;
     body := @try(self.parse_block(true)) return;
     
     (Ok = self.node(Function = (
-        args = args.items(),
+        args = args,
         ret_type = ret,
         body = body,
         name = name,
@@ -458,7 +478,7 @@ fn get_prec(op: OperatorToken, unary: bool) i64 = {
 
 fn eat(self: *Self, expect: OperatorToken) Result(void, Str) = {
     t := self.pop();
-    @if(!t&.is(.Op) && t.Op.op != .@"=") return(Err = @tfmt("expected '%' after declaration", expect));
+    @if(!t&.is(.Op) && t.Op.op != .@"=") return(Err = @tfmt("expected '%'", expect));
     .Ok
 }
 
@@ -473,7 +493,9 @@ fn node(self: *Self, ast: Ast) *Ast = self.arena.boxed(Ast, ast);
 fn emit(self: *Self, ast: *Ast) void = {
     ::tagged_derive(Ast);  // HACK: @rec
     o := self.out;
-    o.push_repeated(self.statement_indent * 4, " ".ascii());
+    if !ast.is(.Block) {
+        o.push_repeated(self.statement_indent * 4, " ".ascii());
+    };
     @match(ast) {
         fn Declare(it) => {
             @fmt(o, "% :% ", it.name, @if(it.kind == .const, ":", "="));
@@ -493,10 +515,11 @@ fn emit(self: *Self, ast: *Ast) void = {
             };
             @fmt(o, ") ");
             self.emit_expr(it.ret_type);
-            @fmt(o, " = {\n");
+            @fmt(o, " =");
             self.emit(it.body);
         }
         fn Block(it) => {
+            @fmt(o, " {\n");
             self.statement_indent += 1;
             for it.body { it |
                 self.emit(it);
@@ -508,33 +531,35 @@ fn emit(self: *Self, ast: *Ast) void = {
         fn If(it) => {
             @fmt(o, "if ");
             self.emit_expr(it.cond);
-            @fmt(o, " {\n");
             self.emit(it.then);
             o.push_repeated(self.statement_indent * 4, " ".ascii());
-            @fmt(o, " else {\n");
-            self.emit(it.then);
-            @fmt(o, "}");
+            if !it.else.is(.VoidValue) {
+                @fmt(o, " else ");
+                self.emit(it.else);
+            };
         }
         fn While(it) => {
             @fmt(o, "while => ");
             self.emit_expr(it.cond);
-            @fmt(o, " {\n");
             self.emit(it.body);
-            @fmt(o, "}");
         }
-        
         fn Switch(it) => {
             @fmt(o, "@switch(");
             self.emit_expr(it.value);
             @fmt(o, ") {\n");
+            self.statement_indent += 1;
             for it.cases { it |
-                o.push_repeated(self.statement_indent.add(1) * 4, " ".ascii());
+                o.push_repeated(self.statement_indent * 4, " ".ascii());
                 @fmt(o, "@case(");
                 self.emit_expr(it.value);
-                @fmt(o, ") => ");
+                @fmt(o, ") =>");
                 self.emit(it.body);
             };
-            @fmt(o, "@default => (); \n}");
+            o.push_repeated(self.statement_indent * 4, " ".ascii());
+            @fmt(o, "@default => (); \n");
+            self.statement_indent -= 1;
+            o.push_repeated(self.statement_indent * 4, " ".ascii());
+            @fmt(o, "}");
         }
         @default => self.emit_expr(ast);
     };
@@ -577,6 +602,7 @@ fn emit_expr(self: *Self, ast: *Ast) void = {
             };
             @fmt(o, ")");
         }
+        fn GetType(it) => self.emit_expr(it[]);
         fn VoidValue() => @fmt(o, "()");
         fn StringLiteral(it) => @fmt(o, "\"%\"", it);
         fn StringInterpolate(it) => {
@@ -586,6 +612,33 @@ fn emit_expr(self: *Self, ast: *Ast) void = {
                 self.emit_expr(it.values[i]);
                 @fmt(o, ").push(\"%\")", it.parts[i + 1]);
             };
+        }
+        fn StructLiteral(it) => {
+            @fmt(o, "@as(");
+            self.emit_expr(it.type);
+            @fmt(o, ") (");
+            for it.fields { it |
+                @fmt(o, "% = ", it.name);
+                self.emit_expr(it.value);
+                @fmt(o, ", ");
+            };
+            @fmt(o, ")");
+        }
+        fn Cast(it) => {
+            @fmt(o, "cast(");
+            self.emit_expr(it.type);
+            @fmt(o, ", ");
+            self.emit_expr(it.value);
+            @fmt(o, ")");
+        }
+        fn If(it) => {
+            @fmt(o, "(@if(");
+            self.emit_expr(it.cond);
+            @fmt(o, ", ");
+            self.emit_expr(it.then);
+            @fmt(o, ", ");
+            self.emit_expr(it.else);
+            @fmt(o, "))");
         }
         @default => @fmt(o, "@run panic(\"TODO: emit_expr \%\", \"%\");", ast.tag());
     };
@@ -632,6 +685,8 @@ fn lex_new_token(self: *Self) Token = {
         return self.lex_new_token();
     };
     
+    // :WhitespaceSensitive this is fragile... (U32 .abc) vs (foo.abc)
+    @if(self.i > 0 && "\n !~[({".contains(self.src[self.i - 1]))
     if s[0] == ".".ascii() && (s[1].is_ascii_alpha() || s[1] == "_".ascii()) {
         self.i += 2;
         return self.lex_ident(start);
@@ -695,7 +750,7 @@ fn lex_new_token(self: *Self) Token = {
             
             if self.src[self.i - 1] == "{".ascii() {
                 self.lexer_is_in_interpolation = true;
-                s := self.src.slice(start + 1, self.i);
+                s := self.src.slice(start + 1, self.i - 1);
                 return(String = (value = s, interpolate = true));
             };
         };
