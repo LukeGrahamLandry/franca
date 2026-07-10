@@ -1,7 +1,17 @@
+## (Jul 9) si
 
-## (Jul 6)
+- progress. it gets through everything wthout dying. 
+  nothing interesting to say about this part, its just a parser. 
+  casts and '.' operator vs implicit self field is a bit sketchy. 
 
-- 
+## (Jul 8) si
+
+- slowly working through the level programs adding to the parser. 
+  for now just printing the ast in a useless way, don't care about it being compilable yet. 
+- im a bit impressed at how much restraint they have in not giving their language an import system given how much duplicated code the arch levels need. 
+
+## (Jul 6) si
+
 - a bit of a waste of time because i don't need it for running the fun things from the schmatic hub, 
   but i think im going to start 2.1 with a frontend for the level tests language. then my own campaign solutions are a good start for autotests, 
   and i get to continue my break from staring at pin positions which im kinda tired of. 

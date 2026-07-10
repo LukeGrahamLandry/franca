@@ -1,9 +1,10 @@
+// THIS IS UNFINISHED
+//
 // this is a transpiler from (the language the game writes the level tests in) to franca. 
 // i got the syntax/builtins are just from looking at in the test.si files in the game's "campaign" folder.
 //
 // each level's Input,Output types are implicitly defined based on the corresponding circuit.data. 
 //
-// TODO:
 // a quirk of my language (franca; not tc's si) is there's a lot of special identifiers that aren't 
 // technically keywords but will be very confusing if you shadow something the compiler wants to reference. 
 // so just to be safe, user identifiers are mangled with a "s_" prefix to make sure they can't collide with anything important. 
@@ -11,7 +12,7 @@
 // even if im not careful about checking for undeclared identifers in this frontend. 
 //
 
-// rt :: import("@/examples/circuit/tc/si_runtime.fr"); // .(constants, callbacks)
+rt :: import("@/examples/circuit/tc/si_runtime.fr");
 
 Ast :: @rec @tagged(
     Declare: @struct(name: Str, value: *Ast, kind: Keyword),
@@ -36,8 +37,8 @@ Ast :: @rec @tagged(
     StringLiteral: Str,
     StringInterpolate: @struct(parts: []Str, values: []*Ast),   // `literal {variable}`
     StructLiteral: @struct(type: *Ast, fields: []StructItem),
-    FieldAccess: @struct(place: *Ast, name: Str),
     Array: []*Ast,
+    Length: *Ast,
     Type: *TypeConst,
     GetType: *Ast,
     VoidValue,
@@ -86,6 +87,7 @@ Self :: @struct {
     arena: Alloc;
     out: *List(u8);
     statement_indent := 0;
+    err: *List(u8);
 };
 
 main :: fn() void = {
@@ -110,15 +112,57 @@ compile :: fn(src: Str, out: *List(u8)) Result(void, Str) = {
         src = src,
         out = out,
         arena = temp(),
+        err = @ref u8.list(temp()),  
     ); self := self&;
+    ::tagged_derive(Ast);  // HACK: @rec
     
+    @fmt(self.out, "rt :: import(\"@/examples/circuit/tc/si_runtime.fr\");\n");
     res := self.parse_block(false);
-    @match(res) {
-        fn Err(msg) => return(Err = @tfmt("[line %] %", self.line, msg));
-        fn Ok(ast) => self.emit(ast);
-    };
+    ast := res.or(fn(msg) => return(Err = @tfmt("[line %] %", self.line, msg)));
+    ast = self.sort_top_level(ast);
+    
+    self.emit(ast);
+    @if(self.err.len != 0) return(Err = self.err.items());
     
     .Ok
+}
+
+fn sort_top_level(self: *Self, ast: *Ast) *Ast = {
+    @assert(ast.is(.Block));
+    declarations := @ref list(*Ast, self.arena);
+    body := @ref list(*Ast, self.arena);
+    fields := @ref list(StructItem, self.arena);
+    for ast.Block.body { it |
+        dest := @if_else {
+            @if(it.is(.Declare) && it.Declare.kind != .const) => {
+                name, value := (it.Declare.name, it.Declare.value);
+                it = self.node(Binary = (
+                    lhs = self.node(Binary = (
+                        lhs = self.node(.ImplicitSelf),
+                        rhs = self.node(GetVar = (name = name)),
+                        op = .@".",
+                        assign = false,
+                    )),
+                    rhs = value,
+                    op = .@"=",
+                    assign = true,
+                ));
+                fields.push(name = name, value = self.node(.VoidValue));
+                body
+            };
+            @if(it.is(.Function) || it.is(.Declare)) => declarations;
+            @else => body;
+        };
+        dest.push(it);
+    };
+    declarations.push(self.node(Function = (
+        name = "reset",
+        args = empty(),
+        ret_type = self.node(.VoidValue),
+        body = self.node(Block = (body = body.items())),
+    )));
+    ast = self.node(Block = (body = declarations.items()));
+    ast
 }
 
 fn parse_block(self: *Self, expect_brace: bool) Result(*Ast, Str) = {
@@ -182,7 +226,7 @@ fn parse_block(self: *Self, expect_brace: bool) Result(*Ast, Str) = {
                     }
                     @default => {
                         if !@is(keyword, .const, .var, .let) {
-                            return(Err = @tfmt("(stmt) unexpected token %", t&.tag()));
+                            return(Err = @tfmt("TODO: parse keyword: %", keyword));
                         }
                         name := @try(self.eat_ident()) return;
                         @try(self.eat(.@"=")) return;
@@ -232,7 +276,10 @@ fn parse_if_body(self: *Self) Result(*Ast, Str) = {
             self.pop();
             
             else = @match(t.Keyword) {
-                fn elif() => @try(self.parse_if_body()) return
+                fn elif() => {
+                    e := @try(self.parse_if_body()) return;
+                    self.node(Block = (body = self.arena.alloc_init(*Ast, 1, fn(_) => e)))
+                }
                 fn else() => {
                     @try(self.eat(.@"{")) return;
                     @try(self.parse_block(true)) return
@@ -274,9 +321,11 @@ fn parse_expr(self: *Self, current_prec: i64) Result(*Ast, Str) = {
         fn Ident(it) => {
             self.pop();
             @if_else {
-                @if(it[0] == ".".ascii()) => self.node(FieldAccess = (
-                    place = self.node(.ImplicitSelf),
-                    name = it.rest(1),
+                @if(it[0] == ".".ascii()) => self.node(Binary = (
+                    lhs = self.node(.ImplicitSelf),
+                    rhs = self.node(GetVar = (name = it.rest(1))),
+                    op = .@".",
+                    assign = false,
                 ));
                 // this cast syntax is a bit unfortunate
                 @if(self.is_type_name(it)) => {
@@ -291,7 +340,7 @@ fn parse_expr(self: *Self, current_prec: i64) Result(*Ast, Str) = {
                         };
                         yield e;
                     };
-                    value := @try(self.parse_expr()) return;
+                    value := @try(self.parse_expr(9)) return;
                     self.node(Cast = (
                         type = e,
                         value = value,
@@ -344,6 +393,7 @@ fn parse_expr(self: *Self, current_prec: i64) Result(*Ast, Str) = {
                 if it.op == .@"(" {
                     args := @try(self.parse_call_args(.@")")) return;
                     lhs = self.node(Call = (f = lhs, arg = args));
+                    lhs = @try(self.sema_call(lhs)) return;
                     continue(true);
                 };
                 next_prec = @if(it.op == .@"[", 0, next_prec);
@@ -490,6 +540,17 @@ fn eat_ident(self: *Self) Result(Str, Str) = {
 
 fn node(self: *Self, ast: Ast) *Ast = self.arena.boxed(Ast, ast);
 
+fn sema_call(self: *Self, call: *Ast) Result(*Ast, Str) = {
+    it := call.Call;
+    @if_let(it.f) fn Binary(f) => if f.op == .@"." && f.rhs.is(.GetVar) && f.rhs.GetVar.name == "len" {
+        return(Ok = self.node(Length = f.lhs));
+    };
+    
+    
+    @if(!it.f.is(.GetVar)) return(Err = "callee must be an identifer");
+    (Ok = call)
+}
+
 fn emit(self: *Self, ast: *Ast) void = {
     ::tagged_derive(Ast);  // HACK: @rec
     o := self.out;
@@ -498,7 +559,8 @@ fn emit(self: *Self, ast: *Ast) void = {
     };
     @match(ast) {
         fn Declare(it) => {
-            @fmt(o, "% :% ", it.name, @if(it.kind == .const, ":", "="));
+            self.emit_mangled(it.name);
+            @fmt(o, " :% ", @if(it.kind == .const, ":", "="));
             self.emit_expr(it.value);
         }
         fn Return(value) => {
@@ -507,9 +569,11 @@ fn emit(self: *Self, ast: *Ast) void = {
             @fmt(o, ")");
         }
         fn Function(it) => {
-            @fmt(o, "% :: fn(self: *Self, ", it.name);
+            self.emit_mangled(it.name);
+            @fmt(o, " :: fn(self: *Self, ");
             for it.args { it |
-                @fmt(o, "%: ", it.name);
+                self.emit_mangled(it.name);
+                @fmt(o, ": ");
                 self.emit_expr(it.value);
                 @fmt(o, ", ");
             };
@@ -532,9 +596,13 @@ fn emit(self: *Self, ast: *Ast) void = {
             @fmt(o, "if ");
             self.emit_expr(it.cond);
             self.emit(it.then);
-            o.push_repeated(self.statement_indent * 4, " ".ascii());
             if !it.else.is(.VoidValue) {
-                @fmt(o, " else ");
+                o.push_repeated(self.statement_indent * 4, " ".ascii());
+                while => o.len > 1 && !o.items().ends_with(";") {
+                    o.len -= 1;
+                };
+                o.len -= 1;
+                @fmt(o, " else");
                 self.emit(it.else);
             };
         }
@@ -561,38 +629,81 @@ fn emit(self: *Self, ast: *Ast) void = {
             o.push_repeated(self.statement_indent * 4, " ".ascii());
             @fmt(o, "}");
         }
+        fn Binary(it) => {
+            if it.assign {
+                // TODO: can it have side effects? might need to put place in a var so don't evaluate twice.
+                self.emit_expr(it.lhs);
+                @fmt(o, " = ");
+                if it.op == .@"=" {
+                    self.emit_expr(it.rhs);
+                } else {
+                    self.emit_expr(ast);
+                };
+            } else {
+                self.emit_expr(ast);
+            }
+        }
         @default => self.emit_expr(ast);
     };
-    @fmt(o, ";\n");
+    @if(!@is(ast, .If, .While, .Function)) @fmt(o, ";\n");
 }
-
 
 fn emit_expr(self: *Self, ast: *Ast) void = {
     o := self.out;
     @match(ast) {
-        fn GetVar(it) => @fmt(o, "get(%)", it.name);
+        fn GetVar(it) => {
+            names := @static import("@/examples/circuit/parse.fr")'collect_scope_names(Type.scope_of(rt.constants));
+            is_builtin := names.contains(it.name);
+            if is_builtin {
+                @fmt(o, "rt.constants.%", it.name);
+            } else {
+                self.emit_mangled(it.name);
+            };
+        };
         fn Literal(it) => @fmt(o, "%", it.value);
         fn ImplicitSelf() => @fmt(o, "self");
         fn Binary(it) => {
-            @fmt(o, "binary(");
-            self.emit_expr(it.lhs);
-            @fmt(o, ", '%', ", it.op);
-            self.emit_expr(it.rhs);
-            @fmt(o, ")");
-        }
-        fn FieldAccess(it) => {
-            self.emit_expr(it.place);
-            @fmt(o, ".%", it.name);
+            if it.op == .@"." {
+                self.emit_expr(it.lhs);
+                @fmt(o, ".");
+                @match(it.rhs) {
+                    fn GetVar(it) => self.emit_mangled(it.name);
+                    @default => @fmt(self.err, "Binary('.').rhs must be an identifier");
+                };
+                return();
+            };
+            
+            if it.op == .@"=" {
+                self.emit_expr(it.lhs);
+                @fmt(o, " = ");
+                self.emit_expr(it.rhs);
+            } else {
+                @fmt(o, "binary(");
+                self.emit_expr(it.lhs);
+                @fmt(o, ", '%', ", it.op);
+                self.emit_expr(it.rhs);
+                @fmt(o, ")");
+            }
         }
         fn Call(it) => {
-            @fmt(o, "call(");
-            self.emit_expr(it.f);
-            @fmt(o, ", (");
+            is_callback := false;
+            @if_let(it.f) fn GetVar(it) => {
+                names := @static import("@/examples/circuit/parse.fr")'collect_scope_names(Type.scope_of(rt.callbacks));
+                is_callback = names.contains(it.name);
+            };
+            if is_callback {
+                @fmt(o, "rt'callbacks'%(self.g, ", it.f.GetVar.name);
+            } else {
+                @fmt(o, "self.");
+                self.emit_expr(it.f);
+                @fmt(o, "(");
+            };
+            
             for it.arg { it |
                 self.emit_expr(it);
                 @fmt(o, ",");
             };
-            @fmt(o, "))");
+            @fmt(o, ")");
         }
         fn Block(it) => {
             @fmt(o, "(");
@@ -612,6 +723,7 @@ fn emit_expr(self: *Self, ast: *Ast) void = {
                 self.emit_expr(it.values[i]);
                 @fmt(o, ").push(\"%\")", it.parts[i + 1]);
             };
+            @fmt(o, ".end()");
         }
         fn StructLiteral(it) => {
             @fmt(o, "@as(");
@@ -640,7 +752,21 @@ fn emit_expr(self: *Self, ast: *Ast) void = {
             self.emit_expr(it.else);
             @fmt(o, "))");
         }
+        fn Length(it) => {
+            self.emit_expr(it[]);
+            @fmt(o, ".len");
+        }
         @default => @fmt(o, "@run panic(\"TODO: emit_expr \%\", \"%\");", ast.tag());
+    };
+}
+
+fn emit_mangled(self: *Self, it: Str) void = {
+    o := self.out;
+    needs_quotes := ".#".contains(it[0]);  // :SLOW
+    if needs_quotes {
+        @fmt(o, "@\"s_%\"", it);
+    } else {
+        @fmt(o, "s_%", it);
     };
 }
 
