@@ -1,3 +1,16 @@
+## (Jul 10) si
+
+sema reflect to get the defs from si_runtime.fr. 
+now that i can actually detect errors, caught a few more things: switch.default, couple more callbacks, 
+
+## (Jul 10) si
+
+im a bit torn between doing it properly (infering the types seperately) or trying to just do 
+it syntatically and do all the work in comptime of the output franca code. i feel like 
+the later would work now but if they make the language anymore complicated i'll regret it. 
+
+started new circuit.data loading.
+
 ## (Jul 9) si
 
 - progress. it gets through everything wthout dying. 

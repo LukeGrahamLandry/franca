@@ -54,7 +54,6 @@ it works well enough to run my overture/leg in the maze and a few things from th
 - need a better interface for choosing circuit/programs, showing memory contents
 - pre_read mistakes would be a lot easier to debug if they were made explicit seperate operations in the trace display. 
 - dropping file doesn't work in franca-web-playground (even when fixed will be annoying because need to feed it all the custom components individually)
-- web have gallery from my archive of the old schematic hub
 - needs the franca library folder available at runtime
 - "str scratch frame"
 - from schematic hub
@@ -77,6 +76,9 @@ it works well enough to run my overture/leg in the maze and a few things from th
 - fast mode that doesn't even save_wire_values once per frame
 - ui: allow copying the code to clipboard
 - `Main :: import().examples.circuit;` doesn't work in the web demo
+- pressing l to fetch archive doesn't work in web demo
+  `panic! Assertion Failed: jit_addr too early: perform_syscall__12311`
+- nice ui for web gallery from my archive of the old schematic hub
 - i don't really care about ui for visually editing the wires
   but i have a bunch of code for converting positions into graph 
   and rn the only way to test it involves opening Steam which is a pain, 

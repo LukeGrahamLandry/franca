@@ -11,13 +11,26 @@
 // also helps sandbox in that you can't access unsafe things (like pointer arithmetic, import(), inline assembly, etc.)
 // even if im not careful about checking for undeclared identifers in this frontend. 
 //
+//
+// TODO: default return value for fallthrough of TestResult?
+// TODO: add type declare of self_fields_initial, Input, Output
+// TODO: make_type(rt.constants.Translation)
+// TODO: break
+// TODO: sort
+// TODO: check types here for nicer error message than just generating invalid franca code
 
 rt :: import("@/examples/circuit/tc/si_runtime.fr");
 
-Ast :: @rec @tagged(
+Ast :: @rec @struct {
+    expr: Ast2 #use;
+    line: i64;
+    type: TypeConst;
+};
+
+Ast2 :: @tagged(
     Declare: @struct(name: Str, value: *Ast, kind: Keyword),
     While: @struct(cond: *Ast, body: *Ast),
-    Block: @struct(body: []*Ast),
+    Block: @struct(body: []*Ast, kind: (@enum(u8) (Block, Tuple, Array)) = .Block),
     Function: @struct {
         args: []StructItem;
         ret_type: *Ast;
@@ -25,19 +38,20 @@ Ast :: @rec @tagged(
         name: Str;
     },
     Return: *Ast,
-    Assign: @struct(place: *Ast, value: *Ast),
-    Switch: @struct(value: *Ast, cases: []SwitchCase),
-    If: @struct(cond: *Ast, then: *Ast, else: *Ast),
+    Switch: @struct(value: *Ast, cases: []SwitchCase, default: *Ast),
+    If: @struct(cond: *Ast, then: *Ast, else: *Ast, is_statement: bool),
+    Break,
     
     GetVar: @struct(name: Str),
     Cast: @struct(type: *Ast, value: *Ast),
     Literal: @struct(value: i64),
     Binary: @struct(lhs: *Ast, rhs: *Ast, op: OperatorToken, assign: bool),
+    FieldAccess: @struct(place: *Ast, name: Str),
     Call: @struct(f: *Ast, arg: []*Ast),
     StringLiteral: Str,
     StringInterpolate: @struct(parts: []Str, values: []*Ast),   // `literal {variable}`
     StructLiteral: @struct(type: *Ast, fields: []StructItem),
-    Array: []*Ast,
+    NewArray: @struct(length: *Ast),
     Length: *Ast,
     Type: *TypeConst,
     GetType: *Ast,
@@ -53,6 +67,9 @@ TypeConst :: @rec @tagged(
     String,
     Bool,
     Void,
+    Unknown,
+    Type,
+    Tuple: []*TypeConst,
 );
 StructItem :: @struct(name: Str, value: *Ast);
 SwitchCase :: @struct(value: *Ast, body: *Ast);
@@ -62,7 +79,7 @@ OperatorToken :: @enum(u8) (
     @"[", @"]", @"(", @")", @":", "?", @".", @"{", @"}", 
     @"=", @",", @"!", @"$", 
 );
-Keyword :: @enum(u8) (def, const, var, let, if, elif, else, while, switch, return);
+Keyword :: @enum(u8) (def, const, var, let, if, elif, else, while, switch, return, default, break);
 
 Token :: @tagged(
     Ident: Str,
@@ -83,11 +100,20 @@ Self :: @struct {
     lexer_indentation_level := 0;
     token: ?Token = .None;
     parser_is_in_signeture := false;
+    scopes: List(HashMap(Str, ScopeItem));
+    sema_is_top_level := false;
+    implicit_self_fields: HashMap(Str, *TypeConst);
     
     arena: Alloc;
     out: *List(u8);
     statement_indent := 0;
     err: *List(u8);
+};
+#use("@/lib/collections/map.fr");
+
+ScopeItem :: @struct {
+    type: *TypeConst;
+    constant: ?*Ast;
 };
 
 main :: fn() void = {
@@ -95,14 +121,15 @@ main :: fn() void = {
     #use("@/lib/sys/fs.fr");
     dirs := collect_directory_ordered(path, temp(), temp())
         || @panic("missing %", path);
+    out := @ref u8.list(100000, temp());
     enumerate dirs { i, it | 
         path := @tfmt("%/%/test.si", path, it.name);
-        @println("==== %. % ====", i, it.name);
+        @fmt(out, "/* %. % */\n", i, it.name);
         if read_entire_file(temp(), path) { src |
-            out := @ref u8.list(temp());
             res := compile(src, out);
-            println(out.items());
             @if_let(res) fn Err(msg) => panic(msg);
+            print(out.items());
+            out.clear();
         };
     };
 }
@@ -113,41 +140,116 @@ compile :: fn(src: Str, out: *List(u8)) Result(void, Str) = {
         out = out,
         arena = temp(),
         err = @ref u8.list(temp()),  
+        scopes = list(temp()),
+        implicit_self_fields = init(temp()),
     ); self := self&;
-    ::tagged_derive(Ast);  // HACK: @rec
     
-    @fmt(self.out, "rt :: import(\"@/examples/circuit/tc/si_runtime.fr\");\n");
+    @fmt(self.out, "rt :: import(\"@/examples/circuit/tc/si_runtime.fr\");\nsi ::");
     res := self.parse_block(false);
     ast := res.or(fn(msg) => return(Err = @tfmt("[line %] %", self.line, msg)));
-    ast = self.sort_top_level(ast);
+    ast := self.sort_top_level(ast);
+    
+    s := self.reflect_builtin_consts();
+    self.scopes&.push(s);
+    self.hoist_constants(ast);
+    self.sema(ast);
+    self.scopes&.pop();
     
     self.emit(ast);
-    @if(self.err.len != 0) return(Err = self.err.items());
+    
+    if self.err.len != 0 {
+        @fmt(self.out, "errors :: \"\"\"\n%\n\"\"\";\n", self.err.items());
+        return(Err = self.err.items());
+    };
     
     .Ok
 }
 
+fn reflect_builtin_consts(self: *Self) HashMap(Str, ScopeItem) = {
+    make_type :: fn(t: Type) *TypeConst = {
+        x: TypeConst = @match(t.get_type_info_ref()) {
+            fn Bool() => .Bool;
+            fn Int(it) => (Int = (signed = it.signed, bits = it.bit_count));
+            fn Enum(it) => return(make_type(it.raw));
+            @default => @if_else {
+                @if(t == Type) => .Type;
+                @if(t == rt.constants.Translation) => (Tuple = empty());  // TODO
+                @if(t == Str) => .String;
+                @if(t == void) => .Void;
+                @else => @panic("TODO: reflect_builtin_consts type=%", t.typename().str());;
+            };
+        };
+        ast_alloc().boxed(TypeConst, x)
+    }
+    
+    callbacks := @run {
+        callbacks := @ref Ty(Str, TypeConst).list(ast_alloc());
+        S := Type.scope_of(rt.callbacks);
+        for get_constants(S) { name | 
+            fid := get_constant(FuncId, S, name)
+                || @panic("rt.callback.% isn't a function", name.str());
+            func := get_function_ast(fid, true, false, true, false);
+            
+            args := @ref list(*TypeConst, ast_alloc());
+            each func.arg.bindings.items().rest(1) { it |
+                @assert(it.ty&.is(.Finished));
+                args.push(make_type(it.ty.Finished));
+            };
+            @assert(func.ret&.is(.Finished));
+            push(callbacks, (name.str(), (Function = (
+                args = args.items(),
+                ret = make_type(func.ret.Finished),
+            ))));
+        };
+        callbacks.items()
+    };
+    
+    constants := @run {
+        constants := @ref Ty(Str, *TypeConst, *TypeConst).list(ast_alloc());
+        S := Type.scope_of(rt.constants);
+        for get_constants(S) { name | 
+            ptr, type := get_constant(S, name).unwrap();
+            // TODO: `.Unknown` doesn't work here because of the @rec TypeInfo.Named hackyness? but `(Unknown = ())` works :compilerbug
+            value := ast_alloc().boxed(TypeConst, (Unknown = ()));
+            if type == Type {
+                value = make_type(Type.ptr_from_raw(ptr)[]);
+            };
+            push(constants, (name.str(), make_type(type), value));
+        };
+        constants.items()
+    };
+    
+    s: HashMap(Str, ScopeItem) = init(temp());
+    each callbacks { it |
+        s&.insert(it._0, (type = it._1&, constant = .None));
+    };
+    each constants { it |
+        s&.insert(it._0, (type = it._1, constant = @if(it._1.is(.Type), (Some = self.node(Type = it._2)), .None)));
+    };
+    s
+}
+
+// top level statements get bundled into an initializer. variables become fields of a struct that's an argument to all functions. 
 fn sort_top_level(self: *Self, ast: *Ast) *Ast = {
     @assert(ast.is(.Block));
     declarations := @ref list(*Ast, self.arena);
+    declarations.push(zeroed(*Ast));  // :patch
     body := @ref list(*Ast, self.arena);
-    fields := @ref list(StructItem, self.arena);
     for ast.Block.body { it |
         dest := @if_else {
             @if(it.is(.Declare) && it.Declare.kind != .const) => {
+                self.line = it.line;
                 name, value := (it.Declare.name, it.Declare.value);
                 it = self.node(Binary = (
-                    lhs = self.node(Binary = (
-                        lhs = self.node(.ImplicitSelf),
-                        rhs = self.node(GetVar = (name = name)),
-                        op = .@".",
-                        assign = false,
+                    lhs = self.node(FieldAccess = (
+                        place = self.node(.ImplicitSelf),
+                        name = name,
                     )),
                     rhs = value,
                     op = .@"=",
                     assign = true,
                 ));
-                fields.push(name = name, value = self.node(.VoidValue));
+                self.implicit_self_fields&.insert(name, value.type&);
                 body
             };
             @if(it.is(.Function) || it.is(.Declare)) => declarations;
@@ -155,14 +257,248 @@ fn sort_top_level(self: *Self, ast: *Ast) *Ast = {
         };
         dest.push(it);
     };
-    declarations.push(self.node(Function = (
+    self.line = -1;
+    declarations[0] = self.node(Function = (  // :patch
         name = "reset",
         args = empty(),
         ret_type = self.node(.VoidValue),
         body = self.node(Block = (body = body.items())),
-    )));
+    ));
     ast = self.node(Block = (body = declarations.items()));
     ast
+}
+
+fn hoist_constants(self: *Self, ast: *Ast) void = {
+    @assert(ast.is(.Block));
+    Sort'default(*Ast, ast.Block.body, fn(a, b) => int(b.expr&.is(.Declare)) <= int(a.expr&.is(.Declare)));
+    for ast.Block.body { a |
+        @if_let(a) fn Function(it) => {
+            s := self.scopes[self.scopes.len - 1]&;
+            args := list(*TypeConst, self.arena);
+            for it.args { it |
+                args&.push(self.eval_type(it.value));
+            };
+            s.insert(it.name, (
+                type = self.node_t(Function = (
+                    args = args.items(),
+                    ret = self.eval_type(it.ret_type),
+                )), 
+                constant = (Some = a),
+            ));
+        }
+    };
+}
+
+fn sema(self: *Self, ast: *Ast) void = {
+    self.line = ast.line;
+    @match(ast) {
+        fn GetVar(it) => {
+            each_rev self.scopes { s |
+                if s.get(it.name) { ty |
+                    ast.type = ty.type[];
+                    return();
+                };
+            };
+            
+            // TODO: check that it's actually declared
+            // TODO: set the type from the declaration
+            if self.sema_is_top_level {
+                if self.implicit_self_fields&.get(it.name) { ty | 
+                    ast.expr = (FieldAccess = (
+                        place = self.node(.ImplicitSelf),
+                        name = it.name,
+                    ));
+                    ast.type = ty[];
+                    return();
+                };
+            };
+        
+            @fmt(self.err, "[line %] undeclared variable (%)\n", ast.line, it.name);
+        }
+        fn FieldAccess(it) => {
+            self.sema(it.place);
+            if it.place.expr&.is(.ImplicitSelf) {
+                if self.implicit_self_fields&.get(it.name) { ty | 
+                    ast.type = ty[];
+                } else {
+                    @fmt(self.err, "[line %] undeclared self field (%)\n", ast.line, it.name);
+                };
+            }
+        }
+        fn Declare(it) => {
+            self.sema(it.value);
+            s := self.scopes[self.scopes.len - 1]&;
+            s.insert(it.name, (
+                type = it.value.type&,
+                constant = @if(it.kind == .const, (Some = it.value), .None),
+            ));
+        }
+        fn Block(it) => {
+            self.scopes&.push(init(temp()));
+            for it.body { it |
+                self.sema(it);
+            };
+            self.scopes&.pop();
+            ast.type = @match(it.kind) {
+                fn Tuple() => .Unknown;  // TODO
+                fn Block() => .Void;
+                fn Array() => (Array = (inner = it.body[0].type&, len = it.body.len));
+            };
+        }
+        fn StringLiteral() => {
+            ast.type = .String;
+        }
+        fn StringInterpolate(it) => {
+            for it.values { it |
+                self.sema(it);
+            };
+            ast.type = .String;
+        }
+        fn Binary(it) => {
+            self.sema(it.lhs);
+            self.sema(it.rhs);
+            if @is(it.op, .@"!=", .@"==", .@">=", .@"<=", .@"<", .@">", .@"!", .@"||", .@"&&") {
+                ast.type = .Bool;
+            };
+            if @is(it.op, .@"<<", .@">>", .@"+", .@"-", .@"*", .@"/", .@"%", .@"^", .@"|", .@"&", .@"~") {
+                ast.type = it.lhs.type;
+            };
+            if it.op == .@"[" {
+                ast.type = @match(it.lhs.type) {
+                    fn String() => (Int = (signed = false, bits = 8));
+                    fn Array(it) => it.inner[];
+                    @default => {
+                        @fmt(self.err, "[line %] type is not indexable: %\n", self.line, it.lhs.type&.tag());
+                        .Unknown
+                    };
+                };
+            };
+        }
+        fn Call(it) => {
+            if !it.f.is(.GetVar) {
+                @fmt(self.err, "[line %] callee non-identifier: %\n", ast.line, it.f.expr&.tag());
+                return()
+            }
+            callee := it.f.GetVar.name;
+            
+            if callee == "sort" {
+                // TODO
+                return();
+            };
+            
+            for it.arg { it |
+                self.sema(it);
+            };
+            ::tagged_derive(@type it.f.type);
+            
+            if callee == "array" && it.arg.len == 2 {
+                ast.type = (Array = (inner = self.eval_type(it.arg[0]), len = 0));
+                ast.expr = (NewArray = (length = it.arg[1]));
+                return();
+            };
+            
+            
+            self.sema(it.f);
+            @match(it.f.type&) {
+                fn Function(it) => {
+                    ast.type = it.ret[];
+                };
+                @default => @fmt(self.err, "[line %] missing function type for callee (%)\n", ast.line, callee);
+            };
+        }
+        fn Function(it) => {
+            s: HashMap(Str, ScopeItem) = init(temp());
+            for it.args { it |
+                s&.insert(it.name, (
+                    type = self.eval_type(it.value),
+                    constant = .None,
+                ));
+            };
+            self.scopes&.push(s);
+            self.sema_is_top_level = it.name == "reset";
+            self.sema(it.body);
+            self.sema_is_top_level = false;
+            self.scopes&.pop();
+        }
+        fn While(it) => {
+            self.sema(it.cond);
+            self.sema(it.body);
+            ast.type = .Void;
+        }
+        fn If(it) => {
+            self.sema(it.cond);
+            self.sema(it.then);
+            self.sema(it.else);
+            ast.type = it.then.type;
+        }
+        fn Switch(it) => {
+            self.sema(it.value);
+            for it.cases { it |
+                self.sema(it.value);
+                self.sema(it.body);
+            };
+            ast.type = .Void;
+        }
+        fn Return(it) => {
+            self.sema(it[]);
+        }
+        fn Cast(it) => {
+            self.sema(it.value);
+            ast.type = self.eval_type(it.type)[];
+        }
+        fn StructLiteral(it) => {
+            type := self.eval_type(it.type);
+            for it.fields { it |
+                self.sema(it.value);
+            };
+            ast.type = type[];
+        }
+        @default => ();
+    };
+    
+    if @is(ast.expr&, .Return, .Switch, .While, .Function, .Declare) {
+        ast.type = .Void;
+    };
+}
+
+fn eval_type(self: *Self, ast: *Ast) *TypeConst = {
+    t := @match(ast) {
+        fn Type(it) => it[];
+        fn VoidValue() => self.node_t(.Void);
+        fn GetVar(it) => {
+            yield :: local_return;
+            check("U".ascii(), false);
+            check("S".ascii(), true);
+            check :: fn(char: u8, signed: bool) => if it.name[0] == char {
+                n, remaining := convert_number(it.name.rest(1), 10, dec_digit);
+                if remaining.len == 0 {
+                    yield self.node_t(Int = (signed = signed, bits = n));
+                };
+            };
+            
+            each_rev self.scopes { s |
+                if s.get(it.name) { ty |
+                    if ty.constant { ty |
+                        @if_let(ty) fn Type(ty) => return(ty[]);
+                    };
+                };
+            };
+            
+            @if(it.name == "Input") yield(self.node_t(.Unknown));
+            @if(it.name == "Output") yield(self.node_t(.Unknown));
+            
+            @fmt(self.err, "[line %] failed to evaluate type expression: %\n", ast.line, it.name);
+            self.node_t(.Unknown)
+        }
+        fn GetType(it) => self.eval_type(it[]);
+        @default => {
+            @fmt(self.err, "[line %] failed to evaluate type expression: %\n", ast.line, ast.expr&.tag());
+            self.node_t(.Unknown)
+        };
+    };
+    ast.expr = (Type = t);
+    ast.type = .Type;
+    t
 }
 
 fn parse_block(self: *Self, expect_brace: bool) Result(*Ast, Str) = {
@@ -187,6 +523,7 @@ fn parse_block(self: *Self, expect_brace: bool) Result(*Ast, Str) = {
                 self.pop();
                 @match(keyword) {
                     fn def() => @try(self.parse_def()) return;
+                    fn break() => self.node(.Break);
                     fn return() => {
                         t := self.peek();
                         value := @if(!t&.is(.EndStmt) && !(t&.is(.Op) && t.Op.op == .@"}"), 
@@ -208,25 +545,34 @@ fn parse_block(self: *Self, expect_brace: bool) Result(*Ast, Str) = {
                         cases := @ref SwitchCase.list(self.arena);
                         t := self.peek();
                         @if(!t&.is(.EndStmt)) return(Err = "expected new line before switch case");
+                        default := self.node(.VoidValue);
                         
                         // :WhitespaceSensitive because switch statements have no delimiters...
                         lexer_indentation_level := self.lexer_indentation_level;
                         dowhile {
                             self.pop();
+                            
+                            t := self.peek();
+                            if t&.is(.Keyword) && t.Keyword == .default {
+                                self.pop();
+                                @try(self.eat(.@"{")) return;
+                                default = @try(self.parse_block(true)) return;
+                            } else {
                             value := @try(self.parse_expr()) return;
                             @try(self.eat(.@"{")) return;
                             body := @try(self.parse_block(true)) return;
                             cases.push(value = value, body = body);
+                            };
                             t := self.peek();
                             @if(!t&.is(.EndStmt)) return(Err = "expected new line after switch case");
                             self.lexer_indentation_level == lexer_indentation_level
                         };
                         
-                        self.node(Switch = (value = inspect, cases = cases.items()))
+                        self.node(Switch = (value = inspect, cases = cases.items(), default = default))
                     }
                     @default => {
                         if !@is(keyword, .const, .var, .let) {
-                            return(Err = @tfmt("TODO: parse keyword: %", keyword));
+                            return(Err = @tfmt("keyword '%' cannot start a statement", keyword));
                         }
                         name := @try(self.eat_ident()) return;
                         @try(self.eat(.@"=")) return;
@@ -271,6 +617,7 @@ fn parse_if_body(self: *Self) Result(*Ast, Str) = {
     
     else := self.node(.VoidValue);
     t := self.peek();
+    // TODO: this would be friendly `t := self.peek_optional_newline();` but it messes up the new line after statement check if there isn't an else/elif 
     if t&.is(.Keyword) {
         if @is(t.Keyword, .elif, .else) {
             self.pop();
@@ -288,7 +635,7 @@ fn parse_if_body(self: *Self) Result(*Ast, Str) = {
             };
         }
     };
-    (Ok = self.node(If = (cond = cond, then = then, else = else)))
+    (Ok = self.node(If = (cond = cond, then = then, else = else, is_statement = true)))
 }
 
 
@@ -321,11 +668,9 @@ fn parse_expr(self: *Self, current_prec: i64) Result(*Ast, Str) = {
         fn Ident(it) => {
             self.pop();
             @if_else {
-                @if(it[0] == ".".ascii()) => self.node(Binary = (
-                    lhs = self.node(.ImplicitSelf),
-                    rhs = self.node(GetVar = (name = it.rest(1))),
-                    op = .@".",
-                    assign = false,
+                @if(it[0] == ".".ascii()) => self.node(FieldAccess = (
+                    place = self.node(.ImplicitSelf),
+                    name = it.rest(1),
                 ));
                 // this cast syntax is a bit unfortunate
                 @if(self.is_type_name(it)) => {
@@ -354,12 +699,12 @@ fn parse_expr(self: *Self, current_prec: i64) Result(*Ast, Str) = {
             self.pop();
             if it.op == .@"(" {
                 e := @try(self.parse_call_args(.@")")) return;
-                e := @if(e.len == 1, e[0], self.node(Block = (body = e)));
+                e := @if(e.len == 1, e[0], self.node(Block = (body = e, kind = .Tuple)));
                 yield e;
             };
             if it.op == .@"[" {
                 e := @try(self.parse_call_args(.@"]")) return;
-                e := @if(e.len == 1, e[0], self.node(Block = (body = e)));
+                e := @if(e.len == 1, e[0], self.node(Block = (body = e, kind = .Array)));
                 yield e;
             };
             if it.op == .@"<" {
@@ -400,12 +745,17 @@ fn parse_expr(self: *Self, current_prec: i64) Result(*Ast, Str) = {
                 rhs := @try(self.parse_expr(next_prec)) return;
                 @if(it.op == .@"[") @try(self.eat(.@"]")) return;
                 
-                if it.op == .@"?" {
-                    @try(self.eat(.@":")) return;
-                    else := @try(self.parse_expr(next_prec)) return;
-                    lhs = self.node(If = (cond = lhs, then = rhs, else = else));
-                } else {
-                    lhs = self.node(Binary = (lhs = lhs, rhs = rhs, op = it.op, assign = false));
+                lhs = @match(it.op) {
+                    fn @"?"() => {
+                        @try(self.eat(.@":")) return;
+                        else := @try(self.parse_expr(next_prec)) return;
+                        self.node(If = (cond = lhs, then = rhs, else = else, is_statement = false))
+                    } 
+                    fn @"."() => {
+                        @if(!rhs.is(.GetVar)) return(Err = "operator '.' expected an identifier");
+                        self.node(FieldAccess = (place = lhs, name = rhs.GetVar.name))
+                    }
+                    @default => self.node(Binary = (lhs = lhs, rhs = rhs, op = it.op, assign = false));
                 };
                 
                 done = false;
@@ -538,12 +888,14 @@ fn eat_ident(self: *Self) Result(Str, Str) = {
     (Ok = name.Ident)
 }
 
-fn node(self: *Self, ast: Ast) *Ast = self.arena.boxed(Ast, ast);
+fn node(self: *Self, ast: Ast2) *Ast = {
+    self.arena.boxed(Ast, (expr = ast, line = self.line, type = .Unknown))
+}
 
 fn sema_call(self: *Self, call: *Ast) Result(*Ast, Str) = {
     it := call.Call;
-    @if_let(it.f) fn Binary(f) => if f.op == .@"." && f.rhs.is(.GetVar) && f.rhs.GetVar.name == "len" {
-        return(Ok = self.node(Length = f.lhs));
+    @if_let(it.f) fn FieldAccess(f) => if f.name == "len" {
+        return(Ok = self.node(Length = f.place));
     };
     
     
@@ -552,7 +904,6 @@ fn sema_call(self: *Self, call: *Ast) Result(*Ast, Str) = {
 }
 
 fn emit(self: *Self, ast: *Ast) void = {
-    ::tagged_derive(Ast);  // HACK: @rec
     o := self.out;
     if !ast.is(.Block) {
         o.push_repeated(self.statement_indent * 4, " ".ascii());
@@ -580,6 +931,7 @@ fn emit(self: *Self, ast: *Ast) void = {
             @fmt(o, ") ");
             self.emit_expr(it.ret_type);
             @fmt(o, " =");
+            self.sema_is_top_level = it.name == "reset";
             self.emit(it.body);
         }
         fn Block(it) => {
@@ -624,7 +976,8 @@ fn emit(self: *Self, ast: *Ast) void = {
                 self.emit(it.body);
             };
             o.push_repeated(self.statement_indent * 4, " ".ascii());
-            @fmt(o, "@default => (); \n");
+            @fmt(o, "@default => ");
+            self.emit(it.default);
             self.statement_indent -= 1;
             o.push_repeated(self.statement_indent * 4, " ".ascii());
             @fmt(o, "}");
@@ -645,7 +998,11 @@ fn emit(self: *Self, ast: *Ast) void = {
         }
         @default => self.emit_expr(ast);
     };
-    @if(!@is(ast, .If, .While, .Function)) @fmt(o, ";\n");
+    @if(!@is(ast.expr&, .If, .While, .Function)) @fmt(o, ";\n");
+}
+
+fn node_t(self: *Self, t: TypeConst) *TypeConst = {
+    self.arena.boxed(TypeConst, t)
 }
 
 fn emit_expr(self: *Self, ast: *Ast) void = {
@@ -662,17 +1019,20 @@ fn emit_expr(self: *Self, ast: *Ast) void = {
         };
         fn Literal(it) => @fmt(o, "%", it.value);
         fn ImplicitSelf() => @fmt(o, "self");
+        fn FieldAccess(it) => {
+            self.emit_expr(it.place);
+            @fmt(o, ".");
+            self.emit_mangled(it.name);
+        }
         fn Binary(it) => {
-            if it.op == .@"." {
+            if it.op == .@"+" && ast.type&.is(.String) {
+                @fmt(o, "new_string_builder().push(");
                 self.emit_expr(it.lhs);
-                @fmt(o, ".");
-                @match(it.rhs) {
-                    fn GetVar(it) => self.emit_mangled(it.name);
-                    @default => @fmt(self.err, "Binary('.').rhs must be an identifier");
-                };
+                @fmt(o, ").push(");
+                self.emit_expr(it.rhs);
+                @fmt(o, ").end()");
                 return();
             };
-            
             if it.op == .@"=" {
                 self.emit_expr(it.lhs);
                 @fmt(o, " = ");
@@ -705,7 +1065,15 @@ fn emit_expr(self: *Self, ast: *Ast) void = {
             };
             @fmt(o, ")");
         }
+        fn NewArray(it) => {
+            @fmt(o, "zeroed(Array(");
+            self.emit_type(ast.type&);
+            @fmt(o, ", ");
+            self.emit_expr(it.length);
+            @fmt(o, ")");
+        }
         fn Block(it) => {
+            @if(it.kind == .Array) @fmt(o, "@array");
             @fmt(o, "(");
             for it.body { it |
                 self.emit_expr(it);
@@ -756,7 +1124,18 @@ fn emit_expr(self: *Self, ast: *Ast) void = {
             self.emit_expr(it[]);
             @fmt(o, ".len");
         }
-        @default => @fmt(o, "@run panic(\"TODO: emit_expr \%\", \"%\");", ast.tag());
+        fn Type(it) => self.emit_type(it[]);
+        @default => @fmt(o, "@run panic(\"TODO: emit_expr \%\", \"%\");", ast.expr&.tag());
+    };
+}
+
+fn emit_type(self: *Self, it: *TypeConst) void = {
+    ::tagged_derive(TypeConst);
+    o := self.out;
+    @match(it) {
+        fn Int() => @fmt(o, "rt.constants.Int");
+        fn Bool() => @fmt(o, "rt.constants.Bool");
+        @default => @fmt(o, "todo:TYPE");
     };
 }
 
@@ -790,6 +1169,7 @@ fn lex_new_token(self: *Self) Token = {
     start := self.i;
     s := self.src.rest(self.i);
     
+    if s[0] == "/".ascii() {
     if s.starts_with("//") {
         while => self.i < self.src.len && !self.src.rest(self.i).starts_with("\n") {
             self.i += 1;
@@ -809,6 +1189,7 @@ fn lex_new_token(self: *Self) Token = {
         };
         self.i += 2;
         return self.lex_new_token();
+    };
     };
     
     // :WhitespaceSensitive this is fragile... (U32 .abc) vs (foo.abc)
@@ -831,7 +1212,7 @@ fn lex_new_token(self: *Self) Token = {
     if true {
         break :: local_return;
         
-        // :SLOW
+        // :SLOW TODO: use read_punct
         for_enum OperatorToken { it |
             name := it.name_str();
             if s.starts_with(name) {
@@ -848,9 +1229,10 @@ fn lex_new_token(self: *Self) Token = {
             };
         };
     };
-    
-    @if(s.starts_with("0x")) return(self.lex_int(16, hex_digit));
-    @if(s.starts_with("0b")) return(self.lex_int(2, bin_digit));
+    if s[0] == "0".ascii() && s.len > 1 {
+        @if(s[1] == "x".ascii()) return(self.lex_int(16, hex_digit));
+        @if(s[1] == "b".ascii()) return(self.lex_int(2, bin_digit));
+    };
     @if(s[0].is_ascii_digit()) return(self.lex_int(10, dec_digit));
     
     if s[0] == "\"".ascii() {
@@ -907,11 +1289,8 @@ fn lex_ident(self: *Self, start: i64) Token = {
     };
     s := self.src.slice(start, self.i);
     
-    // :SLOW
-    for_enum Keyword { it |
-        if s == it.name_str() {
-            return(Keyword = it);
-        };
+    if from_name(Keyword, s) { it |
+        return(Keyword = it);
     };
     
     return(Ident = s);
@@ -941,3 +1320,5 @@ fn lex_int(self: *Self, $base: i64, $digit: @Fn(c: u8) ?i64) Token = {
     self.i = i;
     (Int = total)
 }
+
+fn is(it: *Ast, t: Tag(Ast2)) bool = it.expr&.is(t);

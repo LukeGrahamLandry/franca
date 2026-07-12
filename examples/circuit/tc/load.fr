@@ -21,8 +21,9 @@ Circuit :: @struct {
     arity: Ty(i64, i64) = (-1, -1);
     has_bidirectional_pins := false;
     has_arch_pins := false;
+    v2: bool;
     is_arch := false;
-    default_tick_rate: u32;
+    default_tick_rate: i64;
     
     compiled: ?ComponentId = .None;
     // used when referenced as a Custom Gate in another Circuit. 
@@ -116,6 +117,7 @@ load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64, []Loade
             @eprintln("failed to load [%]: %", path, msg);
             continue();
         });
+        @assert(!info.v2, "TODO: load save breaker saves");
         info.is_arch = path.contains("architecture");
         dir := path.pop_path_segment();
         @debug_assert(dir.ends_with("/"));
@@ -1105,7 +1107,8 @@ collect_schematics :: fn(tc_save_root: Str, a: Alloc) List(Str) = {
 // the lastest version of that repo has the old vN files as though they would still be correct but they're super not because they changed all the component numbers on the commit for v2.1.77 
 load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
     a := arena;  // want an arena because leak on error
-    @if(in[0] != 6) return(Err = "only tc circuit.data version 6 is supported");
+    @if(in[0] != 6 && in[0] != 15) return(Err = "only tc circuit.data version 6/15 is supported");
+    version := in[0];
     in = in.rest(1);
     
     out := @ref u8.list(temp());
@@ -1139,12 +1142,31 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
     
     circuit_id := eat(CustomId); 
     eat(u32); eat(i64); eat(i64); eat(bool);
-    tick_rate := eat(u32);
+    tick_rate := @switch(version) {
+        @case(6) => eat(u32).zext();
+        @case(15) => eat(i64);
+        @default => unreachable();
+    };
     dependencies := eatN(u16, CustomId);
     eatN(u16, u8);  // description
-    eat_point(); eat(u8); eat(bool); eat(u16);
+    if version == 6 {
+        eat_point();
+    };
+    eat(u8);
+    if version == 6 {
+        eat(bool);
+    };
+    eat(u16);
     eatN(u16, u8);  // player data
     eatN(u16, u8);  // hub description
+    
+    if version == 15 {
+        range(0, 32) { x |
+            range(0, 16) { y |
+                eat(u8);  // design
+            };
+        };
+    };
     
     min_pos, max_pos := (vec2(65000), vec2(-65000));
     
@@ -1156,13 +1178,18 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
         pos := eat_point();
         rotation := eat(u8);
         id := eat(i64);
+        if version == 15 {
+            user_label := eatN(u16, u8);
+        };
         custom_string := eatN(u16, u8);
-        // settings
+        custom_id: CustomId = (id = -1);
+        custom_pos := zeroed(Vec2);
+        @switch(version) {
+            @case(6) => {
         s1 := eat(i64);
         s2 := eat(i64);
         _ := eat(i16);
-        custom_id: CustomId = (id = -1);
-        custom_pos := zeroed(Vec2);
+        
         // TODO: get the enum from ./builin.fr
         if kind == 92 {  // Custom
             custom_id = eat(CustomId);
@@ -1184,6 +1211,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
         if kind >= templates.len() {
             return(Err = @tfmt("gate[%] has OOB kind=%", gate_index, kind));
         };
+        
         gates&.push(
             rotation = rotation,
             custom_id = custom_id,
@@ -1194,6 +1222,42 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
             mystery_spice_minus_fifteen_for_custom_pins = custom_pos, 
             link_id = id,
         );
+            };
+            @case(15) => {
+                settings := eatN(u16, i64);
+                buffer_size := eat(i64);
+                eat(i16);
+                word_size := eat(i64);
+                is_immutable := eat(bool);
+                eat(i64); eat(i64);
+                is_little_endian := eat(bool);
+                init_data_kind := eat(u8);
+          
+                watched := eat(u16);
+                range(0, watched.zext()) { _ |
+                    id := eat(i64);
+                    inner_id := eat(i64);
+                    name := eatN(u16, u8);
+                    offset := eat(i64);
+                    word_size := eat(i64);
+                };
+                program_count := eat(u16);
+                range(0, program_count.zext()) { _ |
+                    key := eatN(u16, u8);
+                    value := eatN(u16, u8);
+                };
+                
+                if kind == 78 { // com_custom
+                    custom_id = eat(CustomId);
+                    n := eat(u16);
+                    range(0, n.zext()) { _ |
+                        a := eat(CustomId);
+                        bits := eat(i64);
+                    };
+                };
+            };
+            @default => unreachable();
+        };
         
         min_pos = min(min_pos, pos);
         max_pos = max(max_pos, pos);
@@ -1203,7 +1267,9 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
     wire_count := eat(i64);
     wires&.reserve(wire_count);
     range(0, wire_count) { _ |
-        kind := eat(u8);
+        if version == 6 {
+            kind := eat(u8);
+        };
         colour := eat(u8);
         comment := eatN(u16, u8);
         
@@ -1211,6 +1277,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
         path := Circuit.WireNode.list(a);
         path&.push(pos = pos, direction = vec2(0), length = 0);
         
+        if version == 6 {
         segment := eat(u8);
         length := segment.bit_and(0b0001_1111);
         if segment == 0b0010_0000 {
@@ -1231,6 +1298,25 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
             segment = eat(u8);
             length = segment.bit_and(0b0001_1111);
         };
+        };
+        if version == 15 {
+            break :: local_return;
+            loop {
+                segment := eat(u16);
+                direction := segment.shift_right_logical(13);
+                direction := directions[direction.zext()];
+                length := segment.bit_and(0b00011111_11111111);
+                if length == 0 {
+                    break();
+                };
+                len: i64 = length.zext();
+                prev := path[path.len-1]&;
+                prev.direction = direction;
+                prev.length = len;
+                path&.push(pos = prev.pos + direction*len.float().cast(), direction = vec2(0), length = 0);
+            };
+        };
+        
         @if(path.len == 1) return(Err = "bad wire path length?");
         wires&.push(path = path.as_raw());
         
@@ -1249,6 +1335,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
         name = name,
         programs = programs.items(),
         default_tick_rate = tick_rate,
+        v2 = version != 6,
     ))
 }
 
