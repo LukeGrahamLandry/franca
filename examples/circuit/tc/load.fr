@@ -47,6 +47,7 @@ Circuit :: @struct {
         data: []u8;
         logical_gate_index := -1;
         link_id: i64;  // ram.link_id is referenced by console.data. `{rom.link_id}.rom` file has init data. 
+        label: Str;
     };
     Program :: @struct {
         SANDBOX_LEVEL_ID :: 86;
@@ -1103,12 +1104,13 @@ collect_schematics :: fn(tc_save_root: Str, a: Alloc) List(Str) = {
 }
 
 // https://github.com/Stuffe/save_monger/blob/22fa398d95c3d3a0b5e88a80e9daee613cab1823/versions/v6.nim CC0
-// for now i want to use save files from non-save_breaker 0.1059 beta, 
+// version=6 is non-save_breaker 0.1059 beta, 
 // the lastest version of that repo has the old vN files as though they would still be correct but they're super not because they changed all the component numbers on the commit for v2.1.77 
 load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
     a := arena;  // want an arena because leak on error
-    @if(in[0] != 6 && in[0] != 15) return(Err = "only tc circuit.data version 6/15 is supported");
     version := in[0];
+    @if(version != 6 && version != 15 && version != 14 && version != 13) return(Err = @tfmt("only tc circuit.data version [6,13,14,15] is supported (found %)", version));
+    v2 := version != 6;
     in = in.rest(1);
     
     out := @ref u8.list(temp());
@@ -1142,25 +1144,21 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
     
     circuit_id := eat(CustomId); 
     eat(u32); eat(i64); eat(i64); eat(bool);
-    tick_rate := @switch(version) {
-        @case(6) => eat(u32).zext();
-        @case(15) => eat(i64);
-        @default => unreachable();
-    };
+    tick_rate := @if(v2, eat(i64), eat(u32).zext());
     dependencies := eatN(u16, CustomId);
     eatN(u16, u8);  // description
-    if version == 6 {
+    if !v2 {
         eat_point();
     };
     eat(u8);
-    if version == 6 {
+    if !v2 {
         eat(bool);
     };
     eat(u16);
     eatN(u16, u8);  // player data
     eatN(u16, u8);  // hub description
     
-    if version == 15 {
+    if v2 {
         range(0, 32) { x |
             range(0, 16) { y |
                 eat(u8);  // design
@@ -1178,14 +1176,19 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
         pos := eat_point();
         rotation := eat(u8);
         id := eat(i64);
-        if version == 15 {
-            user_label := eatN(u16, u8);
+        user_label := "";
+        if version >= 15 {
+            user_label = eatN(u16, u8);
         };
         custom_string := eatN(u16, u8);
+        old_custom_string := @const_slice(@as(u16) 87, 94, 101, 46);  //  halt,static_eval,static_indexer,constant
+        if v2 && version < 15 && !old_custom_string.contains(kind){
+            user_label = custom_string;
+            custom_string = "";
+        };
         custom_id: CustomId = (id = -1);
         custom_pos := zeroed(Vec2);
-        @switch(version) {
-            @case(6) => {
+        if !v2 {
         s1 := eat(i64);
         s2 := eat(i64);
         _ := eat(i16);
@@ -1194,7 +1197,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
         if kind == 92 {  // Custom
             custom_id = eat(CustomId);
             custom_pos = eat_point();
-            @if(custom_id.id == circuit_id.id) return(Err = "recursive custom component");
+            @if(custom_id.id == id) return(Err = "recursive custom component");
         };
         if kind == 94 || kind == 68 || kind == 64 {  // Program
             n := eat(u16);
@@ -1208,7 +1211,8 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
                 s1 = 256;  
             }
         };
-        if kind >= templates.len() {
+        xx := @as(i64) kind.zext();
+        if xx >= templates.len() {
             return(Err = @tfmt("gate[%] has OOB kind=%", gate_index, kind));
         };
         
@@ -1221,15 +1225,17 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
             data = custom_string.shallow_copy(a),
             mystery_spice_minus_fifteen_for_custom_pins = custom_pos, 
             link_id = id,
+            label = "",
         );
-            };
-            @case(15) => {
+        } else {
                 settings := eatN(u16, i64);
                 buffer_size := eat(i64);
                 eat(i16);
                 word_size := eat(i64);
                 is_immutable := eat(bool);
-                eat(i64); eat(i64);
+                if version >= 14 {
+                    eat(i64); eat(i64);
+                };
                 is_little_endian := eat(bool);
                 init_data_kind := eat(u8);
           
@@ -1255,8 +1261,18 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
                         bits := eat(i64);
                     };
                 };
-            };
-            @default => unreachable();
+                
+                gates&.push(
+                    rotation = rotation,
+                    custom_id = custom_id,
+                    kind = kind,
+                    pos = pos,
+                    settings = (word_size, buffer_size),  // TODO: need more
+                    data = custom_string.shallow_copy(a),
+                    mystery_spice_minus_fifteen_for_custom_pins = vec2(0), 
+                    link_id = id,
+                    label = user_label.shallow_copy(a),
+                );
         };
         
         min_pos = min(min_pos, pos);
@@ -1267,7 +1283,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
     wire_count := eat(i64);
     wires&.reserve(wire_count);
     range(0, wire_count) { _ |
-        if version == 6 {
+        if !v2 {
             kind := eat(u8);
         };
         colour := eat(u8);
@@ -1277,7 +1293,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
         path := Circuit.WireNode.list(a);
         path&.push(pos = pos, direction = vec2(0), length = 0);
         
-        if version == 6 {
+        if !v2 {
         segment := eat(u8);
         length := segment.bit_and(0b0001_1111);
         if segment == 0b0010_0000 {
@@ -1299,7 +1315,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
             length = segment.bit_and(0b0001_1111);
         };
         };
-        if version == 15 {
+        if v2 {
             break :: local_return;
             loop {
                 segment := eat(u16);
@@ -1335,7 +1351,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
         name = name,
         programs = programs.items(),
         default_tick_rate = tick_rate,
-        v2 = version != 6,
+        v2 = v2,
     ))
 }
 

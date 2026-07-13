@@ -2013,12 +2013,15 @@ fn pop_debug_group(sg: *Self) void #trace = {
 fn map_enum(key: FatExpr, cases: FatExpr) FatExpr #macro = {
     key := compile_ast(key);
     info := get_type_info_ref(key.ty);
-    @debug_assert(info.is(.Enum) && info.Enum.sequential, "map_enum");
-    @debug_assert(cases.expr&.is(.StructLiteralP), "map_enum");
+    @ct_assert(info.is(.Enum) && info.Enum.sequential, key.loc, "@map_enum[0]: expected a sequential enum");
+    @ct_assert(cases.expr&.is(.StructLiteralP), cases.loc, "@map_enum[1]: expected a struct literal");
     fields := info.Enum.fields&;
+    all_prongs_constant := true;
     branches := list(Ty(i64, FatExpr), fields.len, ast_alloc());
     each cases.expr.StructLiteralP.bindings { b |
         continue :: local_return;
+        // TODO: would be nice if this did the stronger #fold etc. but just calling compile_ast won't work since i don't have the infered result type here.
+        all_prongs_constant = all_prongs_constant && import("@/compiler/ast_external.fr")'is_const(b.default&);  
         name := b.ident().unwrap();
         for fields { it |
             if it._0 == name {
@@ -2027,8 +2030,23 @@ fn map_enum(key: FatExpr, cases: FatExpr) FatExpr #macro = {
                 continue();
             };
         };
-        @ct_assert(false, cases.loc, "% is not a member of the enum", name.str());
+        @ct_assert(false, b.default.loc, "% is not a member of the enum", name.str());
     };
+    
+    // TODO: this doesn't work because macro can't forward result type if it expands to something complicated
+    @if(false)
+    if all_prongs_constant {
+        lookup := ast_alloc().alloc_zeroed(FatExpr, fields.len);
+        for branches { i, value |
+            @ct_assert(lookup[i].expr&.is(.Poison), value.loc, "@map_enum key used twice");
+            lookup[i] = value;
+        };
+        range(0, fields.len) { i |
+            @ct_assert(lookup[i].expr&.is(.Poison), cases.loc, "@map_enum missing key ordinal=%", i);
+        };
+        @{ lookup := @slice(@[(Tuple = lookup.items())]); lookup[@[key].raw().int()] }
+    };
+    
     // TODO: detect duplicates
     make_switch(key, @{ panic("invalid value in map_enum") }, branches)
 }

@@ -1,3 +1,12 @@
+- one of the hare tests broke in sr.ht when they took out the old version of ubuntu.
+  make sure it's not my fault
+- recap of language woes
+  - #use of something declared there doesn't work well at top level of an imported scope
+  - @rec sometimes you get the wrong type (might be about when ::tagged_derive gets run?). `.Name` vs `(Name = ())`
+  - needing the extra `()` around an `@default` prong
+  - error message if you accidently have ast_alloc as a list's allocator in a runtime reachable const is terrible
+  - @if_let doesn't go through #use field (@match does it right)
+  - @rec and ::tagged_derive would be so embarassing to teach some one
 - see todo comments:
   - life/README.md
   - circuit/README.md

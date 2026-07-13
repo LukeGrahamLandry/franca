@@ -1,4 +1,9 @@
-## (Jul 10) si
+## (Jul 13) si
+
+- Input/Output field names live in the circuit.data, so need to collect that to know types in the test.si
+- not all the level's circuit.data were written by the latest version so get to play more diff the slight changes in the format.
+
+## (Jul 10,12) si
 
 sema reflect to get the defs from si_runtime.fr. 
 now that i can actually detect errors, caught a few more things: switch.default, couple more callbacks, 
