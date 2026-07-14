@@ -7,6 +7,9 @@
   - error message if you accidently have ast_alloc as a list's allocator in a runtime reachable const is terrible
   - @if_let doesn't go through #use field (@match does it right)
   - @rec and ::tagged_derive would be so embarassing to teach some one
+  - needing to special case single item tuples in macros is annoying
+  - the thing where it looks for overloads before evaluating the types of all the arguments 
+    so on the first reference to a constant they might not be ready yet
 - see todo comments:
   - life/README.md
   - circuit/README.md

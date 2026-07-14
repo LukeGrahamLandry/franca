@@ -39,7 +39,7 @@ Circuit :: @struct {
     WireNode :: @struct(pos: Vec2, direction: Vec2, length: i64);
     Gate :: @struct {
         pos: Vec2;
-        kind: u16;
+        kind: ComponentId;
         rotation: u8;
         custom_id: CustomId;  // when kind is Custom
         mystery_spice_minus_fifteen_for_custom_pins: Vec2;
@@ -85,6 +85,12 @@ load_builtins :: fn(components: *List(Component), a: Alloc) void = {
         c.gate_sum = 1;
         c.bit_width = it.bit_width;
         c.is_switch = it.name.starts_with("Switch");
+        components.push(c);
+    };
+    for_enum GateName(.Tc2) { it |
+        c := zeroed(Component);
+        c.name = it.name_str();
+        c.usage = a.box_zeroed(Component.Usage);
         components.push(c);
     };
 }
@@ -140,11 +146,10 @@ load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64, []Loade
         };
         each info.gates { it |
             continue :: local_return;
-            name := templates[it.kind.zext()].name;
             
-            check_file("Rom", "rom");
-            check_file("Hdd", "hdd");
-            check_file :: fn(kind, ext) => if name == kind {
+            check_file(.Rom, "rom");
+            check_file(.Hdd, "hdd");
+            check_file :: fn(kind: GateName(.Tc1), ext) => if group(it.kind) == .Tc1 && gate_name(it.kind, .Tc1) == kind {
                 it.data = "";
                 if read_entire_file(a, @tfmt("%%.%", dir, it.link_id, ext)) { data |
                     it.data = data;
@@ -152,7 +157,7 @@ load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64, []Loade
                 continue();
             };
             
-            if name != "FileLoader" && name != "SpriteDisplay" {
+            if group(it.kind) != .Tc1 || !@is(gate_name(it.kind, .Tc1), .FileLoader, .SpriteDisplay) {
                 continue();
             };
             file_index := it.settings&[0]&;
@@ -223,16 +228,9 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     gates, wire_count := find_pins(c, a, circuits);
     custom_pins := Ty(i64, i64).list(a);
     switches := Circuit.SwitchablePin.list(a);
-        
-    // TODO: when doing runtime need to be careful not to bake before setting fast_eval pointer
-    builtin_count := defs.tc_components_offset + templates.len();
-    @assert_ge(components.len, builtin_count, "TODO: be more flexible about adding new ones");
-    // TODO: don't be comparing strings all the time and then this doesn't matter :SLOW
-    if components.items().slice(0, builtin_count).contains(fn(it) => it.name == c.name) {
-        @println("TODO: name collides with builtin: '%'", c.name);
-    };
     
-    @debug_assert_eq(components[{ xx := CONST_INDEX; /*:compiler*/ xx.id.zext() }].name, "Off");
+    CONST_INDEX := { xx := CONST_INDEX; /*:compiler*/ xx.id };
+    @debug_assert_eq(components[CONST_INDEX.zext()].name, "Off");
     logical_to_circuit := i64.list(gates.len, temp());
     extra_gates := 0;
     kill: DynamicBitSet = empty(temp());
@@ -246,13 +244,13 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         it := gates.index(i); 
         if i >= c.gates.len {
             // new_false_wire CONST_INDEX is already remapped. TODO: this is more error prone than it needs to be
-            @assert(it.inputs.len == 0 && it.kind.id == { xx := CONST_INDEX; /*:compiler*/ xx.id }, "CONST_INDEX HACK"); 
+            @assert(it.inputs.len == 0 && it.kind.id == CONST_INDEX, "CONST_INDEX HACK"); 
             logical_to_circuit&.push(-1);
             continue();
         };
         
         original_gate := c.gates[i]&;
-        shape := templates[it.kind.id.zext()];
+        shape := get_builtin_shape(it.kind);
         
         if shape.name.starts_with("Bidirectional") {
             c.has_bidirectional_pins = true;
@@ -361,9 +359,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 
                 output_pin_count += int(!is_input); 
             }
-            fn Native() => {
-                it.kind.id += defs.tc_components_offset.trunc();
-            }
+            fn Native() => ();
             fn Custom() => {
                 child := find_custom_impl(original_gate, circuits) || {
                     // should be unreachable because of the `dependencies` in the data file. 
@@ -373,6 +369,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                     continue();
                 };
                 it.kind = child.compiled.unwrap();
+                original_gate.kind = it.kind;
                 
                 for child.switches { switchable_pin |
                     apply_switchable_pin(it.outputs[switchable_pin.value_output_index]&, it.outputs[switchable_pin.condition_output_index]&, child.bit_width[switchable_pin.value_output_index]);
@@ -477,8 +474,10 @@ find_links_for_lastest_component :: fn(c: *Circuit, components: []Component) voi
     component := components[components.len - 1]&;
     each c.gates { it |
         continue :: local_return;
-        shape := templates[it.kind.zext()];
-        if shape.name == "Console" {
+        if group(it.kind) != .Tc1 || name(it.kind, .Tc1) != .Console {
+            continue();
+        };
+        
             if it.logical_gate_index == -1 {
                 @println("TODO: console without logical_gate_index can't update param for linked component");
                 continue();
@@ -514,7 +513,6 @@ find_links_for_lastest_component :: fn(c: *Circuit, components: []Component) voi
             param&.set(.linked_ram_instance, instance);
             param&.set(.linked, 1);
             logical_gate.param = param.repr.bitcast();  // :PatchConsoleLink
-        };
     };
 };
 
@@ -713,11 +711,7 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
     next_wire_id: u32 = c.wires.len.trunc();
     enumerate c.gates& { gate_i, it |
         continue :: local_return;
-        if templates.len() <= it.kind.zext() {
-            @println("TODO kind OOB %", it.kind);
-            continue();
-        }
-        shape := templates[it.kind.zext()];
+        shape := get_builtin_shape(it.kind);
         out_arity, in_arity := get_arity(shape, it, circuits);
         
         w := a.alloc_init(WireId, out_arity + in_arity, fn(_) => (id = 0xFFFFFFFF));
@@ -759,23 +753,24 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
         
         param := 0;
         if shape.has_param {
+            k := @if(group(it.kind) != .Tc1, GateName(.Tc1)._0, name(it.kind, .Tc1));
             s0, s1 := (it.settings&[0], it.settings&[1]);
             param = s0;
             #use(Builtin.Settings);
-            if shape.name.starts_with("Ram") || shape.name.starts_with("Program") || shape.name == "Rom" {
-                big_pins := shape.name == "Ram" || shape.name == "RamLatency" || shape.name == "RamFast";
+            big_pins := @is(k, .Ram, .RamLatency, .RamFast);
+            if big_pins || @is(k, .RamDualLoad, .Program, .Rom) {
                 if s1 > 3 && !big_pins {
                     @println("% doesn't allow >64 bit data width index=%", shape.name, s1);
                     it.settings&[1] = 3;
                     s1 = 3;
                 };
                 s: Ram = construct(storage_size = s0, word_size_index = s1, is_program = int(shape.name.starts_with("Program")));
-                if !shape.name.starts_with("Program") {
+                if k != .Program {
                     s&.set(.storage_size, s.get(.storage_size).align_to(s.word_size()) / s.word_size());
                 } else {
                     ensure_assembled_and_update_size(c, s&, gate_i, a);
                 };
-                if shape.name == "Rom" {
+                if k == .Rom {
                     size := s.get(.storage_size) * s.word_size();
                     @if(size > it.data.len) @println("TODO: rom file too large for storage");
                     @if(size < it.data.len) @println("TODO: rom file too small for storage");
@@ -787,18 +782,18 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
                 
                 param = s.repr.bitcast();
             };
-            if shape.name == "Console" {
+            if k == .Console {
                 s: Console = construct(colour = s0, font = s1, linked = 0, linked_ram_instance = 0/*:PatchConsoleLink*/);
                 param = s.repr.bitcast();
             }
-            if shape.name == "Halt" {
+            if k == .Halt {
                 s: Builtin.Settings.Halt = construct(
                     gate_i = gate_i,
                     circ_i = ptr_diff(circuits.ptr, c),
                 );
                 param = s.repr.bitcast();
             };
-            if shape.name == "Mul64" {
+            if k == .Mul64 {
                 @if(!second_output_is_unused && query_current_arch() == .wasm32) @println("TODO: mul64 high wasm");
                 s: Builtin.Settings.Mul64 = construct(need_high = int(!second_output_is_unused));
                 param = s.repr.bitcast();
@@ -808,7 +803,7 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
         logic_gates&.push(
             outputs = out,
             inputs = in,
-            kind = (id = it.kind.zext()),
+            kind = it.kind,
             param = param,
         );
     };
@@ -847,7 +842,7 @@ fn find_custom_impl(g_gate: *Circuit.Gate, circuits: []Circuit) ?*Circuit = {
 }
 
 fn get_arity(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit) Ty(i64, i64) = {
-    @if(shape.name != "Custom") return(shape.out_arity, shape.in_arity);
+    @if(group(shape.kind) != .Tc1 || name(shape.kind, .Tc1) != .Custom) return(shape.out_arity, shape.in_arity);
     child := find_custom_impl(gate, circuits) || {
         @eprintln("TODO: custom component missing from dependencies?? %", gate.custom_id.id);
         return(0, 0);
@@ -858,7 +853,7 @@ fn get_arity(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit)
 fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, $body: @Fn(pin_index: i64, dx: i64, dy: i64) void) void = {
     pins := shape.pins;
     dx, dy := (0, 0);
-    if shape.name == "Custom" {
+    if group(shape.kind) == .Tc1 && name(shape.kind, .Tc1) == .Custom {
         child := find_custom_impl(gate, circuits)
             || return(@eprintln("TODO: custom component missing from dependencies?? %", gate.custom_id.id));
         pins = child.pins;
@@ -887,7 +882,7 @@ fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, 
 // TODO: what if a bidirectional pin is given too big a value?
 fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate), wire_count: *i64, bit_width: []u8) void = {
     a := gates.gpa;
-    cast_id: ComponentId = (id = trunc(defs.tc_components_offset + templates.len() - 1));
+    cast_id: ComponentId = (id = trunc(defs.tc_components_offset + GateName(.Tc1).enum_count() - 1));
     @debug_assert_eq(components[cast_id.id.zext()].name, "SyntheticCast_FR");
     width := temp().alloc_zeroed(u8, wire_count[]);
     outputs, inputs := (gates[gates.len - 1].inputs, gates[0].outputs);
@@ -998,19 +993,22 @@ insert_consts_for_dead_wires :: fn(components: []Component, gates: *List(Compone
 }
 
 fn get_bit_width(components: []Component, it: *Component.Gate) []u8 = {
-    tc := defs.tc_components_offset; 
-    kind: i64 = it.kind.id.zext();
-    if !FEAT_TC_CIRCUIT || kind < tc || kind >= tc + Tc.Builtin.templates.len() {
-        return components[kind].bit_width;
+    if it.kind.group() == .Tc1 {
+        shape := get_builtin_shape(it.kind);
+        return get_bit_width(shape, it.param);
     };
-    shape := Tc.Builtin.templates[kind - tc];
-    get_bit_width(shape, it.param)
+    kind: i64 = it.kind.id.zext();
+    return components[kind].bit_width;
 }
 
 fn get_bit_width(shape: *Tc.Builtin.Template, param: i64) []u8 = {
-    special := @const_slice("RamFast", "Ram", "RamDualLoad", "Program", "Rom");
-    @if(shape.has_param && shape.name == "SyntheticCast_FR") return(@slice(0x40, param.trunc()) temp());  // can see this while inserting casts after inlining a custom component. 
-    if shape.has_param && special.contains(shape.name) {
+    if !shape.has_param || group(shape.kind) != .Tc1 {
+        return shape.bit_width;
+    };
+    k := name(shape.kind, .Tc1);
+    special := @const_slice(GateName(.Tc1).RamFast, .Ram, .RamDualLoad, .Program, .Rom);
+    @if(k == .SyntheticCast_FR) return(@slice(@as(u8) param.trunc(), 0x40) temp());  // can see this while inserting casts after inlining a custom component. 
+    if special.contains(fn(x) => x[] == k) {
         // :SpecialOutputBitWidth
         // inputs don't matter because writes truncate in the impl so oversized 64 bits from get_width_data is fine.
         // outputs would be fine oversized but doing it right here avoids inserting useless casts. 
@@ -1038,11 +1036,12 @@ set_initial_data :: fn(world: *World, circuits: []Tc.Circuit, root: ComponentId,
         gate := c.gates[gate_i]&;
         instance := instance + c.instance_offset_by_gate[gate_i];
         set_initial_data(world, circuits, gate.kind, instance);  // might be a rom inside a custom component
+        @if(group(gate.kind) != .Tc1) continue();
         n := get_storage_count(world.components, gate);
         dest := world.storage.subslice(instance, n);
-        src := @switch(world[gate.kind].name) {
-            @case("Rom") => c_gate.data;
-            @case("Program") => {
+        src := @match(gate.kind.name(.Tc1)) {
+            fn Rom() => c_gate.data;
+            fn Program() => {
                 asm := circuit.programs.find(fn(it) => it.level_id == Tc.Circuit.Program.SANDBOX_LEVEL_ID && it.assembled.is_some() && it.gate_index == c_gate_i) 
                     || continue(@println("TODO: missing program assembly for gate[%]", gate_i));
                 asm.assembled.unwrap()
@@ -1101,6 +1100,68 @@ collect_schematics :: fn(tc_save_root: Str, a: Alloc) List(Str) = {
         });
     };
     files
+}
+
+GateGroup :: @enum(u8) (DefsBuiltin, DefsLoaded, Tc1, Tc2, Loaded);
+group_sizes :: @const_slice(
+    get_constants(Type.scope_of(DefsBuiltins)).len(),
+    defs.tc_components_offset - get_constants(Type.scope_of(DefsBuiltins)).len(),
+    get_constants(Type.scope_of(Builtin.impl)).len(),
+    get_constants(Type.scope_of(Builtin.impl2)).len(),
+);
+fn group(it: ComponentId) GateGroup = {
+    i: i64 = it.id.zext();
+    @if(!FEAT_TC_CIRCUIT) @if(i < group_sizes[0], .DefsBuiltin, .DefsLoaded);
+    end := 0;
+    inline_range(0, group_sizes.len()) { $j |
+        end += @run group_sizes[j];
+        if i < end {
+            return @as(GateGroup) @as(u8) j.trunc();
+        };
+    };
+    .Loaded
+}
+
+gate_name :: name;
+fn name(it: ComponentId, $g: GateGroup) GateName(g) #generic = {
+    @debug_assert_eq(it.group(), g, "name(ComponentId) wrong group");
+    i: i64 = it.id.zext();
+    start, end := (0, 0);
+    inline_range(0, group_sizes.len()) { $j |
+        start = end; 
+        end += @run group_sizes[j];
+        if g == @as(GateGroup) @as(u8) j.trunc() {
+            return @as(GateName(g)) @as(u16) trunc(i - start);
+        };
+    };
+    zeroed(GateName(g))
+}
+
+fn GateName($g: GateGroup) Type #fold = @run {
+    G := @match(g) {
+        fn DefsBuiltin() => enum_from_scope_names(DefsBuiltins);
+        fn Tc1() => enum_from_scope_names(Builtin.impl);
+        fn Tc2() => enum_from_scope_names(Builtin.impl2);
+        @default => void;
+    };
+    if g != .DefsLoaded && g != .Loaded {
+        const_eval(void, @{ ::enum_derive(@[@literal G]); });
+    };
+    G
+}
+
+enum_from_scope_names :: fn(S: Type) Type = {
+    names := get_constants(Type.scope_of(S));
+    @assert_lt(names.len, 0xffff, "TODO: too many components");
+    create_sequential_enum(u16, names.len, fn(i) => names[i])
+}
+
+fn get_builtin_shape(it: ComponentId) *Builtin.Template = {
+    g := it.group();
+    templates;
+    @if(g == .Loaded) return(templates[@as(i64) zext(@as(u16) GateName(.Tc1).Custom)]);
+    @debug_assert(@is(g, .Tc1), "get_builtin_shape(%, %) invalid", g, it.id);
+    templates[it.id.zext() - defs.tc_components_offset]
 }
 
 // https://github.com/Stuffe/save_monger/blob/22fa398d95c3d3a0b5e88a80e9daee613cab1823/versions/v6.nim CC0
@@ -1212,14 +1273,18 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
             }
         };
         xx := @as(i64) kind.zext();
-        if xx >= templates.len() {
+        if xx >= GateName(.Tc1).enum_count() {
             return(Err = @tfmt("gate[%] has OOB kind=%", gate_index, kind));
         };
+        
+        if kind > GateName(.Tc1).enum_count().trunc() {
+            return(Err = "gate oob");
+        }
         
         gates&.push(
             rotation = rotation,
             custom_id = custom_id,
-            kind = kind,
+            kind = (id = kind.zext() + defs.tc_components_offset.trunc()),
             pos = pos,
             settings = (s1, s2),
             data = custom_string.shallow_copy(a),
@@ -1262,10 +1327,14 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
                     };
                 };
                 
+                if kind > GateName(.Tc2).enum_count().trunc() {
+                    return(Err = "gate oob");
+                }
+                
                 gates&.push(
                     rotation = rotation,
                     custom_id = custom_id,
-                    kind = kind,
+                    kind = (id = kind.zext() + trunc(defs.tc_components_offset + GateName(.Tc1).enum_count())),
                     pos = pos,
                     settings = (word_size, buffer_size),  // TODO: need more
                     data = custom_string.shallow_copy(a),

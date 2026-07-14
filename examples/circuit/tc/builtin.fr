@@ -11,6 +11,7 @@ Template :: @struct {
     has_param := false;
     compute_storage: ?(@FnPtr(it: InstanceInfo) i64) = .None;
     switches: []SwitchablePin = empty();
+    kind := zeroed(import("@/examples/circuit/parse.fr")'ComponentId);
     
     SwitchablePin :: @struct {
         value_output_index: i64;
@@ -24,9 +25,12 @@ Pin :: Ty(i64, i64);
 templates :: {
     out := (*Template).list(ast_alloc());
     S := Type.scope_of(impl);
+    i := 0;
     for get_constants(S) { name |
         it := (*Template).get_constant(S, name)
             || @panic("expected % to be a function", str(name));
+        it.kind = (id = trunc(i + import("@/examples/circuit/parse.fr").defs.tc_components_offset)); i += 1;
+        k := import("@/examples/circuit/tc/load.fr")'gate_name(it.kind, .Tc1);
         
         if it.name != "" {
             it = ast_alloc().boxed(Template, it[]);
@@ -34,34 +38,36 @@ templates :: {
         it.name = str(name);
         it.inputs_for_pure_eval = ast_alloc().alloc_init(i64, it.in_arity, fn(i) => i);
         
-        if it.name.starts_with("Counter") || it.name == "Keyboard" || it.name.starts_with("Register") || it.name.starts_with("DelayLine") || it.name == "BitMemory" {
+        if it.name.starts_with("Counter") || k == .Keyboard || it.name.starts_with("Register") || it.name.starts_with("DelayLine") || k == .BitMemory {
             it.inputs_for_pure_eval = empty();
         };
         
-        if it.name == "LevelInputArch" || it.name.starts_with("Register") || it.name == "Rom" || it.name == "Timing" || it.name == "FileLoader" {
+        if k == .LevelInputArch || it.name.starts_with("Register") || k == .Rom || k == .Timing || k == .FileLoader {
             it.switches = (@slice(@as(Template.SwitchablePin) (value_output_index = 0, condition_input_index = 0))).shallow_copy(ast_alloc());
         };
-        if it.name == "RamFast" || it.name == "Ram" {
+        if k == .RamFast || k == .Ram {
             it.switches = ast_alloc().alloc_init(Template.SwitchablePin, 4, fn(i) => (value_output_index = i, condition_input_index = 0));
             it.inputs_for_pure_eval = ast_alloc().alloc_init(i64, 1, fn(_) => 2);
         };
-        if it.name == "RamDualLoad" {
+        if k == .RamDualLoad {
             it.switches = ast_alloc().alloc_init(Template.SwitchablePin, 2, fn(i) => (value_output_index = i, condition_input_index = i*4));
             it.inputs_for_pure_eval = @const_slice(2, 5);
         };
         
-        it.has_param = it.has_param || it.name.starts_with("Constant") || it.name.starts_with("Counter") || it.name == "Program" || it.name == "Console" || it.name.starts_with("Ram") || it.name.starts_with("Indexer") || it.name == "FileLoader" || it.name.ends_with("Display") || it.name == "Rom" || it.name == "Halt" || it.name == "Keyboard" || it.name == "Mul64";
+        it.has_param = it.has_param || it.name.starts_with("Constant") || it.name.starts_with("Counter") 
+            || it.name.starts_with("Ram") || it.name.starts_with("Indexer") || it.name.ends_with("Display") 
+            || @is(k, .Program, .Console, .FileLoader, .Rom, .Halt, .Keyboard, .Mul64);
         
-        if name == sym("Custom") {
+        if k == .Custom {
             it.body = .Custom;
         };
         
         @if_let(it.fid) fn Some(fid) => {
             it.callee = current_compiler_context().get_jitted(fid);
         };
-        
         it.bit_width = get_width_data(it);
-        if pin_layouts.get(it.name) { pins |
+        pin_layouts;
+        if pin_layouts.get(k) { pins |
             it.pins = pins;
             @assert_eq(it.pins.len, it.in_arity + it.out_arity, "pin count (%)", it.name);
             @assert_eq(it.bit_width.len, it.pins.len, "width count (%)", it.name);
@@ -927,119 +933,119 @@ _15 :: todo();
 };
 
 pin_layouts :: @static @parse_pin_layouts(
-(("Or8", "Equal8", "LessU8", "LessI8", "Xor8", "And8", "Equal64", "Or64", "And64", "Xor64", "LessU64", "LessI64", "Or16", "Equal16", "LessU16", "LessI16", "Or32", "And32", "Xor32", "Nand8", "Nor8", "Xnor8", "Nand16", "Nor16", "Xnor16", "Nand32", "Nor32", "Xnor32", "Nand64", "Nor64", "Xnor64", "Equal32", "LessU32", "LessI32"),
+((.Or8, .Equal8, .LessU8, .LessI8, .Xor8, .And8, .Equal64, .Or64, .And64, .Xor64, .LessU64, .LessI64, .Or16, .Equal16, .LessU16, .LessI16, .Or32, .And32, .Xor32, .Nand8, .Nor8, .Xnor8, .Nand16, .Nor16, .Xnor16, .Nand32, .Nor32, .Xnor32, .Nand64, .Nor64, .Xnor64, .Equal32, .LessU32, .LessI32),
     ((1, 0), (-1, -1), (-1, 0))),
-(("Counter8"),
+((.Counter8),
     ((1, 0), (-1, 0), (-1, -1))),
-(("Counter16", "Counter32"),
+((.Counter16, .Counter32),
     ((2, 0), (-2, 0), (-2, -1))),
-(("Counter64"),
+((.Counter64),
     ((2, 0), (-3, 1), (-3, 0))),
-(("Maker16"),
+((.Maker16),
     ((1, 0), (-1, -1), (-1, 0))),
-(("Shl8", "Shr8", "Shl64", "Shr64", "Shl16", "Shr16", "Shl32", "Shr32", "Rol8", "Rol16", "Rol32", "Rol64", "Ror8", "Ror16", "Ror32", "Ror64", "Ashr8", "Ashr16", "Ashr32", "Ashr64"),
+((.Shl8, .Shr8, .Shl64, .Shr64, .Shl16, .Shr16, .Shl32, .Shr32, .Rol8, .Rol16, .Rol32, .Rol64, .Ror8, .Ror16, .Ror32, .Ror64, .Ashr8, .Ashr16, .Ashr32, .Ashr64),
     ((1, -1), (-1, -1), (-1, 0))),
-(("Switch1", "Switch8", "Switch16", "Switch32", "Switch64"),
+((.Switch1, .Switch8, .Switch16, .Switch32, .Switch64),
     ((1, 0), (-1, 0), (0, -1))),
-(("On", "Off", "Constant8"),
+((.On, .Off, .Constant8),
     ((1, 0))),
-(("Constant16", "Constant32"),
+((.Constant16, .Constant32),
     ((2, 0))),
-(("Maker8", "Maker64"),
+((.Maker8, .Maker64),
     ((1, 0), (-1, -3), (-1, -2), (-1, -1), (-1, 0), (-1, 1), (-1, 2), (-1, 3), (-1, 4))),
-(("Splitter8", "Splitter64"),
+((.Splitter8, .Splitter64),
     ((1, -3), (1, -2), (1, -1), (1, 0), (1, 1), (1, 2), (1, 3), (1, 4), (-1, 0))),
-(("Splitter32"),
+((.Splitter32),
     ((1, -1), (1, 0), (1, 1), (1, 2), (-1, 0))),
-(("Splitter16"),
+((.Splitter16),
     ((1, -1), (1, 0), (-1, 0))),
-(("Maker32"),
+((.Maker32),
     ((1, 0), (-1, -1), (-1, 0), (-1, 1), (-1, 2))),
-(("Add8", "Add16", "Add32", "Add64"),
+((.Add8, .Add16, .Add32, .Add64),
     ((1, -1), (1, 0), (-1, -1), (-1, 1), (-1, 0))),
-(("FullAdder"),
+((.FullAdder),
     ((1, 0), (1, 1), (-1, -1), (-1, 0), (-1, 1))),
-(("DivMod64", "Mul64", "Mul8", "Mul16", "Mul32", "DivMod8", "DivMod16", "DivMod32"),
+((.DivMod64, .Mul64, .Mul8, .Mul16, .Mul32, .DivMod8, .DivMod16, .DivMod32),
     ((1, -1), (1, 0), (-1, -1), (-1, 0))),
-(("And3", "Or3"), 
+((.And3, .Or3), 
     ((2, 0), (-1, 1), (-1, 0), (-1, -1))),
-(("Register8"), 
+((.Register8), 
     ((1, 0), (-1, -1), (-1, 0), (-1, 1))),
-(("Register64"), 
+((.Register64), 
     ((3, 0), (-3, -1), (-3, 0), (-3, 1))),
-(("Decoder3"),
+((.Decoder3),
     ((1, -3), (1, -2), (1, -1), (1, 0), (1, 1), (1, 2), (1, 3), (1, 4), (-1, -3), (-1, -2), (-1, -1), (0, -4))),
-(("Decoder1"),
+((.Decoder1),
     ((1, 0), (1, 1), (-1, 0))),
-(("Timing"),
+((.Timing),
     ((1, 0), (0, -1))),
-(("Keyboard"),
+((.Keyboard),
     ((1, -3), (2, -2), (2, -1), (-2, -2))),
-(("Input1", "Input8", "LevelInput1"),
+((.Input1, .Input8, .LevelInput1),
     ((1, 0))),
-(("Input16", "Input32"),
+((.Input16, .Input32),
     ((2, 0))),
-(("Input64", "Constant64"),
+((.Input64, .Constant64),
     ((3, 0))),
-(("LevelInputArch"),
+((.LevelInputArch),
     ((1, 0), (0, 1))),
-(("Bidirectional1"),
+((.Bidirectional1),
     ((0, 1))),
-(("Bidirectional64", "Bidirectional32", "Bidirectional16"),
+((.Bidirectional64, .Bidirectional32, .Bidirectional16),
     ((0, 2))),
-(("Output64"),
+((.Output64),
     ((-3, 0))),
-(("Program"),
+((.Program),
     ((13, -7), (13, -6), (13, -5), (13, -4), (-13, -7))),
-(("Console"),
+((.Console),
     ((-16, -8))),
-(("Output16", "Output32"),
+((.Output16, .Output32),
     ((-2, 0))),
-(("Mux64", "Mux16", "Mux32", "Mux8"),
+((.Mux64, .Mux16, .Mux32, .Mux8),
     ((1, 0), (-1, -1), (-1, 0), (-1, 1))),
-(("Register32", "Register16"),
+((.Register32, .Register16),
     ((2, 0), (-2, -1), (-2, 0), (-2, 1))),
-(("RamFast", "Ram"),
+((.RamFast, .Ram),
     ((13, -7), (13, -6), (13, -5), (13, -4), (-13, -7), (-13, -6), (-13, -5), (-13, -4), (-13, -3), (-13, -2), (-13, -1))),
-(("RamDualLoad"),
+((.RamDualLoad),
     ((13, -7), (13, -6), (-13, -7), (-13, -6), (-13, -5), (-13, -4), (-13, -3), (-13, -2))),
-(("Rom"),
+((.Rom),
     ((13, -7), (-13, -7), (-13, -6), (-13, -5), (-13, -4))),
-(("Output8", "LevelOutput1Car", "LevelOutput1Sum", "Output1", "Halt", "LevelOutput1"),
+((.Output8, .LevelOutput1Car, .LevelOutput1Sum, .Output1, .Halt, .LevelOutput1),
     ((-1, 0))),
-(("Not64", "Neg64", "Not32", "Neg32", "IndexerBit", "IndexerByte", "Not", "Not8", "Not16", "Neg8", "DelayLine1", "Neg16"),
+((.Not64, .Neg64, .Not32, .Neg32, .IndexerBit, .IndexerByte, .Not, .Not8, .Not16, .Neg8, .DelayLine1, .Neg16),
     ((1, 0), (-1, 0))),
-(("Output64z"),
+((.Output64z),
     ((-3, 0), (0, 2))),
-(("LevelOutputArch", "Output1z", "Output8z"),
+((.LevelOutputArch, .Output1z, .Output8z),
     ((-1, 0), (0, 1))),
-(("Output16z", "Output32z"),
+((.Output16z, .Output32z),
     ((-2, 0), (0, 2))),
-(("Nor", "Xor", "Xnor", "And", "Nand", "Or"),
+((.Nor, .Xor, .Xnor, .And, .Nand, .Or),
     ((2, 0), (-1, 1), (-1, -1))),
-(("BitMemory"),
+((.BitMemory),
     ((1, 0), (-1, 1), (-1, -1))),
-(("FileLoader"), 
+((.FileLoader), 
     ((4, 0), (-3, -1), (-4, 0))),
-(("NoteSound"), 
+((.NoteSound), 
     ((-2, 0), (-1, -1), (-2, 1))),
-(("DelayLine32", "DelayLine16"),
+((.DelayLine32, .DelayLine16),
     ((2, 0), (-2, 0))),
-(("DelayLine64"),
+((.DelayLine64),
     ((3, 0), (-3, 0))),
-(("SegmentDisplay"),
+((.SegmentDisplay),
     ((0, -2), (-1, -2))),
-(("DotMatrixDisplay"),
+((.DotMatrixDisplay),
     ((0, -2), (-1, -2), (-2, 0), (-2, -1))),
-(("Decoder2"), 
+((.Decoder2), 
     ((1, -1), (1, 0), (1, 1), (1, 2), (-1, -1), (-1, 0))),
-(("SpriteDisplay"),
+((.SpriteDisplay),
     ((-17, -12), (-17, -11), (-17, -10), (-17, -9))),
 );
 
 get_width_data :: fn(it: *Template) []u8 = {
     a := ast_alloc();
-    all_one :: @const_slice("BitMemory", "And3", "Or3", "FullAdder", "Decoder3", "Decoder1", "Decoder2", "On", "Off", "Halt", "LevelOutput1Sum", "LevelOutput1Car");
+    all_one :: @const_slice(GateName(.Tc1).BitMemory, .And3, .Or3, .FullAdder, .Decoder3, .Decoder1, .Decoder2, .On, .Off, .Halt, .LevelOutput1Sum, .LevelOutput1Car);
     all_suffix :: @const_slice("DelayLine", "Input", "Output", "Bidirectional", "Shl", "Shr", "Ashr", "Rol", "Ror", "And", "Or", "Xor", "Nand", "Xnor", "Nor", "Not", "Constant", "DivMod", "Mul", "Neg", "LevelInput", "LevelOutput");
     cmp_suffix :: @const_slice("Equal", "LessU", "LessI");
     suffix_int :: fn(s: Str) ?u8 = {
@@ -1051,7 +1057,8 @@ get_width_data :: fn(it: *Template) []u8 = {
         (Some = s.rest(i+1).parse_int().trunc())
     };
     pin_count := it.in_arity + it.out_arity;
-    if all_one.contains(it.name) {
+    k := import("@/examples/circuit/tc/load.fr")'gate_name(it.kind, .Tc1);
+    if all_one.contains(fn(x) => x[] == k) {
         return a.alloc_init(u8, pin_count, fn(_) => 1);
     }
     for all_suffix { prefix |
@@ -1085,52 +1092,53 @@ get_width_data :: fn(it: *Template) []u8 = {
         return @slice(i, i, 0x01) a;
     }
     
-    @if(it.name == "IndexerBit") return(@slice(0x01, 64) a);
-    @if(it.name == "IndexerByte") return(@slice(0x08, 64) a);
+    @if(k == .IndexerBit) return(@slice(0x01, 64) a);
+    @if(k == .IndexerByte) return(@slice(0x08, 64) a);
     @if(it.name == "LevelInputArch" || it.name == "LevelOutputArch") return(@slice(0x08, 0x01) a);
-    @if(it.name == "FileLoader") return(@slice(0x40, 0x01, 0x40) a);
+    @if(k == .FileLoader) return(@slice(0x40, 0x01, 0x40) a);
     if it.name.starts_with("Register") {
         if suffix_int(it.name) { i |
             return @slice(i, 0x01, 0x01, i) a;
         };
     }
-    @if(it.name == "Maker8") return(@slice(0x08, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01) a);
-    @if(it.name == "Splitter8") return(@slice(0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x08) a);
-    @if(it.name == "Maker16") return(@slice(0x10, 0x08, 0x08) a);
-    @if(it.name == "Splitter16") return(@slice(0x08, 0x08, 0x10) a);
-    @if(it.name == "Maker32") return(@slice(0x20, 0x08, 0x08, 0x08, 0x08) a);
-    @if(it.name == "Splitter32") return(@slice(0x08, 0x08, 0x08, 0x08, 0x20) a);
-    @if(it.name == "Maker64") return(@slice(0x40, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08) a);
-    @if(it.name == "Splitter64") return(@slice(0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x40) a);
+    @if(k == .Maker8) return(@slice(0x08, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01) a);
+    @if(k == .Splitter8) return(@slice(0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x08) a);
+    @if(k == .Maker16) return(@slice(0x10, 0x08, 0x08) a);
+    @if(k == .Splitter16) return(@slice(0x08, 0x08, 0x10) a);
+    @if(k == .Maker32) return(@slice(0x20, 0x08, 0x08, 0x08, 0x08) a);
+    @if(k == .Splitter32) return(@slice(0x08, 0x08, 0x08, 0x08, 0x20) a);
+    @if(k == .Maker64) return(@slice(0x40, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08) a);
+    @if(k == .Splitter64) return(@slice(0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x40) a);
     if it.name.starts_with("Add") {
         i := suffix_int(it.name).unwrap();
         return @slice(i, 0x01, 0x01, i, i) a;
     }
     
-    @if(it.name == "Timing") return(@slice(0x40, 0x01) a);
-    @if(it.name == "Console") return(@slice(0x40) a);
-    @if(it.name == "Keyboard") return(@slice(0x01, 0x10, 0x01, 0x01) a);
-    @if(it.name == "SegmentDisplay") return(@slice(0x08, 0x01) a);
-    @if(it.name == "DotMatrixDisplay") return(@slice(0x40, 0x01, 0x20, 0x01) a);
-    @if(it.name == "NoteSound") return(@slice(0x40, 0x40, 0x40) a);  // TODO
-    @if(it.name == "SpriteDisplay") return(@slice(0x08, 0x08, 0x20, 0x20) a);
+    @if(k == .Timing) return(@slice(0x40, 0x01) a);
+    @if(k == .Console) return(@slice(0x40) a);
+    @if(k == .Keyboard) return(@slice(0x01, 0x10, 0x01, 0x01) a);
+    @if(k == .SegmentDisplay) return(@slice(0x08, 0x01) a);
+    @if(k == .DotMatrixDisplay) return(@slice(0x40, 0x01, 0x20, 0x01) a);
+    @if(k == .NoteSound) return(@slice(0x40, 0x40, 0x40) a);  // TODO
+    @if(k == .SpriteDisplay) return(@slice(0x08, 0x08, 0x20, 0x20) a);
     
     i := 0x40;  // :SpecialOutputBitWidth
-    @if(it.name == "Ram" || it.name == "RamFast") return(@slice(i, i, i, i, 0x01, 0x01, 0x40, i, i, i, i) a);
-    @if(it.name == "Program") return(@slice(i, i, i, i, 0x40) a);
-    @if(it.name == "Rom") return(@slice(i, 0x01, 0x01, 0x40, i) a);
-    @if(it.name == "RamDualLoad") return(@slice(i, i, 0x01, 0x01, 0x40, i, 0x01, 0x40) a);
+    @if(k == .Ram || k == .RamFast) return(@slice(i, i, i, i, 0x01, 0x01, 0x40, i, i, i, i) a);
+    @if(k == .Program) return(@slice(i, i, i, i, 0x40) a);
+    @if(k == .Rom) return(@slice(i, 0x01, 0x01, 0x40, i) a);
+    @if(k == .RamDualLoad) return(@slice(i, i, 0x01, 0x01, 0x40, i, 0x01, 0x40) a);
     
     empty()
 }
 
 parse_pin_layouts :: fn(e: FatExpr) FatExpr #macro = {
-    result: HashMap(Str, []Pin) = init(ast_alloc());
+    G :: GateName(.Tc1);
+    result: OptionalEnumMap(G, []Pin) = empty();
     each e&.items() { entry |
         e := entry.items();
         names, pins := (e[0]&, e[1]&);
         pins_value := collect_values(Pin, pins);
-        names_value := collect_values(Str, names);
+        names_value := collect_values(G, names);
         for names_value { name |
             prev := result&.insert(name, pins_value);
             @ct_assert(prev.is_none(), entry.loc, "% used twice in pin_layouts", name);
@@ -1139,7 +1147,7 @@ parse_pin_layouts :: fn(e: FatExpr) FatExpr #macro = {
     collect_values :: fn($T: Type, e: *FatExpr) []T #generic = {
         es := e.items();
         out := T.list(es.len, ast_alloc());
-        if !es[0].expr&.is(.Tuple) && !es[0].expr&.is(.String) {
+        if !es[0].expr&.is(.Tuple) && !es[0].expr&.is(.ContextualField) {
             out&.push(T.const_eval(e[]));
         } else {
             each es { e |
@@ -1148,7 +1156,7 @@ parse_pin_layouts :: fn(e: FatExpr) FatExpr #macro = {
         }
         out.items()
     }
-    @literal result.raw
+    @literal result
 };
 
 multiply_high_u64 :: AsmFunction(fn(a: i64, b: i64) i64 = (), { #use("@/backend/arm64/bits.fr"); @const_slice(

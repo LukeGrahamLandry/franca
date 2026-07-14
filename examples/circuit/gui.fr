@@ -610,7 +610,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             b := tc_to_world_pos(it.pos);
             hover := p.y < b.y + W/2 && p.y > b.y - W/2 && p.x > b.x - W/2 && p.x < b.x + W/2;
             sgl.color = pack_rgba(100, 100, 100, 255);
-            info := Builtin'templates[it.kind.zext()];
+            info := Tc'get_builtin_shape(it.kind);
             if hover {
                 sgl.color = pack_rgba(200, 200, 200, 255);
                 sdtx.color = pack_rgba(255, 255, 255, 255);
@@ -674,7 +674,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         };
         @if(state.loading.is_none() || state.loading.Some.started_compiling)
         each circuit.gates { it |
-            info := Builtin'templates[it.kind.zext()];
+            info := Tc'get_builtin_shape(it.kind);
             for_pins(info, it, state.circuit) { i, dx, dy |
                 a := tc_to_world_pos(it.pos);
                 b := tc_to_world_pos(it.pos + vec2(dx.float().cast(), dy.float().cast()));
@@ -738,11 +738,13 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             i := gate.logical_gate_index;
             @if(i == -1) continue();
             it := c.gates[i]&;
+            @if(it.kind.group() != .Tc1) continue();
+            gate_kind := it.kind.name(.Tc1);
             
             sdtx.pos = vec2(0);
             sdtx.origin = world_to_text_pos(tc_to_world_pos(gate.pos));
         
-            if world[it.kind].name == "Console" {  // TODO: do this by index
+            if gate_kind == .Console {
                 sdtx.origin = world_to_text_pos(tc_to_world_pos(gate.pos + vec2(-16, -8)));
             
                 a, b := (text_to_world_pos(sdtx.origin + sdtx.pos), text_to_world_pos(sdtx.origin + sdtx.pos + vec2(80, 24)));
@@ -806,7 +808,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                 };
             };
             
-            if world[it.kind].name == "SegmentDisplay" {  // TODO: do this by index
+            if gate_kind == .SegmentDisplay {
                 sdtx.origin = world_to_text_pos(tc_to_world_pos(gate.pos + vec2(-1, -1.5)));
                 w: f32 = 0.02;
                 s: f32 = 0.06;
@@ -825,7 +827,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                 sdtx.pos.y += 6;
             };
             
-            if world[it.kind].name == "DotMatrixDisplay" {
+            if gate_kind == .DotMatrixDisplay {
                 sdtx.origin = world_to_text_pos(tc_to_world_pos(gate.pos + vec2(-1.5, -1.5)));
                 buf := world.storage.subslice(c.instance_offset_by_gate[i], 7*8*32/64);
                 buf := u32.reinterpret_bytes(buf.interpret_as_bytes());
@@ -845,7 +847,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                 };
             };
             
-            if world[it.kind].name == "SpriteDisplay" {
+            if gate_kind == .SpriteDisplay {
                 continue :: local_return;
                 sdtx.origin = world_to_text_pos(tc_to_world_pos(gate.pos + vec2(-16.5, 12)));
                 data := world.storage.subslice(c.instance_offset_by_gate[i], size_of(Tc.Builtin.SpriteData) * 256);
@@ -1058,7 +1060,7 @@ fn find_keyboard(state: *State) void = {
     root := state.tree[0].component || return();
     world := state.world&;
     c := world[root]&;
-    gate_i := c.gates.index_of(fn(it) => world[it.kind].name == "Keyboard")
+    gate_i := c.gates.index_of(fn(it) => group(it.kind) == .Tc1 && name(it.kind, .Tc1) == .Keyboard)
         || return();
     instance := c.instance_offset_by_gate[gate_i];
     data := bit_cast_unchecked(*WireValue, *Tc.Builtin.KeyboardData, world.storage.index(instance));

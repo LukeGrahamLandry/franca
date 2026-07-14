@@ -245,12 +245,13 @@ calculate_usage :: fn(components: []Component, off: i64, a: Alloc) void = {
     @assert_lt(components.len, MAX_u32, "too many components");
     range(off, components.len) { i |
         continue :: local_return;
+        id := @as(ComponentId) (id = i.trunc());
         c := components.index(i);
         c.usage = a.box_zeroed(Component.Usage);
         if c.gates.len == 0 {
             c.gate_sum = 1;
         
-            @if(i < defs.tc_components_offset)
+            @if(group(id) == .DefsBuiltin)
             if c.name == "delay" || c.name == "input" || c.name == "output" {
                 c.inputs_for_pure_eval = empty();
             } else {
@@ -365,12 +366,11 @@ fn get_storage_count(components: []Component, it: *Component.Gate) i64 =
     get_storage_count(components, it.kind, it.param);
 
 fn get_storage_count(components: []Component, kind: ComponentId, param: i64) i64 = {
-    tc := defs.tc_components_offset; 
-    kind: i64 = kind.id.zext();
-    if !FEAT_TC_CIRCUIT || kind < tc || kind >= tc + Tc.Builtin.templates.len() {
-        return components[kind].storage_count;
+    k: i64 = kind.id.zext();
+    if kind.group() != .Tc1 {
+        return components[k].storage_count;
     };
-    shape := Tc.Builtin.templates[kind - tc]&;
+    shape := get_builtin_shape(kind);
     if shape.compute_storage { compute_storage |
         n := compute_storage(param = param).ualign_to(64).udiv(64);
         return n;
@@ -569,20 +569,16 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
     tc_components_offset := defs.tc_components_offset; 
     enumerate components { i, c |
         continue :: local_return;
+        id := @as(ComponentId) (id = i.trunc());
         if c.gates.len == 0 {
-            templates :: Tc.templates;
-            tc_start := defs.tc_components_offset;
-            tc_end := defs.tc_components_offset + templates.len();
-            if i < tc_start {
-            if defs_builtin_names.contains(c.name) {
+            g := group(id);
+            if g == .DefsBuiltin {
                 @fmt(out, "% :: TcBuiltins'get_native(DefsBuiltins.%);\n", mangle(components, i), c.name);
                 continue();
             };
-            };
             // TODO: quarantine this in ./tc/*.fr
-            @if(FEAT_TC_CIRCUIT) if i >= tc_start && i < tc_end {
-                tc_index := i - defs.tc_components_offset;
-                shape := templates[tc_index]&;
+            if g == .Tc1 {
+                shape := get_builtin_shape(id);
                 if shape.fid.is_some() {
                     @fmt(out, "% :: TcBuiltins'get_native(TcBuiltins.%);\n", mangle(components, i), shape.name);
                     continue();
