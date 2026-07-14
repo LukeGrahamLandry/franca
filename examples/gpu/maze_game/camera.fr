@@ -1,0 +1,68 @@
+
+Camera :: @struct {
+    pos: Vec3;
+    rot: Vec2;  // pitch,yaw
+    // pos is persistent until you release the key, rot is consumed mouse movement. 
+    delta_pos: Vec3;
+    delta_rot: Vec2;
+    
+    speed: @struct(pos: f32, rot: f32);
+    perspective: @struct(fovy: f32, aspect: f32, znear: f32, zfar: f32);
+};
+
+fn update_camera(c: *Camera, dt: f32, mvp: *import("@/graphics/gl.fr").Matrix) void = {
+    look_dir, forward, right := {
+        sp, cp := c.rot.x.sin_cos();
+        sy, cy := c.rot.y.sin_cos();
+        (vec3(cp * cy, sp, cp * sy), vec3(cy, 0.0, sy), vec3(-sy, 0.0, cy))
+    };
+    normalize(look_dir&);
+    normalize(forward&);
+    normalize(right&);
+    
+    d := c.delta_pos;
+    c.pos += forward * d.x * c.speed.pos * dt;
+    c.pos += right * d.z * c.speed.pos * dt;
+    c.pos.y += d.y * c.speed.pos * dt;
+    c.rot += c.delta_rot * c.speed.rot * dt;
+    
+    limit: f32 = 3.1415 / 2.0;
+    c.delta_rot.x = clamp(c.delta_rot.x, -limit, limit);  // don't let you flip your neck backwards because that feels bad
+    
+    c.delta_rot = vec2(0);
+    
+    view := @uninitialized Sgl.Matrix;
+    identity(view&);
+    lookat(view&, c.pos, c.pos + look_dir, vec3(0.0, 1.0, 0.0));  // eye, center, up
+    
+    projection := @uninitialized Sgl.Matrix;
+    identity(projection&);
+    p := c.perspective&;
+    perspective(projection&, p.fovy, p.aspect, p.znear, p.zfar);
+    
+    mul(mvp, projection&);
+    mul(mvp, view&);
+}
+
+fn fly_controller(c: *Camera, event: *import("@/graphics/app.fr").Event) void = {
+    if event.type == .MOUSE_MOVE {
+        c.delta_rot += vec2(-event.mouse_dy, event.mouse_dx);
+    };
+    @if(!@is(event.type, .KEY_DOWN, .KEY_UP)) return();
+    dir, sign := @match(event.key_code) {
+        fn W()          => (c.delta_pos.x&, 1);
+        fn S()          => (c.delta_pos.x&, -1);
+        fn A()          => (c.delta_pos.z&, -1);
+        fn D()          => (c.delta_pos.z&, 1);
+        fn LEFT_SHIFT() => (c.delta_pos.y&, -1);
+        fn SPACE()      => (c.delta_pos.y&, 1);
+        @default        => return();
+    };
+    dir[] = @if(event.type == .KEY_DOWN, sign.float().cast(), 0);
+}
+
+fn update_aspect(c: *Camera, sapp: *import("@/graphics/app.fr").Self) void = {
+    c.perspective.aspect = (sapp.width().float() / sapp.height().float()).cast();
+}
+
+#use("@/graphics/vec.fr");

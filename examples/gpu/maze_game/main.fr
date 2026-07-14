@@ -1,0 +1,96 @@
+
+State :: @struct {
+    HIGH_DPI :: true;
+    pipe: Sgl.Pipeline;
+    pass_action: Sg.PassAction;
+    app: *Sapp.Self;
+    draw: Sgl.Self;
+    sg: *Sg.Self;
+    prev_frame_time: f64;
+    camera: Camera;
+};
+
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    now := timestamp_s();
+    dt := (now - state.prev_frame_time).cast();
+    state.prev_frame_time = now;
+
+    sgl := state.draw&;
+    
+    sgl.defaults();
+    sgl.viewport(0.intcast(), 0.intcast(), sapp.width().intcast(), sapp.height().intcast(), true);
+    sgl.load_pipeline(state.pipe);
+    
+    sgl.begin(.QUADS);
+    sgl.load_identity();
+    
+    
+    sgl.line(vec2(1), vec2(0), 0.2);
+    sgl.end();
+
+    mvp := sgl.uniforms[0].mvp&;
+    
+    model := @uninitialized Sgl.Matrix;
+    identity(model&);
+
+    ss: f32 = 1.0;
+    scale(model&, ss, ss, ss);
+    
+    identity(mvp);
+    update_camera(state.camera&, dt, mvp);
+    mul(mvp, model&);
+    
+    Easy'glue_begin_pass(sapp, sg, state.pass_action);
+    sgl.draw_layer(sg, 0);
+    sg.end_pass();
+    sg.commit();
+};
+
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    fly_controller(state.camera&, event);
+    @if(event.type == .RESIZED) update_aspect(state.camera&, sapp);
+};
+
+fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
+    state.sg = sg; state.app = app;
+    
+    state.draw&.setup(
+        allocator = general_allocator(),
+        sg = sg,
+        max_vertices = 100_000,
+    );
+    
+    init_pipeline(state.draw&, state.pipe&, sg, (
+        alpha_to_coverage_enabled = true,
+        depth = (
+            pixel_format = .DEFAULT,
+            write_enabled = true,
+            compare = .LESS_EQUAL,
+        ),
+        colors = (
+            (blend = (
+                enabled = true,
+                src_factor_rgb = .SRC_ALPHA,
+                dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
+            )),
+            ..,
+        ),
+    ));
+    
+    state.pass_action.colors&[0] = (
+        load_action = .CLEAR,
+        clear_value = (r = 0.3, g = 0.3, b = 0.3, a = 1.0),
+    );
+    
+    app.lock_mouse(true);
+    state.prev_frame_time = timestamp_s();
+    
+    state.camera.perspective = (aspect = 1, fovy = deg_to_rad(70), znear = 0.01, zfar = 100.0);
+    update_aspect(state.camera&, app);
+    state.camera.speed = (pos = 0.045 * 30.0, rot = 0.005 * 30.0);
+};
+
+main :: fn() void = Easy'start(State);
+driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
+#use("@/graphics/lib.fr");
+#use("@/examples/gpu/maze_game/camera.fr");
