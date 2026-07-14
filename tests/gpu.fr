@@ -100,8 +100,8 @@ tests :: filter_tests @const_slice(@as(TestCase)
     }),
     ("@/examples/gpu/viewer.fr", 5, fn(t) = {
         prospero := @run {
-            ok, out, _ := exec_and_catch(get_executable_path(temp()), @slice("examples/prospero.fr"), ast_alloc());
-            @assert(ok, "prospero");
+            ok, out, err := exec_and_catch(get_executable_path(temp()), @slice("examples/prospero.fr"), ast_alloc());
+            @assert(ok, "prospero %", err.items());
             out.items()
         };
         ascii := @run {
@@ -145,6 +145,13 @@ tests :: filter_tests @const_slice(@as(TestCase)
         t.frame();
         range(0, 4000) { _ | t.key(press = .RIGHT_BRACKET); };
         t.key(press = .SPACE);
+        t.frame();
+    }),
+    ("@/examples/gpu/maze_game/main.fr", 1, fn(t) = {
+        t.hold(press = .A);
+        range(0, 50) { _ | t.app.frame(); };
+        t.hold(press = .A, up = true);
+    
         t.frame();
     }),
     // TODO: terminal and app_events don't use Easy'start. 
@@ -215,6 +222,7 @@ main :: fn() void = {
     out_index := 0;
     inline_for tests { $it |
         mark := temp().mark();
+        commit_listener_count := sg.commit_listeners.len;
         app := init_headless_app(it._0, sg, at, W, H);
         t := @ref @as(Test) (
             app = app, sg = sg, scratch = scratch, image = image,
@@ -227,8 +235,8 @@ main :: fn() void = {
         out_index = t.out_index;
         
         app'desc'cleanup_cb(app.desc.user_data);
-        // TODO
-        //temp().reset(mark);
+        @assert_eq(commit_listener_count, sg.commit_listeners.len, "[%] cleanup leaked commit listeners", it._0);
+        temp().reset(mark);
     };
     #use("@/lib/sys/fs.fr");
     println(Sha256'hex(out));
@@ -251,7 +259,7 @@ init_headless_app :: fn($path: Str, sg: *Sg.Self, at: Sg.Attachments, W: i64, H:
     a := temp();
     app := a.box_zeroed(Sapp.Self);
     app.first_frame = true; 
-    app.events = list(a);  // annoying to reset after temp()
+    app.events = list(a);
     user := a.box_zeroed(UserData);
     instance := a.boxed(Instance, (sg = sg, app = app, user = user));
     UserData :: import(path).State;

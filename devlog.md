@@ -1,4 +1,10 @@
 
+## (Jul 14)
+
+- going to start poking at making the circuit game i was thinking about before
+- might as well deduplicate some camera code if im going to just want the same thing for now
+- tests/gpu.fr: let it reset temp by not leaking commit listeners in a few of the examples
+
 ## (Jul 13) si
 
 - Input/Output field names live in the circuit.data, so need to collect that to know types in the test.si
