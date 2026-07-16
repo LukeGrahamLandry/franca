@@ -1,5 +1,12 @@
 
-## (Jul 15)
+## (Jul 16)
+
+- dumb hack to make the mandelbrot program not make overloads annoying even tho it shouldn't matter
+- move the special case about commit() out of each individual app
+- focus on the one closest to the center of the screen when you toggle
+- need to be careful not to let the app's on_init save a random place into the temp() alloc and keep resetting to it
+
+## (Jul 15) maze_game
 
 - render the circuit app as a texture in a 3d world was easy since its just the same as tests/gpu.fr
 - now when forwarding events, i need to remap the mouse position based on the projection of the canvas in the 3d world. 
