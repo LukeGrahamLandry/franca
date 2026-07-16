@@ -1,5 +1,6 @@
 
 State :: @struct {
+    WIDTH :: 500; HEIGHT :: 500;
     HIGH_DPI :: true;
     pipe: Sgl.Pipeline;
     pass_action: Sg.PassAction;
@@ -8,13 +9,55 @@ State :: @struct {
     sg: *Sg.Self;
     prev_frame_time: f64;
     camera: Camera;
+    walls: []Wall;
+    puzzles: []Puzzle;
+    puzzle_focus: ?i64;
+    dirty: bool;
+    
+    mouse: Vec2;
+    screen_size: Vec2;
+    debug_mouse_pos: Vec2;
+    debug_mouse_dir: Vec3;
+    debug_look_dir: Vec3;
+    debug_old_player_pos: Vec3;
+    debug_fov: Array(Vec3, 4);
+    debug_rot: Vec2;
 };
 
+Wall :: @struct {
+    v: Array(Vec3, 4);
+};
+Puzzle :: @struct {
+    wall: Wall;
+
+    app: *Sapp.Self;
+    state: *PuzzleState;
+    img: Sg.Image;
+    att: Sg.Attachments;
+};
+PuzzleState :: import("@/examples/circuit/gui.fr").State;
+
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    // before the drop frame check so the first move after idle isn't a jump
     now := timestamp_s();
     dt := (now - state.prev_frame_time).cast();
     state.prev_frame_time = now;
 
+    each state.puzzles { it |
+        state.dirty = state.dirty || it.state.dirty;
+    };
+    // TODO: for the above loop to work, need to run the puzzle's event handlers now, not wait until frame() later
+    if state.puzzle_focus.is_some() {
+        state.dirty = true;
+    };
+    state.dirty = state.dirty || state.camera.delta_pos.norm() != 0;
+    
+    if Easy'should_skip_frame(sapp, state.dirty&) {
+        return();
+    };
+
+    update_camera(state.camera&, dt);
+    // TODO: do write_camera properly (add to matrix stack before end()), don't peek in at the uniforms like this. also fix it in geo.  
     sgl := state.draw&;
     
     sgl.defaults();
@@ -24,21 +67,147 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sgl.begin(.QUADS);
     sgl.load_identity();
     
+    each state.walls { wall |
+        for wall.v& { p |
+            sgl.v3f(p);
+        };
+    };
+    if true {  // HACK
+        // TODO: why does the background of the text of the puzzle texture end up being transperent? 
+        //       like it should be transparent but then you should see the background of that the circuit draws, 
+        //       not the 3d background? i guess the glue_begin_pass(clear_value) doesn't work right? 
+        //       theres also a behaviour on dirty frames only that looks a lot like the weird text highlighting in firefox. 
+        //       ohh which is interesting because for web im doing a texture copy which is like what im doing here i guess. 
+        sgl.color = pack_rgba(80,40,40,255);
+        each state.puzzles { it |
+            for it.wall.v& { p |
+                sgl.v3f(p);
+            };
+        };
+    };
+    if true {  // temporary
+        debug_point :: fn(p: Vec3, c: u32) => {
+            sgl.color = c;
+            x: f32 = 0.01;
+            sgl.v3f(p+vec3(0,-x,-x));
+            sgl.v3f(p+vec3(0,-x,x));
+            sgl.v3f(p+vec3(0,x,x));
+            sgl.v3f(p+vec3(0,x,-x));
+            
+            sgl.v3f(p+vec3(-x,-x,0));
+            sgl.v3f(p+vec3(-x,x,0));
+            sgl.v3f(p+vec3(x,x,0));
+            sgl.v3f(p+vec3(x,-x,0));
+        };
+        debug_point(state.camera.pos + state.camera.look_dir, pack_rgba(100,0,0,255));
+        debug_point(state.debug_old_player_pos + state.debug_look_dir, pack_rgba(255,0,0,255));
+        debug_point(state.debug_old_player_pos + state.debug_mouse_dir, pack_rgba(0,255,0,255));
+        debug_point(state.debug_old_player_pos, pack_rgba(0,0,255,255));
+        for state.debug_fov& { p |
+            debug_point(state.debug_old_player_pos + p, pack_rgba(0,255,255,255));
+        };
+        
+        
+        // debug_plane
+        // TODO: `up` is wrong, need to change it by rot
+        // TODO: i think plane_distance changes based on size too somehow
+        look_dir := state.debug_look_dir;
+        
+        
+        // a plane parallel to the projected screen, center directly forward from the camera, 
+        // whose width/height matches the screen and at a distance where 1 world unit = 1 screen pixel. 
+        
+        right := {
+            sp, cp := state.debug_rot.x.sin_cos();
+            sy, cy := state.debug_rot.y.sin_cos();
+            vec3(-sy, 0.0, cy).normalize()
+        };
+        
+        //up := vec3(0.0, 1.0, 0.0);
+        plane_dir := cross(right, look_dir).normalize();
+        size := state.screen_size;
+        plane_distance := {
+            angle := state.camera.perspective.fovy / 2;
+            opposite := size.y / 2;
+            s,c := angle.sin_cos();
+            adjacent := opposite / (s/c);
+            adjacent
+        };
+        p := state.debug_old_player_pos + look_dir*plane_distance;
+        sgl.color = pack_rgba(255,0,255,255);
+        
+        half := size/2;
+        tl := p + plane_dir*half.y + right*half.x;
+        tr := p + plane_dir*half.y - right*half.x;
+        br := p - plane_dir*half.y - right*half.x;
+        bl := p - plane_dir*half.y + right*half.x;
+        sgl.v3f(tl);
+        sgl.v3f(tr);
+        sgl.v3f(br);
+        sgl.v3f(bl);
+        
+        fraction := state.debug_mouse_pos / size * 2 - vec2(1);
+        A, B := (right*half.x, plane_dir*half.y);
+        pos := p + A*fraction.x + B*fraction.y;
+        debug_point(pos, pack_rgba(0,0,0,255));
+        
+        dir := normalize(pos - state.debug_old_player_pos);
+        debug_point(state.debug_old_player_pos + dir, pack_rgba(255,100,0,255));
+        
+        // so then where that line intersects the app screen is where the mouse is
+        i := 0;
+        wall := state.puzzles[i].wall.v&;
+        p0 := wall[0];
+        l0 := state.debug_old_player_pos;
+        l := dir;
+        wall_right, wall_up := (wall[0] - wall[1], wall[1] - wall[2]);
+        n := cross(wall_right, wall_up).normalize();
+        
+        d := (p0 - l0).dot(n) / l.dot(n);
+        
+        hit := l0 + l*d;
+        debug_point(hit, pack_rgba(0,0,0,255));
+        
+        range(0, plane_distance.cast().int()) { i |
+            debug_point(p + n*i.float().cast(), pack_rgba(255,255,255,255));
+        };
+        
+        // now i need to know where that point in space is in the app's local coordinates
+        // what i actually want is to change the basis of hit to (wall_right, wall_up, n)
+        wall_size := abs(wall[0] - wall[2]);
+        frac := (wall[0] - hit) / wall_size;
+        
+        m := vec2(1 - frac.z, frac.y);  // TODO: this only works for this specific puzzle position
+        m *= vec2(PUZZLE_LOGICAL_WIDTH.float().cast());
+        @println("% %", m.x, m.y);
+    };
     
-    sgl.line(vec2(1), vec2(0), 0.2);
     sgl.end();
-
-    mvp := sgl.uniforms[0].mvp&;
+    write_camera(state.camera&, sgl.uniforms[sgl.uniforms.len - 1].mvp&);
     
-    model := @uninitialized Sgl.Matrix;
-    identity(model&);
-
-    ss: f32 = 1.0;
-    scale(model&, ss, ss, ss);
+    // TODO: visual feedback when focused. coloured border maybe?
+    each state.puzzles { it |
+        first := !it.app.init_called;
+        it.app.frame();
+        if first {
+            it.state.scale = 1.5;
+            it.state.dirty = true;
+        };
     
-    identity(mvp);
-    update_camera(state.camera&, dt, mvp);
-    mul(mvp, model&);
+        sgl.color = pack_rgba(255,255,255,255);
+        sgl.texturing_enabled = true;
+        sgl.texture(it.img, (id = 0));
+        sgl.begin(.QUADS);
+        sgl.load_identity();
+    
+        uv := @const_slice(vec2(1,0), vec2(0,0), vec2(0,1), vec2(1,1));
+        enumerate it.wall.v& { i, p |
+            sgl.u = uv[i].x; sgl.v = uv[i].y;
+            sgl.v3f(p[]);
+        };
+        sgl.end();
+        write_camera(state.camera&, sgl.uniforms[sgl.uniforms.len - 1].mvp&);
+    };
     
     Easy'glue_begin_pass(sapp, sg, state.pass_action);
     sgl.draw_layer(sg, 0);
@@ -47,17 +216,152 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 };
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    if event.type == .KEY_DOWN && event.key_code == .ESCAPE {
+        it := state.puzzle_focus&;
+        it[] = @if(it.is_some(), .None, (Some = 0));  // TODO: trace the one you're looking at
+        sapp.lock_mouse(!it.is_some());
+        // TODO: you still keep moving if you were holding the button while pressing escape
+        // TODO: deal with puzzle.state.pan_keys_pressed
+        state.camera.delta_pos = vec3(0);
+        return();
+    };
+    
+    @if(event.type != .RESIZED)
+    if state.puzzle_focus { i |
+        event := event[];
+        if @is(event.type, .MOUSE_MOVE, .MOUSE_DOWN, .MOUSE_UP) {
+            state.mouse = vec2(event.mouse_x, event.mouse_y);
+        };
+        
+        // remap the mouse positions to be relative to the puzzle quad in 3d space
+        // TODO: cache this, only need to recalucate on MOUSE_MOVE
+        wall := state.puzzles[i].wall;
+        
+        
+        screen := state.screen_size;
+        mouse := vec2(event.mouse_x, screen.y - event.mouse_y);
+        ;{
+        look_dir, fovy, aspect := (state.camera.look_dir, state.camera.perspective.fovy, state.camera.perspective.aspect);
+        fov := vec2(fovy * aspect, fovy);
+        mouse_normalized := mouse / screen * 2 - vec2(1);  // center is 0,0
+        
+        make_look_dir :: fn(mouse_normalized: Vec2) Vec3 => {
+            angle := mouse_normalized * (fov/2);
+            
+            rot := state.camera.rot + vec2(angle.y, angle.x);
+            sp, cp := rot.x.sin_cos();
+            sy, cy := rot.y.sin_cos();
+            look_dir := vec3(cp * cy, sp, cp * sy).normalize();
+            look_dir
+            
+            //up := vec3(0.0, 1.0, 0.0);
+            //axis := (cross(up, look_dir), up);
+            
+            //r := Sgl.Matrix.IDENTITY;
+            //rotate(r&, angle.y, axis._0);
+            //rotate(r&, angle.x, axis._1);
+            
+            //look_dir4 := vec4(look_dir.x, look_dir.y, look_dir.z, 0);
+            //look_dir4 := r * look_dir4;
+            //vec3(look_dir4.x, look_dir4.y, look_dir4.z).normalize()
+        };
+
+        state.debug_mouse_pos = mouse;
+        state.debug_old_player_pos = state.camera.pos;
+        state.debug_rot = state.camera.rot;
+        state.debug_look_dir = state.camera.look_dir;
+        //state.debug_mouse_dir = make_look_dir(mouse_normalized);
+        
+        up := vec3(0.0, 1.0, 0.0);
+        plane_dir := cross(up, look_dir).normalize();
+        m := vec2(-mouse_normalized.x, mouse_normalized.y) * state.screen_size/4;
+        state.debug_mouse_dir = normalize(vec3(m.x, m.y, 360) - state.camera.pos);
+        
+        
+        
+        x: f32 = 1;
+        state.debug_fov = (
+            make_look_dir(vec2(-x)),
+            make_look_dir(vec2(x,-x)),
+            make_look_dir(vec2(-x,x)),
+            make_look_dir(vec2(x)),
+        );
+        
+        };
+        
+        
+        // TODO: this is a big paste from the debug rendering
+        look_dir := state.camera.look_dir;
+        right := {
+            sp, cp := state.camera.rot.x.sin_cos();
+            sy, cy := state.camera.rot.y.sin_cos();
+            vec3(-sy, 0.0, cy).normalize()
+        };
+        plane_dir := cross(right, look_dir).normalize();
+        size := state.screen_size;
+        plane_distance := {
+            angle := state.camera.perspective.fovy / 2;
+            opposite := size.y / 2;
+            s,c := angle.sin_cos();
+            adjacent := opposite / (s/c);
+            adjacent
+        };
+        p := state.camera.pos + look_dir*plane_distance;
+        
+        half := size/2;
+        
+        fraction := mouse / size * 2 - vec2(1);
+        A, B := (right*half.x, plane_dir*half.y);
+        pos := p + A*fraction.x + B*fraction.y;
+        
+        dir := normalize(pos - state.camera.pos);
+        
+        // so then where that line intersects the app screen is where the mouse is
+        i := 0;
+        wall := state.puzzles[i].wall.v&;
+        p0 := wall[0];
+        l0 := state.camera.pos;
+        l := dir;
+        wall_right, wall_up := (wall[0] - wall[1], wall[1] - wall[2]);
+        n := cross(wall_right, wall_up).normalize();
+        
+        d := (p0 - l0).dot(n) / l.dot(n);
+        
+        hit := l0 + l*d;
+        
+        // now i need to know where that point in space is in the app's local coordinates
+        // what i actually want is to change the basis of hit to (wall_right, wall_up, n)
+        wall_size := abs(wall[0] - wall[2]);
+        frac := (wall[0] - hit) / wall_size;
+        
+        m := vec2(1 - frac.z, frac.y);  // TODO: this only works for this specific puzzle position
+        m *= vec2(PUZZLE_LOGICAL_WIDTH.float().cast());
+        
+        event.mouse_x = m.x;
+        event.mouse_y = m.y;
+        // TODO: also need to remap mouse delta
+        
+        state.puzzles[i].app.events&.push(event);
+        return();
+    };
+
+    state.dirty = true;
     fly_controller(state.camera&, event);
-    @if(event.type == .RESIZED) update_aspect(state.camera&, sapp);
+    if event.type == .RESIZED {
+        update_aspect(state.camera&, sapp);
+        state.screen_size = vec2(sapp.framebuffer_width.float().cast(), sapp.framebuffer_height.float().cast());
+    };
 };
 
 fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     state.sg = sg; state.app = app;
+    state.dirty = true;
+    state.puzzle_focus = .None;
     
     state.draw&.setup(
         allocator = general_allocator(),
         sg = sg,
-        max_vertices = 100_000,
+        max_vertices = 1_000_000,
     );
     
     init_pipeline(state.draw&, state.pipe&, sg, (
@@ -85,14 +389,82 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     app.lock_mouse(true);
     state.prev_frame_time = timestamp_s();
     
-    state.camera.perspective = (aspect = 1, fovy = deg_to_rad(70), znear = 0.01, zfar = 100.0);
+    state.camera.perspective = (aspect = 1, fovy = deg_to_rad(70), znear = 0.01, zfar = 1000.0);
     update_aspect(state.camera&, app);
+    state.screen_size = vec2(app.framebuffer_width.float().cast(), app.framebuffer_height.float().cast());
     state.camera.speed = (pos = 0.045 * 30.0, rot = 0.005 * 30.0);
+    
+    a := general_allocator();
+    walls := @ref Wall.list(a);
+    
+    new_vertical :: fn(a: Vec2, b: Vec2, h: f32, y: f32) Wall = {
+        a := vec3(a.x, y, a.y);
+        b := vec3(b.x, y, b.y);
+        h := vec3(0, h, 0);
+        (v = (a+h, b+h, b, a))
+    };
+    vertical :: fn(a: Vec2, b: Vec2, h: f32, y: f32) => 
+        walls.push(new_vertical(a,b,h,y));
+    square_vertical :: fn(p: Array(Vec2, 4), h: f32, y: f32) => {
+        vertical(p&[0], p&[1], h, y);
+        vertical(p&[1], p&[2], h, y);
+        vertical(p&[2], p&[3], h, y);
+        vertical(p&[3], p&[0], h, y);
+    };
+    square_vertical((vec2(10, 10), vec2(10, -10), vec2(-10, -10), vec2(-10, 10)), 3, 0);
+    
+    state.walls = walls.items();
+    
+    puzzles := @ref Puzzle.list(a);
+    puzzles.push(new_puzzle(sg, new_vertical(vec2(4, 2), vec2(4, -2), 4, 0.5), a));
+    state.puzzles = puzzles.items();
 };
+
+PUZZLE_LOGICAL_WIDTH :: 1024;
+
+fn new_puzzle(sg: *Sg.Self, wall: Wall, a: Alloc) Puzzle = {
+    // TODO: this is a paste from tests/gpu.fr
+    W :: PUZZLE_LOGICAL_WIDTH; H :: W;
+    image: Sg.Image = sg.make(
+        width = W,
+        height = H,
+        pixel_format = .BGRA8,
+        render_target = true,
+        copy_source = true,
+    );
+    // TODO: in website ask for features: Depth32FloatStencil8
+    dimage: Sg.Image = @if(SOKOL_BACKEND == .WGPU, (id = 0), sg.make(
+        width = W,
+        height = H,
+        pixel_format = .DEPTH_STENCIL,
+        render_target = true,
+    ));
+    at: Sg.Attachments = sg.make(
+        colors = ((
+            image = image,
+        ), ..),
+        depth_stencil = (image = dimage),
+    );
+    
+    app, user := import("@/tests/gpu.fr")'local_scope'init_headless_app2(PuzzleState, sg, at, W, H, a);
+    
+    // TODO: without this, the app's on_render calls sg.commit() but for this program 
+    //       i just want it to add passes and the commit happens once in the 3d on_render.
+    //       if commit is called early, the 3d world walls etc. don't get drawn 
+    //       (which is any frames where user.state.dirty=true without this hack). 
+    //       solution might be headless app never calls commit and 
+    //       the embeder needs to do it since logically it owns the Sg.Self anyway. 
+    user.hack_no_commit_for_shared_sg = true;
+    
+    (img = image, att = at, app = app, state = user, wall = wall)
+}
 
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sg.destroy_pipeline(state.pipe&);
     state.draw&.destroy(sg, general_allocator());
+    for state.puzzles { it |
+        it.app.call_cleanup();
+    };
 }
 
 main :: fn() void = Easy'start(State);

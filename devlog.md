@@ -1,4 +1,21 @@
 
+## (Jul 15)
+
+- render the circuit app as a texture in a 3d world was easy since its just the same as tests/gpu.fr
+- now when forwarding events, i need to remap the mouse position based on the projection of the canvas in the 3d world. 
+  - is it easier to do the math in 3d and find where the line from the camera hits the quad of the puzzle
+    or just project the puzzle to the screen like when rendering it. also need to deal with the mouse's position.
+  - to start with, just draw where the mouse is pointing.  
+
+this would be a lot easier if i remembered more linear algebra. 
+
+i know the mouse pos on real screen and the fov so i can find the angle 
+where the mouse ray would be by finding scaling the fov by how far away from the center of the screen the mouse is. 
+seems wrong at the edges. i guess the distortion isn't linear, that makes sense to me. 
+
+other idea is thing of the plane that's the distance away where one world unit projects to one pixel so it perfectly covers the camera. 
+so then the mouse screen coord is automatically where it would hit that plane. 
+
 ## (Jul 14)
 
 - going to start poking at making the circuit game i was thinking about before

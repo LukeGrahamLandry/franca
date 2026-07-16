@@ -64,7 +64,17 @@ PipeDesc :: @struct {
 };
 
 Vertex :: Shaders.InV;
-Matrix :: @struct(v: Array(Array(f32, 4), 4));
+Matrix :: @struct {
+    v: Array(Array(f32, 4), 4);
+    
+    IDENTITY :: { 
+        m := @uninitialized Matrix; 
+        range(0, 4, fn(c) => range(0, 4) { r |
+            m&[c, r] = @if(r == c, 1.0, 0.0);
+        });
+        m 
+    };
+};
 Uniform :: @struct(
     mvp: Matrix,  /* model-view-projection matrix */
     tm: Matrix,   /* texture matrix */
@@ -681,24 +691,18 @@ fn pop_matrix(ctx: *Self) void = {
 // (there are helpers below for applying these to a Context and marking it dirty)
 //
 
-fn identity(m: *Matrix) void =
-    range(0, 4, fn(c) => range(0, 4) { r |
-        ::if(f32);
-        m[c, r] = if(r == c, => 1.0, => 0.0);
-    });
+fn identity(m: *Matrix) void = { m[] = Matrix.IDENTITY; }
 
 fn transpose(dst: *Matrix, m: *Matrix) void = {
-    @debug_assert(!identical(dst, m), "use transpose_in_place");
+    if identical(dst, m) {
+        m = @ref m[];
+    };
     range(0, 4, fn(c) => range(0, 4) { r |
         dst[r, c] = m[c, r];
     });
 }
 
-fn transpose_in_place(m: *Matrix) void = {
-    src := m[];
-    transpose(m, src&);
-}
-
+// (row, col)
 fn index(m: *Matrix, ij: Ty(i64, i64)) *f32 = 
     m.v&.index(ij._0).index(ij._1);
 
@@ -715,6 +719,9 @@ fn matmul4(p: *Matrix, a: *Matrix, b: *Matrix) void = {
 
 fn mul(dst: *Matrix, m: *Matrix) void =
     matmul4(dst, dst, m);
+
+fn rotate(dst: *Matrix, rad: f32, axis: Vec3) void = 
+    rotate(dst, rad, axis.x, axis.y, axis.z); 
 
 fn rotate(dst: *Matrix, a: f32, x: f32, y: f32, z: f32) void = {
     s := sin(a);
@@ -815,8 +822,7 @@ fn perspective(dst: *Matrix, fovy: f32, aspect: f32, znear: f32, zfar: f32) void
         return();
     };
     cotan := cos(fovy / 2.0) / sine;
-    m := @uninitialized Matrix; m := m&;
-    identity(m);
+    m := @ref Matrix.IDENTITY;
     m[0, 0] = cotan / aspect;
     m[1, 1] = cotan;
     m[2, 2] = -(zfar + znear) / delta_z;
@@ -826,29 +832,18 @@ fn perspective(dst: *Matrix, fovy: f32, aspect: f32, znear: f32, zfar: f32) void
     mul(dst, m);
 }
 
-fn normalize(v: *Vec3) void = {
-    r := sqrt(v[].dot(v[]));
-    if(r == 0.0, => return());
-    v[] = v[] / r;
-}
-
-// TODO: only one that's (src, dest) for some reason
-fn cross(v1: *Vec3, v2: *Vec3, res: *Vec3) void = {
-    res[0] = v1[1]*v2[2] - v1[2]*v2[1];
-    res[1] = v1[2]*v2[0] - v1[0]*v2[2];
-    res[2] = v1[0]*v2[1] - v1[1]*v2[0];
-}
+fn cross(a: Vec3, b: Vec3) Vec3 = (v = (
+    a.y*b.z - a.z*b.y,
+    a.z*b.x - a.x*b.z,
+    a.x*b.y - a.y*b.x,
+));
 
 fn lookat(dst: *Matrix, eye: Vec3, center: Vec3, up: Vec3) void = {
-    side := Vec3.zeroed();
-    fwd := center - eye;
-    normalize(fwd&);
-    cross(fwd&, up&, side&);
-    normalize(side&);
-    cross(side&, fwd&, up&);
+    fwd := normalize(center - eye);
+    side := normalize(cross(fwd, up));
+    up := cross(side, fwd);
 
-    m := @uninitialized Matrix; m := m&;
-    identity(m);
+    m := @ref Matrix.IDENTITY;
     inline_range(0, 3) { i |
         m[i, 0] = side&[i];
         m[i, 1] = up&[i];
@@ -875,6 +870,9 @@ fn v2f_t2f(ctx: *Self, xy: Vec2, u: f32, v: f32) void =
     
 fn v2f(ctx: *Self, x: f32, y: f32) void = 
     vtx(ctx, x, y, 0.0, ctx.u, ctx.v, ctx.color);
+
+fn v3f(ctx: *Self, xyz: Vec3) void = 
+    v3f(ctx, xyz.x, xyz.y, xyz.z);
 
 fn v3f(ctx: *Self, x: f32, y: f32, z: f32) void = 
     vtx(ctx, x, y, z, ctx.u, ctx.v, ctx.color);
