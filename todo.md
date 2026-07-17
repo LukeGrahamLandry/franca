@@ -1,3 +1,10 @@
+
+TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
+TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
+TODO: could be interesting to have a new app hook for taking a snapshot 
+      so when not loaded could store the state more efficiently than all the allocated vertex buffers. 
+      ex. chess just needs a fen+selected square+zoom. etc. 
+
 - one of the hare tests broke in sr.ht when they took out the old version of ubuntu.
   make sure it's not my fault
 - recap of language woes
@@ -13,6 +20,7 @@
 - see todo comments:
   - life/README.md
   - circuit/README.md
+  - gpu/maze_game/README.md
   - web/(get,serve).fr
 - use bubblewrap more
   - more fine grained settings. ie. enforce that the no-deps tests don't try to fetch anything, etc.

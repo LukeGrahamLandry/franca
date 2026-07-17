@@ -1,0 +1,89 @@
+
+App :: import("@/examples/chess/gui.fr").State;
+Instance :: @struct {
+    puzzle_index: i64;
+    
+    pos: Vec2;
+    step: f32;
+    Y: f32;
+    H: f32;
+    flip_xz: bool;
+};
+
+// TODO: need to allow multiple and set them up at the beginning. 
+//       make these world renderer things a generic property of the puzzle
+// TODO: the locations of the pieces in the world also need to block you from moving. 
+// TODO: find a symetrical knight icon or mirror one of them so both face the center. 
+fn draw_chess_3d(sgl: *Sgl.Self, it: *Instance, self: *App) void = {
+    pos, step, Y, H, flip_xz := (it.pos, it.step, it.Y, it.H, it.flip_xz);
+    Y0 := Y + 0.01;  // don't z-fight with the floor when drawing the grid
+    Y -= H * 0.11;  // don't be floating above the floor
+    
+    // would be more efficient to just make a grid texture and put it in the pieces atlas so this didn't need an extra draw call
+    sgl.color = pack_rgba(100,100,100,255);
+    sgl.texturing_enabled = false;
+    sgl.begin(.QUADS);
+    parity := false;
+    range(0, 8) { file |
+        parity = !parity;
+        range(0, 8) { rank |
+            continue :: local_return;
+            parity = !parity;
+            @if(parity) continue();
+            
+            off := vec2(rank.float().cast(), file.float().cast());
+            if flip_xz {| off = vec2(off.y, off.x); };
+            
+            c := pos + off*step;
+                c1 := c;
+                c2 := c1 + vec2(step, step);
+                sgl.v3f(c1.x, Y0, c1.y);
+                sgl.v3f(c2.x, Y0, c1.y);
+                sgl.v3f(c2.x, Y0, c2.y);
+                sgl.v3f(c1.x, Y0, c2.y);
+        }
+    };
+    sgl.end();
+    
+    sgl.texturing_enabled = true;
+    sgl.texture(self.pieces_image, (id = 0));
+    sgl.color = pack_rgba(255,255,255,255);
+    sgl.begin(.QUADS);
+    range(0, 8) { file |
+        range(0, 8) { rank |
+            continue :: local_return;
+            p := self.board.board&.get(file, rank);
+            @if(p.kind() == .Empty) continue();
+            (w: f32, h: f32) := (1.0 / 6.0, 1.0 / 2.0);
+            x: f32 = p.kind().raw().int().sub(1).float().cast();
+            y: f32 = p.colour().eq(.Black).int().float().cast();
+            u, v := (vec2(x*w, x*w + w), vec2(y*h, y*h + h));
+            
+            off := vec2(rank.float().cast(), file.float().cast());
+            if flip_xz {| off = vec2(off.y, off.x); };
+            
+            c := pos + off*step;
+
+            // TODO: surely this can be less verbose. i want this sort of cross quad model thing to be reusable. 
+                c1 := c + vec2(step/2, 0);
+                c2 := c1 + vec2(0, step);
+                
+                (u1: f32, u2: f32, v1: f32, v2: f32) := (u.x, u.y, v.x, v.y);
+                sgl.v3f_t2f(c1.x, Y+H, c1.y, u2, v1); 
+                sgl.v3f_t2f(c2.x, Y, c1.y, u2, v2);
+                sgl.v3f_t2f(c2.x, Y, c2.y, u1, v2);
+                sgl.v3f_t2f(c1.x, Y+H, c2.y, u1, v1);
+                
+                c1 := c + vec2(0, step/2);
+                c2 := c1 + vec2(step, 0);
+                sgl.v3f_t2f(c1.x, Y+H, c1.y, u1, v1);
+                sgl.v3f_t2f(c2.x, Y+H, c1.y, u2, v1);
+                sgl.v3f_t2f(c2.x, Y, c2.y, u2, v2);
+                sgl.v3f_t2f(c1.x, Y, c2.y, u1, v2);
+        }
+    };
+
+    sgl.end();    
+}
+
+#use("@/examples/gpu/maze_game/main.fr");

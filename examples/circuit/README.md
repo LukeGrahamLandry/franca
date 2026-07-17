@@ -123,6 +123,3 @@ it works well enough to run my overture/leg in the maze and a few things from th
 // TODO: if i want to let you edit the circuit in the ui, 
 //       have two copies that swap when you change something so it doesn't hang the ui while compiling the new one. 
 ```
-- for a long time i've had the vague idea of a game where you're exploring a 3d maze and have to collect
-  circuit components and spend them to solve puzzles (like build more complex gates) to unlock doors
-  but the wire layout matters because they become paths in the 3d world. 
