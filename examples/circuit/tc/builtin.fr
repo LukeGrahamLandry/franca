@@ -21,16 +21,17 @@ Template :: @struct {
     Body :: @enum(Unimplemented, Native, IO, Custom);
 };
 Pin :: Ty(i64, i64);
+Tc :: import("@/examples/circuit/tc/load.fr");
 
-templates :: {
+collect_templates :: fn($impl: Type, $g: Tc.GateGroup, $pin_layouts: ~A, $body: FuncId) []*Template #where = {
     out := (*Template).list(ast_alloc());
     S := Type.scope_of(impl);
     i := 0;
     for get_constants(S) { name |
         it := (*Template).get_constant(S, name)
             || @panic("expected % to be a function", str(name));
-        it.kind = (id = trunc(i + import("@/examples/circuit/parse.fr").defs.tc_components_offset)); i += 1;
-        k := import("@/examples/circuit/tc/load.fr")'gate_name(it.kind, .Tc1);
+        it.kind = (id = trunc(i + component_offset(g))); i += 1;
+        k := Tc'gate_name(it.kind, g);
         
         if it.name != "" {
             it = ast_alloc().boxed(Template, it[]);
@@ -38,6 +39,28 @@ templates :: {
         it.name = str(name);
         it.inputs_for_pure_eval = ast_alloc().alloc_init(i64, it.in_arity, fn(i) => i);
         
+        if k == .Custom {
+            it.body = .Custom;
+        };
+        
+        @if_let(it.fid) fn Some(fid) => {
+            it.callee = current_compiler_context().get_jitted(fid);
+        };
+        
+        if pin_layouts.get(k) { pins |
+            it.pins = pins;
+        };
+        body(it, k);
+        if it.pins.len != 0 && g == .Tc1 {
+            @assert_eq(it.pins.len, it.in_arity + it.out_arity, "pin count (%)", it.name);
+            @assert_eq(it.bit_width.len, it.pins.len, "width count (%)", it.name);
+        }
+        out&.push(it);
+    };
+    out.items()
+};
+
+templates :: collect_templates(impl, .Tc1, pin_layouts) { it, k |
         if it.name.starts_with("Counter") || k == .Keyboard || it.name.starts_with("Register") || it.name.starts_with("DelayLine") || k == .BitMemory {
             it.inputs_for_pure_eval = empty();
         };
@@ -58,23 +81,11 @@ templates :: {
             || it.name.starts_with("Ram") || it.name.starts_with("Indexer") || it.name.ends_with("Display") 
             || @is(k, .Program, .Console, .FileLoader, .Rom, .Halt, .Keyboard, .Mul64);
         
-        if k == .Custom {
-            it.body = .Custom;
-        };
-        
-        @if_let(it.fid) fn Some(fid) => {
-            it.callee = current_compiler_context().get_jitted(fid);
-        };
         it.bit_width = get_width_data(it);
-        pin_layouts;
-        if pin_layouts.get(k) { pins |
-            it.pins = pins;
-            @assert_eq(it.pins.len, it.in_arity + it.out_arity, "pin count (%)", it.name);
-            @assert_eq(it.bit_width.len, it.pins.len, "width count (%)", it.name);
-        };
-        out&.push(it);
-    };
-    out.items()
+};
+
+templates2 :: collect_templates(impl2, .Tc2, pin_layouts2) { it, k |
+    it.has_param = it.has_param || @is(k, .Level_gate);
 };
 
 #use("@/examples/circuit/eval.fr");
@@ -806,23 +817,23 @@ SyntheticCast_FR :: math_param(1, 1) { o, i, p | o[0] = i[0].bit_and(1.shift_lef
 
 impl2 :: @struct {
 None :: todo();
-Off :: todo();
-On :: todo();
-Not_bit :: todo();
-And_bit :: todo();
-And_3_bit :: todo();
-Nand_bit :: todo();
-Or_bit :: todo();
-Or_3_bit :: todo();
-Nor_bit :: todo();
-Xor_bit :: todo();
-Xnor_bit :: todo();
-Switch_bit :: todo();
-Delay_line_bit :: todo();
-Register_bit :: todo();
-Full_adder :: todo();
-Maker_bit_8 :: todo();
-Splitter_bit_8 :: todo();
+Off :: impl.Off;
+On :: impl.On;
+Not_bit :: impl.Not;
+And_bit :: impl.And;
+And_3_bit :: impl.And3;
+Nand_bit :: impl.Nand;
+Or_bit :: impl.Or;
+Or_3_bit :: impl.Or3;
+Nor_bit :: impl.Nor;
+Xor_bit :: impl.Xor;
+Xnor_bit :: impl.Xnor;
+Switch_bit :: impl.Switch1;
+Delay_line_bit :: impl.DelayLine1;
+Register_bit :: impl.BitMemory;
+Full_adder :: impl.FullAdder;
+Maker_bit_8 :: impl.Maker8;
+Splitter_bit_8 :: impl.Splitter8;
 Not_word :: todo();
 Or_word :: todo();
 And_word :: todo();
@@ -864,7 +875,15 @@ Delay_line_word :: todo();
 Store_port :: todo();
 Ctz :: todo();
 Cc_level_output :: todo();
-Level_gate :: todo();
+Level_gate :: device(1, 1,
+    fn(it) => 64,
+    fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 1), param: i64, instance: i64, _1: bool) void = {
+        // TODO: clickable if i=1, o=1 if solved
+        // TODO: click in ui to open level
+        // TODO: load solvedness with init_data
+        o[0] = 0;
+    },
+);
 Level_input_1_pin :: todo();
 Level_input_word :: todo();
 Level_input_switched :: todo();
@@ -932,7 +951,7 @@ _14 :: todo();
 _15 :: todo();
 };
 
-pin_layouts :: @static @parse_pin_layouts(
+pin_layouts :: @static @(parse_pin_layouts(.Tc1)) (
 ((.Or8, .Equal8, .LessU8, .LessI8, .Xor8, .And8, .Equal64, .Or64, .And64, .Xor64, .LessU64, .LessI64, .Or16, .Equal16, .LessU16, .LessI16, .Or32, .And32, .Xor32, .Nand8, .Nor8, .Xnor8, .Nand16, .Nor16, .Xnor16, .Nand32, .Nor32, .Xnor32, .Nand64, .Nor64, .Xnor64, .Equal32, .LessU32, .LessI32),
     ((1, 0), (-1, -1), (-1, 0))),
 ((.Counter8),
@@ -1043,6 +1062,23 @@ pin_layouts :: @static @parse_pin_layouts(
     ((-17, -12), (-17, -11), (-17, -10), (-17, -9))),
 );
 
+pin_layouts2 :: @static @(parse_pin_layouts(.Tc2)) (
+((.Level_input_1_pin, .On, .Off),
+    ((1, 0))),
+((.Level_output_1_pin),
+    ((-1, 0))),
+((.Level_input_2_pin),
+    ((0, 1), (0, -1))),
+((.Not_bit),
+    ((2, 0), (-1, 0))),
+((.Or_bit, .And_bit, .Nand_bit, .Xor_bit, .Nor_bit, .Xnor_bit),
+    ((2, 0), (-1, -1), (-1, 1))),
+((.Or_3_bit, .And_3_bit),
+    ((2, 0), (-1, -1), (-1, 0), (-1, 1))),
+((.Level_gate),
+    ((4, 0), (-4, 0))),
+);
+
 get_width_data :: fn(it: *Template) []u8 = {
     a := ast_alloc();
     all_one :: @const_slice(GateName(.Tc1).BitMemory, .And3, .Or3, .FullAdder, .Decoder3, .Decoder1, .Decoder2, .On, .Off, .Halt, .LevelOutput1Sum, .LevelOutput1Car);
@@ -1131,8 +1167,8 @@ get_width_data :: fn(it: *Template) []u8 = {
     empty()
 }
 
-parse_pin_layouts :: fn(e: FatExpr) FatExpr #macro = {
-    G :: GateName(.Tc1);
+parse_pin_layouts :: fn($g: Tc.GateGroup) FuncId = (fn(e: FatExpr) FatExpr #macro = {
+    G :: GateName(g);
     result: OptionalEnumMap(G, []Pin) = empty();
     each e&.items() { entry |
         e := entry.items();
@@ -1157,7 +1193,7 @@ parse_pin_layouts :: fn(e: FatExpr) FatExpr #macro = {
         out.items()
     }
     @literal result
-};
+});
 
 multiply_high_u64 :: AsmFunction(fn(a: i64, b: i64) i64 = (), { #use("@/backend/arm64/bits.fr"); @const_slice(
     @bits(0b1, 0b00, 0b1, 0b101, 0b1, 0b1, 0b10, @as(u5) x1, 0b0, 0b11111, @as(u5) x0, @as(u5) x0),  // UMULH

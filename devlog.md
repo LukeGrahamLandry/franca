@@ -1,10 +1,16 @@
 
 ## (Jul 16)
 
+maze_game
 - dumb hack to make the mandelbrot program not make overloads annoying even tho it shouldn't matter
 - move the special case about commit() out of each individual app
 - focus on the one closest to the center of the screen when you toggle
 - need to be careful not to let the app's on_init save a random place into the temp() alloc and keep resetting to it
+
+circuit
+- start pins for new version 
+- load the file structure of the campaign saves. level map is just another circuit with a special component for each level. 
+- remember position when going back out to previous circuit, its so annoying when you lose your place because they're different sizes. 
 
 ## (Jul 15) maze_game
 

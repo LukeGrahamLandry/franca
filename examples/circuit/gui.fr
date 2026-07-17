@@ -73,6 +73,7 @@ CircuitNode :: @struct {
     diagram_circuit: ?i64 = .None;  // index in state.circuit
     logical_gate: ?i64 = .None;  // index in previous component
     component: ?ComponentId = .None;
+    saved := zeroed(@struct(pos: Vec2, scale: f32));
 };
 
 has_dis :: @const_slice("overture", "leg", "OVERTURE", "LEG", "NANDverture");
@@ -241,7 +242,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     // TODO: list them from the save dir even if don't ask for a specific one on cli
     enumerate state.circuit { i, c |
         continue :: local_return;
-        @if(!c.is_arch) continue();
+        @if(!c.is_arch && !c.is_campaign) continue();
         
         sdtx.pos = world_to_text_pos(vec2(0 * width, height * (7 + arch_list_count)));
         p := world_to_text_pos(p);
@@ -372,10 +373,9 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             };
         }
         
-        if state.clicked && hover && state.tree.len > 1 {
-            _ := state.tree&.pop();
+        if state.clicked && hover {
+            state.pop_tree_node();
             state.clicked = false;
-            state.dirty = true;
         };
         
         sdtx.origin = vec2(0);
@@ -402,30 +402,12 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         pos.y -= height;
         
         if state.clicked && hover {
+            // TODO: move this into open_gate
             is_io := i == 0 || i == c.gates.len - 1;
-            if is_io && state.tree.len > 1 {
-                _ := state.tree&.pop();
+            if is_io {
+                state.pop_tree_node();
             } else {
-                graphic: ?i64 = .None;
-                @if(FEAT_TC_CIRCUIT) if state.tree.len > 0 {
-                    break :: local_return;
-                    if state.tree[state.tree.len - 1].diagram_circuit { circuit_i |
-                        circuit := state.circuit[circuit_i]&;
-                        each circuit.gates { gate |
-                            if gate.logical_gate_index == i {
-                                if state.circuit.index_of(fn(check) => check.id == gate.custom_id) { new |
-                                    graphic = (Some = new);
-                                };
-                                break();
-                            };
-                        };
-                    };
-                };
-                state.tree&.push(
-                    diagram_circuit = graphic,
-                    logical_gate = (Some = i),
-                    component = (Some = it.kind),
-                );
+                state.open_gate((Some = i), .None);
             };
             state.clicked = false;
             state.dirty = true;
@@ -606,7 +588,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         
         W: f32 = 0.025;
         wire_hover_count: f32 = 1;
-        each circuit.gates { it |
+        enumerate circuit.gates { g_gate_index, it |
             b := tc_to_world_pos(it.pos);
             hover := p.y < b.y + W/2 && p.y > b.y - W/2 && p.x > b.x - W/2 && p.x < b.x + W/2;
             sgl.color = pack_rgba(100, 100, 100, 255);
@@ -623,23 +605,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                 wire_hover_count += 1;
                 
                 if state.clicked {
-                    logical: ?i64 = @if(it.logical_gate_index == -1, .None, (Some = it.logical_gate_index));
-                    graphic := state.circuit.index_of(fn(check) => check.id == it.custom_id);
-                    if graphic.is_some() || logical.is_some() {
-                        state.clicked = false;
-                        state.dirty = true;
-                        state.tree&.push(
-                            diagram_circuit = graphic,
-                            logical_gate = logical,
-                        );
-                    }
-                    
-                    is_io := info.name.contains("Input") || info.name.contains("Output");
-                    if is_io && state.tree.len > 1 {
-                        _ := state.tree&.pop();
-                        state.clicked = false;
-                        state.dirty = true;
-                    };
+                    state.open_gate(.None, (Some = g_gate_index));
                 };
             };
             sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
@@ -700,9 +666,12 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         
         display_name :: fn(info: *Builtin.Template, it: *Tc.Circuit.Gate, circuit: []Tc.Circuit) Str = {
             name := info.name;
-            @if(name == "Custom")
+            @if(it.kind.group() == .Loaded)
             if circuit.find(fn(check) => check.id == it.custom_id) { it |
                 name = @tfmt("Custom (%)", it.name);
+            };
+            if it.kind.group() == .Tc2 && it.kind.Tc'gate_name(.Tc2) == .Level_gate {
+                name = @tfmt("% (%)", name, it.label);
             };
             name
         }
@@ -911,6 +880,97 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sg.commit();
 };
 
+// TODO: ugh this needs to not be so verbose
+fn open_gate(state: *State, logical_gate_index: ?i64, diagram_gate_index: ?i64) void = {
+    old_circuit: ?*Tc.Circuit = .None;
+    new_diagram_circuit: ?i64 = .None;
+    is_io := false;
+    new_component: ?ComponentId = .None;
+    @if(state.tree.len > 0) if state.tree[state.tree.len - 1].diagram_circuit { i |
+        old_circuit = (Some = state.circuit[i]&);
+    };
+
+    if old_circuit { c |
+        @if(logical_gate_index.is_none()) if diagram_gate_index { i |
+            g := c.gates[i];
+            if g.logical_gate_index != -1 {
+                logical_gate_index = (Some = g.logical_gate_index);
+                new_component = (Some = g.kind);
+            };
+        };
+        
+        @if(diagram_gate_index.is_none()) if logical_gate_index { i |
+            enumerate c.gates { j, g |
+                if g.logical_gate_index == i {
+                    diagram_gate_index = (Some = j);
+                };
+            };
+        };
+        
+        if diagram_gate_index { i |
+            it := c.gates[i]&;
+            new_component = (Some = it.kind);
+            if group(it.kind) == .Loaded {
+                id := it.custom_id;
+                new_diagram_circuit = state.circuit.index_of(fn(it) => it.id == id);
+            };
+            if group(it.kind) == .Tc2 && Tc'gate_name(it.kind, .Tc2) == .Level_gate {
+                name := it.label;
+                new_diagram_circuit = state.circuit.index_of(fn(it) => it.is_level && it.name == name);
+                if new_diagram_circuit.is_none() {
+                    @println("missing level '%'", name);
+                };
+                if new_diagram_circuit { i |
+                    if state.circuit[i].level_test_si.is_none() {
+                        @println("missing test.si for level '%'", name);
+                    };
+                };
+            };
+        };
+        
+        if new_diagram_circuit { i |
+            new_component = state.circuit[i].compiled;
+        };
+    };
+    
+    if new_component { i |
+        // TODO: do this with shape.kind == .io ?
+        if @is(group(i), .DefsBuiltin, .Tc1, .Tc2) {
+            name := state.world&[i].name;
+            is_io = is_io || name == "input" || name == "output" || name.contains("Input") || name.contains("Output")|| name.contains("Level_input") || name.contains("Level_output");
+        };
+    };
+    
+    if is_io {
+        state.pop_tree_node();
+        state.clicked = false;
+        return();
+    };
+    
+    if logical_gate_index.is_some() || new_diagram_circuit.is_some() {
+        state.clicked = false;
+        state.dirty = true;
+        state.push_tree_node(
+            diagram_circuit = new_diagram_circuit,
+            logical_gate = logical_gate_index,
+            component = new_component,
+        );
+    }
+}
+
+fn pop_tree_node(state: *State) void = {
+    @if(state.tree.len <= 1) return();
+    state.dirty = true;
+    prev := state.tree&.pop().unwrap();
+    state.pos = prev.saved.pos;
+    state.scale = prev.saved.scale;
+}
+
+fn push_tree_node(state: *State, it: CircuitNode) void = {
+    it.saved = (pos = state.pos, scale = state.scale);
+    state.tree&.push(it);
+}
+
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.loading = .None;
     state.loader_thread = .None;
@@ -935,7 +995,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.frame_time_history = init(a, 128);
     init(state.world&, a, true);  // TODO: leaked when loading new circuit
     state.tree = list(a);
-    state.tree&.push(
+    state.push_tree_node(
         component = (Some = get_component_by_name("overture", finished_defs.components)),
     );
     state.dirty = true;
@@ -1122,9 +1182,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             tick_off := @if(event.modifiers.get(.shift) == 1, 50, 1);
             tick_off := @if(event.modifiers.get(.super) == 1, 1000, tick_off);
             @match(event.key_code) {
-                fn ESCAPE() => if state.tree.len > 1 { 
-                    _ := state.tree&.pop(); 
-                }
+                fn ESCAPE() => state.pop_tree_node();
                 fn ENTER() => { state.want_eval = true; }
                 fn SPACE() => { state.auto_eval = !state.auto_eval; }
                 fn U() => { state.split_graphics_and_wires = !state.split_graphics_and_wires; }
@@ -1142,7 +1200,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                     state.arch_is_leg = !state.arch_is_leg;
                     root := get_component_by_name(@if(state.arch_is_leg, "leg", "overture"), finished_defs.components);
                     state.tree&.clear();
-                    state.tree&.push(component = (Some = root));
+                    state.push_tree_node(component = (Some = root));
                     state.reset();
                 }
                 fn LEFT_SHIFT() => { state.show_wire_ref_lines = true; }
@@ -1206,6 +1264,11 @@ fn load_path(state: *State, path: Str) void = {
     
     // if it uses custom components, need to load everything to find them
     circuits, root_index, tc_file_loader_device := Tc'load_all_circuits(path, a);
+    
+    // TODO: don't hardcode this!!
+    path := "/Users/luke/Library/Application Support/Steam/steamapps/common/Turing Complete/campaign";
+    Tc'load_level_tests(circuits, path, a);
+    
     @eprintln("found circuit diagrams in %ms; %mb;", timestamp() - start, state.circuit_arena&.current_used_size()/1024/1024);
     state.circuit = circuits;
     if circuits.len == 0 || root_index == -1 {
@@ -1221,7 +1284,7 @@ fn load_circuit_index_async(state: *State, root_index: i64, tc_file_loader_devic
     state.world.tc_file_loader_device = tc_file_loader_device;
     state.loading = (Some = (start_time = start, root_index = root_index));
     state.tree&.clear();
-    state.tree&.push(diagram_circuit = (Some = root_index));
+    state.push_tree_node(diagram_circuit = (Some = root_index));
     if state.loader_thread.is_none() {
         state.loader_thread = (Some = start_thread(State, fn(state) = {
             while => state.have_load_work_futex == 1 {
@@ -1257,6 +1320,19 @@ fn load_circuit_index_worker(state: *State) void = {
     loading.started_compiling = true;
     
     jit_circuit(state.fr&, components.items(), a);
+    
+    // TODO: if it has a level test, add that to the compilation. 
+    // TODO: when entering a new level, trigger a compilation. 
+    // TODO: since level map is above in the tree, the instance offset will be wrong. 
+    //       (Level_gate isn't a custom component containing the level solution even tho i want the ui to nagvigate as tho it were). 
+    // TODO: need to fill out an si_runtime.VTable. 
+    //       needs to deal with the weirdness of input.input_enabled being an output. 
+    
+    //if c.level_test_si { src |
+    //    out := @ref u8.list(temp());
+    //    _ := Tc'Si'compile(src, out, (Some = c));
+    //    println(out.items());
+    //};
     
     init(state.world&, a, true, components.items());
     state.world.tc_file_loader_device = tc_file_loader_device;

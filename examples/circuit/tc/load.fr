@@ -23,7 +23,10 @@ Circuit :: @struct {
     has_arch_pins := false;
     v2: bool;
     is_arch := false;
+    is_campaign := false;
+    is_level := false;  // just to avoid name conflicts with custom components
     default_tick_rate: i64;
+    level_test_si: ?Str = .None;
     
     compiled: ?ComponentId = .None;
     // used when referenced as a Custom Gate in another Circuit. 
@@ -70,9 +73,12 @@ CustomId :: @struct(id: i64);
 #use("@/lib/sys/fs.fr");
 Builtin :: import("@/examples/circuit/tc/builtin.fr");
 Asm :: import("@/examples/circuit/tc/asm.fr");
+Si :: import("@/examples/circuit/tc/si.fr");
 
 load_builtins :: fn(components: *List(Component), a: Alloc) void = {
-    each Builtin.templates { it |
+    add_templates(components, a, Builtin.templates);
+    add_templates(components, a, Builtin.templates2);
+    add_templates :: fn(components: *List(Component), a: Alloc, templates: []*Builtin.Template) void = each templates { it |
         c := zeroed(Component);
         c.primitive_arity = (it.out_arity, it.in_arity);
         if it.fid { _ |
@@ -87,11 +93,15 @@ load_builtins :: fn(components: *List(Component), a: Alloc) void = {
         c.is_switch = it.name.starts_with("Switch");
         components.push(c);
     };
-    for_enum GateName(.Tc2) { it |
-        c := zeroed(Component);
-        c.name = it.name_str();
-        c.usage = a.box_zeroed(Component.Usage);
-        components.push(c);
+}
+
+load_level_tests :: fn(circuits: []Circuit, campaign_root: Str, a: Alloc) void = {
+    each circuits { c |
+        continue :: local_return;
+        @if(!c.is_level) continue();
+        path := @tfmt("%/%/test.si", campaign_root, safe_name(c.name, temp()));
+        src := read_entire_file(a, path) || continue();
+        c.level_test_si = (Some = src);
     };
 }
 
@@ -106,7 +116,7 @@ load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64, []Loade
     
     // TODO: could just look at the headers and only load full data if in dependencies
     files := collect_schematics(root, temp());
-    if files.len == 0 {
+    if !files&.contains(original_root) {
         files&.push(original_root);
     };
     
@@ -124,8 +134,9 @@ load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64, []Loade
             @eprintln("failed to load [%]: %", path, msg);
             continue();
         });
-        @assert(!info.v2, "TODO: load save breaker saves");
         info.is_arch = path.contains("architecture");
+        info.is_level = path.ends_with("Default/circuit.data") && info.v2;
+        info.is_campaign = info.is_level && name == "main";
         dir := path.pop_path_segment();
         @debug_assert(dir.ends_with("/"));
         has_path_escapes :: import("@/examples/fetch.fr")'has_path_escapes;
@@ -443,6 +454,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     logical_to_circuit&.push(-1);       // out
     insert_consts_for_dead_wires(components.items(), gates&);
     @if(!c.has_arch_pins) @debug_assert_eq(bit_width.len, custom_pins.len);
+    @if(!c.v2)  // TODO
     insert_bit_width_casts(components.items(), gates&, wire_count&, bit_width);
     logical_to_circuit&.push_repeated(gates.len - logical_to_circuit.len, -1);
     new_gates, order := schedule_gates(c, gates, wire_count, a, out.items(), in.items(), components.items());
@@ -882,7 +894,7 @@ fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, 
 // TODO: what if a bidirectional pin is given too big a value?
 fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate), wire_count: *i64, bit_width: []u8) void = {
     a := gates.gpa;
-    cast_id: ComponentId = (id = trunc(defs.tc_components_offset + GateName(.Tc1).enum_count() - 1));
+    cast_id: ComponentId = (id = trunc(component_offset(.Tc2) - 1));
     @debug_assert_eq(components[cast_id.id.zext()].name, "SyntheticCast_FR");
     width := temp().alloc_zeroed(u8, wire_count[]);
     outputs, inputs := (gates[gates.len - 1].inputs, gates[0].outputs);
@@ -1076,6 +1088,11 @@ name_from_path :: fn(path: Str) Str = {
     name = name.pop_path_segment();  // circuit.data
     prefix := name.pop_path_segment();
     name = @if(name.ends_with("/"), name.slice(0, name.len - 1), name);
+    d := "/Default";
+    if name.ends_with(d) {
+        name = name.slice(0, name.len - d.len);
+        prefix = name.pop_path_segment();
+    };
     name = name.rest(prefix.len);
     name
 };
@@ -1085,6 +1102,7 @@ collect_schematics :: fn(tc_save_root: Str, a: Alloc) List(Str) = {
     dirs := Str.list(temp());
     tc_save_root.len -= int(tc_save_root.ends_with("/"));
     dirs&.push(@tfmt("%/architecture", tc_save_root));
+    // TODO: it's called foundery now
     dirs&.push(@tfmt("%/component_factory", tc_save_root));
     while => dirs&.pop() { s |
         _ := (walk_directory_unordered(as_cstr s) { e |
@@ -1099,6 +1117,18 @@ collect_schematics :: fn(tc_save_root: Str, a: Alloc) List(Str) = {
             };
         });
     };
+    
+    // save files for other campaign levels
+    // TODO: link these with the fixed campaign level files too
+    _ := (walk_directory_unordered(as_cstr tc_save_root) { e |
+        continue :: local_return;
+        if e.is(.Directory) {
+            @if(e.name.starts_with(".")) continue();
+            @if(e.name == "architecture" || e.name == "foundery" || e.name == "component_factory") continue();
+            files&.push(@tfmt("%/%/Default/circuit.data", tc_save_root, e.name));
+        };
+    });
+    
     files
 }
 
@@ -1150,6 +1180,16 @@ fn GateName($g: GateGroup) Type #fold = @run {
     G
 }
 
+fn component_offset(g: GateGroup) i64 #fold = {
+    start := 0;
+    inline_range(0, group_sizes.len()) { $j |
+        G :: @as(GateGroup) @as(u8) j.trunc();
+        @if(G == g) return(start);
+        start += @run group_sizes[j];
+    };
+    start
+}
+
 enum_from_scope_names :: fn(S: Type) Type = {
     names := get_constants(Type.scope_of(S));
     @assert_lt(names.len, 0xffff, "TODO: too many components");
@@ -1159,9 +1199,13 @@ enum_from_scope_names :: fn(S: Type) Type = {
 fn get_builtin_shape(it: ComponentId) *Builtin.Template = {
     g := it.group();
     templates;
-    @if(g == .Loaded) return(templates[@as(i64) zext(@as(u16) GateName(.Tc1).Custom)]);
-    @debug_assert(@is(g, .Tc1), "get_builtin_shape(%, %) invalid", g, it.id);
-    templates[it.id.zext() - defs.tc_components_offset]
+    Builtin'templates2;
+    @match(g) {
+        fn Loaded() => return(templates[@as(i64) zext(@as(u16) GateName(.Tc1).Custom)]);;
+        fn Tc1() => templates[it.id.zext() - component_offset(.Tc1)];
+        fn Tc2() => Builtin'templates2[it.id.zext() - component_offset(.Tc2)];
+        @default => @panic("get_builtin_shape(%, %) invalid", g, it.id);
+    }
 }
 
 // https://github.com/Stuffe/save_monger/blob/22fa398d95c3d3a0b5e88a80e9daee613cab1823/versions/v6.nim CC0
@@ -1284,7 +1328,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
         gates&.push(
             rotation = rotation,
             custom_id = custom_id,
-            kind = (id = kind.zext() + defs.tc_components_offset.trunc()),
+            kind = (id = kind.zext() + component_offset(.Tc1).trunc()),
             pos = pos,
             settings = (s1, s2),
             data = custom_string.shallow_copy(a),
@@ -1334,7 +1378,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
                 gates&.push(
                     rotation = rotation,
                     custom_id = custom_id,
-                    kind = (id = kind.zext() + trunc(defs.tc_components_offset + GateName(.Tc1).enum_count())),
+                    kind = (id = kind.zext() + trunc(component_offset(.Tc2))),
                     pos = pos,
                     settings = (word_size, buffer_size),  // TODO: need more
                     data = custom_string.shallow_copy(a),
