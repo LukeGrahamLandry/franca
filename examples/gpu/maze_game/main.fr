@@ -8,44 +8,13 @@ State :: @struct {
     sg: *Sg.Self;
     prev_frame_time: f64;
     camera: Camera;
-    walls: []Wall;
+    rooms: []Room;
     puzzles: []Puzzle;
+    active_room: i64;
     puzzle_focus: ?i64;
     dirty: bool;
     
     screen_size: Vec2;
-};
-
-Wall :: @struct {
-    v: Array(Vec3, 4);
-    c: u32 = pack_rgba(255,255,255,255);
-};
-Puzzle :: @struct {
-    wall: Wall;
-
-    app: *Sapp.Self;
-    img: Sg.Image;
-    att: Sg.Attachments;
-    
-    state: rawptr;
-    type: Type;
-    
-    prev_mouse := zeroed(Vec2);
-};
-
-fn cast(it: *Puzzle, $T: Type) *T #generic = {
-    @debug_assert_eq(T, it.type, "cast(Puzzle, %)", @run T.typename().str());
-    T.ptr_from_raw(it.state)
-}
-
-Puzzles :: @struct {
-    Stackie :: import("@/examples/gpu/stackie.fr").State;
-    Life :: import("@/examples/life/gui.fr").State;
-    Circuit :: import("@/examples/circuit/gui.fr").State;
-    Chess :: import("@/examples/chess/gui.fr").State;
-    Mandelbrot :: import("@/examples/gpu/mandelbrot.fr").State;
-    Rtc :: import("@/examples/gpu/rtc.fr").State;
-    FarmGame :: import("@/examples/gpu/farm_game.fr").State;
 };
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -62,7 +31,9 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     //       the embeder needs to do it since logically it owns the Sg.Self anyway. 
     sg.hack_disable_commit_for_headless_app = true;
     // important that they get to run their event handlers and decide if dirty before skipping the real rendering. 
-    each state.puzzles { it |
+    room := state.rooms&[state.active_room]&;
+    for room.puzzles { i |
+        it := state.puzzles[i]&;
         prev := sg.disabled_commit_calls;
         it.app.frame();
         dirty := sg.disabled_commit_calls != prev;
@@ -86,13 +57,18 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sgl.begin(.QUADS);
     sgl.load_identity();
     
-    each state.walls { wall |
+    // TODO: render adjacent rooms and always layout the world so theres a filler room with no puzzles between interesting rooms so its cheap to render two. 
+    
+    each state.rooms { room |
+    each room.walls { wall |
         sgl.color = wall.c;
         for wall.v& { p |
             sgl.v3f(p);
         };
     };
+    };
     sgl.color = pack_rgba(255,255,255,255);
+    
     
     if true {  // HACK
         // TODO: why does the background of the text of the puzzle texture end up being transperent? 
@@ -109,9 +85,9 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     
     focus := state.puzzle_focus || -1;
-    enumerate state.puzzles { i, it |
-        sgl.color = @if(i == focus, pack_rgba(255,255,255,255), pack_rgba(0,0,0,255));
+    for room.puzzles { i |
         it := state.puzzles[i]&;
+        sgl.color = @if(i == focus, pack_rgba(255,255,255,255), pack_rgba(0,0,0,255));
         w := it.wall.v&;
         center := (w[0]+w[1]+w[2]+w[3])/4;
         for w { p |
@@ -123,12 +99,17 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sgl.end();
     write_camera(state.camera&, sgl.uniforms[sgl.uniforms.len - 1].mvp&);
     
-    data: XXX.Instance = (puzzle_index = 3, pos = vec2(-4), Y = 0, step = 1, H = 1, flip_xz = true);
-    it := state.puzzles[data.puzzle_index]&.cast(XXX.App);
-    XXX :: import("@/examples/gpu/maze_game/puzzles/chess.fr");
-    draw_chess_3d(sgl, data&, it);
+    for room.puzzles { i |
+        it := state.puzzles[i]&;
+        #use("@/examples/gpu/maze_game/puzzles/chess.fr");
+        @match(it.extra&) {
+            fn Chess(jt) => draw_chess_3d(sgl, jt, it.cast(Puzzles.Chess));
+            fn None() => ();
+        };
+    };
     
-    each state.puzzles { it |
+    for room.puzzles { i |
+        it := state.puzzles[i]&;
         sgl.color = pack_rgba(255,255,255,255);
         sgl.texturing_enabled = true;
         sgl.texture(it.img, (id = 0));
@@ -155,7 +136,9 @@ fn choose_focus(state: *State, mouse: Vec2) ?i64 = {
     s := PUZZLE_LOGICAL_WIDTH.float().cast();
     center := vec2(s) / 2;
     best_distance: f32 = 2000;
-    enumerate state.puzzles { check, it |
+    room := state.rooms&[state.active_room]&;
+    for room.puzzles { check |
+        it := state.puzzles[check]&;
         m := remap_mouse_to_puzzle(it, state.camera&, mouse, state.screen_size);
         check_distance := norm(m - center);
         if check_distance < best_distance {
@@ -317,125 +300,47 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     state.camera.perspective = (aspect = 1, fovy = deg_to_rad(70), znear = 0.01, zfar = 1000.0);
     update_aspect(state.camera&, app);
     state.screen_size = vec2(app.framebuffer_width.float().cast(), app.framebuffer_height.float().cast());
-    state.camera.speed = (pos = 0.075 * 30.0, rot = 0.005 * 30.0);
+    state.camera.speed = (pos = 0.08 * 30.0, rot = 0.005 * 30.0);
     
+    // TODO: `forever: Arena.Allocator;`
     a := general_allocator();
-    walls := @ref Wall.list(a);
-    
-    new_horizontal :: fn(a: Vec2, b: Vec2, y: f32) Wall = {
-        (v = (vec3(a.x, y, a.y), vec3(b.x, y, a.y), vec3(b.x, y, b.y), vec3(a.x, y, b.y)))
+    //puzzles, rooms := init_world_map(a);
+    map := import("@/examples/gpu/maze_game/map.fr").objects;
+    #use("@/examples/gpu/maze_game/editor.fr");
+    puzzles, rooms := objects_to_world(map, a);
+    state.rooms = rooms;
+    state.puzzles = puzzles;
+    each state.puzzles { it |
+        found := false;
+        S :: Type.scope_of(Puzzles);
+        inline_for get_constants(S) { $name |
+            T :: get_constant(Type, S, name[]).unwrap();
+            if it.app_name == @run name[].str() {
+                found = true;
+                init_puzzle(T, sg, it, a);
+            };
+        };
+        @assert(found, "missing app_name=%", it.app_name);
     };
-    new_vertical :: fn(a: Vec2, b: Vec2, h: f32, y: f32) Wall = {
-        a := vec3(a.x, y, a.y);
-        b := vec3(b.x, y, b.y);
-        h := vec3(0, h, 0);
-        (v = (a+h, b+h, b, a))
-    };
-    vertical :: fn(a: Vec2, b: Vec2, h: f32, y: f32) => 
-        walls.push(new_vertical(a,b,h,y));
-    square_vertical :: fn(p: Array(Vec2, 4), h: f32, y: f32) => {
-        vertical(p&[0], p&[1], h, y);
-        vertical(p&[1], p&[2], h, y);
-        vertical(p&[2], p&[3], h, y);
-        vertical(p&[3], p&[0], h, y);
-    };
-    s: f32 = 4;
-    square_vertical((vec2(s, s), vec2(s, -s), vec2(-s, -s), vec2(-s, s)), 5, 0);
-    each walls { it |
-        it.c = pack_rgba(10, 70, 10, 255);
-    };
-    w := new_horizontal(vec2(s, s), vec2(-s, -s), 0);
-    w.c = pack_rgba(30, 30, 30, 255);
-    walls.push(w);
-    w := new_horizontal(vec2(s, s), vec2(-s, -s), 5);
-    w.c = pack_rgba(200, 200, 200, 255);
-    walls.push(w);
-    
-    state.walls = walls.items();
-    
-    puzzles := @ref Puzzle.list(a);
-    x: f32 = s - 0.05;
-    y: f32 = -1.75;
-    S :: Type.scope_of(Puzzles);
-    inline_for get_constants(S) { $name |
-        T :: get_constant(Type, S, name[]).unwrap();
-        puzzles.push(new_puzzle(T, sg, new_vertical(vec2(x, y+0.5), vec2(x, y), 0.5, 0.75), a));
-        y += 0.75;
-    };
-    state.puzzles = puzzles.items();
-    
-    for puzzles { it |
+    each state.puzzles { it |
         it.app.hack_no_reset_temp_for_headless = true;
         it.app.frame();
+        set_defaults_post_init(it);
     };
-    each puzzles { it |
-        @switch(it.type) {
-            @case(Puzzles.Stackie) => {
-                // i want something without `t` so it doesn't keep ticking every frame until you mess with it. 
-                s := it.cast(Puzzles.Stackie);
-                buf := s.src&;
-                buf.clear();
-                buf.push_all("xy9o");
-                s.need_recompile = true;
-                s.input_dirty = true;
-            };
-            @case(Puzzles.FarmGame) => {
-                s := it.cast(Puzzles.FarmGame);
-                s.world.paused = true;
-            };
-            @case(Puzzles.Chess) => {
-                s := it.cast(Puzzles.Chess);
-                s.board.size *= 3.1;
-                s.dirty = true;
-            };
-            @default => ();
-        };
-    };
-    
     state.camera.pos.y = 1;
-    state.camera.pos.x = s - 2;
-};
-
-PUZZLE_LOGICAL_WIDTH :: 1024;
-
-fn new_puzzle($T: Type, sg: *Sg.Self, wall: Wall, a: Alloc) Puzzle = {
-    // TODO: this is a paste from tests/gpu.fr
-    W :: PUZZLE_LOGICAL_WIDTH; H :: W;
-    image: Sg.Image = sg.make(
-        width = W,
-        height = H,
-        pixel_format = .BGRA8,
-        render_target = true,
-        copy_source = true,
-    );
-    // TODO: in website ask for features: Depth32FloatStencil8
-    dimage: Sg.Image = @if(SOKOL_BACKEND == .WGPU, (id = 0), sg.make(
-        width = W,
-        height = H,
-        pixel_format = .DEPTH_STENCIL,
-        render_target = true,
-    ));
-    at: Sg.Attachments = sg.make(
-        colors = ((
-            image = image,
-        ), ..),
-        depth_stencil = (image = dimage),
-    );
-    
-    app, user := import("@/tests/gpu.fr")'local_scope'init_headless_app2(T, sg, at, W, H, a);
-    
-    (img = image, att = at, app = app, state = T.raw_from_ptr(user), wall = wall, type = T)
+    state.camera.pos.x = 4 - 2;
 }
 
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sg.destroy_pipeline(state.pipe&);
     state.draw&.destroy(sg, general_allocator());
-    for state.puzzles { it |
+    each state.puzzles { it |
         it.app.call_cleanup();
     };
 }
 
 main :: fn() void = Easy'start(State);
-driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
+driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics2(vtable, @source_file_name(), true);
 #use("@/graphics/lib.fr");
 #use("@/examples/gpu/maze_game/camera.fr");
+#use("@/examples/gpu/maze_game/world.fr");

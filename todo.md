@@ -17,6 +17,9 @@ TODO: could be interesting to have a new app hook for taking a snapshot
   - needing to special case single item tuples in macros is annoying
   - the thing where it looks for overloads before evaluating the types of all the arguments 
     so on the first reference to a constant they might not be ready yet
+  - the way the global scope of the main file works is unusual. 
+    maybe there should be an explicit way to add things to it and just 
+    default to `main :: import("whatever").main` so you don't default to the weird double declaring types if you try to import your main file. 
 - see todo comments:
   - life/README.md
   - circuit/README.md

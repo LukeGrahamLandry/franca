@@ -1,0 +1,241 @@
+
+Room :: @struct {
+    puzzles: []i64;
+    walls: []Wall;
+    bounds: @struct(center: Vec3, radius: f32);
+};
+
+Wall :: @struct {
+    v: Array(Vec3, 4);
+    c: u32 = pack_rgba(255,255,255,255);
+};
+Puzzle :: @struct {
+    wall: Wall;
+    app_name: Str;
+    
+    // TODO: more indirection
+    extra: @tagged(
+        None: void,
+        Chess: import("@/examples/gpu/maze_game/puzzles/chess.fr").Instance,
+    );
+
+    app: *Sapp.Self;
+    img: Sg.Image;
+    att: Sg.Attachments;
+    
+    state: rawptr;
+    type: Type;
+    
+    prev_mouse := zeroed(Vec2);
+};
+
+fn cast(it: *Puzzle, $T: Type) *T #generic = {
+    @debug_assert_eq(T, it.type, "cast(Puzzle, %)", @run T.typename().str());
+    T.ptr_from_raw(it.state)
+}
+
+Puzzles :: @struct {
+    Stackie :: import("@/examples/gpu/stackie.fr").State;
+    Life :: import("@/examples/life/gui.fr").State;
+    Circuit :: import("@/examples/circuit/gui.fr").State;
+    Chess :: import("@/examples/chess/gui.fr").State;
+    Mandelbrot :: import("@/examples/gpu/mandelbrot.fr").State;
+    Rtc :: import("@/examples/gpu/rtc.fr").State;
+    FarmGame :: import("@/examples/gpu/farm_game.fr").State;
+    Editor :: import("@/examples/gpu/maze_game/editor.fr").State;
+};
+
+WallType :: @enum(N, S, D);
+fn init_world_map(a: Alloc) Ty([]Puzzle, []Room) = {
+    rooms := @ref Room.list(a);
+    
+    walls := @ref Wall.list(a);
+    s: f32 = 4;
+    simple_room(walls, vec2(0), s*2, (.S,.S,.S,.D), pack_rgba(10, 70, 10, 255));
+    puzzles := @ref Puzzle.list(a);
+    x: f32 = s - 0.05;
+    y: f32 = -2.75;
+    S :: Type.scope_of(Puzzles);
+    inline_for get_constants(S) { $name |
+        T :: get_constant(Type, S, name[]).unwrap();
+        puzzles.push(new_puzzle(T, new_vertical(vec2(x, y+0.5), vec2(x, y), 0.5, 0.75), a));
+        y += 0.75;
+    };
+    
+    rooms.push(
+        walls = walls.items(),
+        puzzles = a.alloc_init(i64, puzzles.len, fn(i) => i),
+        bounds = (center = vec3(0), radius = sqrt(4*4*2)),
+    );
+    
+    p := vec2(0, s*2 + 1);
+    walls := @ref Wall.list(a);
+    simple_room(walls, p, s*2, (.S,.D,.S,.S), pack_rgba(10, 100, 10, 255));
+    it := new_horizontal(p + vec2(-1, -s), p + vec2(0, -s -1), 0);
+    it.c = pack_rgba(30, 30, 30, 255);
+    walls.push(it);
+    rooms.push(
+        walls = walls.items(),
+        puzzles = empty(),
+        bounds = (center = vec3(p.x, 0, p.y), radius = sqrt(4*4*2)),
+    );
+    
+    (puzzles.items(), rooms.items())
+};
+
+fn simple_room(w: *List(Wall), p: Vec2, size: f32, door: Array(WallType, 4), wall_colour: u32) void = {
+    prev := w.len;
+    s: f32 = size / 2;
+    // w.square_vertical((p + vec2(s, s), p + vec2(s, -s), p + vec2(-s, -s), p + vec2(-s, s)), 5, 0);
+    ;{
+        (h: f32, y: f32) := (5, 0);
+        c := p;
+        p: Array(Vec2, 4) = (p + vec2(s, s), p + vec2(s, -s), p + vec2(-s, -s), p + vec2(-s, s));
+        
+        @match(door&[0]) {
+            fn N() => ();
+            fn D() => {
+            }
+            fn S() => w.vertical(p&[0], p&[1], h, y);
+        };
+        
+        
+        @match(door&[1]) {
+            fn N() => ();
+            fn D() => {
+                w.vertical(c + vec2(0, -s), p&[1], h, y);
+                w.vertical(c + vec2(-1, -s), p&[2], h, y);
+                ratio: f32 = 0.6;
+                w.vertical(c + vec2(0, -s), c + vec2(-1, -s), h*ratio, y + h*(1-ratio));
+            }
+            fn S() => w.vertical(p&[1], p&[2], h, y);
+        };
+        
+        @match(door&[2]) {
+            fn N() => ();
+            fn D() => {
+            }
+            fn S() => w.vertical(p&[2], p&[3], h, y);
+        };
+        
+        @match(door&[3]) {
+            fn N() => ();
+            fn D() => {
+                w.vertical(c + vec2(0, s), p&[0], h, y);
+                w.vertical(c + vec2(-1, s), p&[3], h, y);
+                ratio: f32 = 0.6;
+                w.vertical(c + vec2(0, s), c + vec2(-1, s), h*ratio, y + h*(1-ratio));
+            }
+            fn S() => w.vertical(p&[3], p&[0], h, y);
+        };
+    };
+    
+    each w.items().slice(prev, w.len) { it |
+        it.c = wall_colour;
+    };
+    it := new_horizontal(p + vec2(s, s), p + vec2(-s, -s), 0);
+    it.c = pack_rgba(30, 30, 30, 255);
+    w.push(it);
+    it := new_horizontal(p + vec2(s, s), p + vec2(-s, -s), 5);
+    it.c = pack_rgba(200, 200, 200, 255);
+    //w.push(it);
+}
+
+new_horizontal :: fn(a: Vec2, b: Vec2, y: f32) Wall = {
+    (v = (vec3(a.x, y, a.y), vec3(b.x, y, a.y), vec3(b.x, y, b.y), vec3(a.x, y, b.y)))
+};
+new_vertical :: fn(a: Vec2, b: Vec2, h: f32, y: f32) Wall = {
+    a := vec3(a.x, y, a.y);
+    b := vec3(b.x, y, b.y);
+    h := vec3(0, h, 0);
+    (v = (a+h, b+h, b, a))
+};
+vertical :: fn(w: *List(Wall), a: Vec2, b: Vec2, h: f32, y: f32) void = 
+    w.push(new_vertical(a,b,h,y));
+square_vertical :: fn(w: *List(Wall), p: Array(Vec2, 4), h: f32, y: f32) void = {
+    w.vertical(p&[0], p&[1], h, y);
+    w.vertical(p&[1], p&[2], h, y);
+    w.vertical(p&[2], p&[3], h, y);
+    w.vertical(p&[3], p&[0], h, y);
+};
+
+fn set_defaults_post_init(it: *Puzzle) void = {
+    @switch(it.type) {
+        @case(Puzzles.Stackie) => {
+            // i want something without `t` so it doesn't keep ticking every frame until you mess with it. 
+            s := it.cast(Puzzles.Stackie);
+            buf := s.src&;
+            buf.clear();
+            buf.push_all("xy9o");
+            s.need_recompile = true;
+            s.input_dirty = true;
+        };
+        @case(Puzzles.FarmGame) => {
+            s := it.cast(Puzzles.FarmGame);
+            s.world.paused = true;
+        };
+        @case(Puzzles.Chess) => {
+            s := it.cast(Puzzles.Chess);
+            s.board.size *= 3.1;
+            s.dirty = true;
+            @if_let(it.extra&) fn Chess(it) => {
+                if fromFen(it.init_fen) { board |
+                    s.board.board = board;
+                    s.bot_colour = s.board.board.nextPlayer.other();
+                };
+            };
+        };
+        @default => ();
+    };
+}
+
+PUZZLE_LOGICAL_WIDTH :: 1024;
+
+fn new_puzzle($T: Type, wall: Wall, a: Alloc) Puzzle = {
+    it := zeroed(Puzzle);
+    it.wall = wall;
+    S :: Type.scope_of(Puzzles);
+    inline_for get_constants(S) { $name |
+        T2 :: get_constant(Type, S, name[]).unwrap();
+        if T == T2 {
+            it.app_name = @run name[].str();
+        };
+    };
+    it
+}
+
+fn init_puzzle($T: Type, sg: *Sg.Self, it: *Puzzle, a: Alloc) void = {
+    // TODO: this is a paste from tests/gpu.fr
+    W :: PUZZLE_LOGICAL_WIDTH; H :: W;
+    image: Sg.Image = sg.make(
+        width = W,
+        height = H,
+        pixel_format = .BGRA8,
+        render_target = true,
+        copy_source = true,
+    );
+    // TODO: in website ask for features: Depth32FloatStencil8
+    dimage: Sg.Image = @if(SOKOL_BACKEND == .WGPU, (id = 0), sg.make(
+        width = W,
+        height = H,
+        pixel_format = .DEPTH_STENCIL,
+        render_target = true,
+    ));
+    at: Sg.Attachments = sg.make(
+        colors = ((
+            image = image,
+        ), ..),
+        depth_stencil = (image = dimage),
+    );
+    
+    app, user := import("@/tests/gpu.fr")'local_scope'init_headless_app2(T, sg, at, W, H, a);
+    
+    it.app = app;
+    it.state = T.raw_from_ptr(user);
+    it.img = image;
+    it.att = at;
+    it.type = T;
+}
+
+
+#use("@/graphics/lib.fr");

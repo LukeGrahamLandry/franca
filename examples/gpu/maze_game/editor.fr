@@ -1,0 +1,509 @@
+// TODO: ui for placing walls, deleting walls, etc.
+// TODO: export as code in a file that gets loaded
+// TODO: debug ui that lets you edit the structs as text (use terminal.fr)?
+
+main :: fn() void = Easy'start(State);
+State :: @struct {
+    HIGH_DPI :: true;
+    pipe: Sgl.Pipeline;
+    pass_action: Sg.PassAction;
+    app: *Sapp.Self;
+    draw: Sgl.Self;
+    sg: *Sg.Self;
+    
+    objects: List(Object);
+    pos: Vec2;
+    scale: f32;
+    dirty: bool;
+    screen_size: Vec2;
+    
+    mouse: Vec2;
+    prev_click: ?Vec2;
+    holding_shift: bool;
+    tool: Tool;
+};
+
+Object :: @tagged(
+    Wall: @struct(a: Vec2, b: Vec2, y: f32, h: f32, colour: u32),  // veritical
+    Tile: @struct(a: Vec2, b: Vec2, y: f32, colour: u32),  // horizontal
+    Screen: @struct(pos: Vec3, size: f32, normal: Vec3, app: Str, link: i64),
+    Chess: @struct {
+        data: import("@/examples/gpu/maze_game/puzzles/chess.fr").Instance;
+        link: i64;
+    },
+    Room: @struct(pos: Vec2, radius: f32),
+);
+
+Tool :: @tagged(Place: Tag(Object), Delete, None, HighWall);
+
+choose_tool :: fn(key: Sapp.Keycode) ?Tool = {
+    (Some = @match(key) {
+        fn W() => (Place = .Wall);
+        fn T() => (Place = .Tile);
+        fn S() => (Place = .Screen);
+        fn R() => (Place = .Room);
+        fn C() => (Place = .Chess);
+        fn H() => .HighWall;
+        fn D() => .Delete;
+        @default => return(.None);
+    })
+}
+
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    if Easy'should_skip_frame(sapp, state.dirty&) {
+        return();
+    };
+    sgl := state.draw&;
+    
+    sgl.defaults();
+    sgl.viewport(0.intcast(), 0.intcast(), sapp.width().intcast(), sapp.height().intcast(), true);
+    sgl.load_pipeline(state.pipe);
+    
+    sgl.begin(.QUADS);
+    sgl.load_identity();
+    sgl.translate(state.pos.x, state.pos.y, 0.0);
+    app_w, app_h := (sapp.width().float().cast(), sapp.height().float().cast());
+    screen_aspect := app_w / app_h;
+    sgl.scale(state.scale, state.scale * screen_aspect, 1.0);    
+    
+    each state.objects& { it |
+        @match(it) {
+            fn Tile(it) => {
+                sgl.color = pack_rgba(0,100,0, 255);
+                sgl.v2f(it.a.x, it.a.y);
+                sgl.v2f(it.b.x, it.a.y);
+                sgl.v2f(it.b.x, it.b.y);
+                sgl.v2f(it.a.x, it.b.y);
+            };
+            @default => ();
+        };
+    };
+    
+    each state.objects& { it |
+        @match(it) {
+            fn Room(it) => {
+                sgl.color = pack_rgba(255,255,255, 255);
+                p := it.pos;
+                dir :: @const_slice(vec2(1,1), vec2(1,-1), vec2(-1,1), vec2(-1,-1), vec2(0,1), vec2(1,0), vec2(-1,0), vec2(0,-1));
+                for dir { dir |
+                    sgl.line(p, p + dir.normalize()*it.radius, 0.05);
+                };
+            };
+            @default => ();
+        };
+    };
+    
+    each state.objects& { it |
+        @match(it) {
+            fn Wall(it) => {
+                sgl.color = pack_rgba(0,0, @if(it.y == 0, 0, 80), 255);
+                sgl.line(it.a, it.b, 0.1);
+            };
+            fn Screen(it) => {
+                sgl.color = pack_rgba(255,255,0, 255);
+                p := vec2(it.pos.x, it.pos.z);
+                sgl.line(p, p + vec2(it.normal.x, it.normal.y)*0.1, 0.1);
+            };
+            @default => ();
+        };
+    };
+    
+    
+    sgl.color = pack_rgba(255,0,0, 255);
+    each state.objects& { it |
+        p := it.get_pos();
+        s: f32 = 0.1;
+        v := vec2(0,s/2);
+        sgl.line(p - v, p + v, s);
+    };
+    
+    ;{
+        sgl.color = pack_rgba(0,0,0, 255);
+        s: f32 = 0.25;
+        v := vec2(0,s/2);
+        m := state.mouse;
+        if state.holding_shift {
+            m = floor(m);
+        };
+        sgl.line(m - v, m + v, s);
+        
+        if state.prev_click { prev_click |
+            a, b := (prev_click, m);
+            if state.holding_shift {
+                a = floor(a);
+            };
+            sgl.color = pack_rgba(100,100,100, 200);
+            sgl.line(a, b, s);
+        };
+    };
+    
+    sgl.end();
+    
+    Easy'glue_begin_pass(sapp, sg, state.pass_action);
+    sgl.draw_layer(sg, 0);
+    sg.end_pass();
+    sg.commit();
+};
+
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    screen := vec2(sapp.framebuffer_width.float().cast(), sapp.framebuffer_height.float().cast()) 
+        / 2;
+    mouse := vec2(event.mouse_x, -event.mouse_y) / screen + vec2(-1.0, 1.0);
+    delta_mouse := vec2(event.mouse_dx, -event.mouse_dy) / screen;
+
+    state.holding_shift = event.modifiers.get(.shift) != 0;
+    @match(event.type) {
+        fn MOUSE_MOVE() => {
+            state.dirty = true;
+            if event.modifiers.get(.left_mouse) != 0 {
+                state.pos += delta_mouse;
+            }
+        }
+        fn MOUSE_SCROLL() => {
+            (lo: f32, hi: f32) := (0.000001, 1000000);
+            delta := event.scroll_y * state.scale * 3 / screen.x;
+            delta := clamp(state.scale + delta, lo, hi) - state.scale;
+            
+            pos := (mouse - state.pos) / state.scale;
+            pos0 := pos * vec2(state.scale);
+            pos1 := pos * vec2(state.scale + delta);
+            state.pos -= pos1 - pos0;
+            state.scale += delta;
+            state.dirty = true;
+        }
+        fn RESIZED() => {
+            state.dirty = true;
+        }
+        fn KEY_DOWN() => {
+            if choose_tool(event.key_code) { it |
+                state.tool = it;
+            };
+            if event.key_code == .SPACE {
+                out := @ref u8.list(temp());
+                save_as_code(out, state.objects&);
+                
+                if !write_entire_file("target/map.fr", out.items()) {
+                    println(out.items());
+                };
+                write_entire_file_or_crash("examples/gpu/maze_game/map.fr", out.items());
+                println("saved");
+            };
+        }
+        // TODO: cmd+w needs to send QUIT_REQUESTED
+        fn QUIT_REQUESTED() => {
+            println("quitting... (backup target/map.fr)");
+            out := @ref u8.list(temp());
+            save_as_code(out, state.objects&);
+            if !write_entire_file("target/map.fr", out.items()) {
+                println(out.items());
+            };
+        }
+        @default => ();
+    };
+    #use("@/lib/sys/fs.fr");
+    
+    screen_aspect := screen.x / screen.y;
+    state.mouse = (mouse - state.pos) / state.scale;
+    state.mouse.y /= screen_aspect;
+    @match(event.type) {
+        fn MOUSE_UP() => if event.mouse_button == .RIGHT {
+            state.dirty = true;
+            if state.prev_click { prev_click |
+                state.prev_click = .None;
+                a, b := (prev_click, state.mouse);
+                if event.modifiers.get(.shift) != 0 {
+                    a = floor(a);
+                    b = floor(b);
+                };
+                
+                H: f32 = 5;
+                @match(state.tool) {
+                    fn Place(it) => @match(it) {
+                        fn Wall() => state.objects&.push(Wall = (a = a, b = b, y = 0, h = H, colour = pack_rgba(10, 100, 10, 255)));
+                        fn Tile() => state.objects&.push(Tile = (a = a, b = b, y = 0, colour = pack_rgba(30, 30, 30, 255)));
+                        fn Screen() => {
+                            n := normalize(b - a);
+                            state.objects&.push(Screen = (
+                                pos = vec3(a.x, 2, a.y), 
+                                normal = vec3(n.x, 0, n.y), 
+                                app = "",
+                                size = 0.5,
+                                link = state.objects.len,
+                            ));
+                        }
+                        fn Room() => state.objects&.push(Room = (pos = a, radius = norm(a - b)));
+                        fn Chess() => {
+                            // :SLOW
+                            link := -1;
+                            best_distance: f32 = 9999;
+                            each_rev state.objects { it |
+                                @if_let(it) fn Screen(it) => if it.app == "Chess" {
+                                    check_distance := norm(vec2(it.pos.x, it.pos.z) - a);
+                                    if check_distance < best_distance {
+                                        link = it.link;
+                                        best_distance = check_distance;
+                                    };
+                                };
+                            };
+                            
+                            size := abs(b.x - a.x);
+                            step := size / 8;
+                            state.objects&.push(Chess = (link = link, data = (
+                                pos = min(a, b),
+                                step = step,
+                                flip_xz = a.x > b.x,
+                                Y = 0,
+                                H = step,
+                                init_fen = import("@/examples/chess/moves.fr").INIT_FEN,
+                            )));
+                        }
+                    };
+                    fn HighWall() => {
+                        ratio: f32 = 0.6;
+                        state.objects&.push(Wall = (a = a, b = b, h = H*ratio, y = H*(1-ratio), colour = pack_rgba(10, 100, 10, 255)));
+                    }
+                    fn Delete() => {
+                        lo, hi := (min(a, b), max(a, b));
+                        state.objects&.unordered_retain(fn(it) => {
+                            p := it.get_pos();
+                            p.x < lo.x || p.y < lo.y || p.x > hi.x || p.y > hi.y
+                        });
+                    }
+                    @default => ();
+                };
+            } else {
+                state.prev_click = (Some = state.mouse);
+            }
+        }
+        @default => ();
+    };
+};
+
+fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
+    state.sg = sg; state.app = app;
+    app.desc.enable_clipboard = true;
+    state.dirty = true;
+    state.prev_click = .None;
+    state.tool = (Place = .Wall);
+    
+    state.draw&.setup(
+        allocator = general_allocator(),
+        sg = sg,
+        max_vertices = 1_000_000,
+    );
+    
+    init_pipeline(state.draw&, state.pipe&, sg, (
+        alpha_to_coverage_enabled = true,
+        depth = (
+            pixel_format = .DEFAULT,
+            write_enabled = true,
+            compare = .LESS_EQUAL,
+        ),
+        colors = (
+            (blend = (
+                enabled = true,
+                src_factor_rgb = .SRC_ALPHA,
+                dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
+            )),
+            ..,
+        ),
+    ));
+    
+    state.pass_action.colors&[0] = (
+        load_action = .CLEAR,
+        clear_value = (r = 0.3, g = 0.3, b = 0.3, a = 1.0),
+    );
+    
+    a := general_allocator();
+    o := state.objects&;
+    o[] = list(a);
+    //puzzles, rooms := init_world_map(a);
+    //load_objects_from_world(o, puzzles, rooms);
+    o.push_all(import("@/examples/gpu/maze_game/map.fr")'objects);
+    state.scale = 0.05;
+}
+
+fn load_objects_from_world(o: *List(Object), puzzles: []Puzzle, rooms: []Room) void = {
+    each rooms { it |
+        each it.walls { it |
+            h := it.v&[0].y - it.v&[3].y;
+            if h == 0 {
+                o.push(Tile = (
+                    a = vec2(it.v&[0].x, it.v&[0].z), 
+                    b = vec2(it.v&[2].x, it.v&[2].z),
+                    y = it.v&[0].y,
+                    colour = it.c
+                ));
+            } else {
+                o.push(Wall = (
+                    a = vec2(it.v&[0].x, it.v&[0].z), 
+                    b = vec2(it.v&[1].x, it.v&[1].z),
+                    y = it.v&[2].y,
+                    h = h,
+                    colour = it.c,
+                ));
+            }
+        };
+        o.push(Room = (
+            pos = vec2(it.bounds.center.x, it.bounds.center.z),
+            radius = it.bounds.radius,
+        ));
+    };
+    
+    each puzzles { it |
+        lo := it.wall.v&[0].min(it.wall.v&[1]).min(it.wall.v&[2]).min(it.wall.v&[3]);
+        hi := it.wall.v&[0].max(it.wall.v&[1]).max(it.wall.v&[2]).max(it.wall.v&[3]);
+        link := o.len;
+        o.push(Screen = (
+            pos = lo,
+            normal = vec3(1),
+            app = it.app_name,
+            size = hi.y - lo.y,
+            link = link,
+        ));
+        @match(it.extra&) {
+            fn None() => ();
+            fn Chess(data) => {
+                o.push(chess = (link = link, data = data[]));
+            }
+        };
+    };
+}
+
+fn save_as_code(o: *List(u8), objects: *List(Object)) void = {
+    sorted_objects := @ref Object.list(objects.len, temp());
+    dowhile {
+        continue :: local_return;
+        
+        if objects.items().index_of(fn(it) => it.is(.Room)) { i |
+            r := objects.unordered_remove(i).unwrap();
+            room := r.Room;
+            sorted_objects.push(r);
+            sorted_start := sorted_objects.len;
+            objects.unordered_retain(fn(it) => {
+                // TODO: don't sqrt just to compare
+                distance := norm(room.pos - it.get_pos());
+                in_room := !it.is(.Room) && distance <= room.radius;
+                if in_room {
+                    sorted_objects.push(it[]);
+                };
+                !in_room
+            });
+            new := sorted_objects.items().rest(sorted_start);
+            Sort'default(Object, new) { a, b |
+                yield :: local_return;
+                pa, pb := (a.get_pos(), b.get_pos());
+                @if(pa.x != pb.x) yield(pa.x < pb.x);
+                @if(pa.y != pb.y) yield(pa.y < pb.y);
+                aa, bb := (a.tag(), b.tag());
+                aa.raw() <= bb.raw()
+            };
+            continue(true);
+        };
+        
+        false
+    };
+    sorted_objects.push_all(objects.items());
+    objects.clear();
+    objects.push_all(sorted_objects.items());
+    
+    // TODO: this is trash, do reflection
+    @fmt(o, "objects :: @const_slice(@as(import(\"@/examples/gpu/maze_game/editor.fr\")'Object)\n");
+    each objects { it |
+        @fmt(o, "(% = (", it.tag());
+        @match(it) {
+            fn Wall(it) => @fmt(o, "a=vec2(%,%), b=vec2(%,%), y=%, h=%, colour=%,", it.a.x, it.a.y, it.b.x, it.b.y, it.y, it.h, fmt_hex it.colour);
+            fn Tile(it) => @fmt(o, "a=vec2(%,%), b=vec2(%,%), y=%, colour=%,", it.a.x, it.a.y, it.b.x, it.b.y, it.y, fmt_hex it.colour);
+            fn Room(it) => @fmt(o, "pos=vec2(%,%),radius=%", it.pos.x, it.pos.y, it.radius);
+            fn Screen(it) => @fmt(o, "pos=vec3(%,%,%),normal=vec3(%,%,%),app=\"%\",size=%,link=%,", it.pos.x, it.pos.y, it.pos.z, it.normal.x,it.normal.y,it.normal.z,it.app, it.size, it.link);
+            fn Chess(it) => @fmt(o, "link=%,data=(pos=vec2(%,%),step=%,Y=%,H=%,flip_xz=%,init_fen=\"%\"),",it.link,it.data.pos.x,it.data.pos.y,it.data.step,it.data.Y,it.data.H,it.data.flip_xz,it.data.init_fen);
+        };
+        @fmt(o, ")),\n");
+    };
+    @fmt(o, ");\n");
+}
+
+fn objects_to_world(objects: []Object, a: Alloc) Ty([]Puzzle, []Room) = {
+    rooms := @ref Room.list(a);
+    puzzles := @ref Puzzle.list(a);
+    walls := @ref Wall.list(temp());
+    puzzle_start := 0;
+    finish_room :: fn() => {
+        r := rooms[rooms.len - 1]&;
+        r.walls = walls.items().shallow_copy(a);
+        walls.clear();
+        r.puzzles = a.alloc_init(i64, puzzles.len - puzzle_start, fn(i) => i + puzzle_start);
+        puzzle_start = puzzles.len;
+    };
+    each objects { it |
+        @match(it) {
+            fn Room(it) => {
+                if rooms.len > 0 {
+                    finish_room();
+                };
+            
+                rooms.push(
+                    puzzles = empty(), 
+                    walls = empty(), 
+                    bounds = (center = vec3(it.pos.x, 0, it.pos.y), radius = it.radius),
+                ); 
+            }
+            fn Wall(it) => {
+                w := new_vertical(it.a, it.b, it.h, it.y);
+                w.c = it.colour;
+                walls.push(w);
+            }
+            fn Tile(it) => {
+                w := new_horizontal(it.a, it.b, it.y);
+                w.c = it.colour;
+                walls.push(w);
+            }
+            fn Screen(it) => {
+                p := zeroed(Puzzle);
+                p.app_name = it.app;
+                a := vec2(it.pos.x, it.pos.z);
+                // TODO: use it.normal
+                dir := vec2(0, 1);  
+                p.wall = new_vertical(a + dir*it.size, a, it.size, it.pos.y);
+                
+                // :SLOW
+                each objects { check |
+                    @if_let(check) fn Chess(jt) => if jt.link == it.link {
+                        p.extra = (Chess = jt.data);
+                    };
+                };
+                
+                puzzles.push(p);
+            }
+            fn Chess(it) => ();
+        };
+    };
+    if puzzles.len != puzzle_start || walls.len != 0 {
+        rooms.push(
+            puzzles = empty(), 
+            walls = empty(), 
+            bounds = (center = vec3(0), radius = 1000),
+        );
+        finish_room();
+    };
+    
+    (puzzles.items(), rooms.items())
+}
+
+fn get_pos(it: *Object) Vec2 = 
+    @match(it) {
+        fn Wall(it) => it.a;
+        fn Tile(it) => it.a;
+        fn Room(it) => it.pos;
+        fn Screen(it) => vec2(it.pos.x, it.pos.z);
+        fn Chess(it) => it.data.pos;
+    };
+
+fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    sg.destroy_pipeline(state.pipe&);
+    state.draw&.destroy(sg, general_allocator());
+}
+
+driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics2(vtable, @source_file_name(), true);
+#use("@/graphics/lib.fr");
+#use("@/examples/gpu/maze_game/world.fr");

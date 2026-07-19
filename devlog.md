@@ -1,4 +1,21 @@
 
+## (Jul 17-19)
+
+maze_game
+- draw the chess in the world so now you can see where this idea is going. feels like progress. 
+  - wasted some time on nested loop swapping the counters expecting it to be shadowed but the outer one persists to next iteration of the inner. 
+  - trial and error to make the uvs look right when rotated
+- start the idea of splitting the world into rooms so easy to check which puzzles need to be ticked
+- turns out defining the world by manually listing coordinates in code really sucks,  
+  so ten thousand year side quest to make a shitty level editor. 
+  - everything is mostly on the same y so just 2d view should be fine for now. 
+    i don't need it to actually be good yet, its fine if i have to change things manually, its just the positions that are important. 
+  - lots of tedious translating between the structs that make sense for the rendering and the 2d ones that make sense in the editor. maybe this whole operation is a waste of time. 
+  - puzzles need to know who they are seperate from being init-ed
+  - this whole thing is kinda unusable but i think the morale of just getting the minimal thing to let me see what im doing in the game is worth it. 
+- top level scope doesn't get deduplicated if imported elsewhere because it uses the old #include_std. 
+  for now just hack in a new version of build_for_graphics that does it the other way. 
+
 ## (Jul 16)
 
 maze_game
