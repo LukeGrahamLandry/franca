@@ -46,7 +46,67 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         return();
     };
 
+    moved := state.camera.delta_pos.norm_sq() != 0;
+    prev_pos := state.camera.pos;
     update_camera(state.camera&, dt);
+    
+    if moved {
+        break :: local_return;
+        on_ground := false;
+        p := state.camera.pos;
+        // TODO: don't let you get too close to the vertical walls because you can see through them
+        // TODO: would be nice to slide along the edges instead of just stopping
+        // :SLOW
+        each state.rooms { room |
+            each room.walls& { wall |
+                v := wall.v&;
+                lo := v[0].min(v[1]).min(v[2]).min(v[3]);
+                hi := v[0].max(v[1]).max(v[2]).max(v[3]);
+                if hi.y == lo.y {
+                    if p.x > lo.x && p.x < hi.x && p.z > lo.z && p.z < hi.z {
+                        on_ground = true;
+                    }
+                };
+            };
+        };
+        
+        if on_ground {
+            room := state.rooms&[state.active_room]&;
+            for room.puzzles { i |
+                it := state.puzzles[i]&;
+                @match(it.extra&) {
+                    fn Chess(data) => {
+                        if collision(p, data, it.cast(Puzzles.Chess)) {
+                            on_ground = false;
+                        };
+                    };
+                    fn None() => ();
+                }
+            };
+        };
+        
+        if !on_ground {
+            state.camera.pos = prev_pos;
+            break();
+        };
+    
+        best_distance: f32 = 2000;
+        best := state.active_room;
+        enumerate state.rooms { i, it |
+            distance := norm_sq(p - it.bounds.center);
+            r_sq := it.bounds.radius * it.bounds.radius;
+            if distance < best_distance && distance < r_sq {
+                best = i;
+                best_distance = distance;
+            };
+        };
+        
+        if best != state.active_room {
+            state.active_room = best;
+            @println("moved to room %", best);
+        }
+    };
+    
     // TODO: do write_camera properly (add to matrix stack before end()), don't peek in at the uniforms like this. also fix it in geo.  
     sgl := state.draw&;
     
@@ -103,7 +163,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         it := state.puzzles[i]&;
         #use("@/examples/gpu/maze_game/puzzles/chess.fr");
         @match(it.extra&) {
-            fn Chess(jt) => draw_chess_3d(sgl, jt, it.cast(Puzzles.Chess));
+            fn Chess(jt) => render(sgl, jt, it.cast(Puzzles.Chess));
             fn None() => ();
         };
     };
@@ -198,9 +258,6 @@ fn remap_and_push_event(state: *State, it: *Puzzle, event: Sapp.Event) void = {
     
     event.mouse_x = m.x;
     event.mouse_y = m.y;
-    
-    // TODO: ?? without this it seems to be 0 if you try to play a chess move while the circuit is running. :FUCKED :compiler ?
-    //_ := @tfmt("% %", event.mouse_x, event.mouse_y);
     
     if event.type == .MOUSE_MOVE {
         d := m - it.prev_mouse;
@@ -300,7 +357,7 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     state.camera.perspective = (aspect = 1, fovy = deg_to_rad(70), znear = 0.01, zfar = 1000.0);
     update_aspect(state.camera&, app);
     state.screen_size = vec2(app.framebuffer_width.float().cast(), app.framebuffer_height.float().cast());
-    state.camera.speed = (pos = 0.08 * 30.0, rot = 0.005 * 30.0);
+    state.camera.speed = (pos = 0.09 * 30.0, rot = 0.005 * 30.0);
     
     // TODO: `forever: Arena.Allocator;`
     a := general_allocator();
@@ -320,7 +377,13 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
                 init_puzzle(T, sg, it, a);
             };
         };
-        @assert(found, "missing app_name=%", it.app_name);
+        if !found {
+            T :: Puzzles.Hint;
+            init_puzzle(T, sg, it, a);
+            s := it.cast(T);
+            s.msg = @afmt(a, "Missing app_name='%'", it.app_name);
+            s.dirty = true;
+        };
     };
     each state.puzzles { it |
         it.app.hack_no_reset_temp_for_headless = true;
