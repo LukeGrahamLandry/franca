@@ -1,0 +1,71 @@
+
+App :: import("@/examples/life/gui.fr").State;
+Instance :: @struct {
+    pos: Vec2;
+    world_size: Vec2;
+    grid_size: i64;
+    solid: Array(bool, 2);  // (dead, alive)
+    init_pattern: Str;
+    flip_xz: bool;
+};
+// TODO: consitant way of doing 90 degree rotations for these puzzles
+// TODO: better visual feedback when you're not allowed to walk on the floor
+// TODO: have a height so there's a visual indicator when alive cells are the solid ones
+
+fn render(sgl: *Sgl.Self, it: *Instance, self: *App) void = {
+    Y: f32 = 0.01;
+    board := decompress_board(it, self);
+    sgl.begin(.QUADS);
+    step := it.world_size.x / it.grid_size.float().cast();
+    sgl.color = pack_rgba(255,255,255,255);
+    range(0, it.grid_size) { x |
+        range(0, it.grid_size) { y |
+            if get(board&, x.intcast(), y.intcast()) != 0 {
+                off := vec2(x.float().cast(), y.float().cast());
+                if it.flip_xz {| off = vec2(off.y, off.x); };
+                c := it.pos + off*step;
+                    c1 := c;
+                    c2 := c1 + vec2(step, step);
+                    sgl.v3f(c1.x, Y, c1.y);
+                    sgl.v3f(c2.x, Y, c1.y);
+                    sgl.v3f(c2.x, Y, c2.y);
+                    sgl.v3f(c1.x, Y, c2.y);
+            };
+        };
+    };
+    sgl.end();
+}
+
+fn collision(player_pos: Vec3, it: *Instance, self: *App) bool = {
+    @if(!it.solid&[0] && !it.solid&[1]) return(false);
+    off := vec2(player_pos.x, player_pos.z) - it.pos;
+    if it.flip_xz {| off = vec2(off.y, off.x); };
+    @if(off.x < 0 || off.y < 0) return(false);
+    step := it.world_size.x / it.grid_size.float().cast();
+    off := off / step;
+    x, y := (off.x.cast().int().intcast(), off.y.cast().int().intcast());
+    @if(x >= it.grid_size.intcast() || y >= it.grid_size.intcast()) return(false);
+    board := decompress_board(it, self);
+    alive := get(board&, x, y) != 0;
+    it.solid&[int(alive)]
+}
+
+
+fn decompress_board(it: *Instance, self: *App) BitBoard = {
+    size := it.grid_size.intcast();
+    board := empty_bitboard(temp(), size);
+    // the root will grow at least once to eval (and more if they made a glider), 
+    // zoom in so it's always the same area that affects the world. 
+    node, node_size := (self.memo.root, self.memo.size);
+    while => node_size > size {
+        node = self.memo&.get_center_no_eval(node&);
+        node_size /= 2;
+    };
+    decompress(board&, self.memo&, node, size);
+    board
+}
+
+
+#use("@/graphics/lib.fr");
+#use("@/examples/life/eval.fr");
+#use("@/examples/life/pattern.fr");

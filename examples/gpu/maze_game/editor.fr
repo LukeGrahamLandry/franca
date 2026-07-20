@@ -27,12 +27,13 @@ Object :: @tagged(
     Wall: @struct(a: Vec2, b: Vec2, y: f32, h: f32, colour: u32),  // veritical
     Tile: @struct(a: Vec2, b: Vec2, y: f32, colour: u32),  // horizontal
     Screen: @struct(pos: Vec3, size: f32, normal: Vec3, app: Str, link: i64),
-    Chess: @struct {
-        data: import("@/examples/gpu/maze_game/puzzles/chess.fr").Instance;
-        link: i64;
-    },
+    Chess: Linked(import("@/examples/gpu/maze_game/puzzles/chess.fr")),
+    Life: Linked(import("@/examples/gpu/maze_game/puzzles/life.fr")),
     Room: @struct(pos: Vec2, radius: f32),
 );
+
+Linked :: fn($S: ScopeId) Type = 
+    @struct(data: S.Instance, link: i64);
 
 Tool :: @tagged(Place: Tag(Object), Delete, None, HighWall);
 
@@ -43,6 +44,7 @@ choose_tool :: fn(key: Sapp.Keycode) ?Tool = {
         fn S() => (Place = .Screen);
         fn R() => (Place = .Room);
         fn C() => (Place = .Chess);
+        fn L() => (Place = .Life);
         fn H() => .HighWall;
         fn D() => .Delete;
         @default => return(.None);
@@ -233,18 +235,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                         }
                         fn Room() => state.objects&.push(Room = (pos = a, radius = norm(a - b)));
                         fn Chess() => {
-                            // :SLOW
-                            link := -1;
-                            best_distance: f32 = 9999;
-                            each_rev state.objects { it |
-                                @if_let(it) fn Screen(it) => if it.app == "Chess" {
-                                    check_distance := norm(vec2(it.pos.x, it.pos.z) - a);
-                                    if check_distance < best_distance {
-                                        link = it.link;
-                                        best_distance = check_distance;
-                                    };
-                                };
-                            };
+                            link := find_link(state, a, "Chess");
                             
                             size := abs(b.x - a.x);
                             step := size / 8;
@@ -255,6 +246,17 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                                 Y = 0,
                                 H = step,
                                 init_fen = import("@/examples/chess/moves.fr").INIT_FEN,
+                            )));
+                        }
+                        fn Life() => {
+                            link := find_link(state, a, "Life");
+                            state.objects&.push(Life = (link = link, data = (
+                                pos = min(a, b),
+                                world_size = abs(b - a),
+                                grid_size = 16,
+                                init_pattern = "",
+                                solid = (false, false),
+                                flip_xz = a.x > b.x,
                             )));
                         }
                     };
@@ -278,6 +280,22 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         @default => ();
     };
 };
+
+// :SLOW
+fn find_link(state: *State, a: Vec2, app_name: Str) i64 = {
+    link := -1;
+    best_distance: f32 = 9999;
+    each_rev state.objects { it |
+        @if_let(it) fn Screen(it) => if it.app == app_name {
+            check_distance := norm(vec2(it.pos.x, it.pos.z) - a);
+            if check_distance < best_distance {
+                link = it.link;
+                best_distance = check_distance;
+            };
+        };
+    };
+    link
+}
 
 fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     state.sg = sg; state.app = app;
@@ -363,9 +381,8 @@ fn load_objects_from_world(o: *List(Object), puzzles: []Puzzle, rooms: []Room) v
         ));
         @match(it.extra&) {
             fn None() => ();
-            fn Chess(data) => {
-                o.push(chess = (link = link, data = data[]));
-            }
+            fn Chess(data) => o.push(Chess = (link = link, data = data[]));
+            fn Life(data) => o.push(Life = (link = link, data = data[]));
         };
     };
 }
@@ -408,20 +425,74 @@ fn save_as_code(o: *List(u8), objects: *List(Object)) void = {
     objects.clear();
     objects.push_all(sorted_objects.items());
     
-    // TODO: this is trash, do reflection
     @fmt(o, "objects :: @const_slice(@as(import(\"@/examples/gpu/maze_game/editor.fr\")'Object)\n");
     each objects { it |
-        @fmt(o, "(% = (", it.tag());
-        @match(it) {
-            fn Wall(it) => @fmt(o, "a=vec2(%,%), b=vec2(%,%), y=%, h=%, colour=%,", it.a.x, it.a.y, it.b.x, it.b.y, it.y, it.h, fmt_hex it.colour);
-            fn Tile(it) => @fmt(o, "a=vec2(%,%), b=vec2(%,%), y=%, colour=%,", it.a.x, it.a.y, it.b.x, it.b.y, it.y, fmt_hex it.colour);
-            fn Room(it) => @fmt(o, "pos=vec2(%,%),radius=%", it.pos.x, it.pos.y, it.radius);
-            fn Screen(it) => @fmt(o, "pos=vec3(%,%,%),normal=vec3(%,%,%),app=\"%\",size=%,link=%,", it.pos.x, it.pos.y, it.pos.z, it.normal.x,it.normal.y,it.normal.z,it.app, it.size, it.link);
-            fn Chess(it) => @fmt(o, "link=%,data=(pos=vec2(%,%),step=%,Y=%,H=%,flip_xz=%,init_fen=\"%\"),",it.link,it.data.pos.x,it.data.pos.y,it.data.step,it.data.Y,it.data.H,it.data.flip_xz,it.data.init_fen);
-        };
-        @fmt(o, ")),\n");
+        as_text(Object, it, o);
+        @fmt(o, ",\n");
     };
     @fmt(o, ");\n");
+}
+
+fn as_text($T: Type, it: *T, out: *List(u8)) void #generic = {
+    @inline_switch(T) {
+        @case(void) => @fmt(out, "()");
+        @case(Vec2) => @fmt(out, "vec2(%,%)", it.x, it.y);
+        @case(Vec3) => @fmt(out, "vec3(%,%,%)", it.x, it.y, it.z);
+        // TODO: just use \x00 non-printable characters
+        @case(Str) => {
+            if it[].contains("\n".ascii()) {
+                @fmt(out, "\"\"\"%\"\"\"", it[]);
+            } else {
+                @fmt(out, "\"%\"", it[]);
+            };
+        };
+        @case(f32) => @fmt(out, "%", it[]);
+        @case(i64) => @fmt(out, "%", it[]);
+        @case(u32) => @fmt(out, "%", fmt_hex(it[]));
+        @case(bool) => @fmt(out, "%", it[]);
+        @default => {
+            @inline_match(@run T.get_type_info_ref()) {
+                fn Enum() => @fmt(out, ".%", it[].name_str());
+                fn Struct($f) => {
+                    ::assert(!f[].is_union, "TODO: format union");
+                    out.push_all("(");
+                    inline_for T.get_fields() { $f | 
+                        inner := T.get_field_ptr(it, f);
+                        @fmt(out, "%=", @run f[].name.str());
+                        as_text(f[].ty, inner, out);
+                        @fmt(out, ", ");
+                    };
+                    out.len -= int(out.items().ends_with(" "));
+                    out.push_all(")");
+                }
+                fn Tagged($t) => {
+                    @fmt(out, "(% = ", it.tag());
+                    
+                    i := 0; // TODO : inline_enumerate
+                    tag_value := it.tag().raw();
+                    // TODO: @inline_switch.
+                    inline_for T.get_variants() { $f | 
+                        non_void :: !(f[]._1 == void);
+                        if i == tag_value {
+                            inner := T.get_variant_ptr_for(it, f);
+                            as_text(@type inner[], inner, out);
+                        };
+                        i += 1;
+                    };
+                    out.push_all(")");
+                }
+                fn Array() => {
+                    out.push_all("(");
+                    each it { it |
+                        as_text(@type it[], it, out);
+                        out.push_all(",");
+                    }; 
+                    out.push_all(")");
+                }
+                @default => @run @panic("Unsupported type for as_text %", T.typename().str());
+            };
+        };
+     };
 }
 
 fn objects_to_world(objects: []Object, a: Alloc) Ty([]Puzzle, []Room) = {
@@ -469,14 +540,21 @@ fn objects_to_world(objects: []Object, a: Alloc) Ty([]Puzzle, []Room) = {
                 
                 // :SLOW
                 each objects { check |
-                    @if_let(check) fn Chess(jt) => if jt.link == it.link {
-                        p.extra = (Chess = jt.data);
+                    @match(check) {
+                        fn Chess(jt) => if jt.link == it.link {
+                            p.extra = (Chess = jt.data);
+                        };
+                        fn Life(jt) => if jt.link == it.link {
+                            p.extra = (Life = jt.data);
+                        };
+                        @default => ();
                     };
                 };
                 
                 puzzles.push(p);
             }
             fn Chess(it) => ();
+            fn Life(it) => ();
         };
     };
     if puzzles.len != puzzle_start || walls.len != 0 {
@@ -498,6 +576,7 @@ fn get_pos(it: *Object) Vec2 =
         fn Room(it) => it.pos;
         fn Screen(it) => vec2(it.pos.x, it.pos.z);
         fn Chess(it) => it.data.pos;
+        fn Life(it) => it.data.pos;
     };
 
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {

@@ -33,7 +33,11 @@ State :: @struct {
     text: Sdtx.Self;
     pattern: List(u8);
     debug: Str;  // temp()
+    
+    // 0<target_eval_speed<1 means wait multiple frames to do a single step.
     eval_speed: i32;
+    target_eval_speed: f64;
+    eval_fraction: f64;
 };
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -51,7 +55,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.uni.scale = 1.0;
     sapp.set_window_title("Life (press h for help)");
     state.paused = true;
-    state.eval_speed = 1;
+    state.target_eval_speed = 1;
     
     for cli_args() { it |
         path := it.str();
@@ -128,7 +132,21 @@ Shaders :: @struct {
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     if !state.paused {
-        state.tick();
+        want_eval := true;
+        if state.target_eval_speed >= 1 {
+            state.eval_speed = state.target_eval_speed.int().intcast();
+        } else {
+            state.eval_speed = 1;
+            state.eval_fraction += state.target_eval_speed;
+            if state.eval_fraction >= 1 {
+                state.eval_fraction -= 1;
+            } else {
+                want_eval = false;
+            };
+        };
+        if want_eval {
+            state.tick();
+        };
     };
     @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
     state.view = find_view_area(state.flat&, state.memo&, state.uni&, state.debug&);
@@ -193,11 +211,11 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 fn EQUAL() => apply_zoom(state.uni.scale);
                 fn C() => write(Patterns'write_mc);
                 fn B() => write(Patterns'write_rle);
-                fn LEFT_BRACKET() => if state.eval_speed > 1 {
-                    state.eval_speed /= 2;
+                fn LEFT_BRACKET() => if state.target_eval_speed > 1.0 / 512 {
+                    state.target_eval_speed /= 2;
                 }
-                fn RIGHT_BRACKET() => if state.eval_speed < 1.shift_left(30) {
-                    state.eval_speed *= 2;
+                fn RIGHT_BRACKET() => if state.target_eval_speed < 1.shift_left(30).float() {
+                    state.target_eval_speed *= 2;
                 }
                 @default => return();
             };
@@ -456,7 +474,7 @@ fn maybe_show_info(state: *State, sapp: *Sapp.Self) f32 = {
     @fmt(msg, "; pos=(%,%);\n", uni.pos.x, uni.pos.y);
     // todo: stable is wrong if need to grow in eval to get more steps
     stable := root.next.id != 0 && root.next_step == state.eval_speed;
-    @fmt(msg, "paused=%; steps=%; stable=%;\n", state.paused, state.eval_speed, stable);
+    @fmt(msg, "paused=%; steps=%; stable=%;\n", state.paused, state.target_eval_speed, stable);
     msg.push_all(state.debug);
     @fmt(msg, "\n");
     sdtx.put(msg.items());

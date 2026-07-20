@@ -15,6 +15,7 @@ life:
 - the grid is the floor and you can only walk on the solid cells. 
   need to create a pattern that repeats so you have time to walk across while it runs.
 - maybe the controller panel is in another room and somewhere else there's ones with hints for patterns that would work. 
+- it could also be vertical so its like a locked door
 
 circuit:  
 - have to make a truth table to open door but the wires you place are also paths in the 3d world. 
@@ -52,14 +53,12 @@ wasm4
 
 - fix the weird transparent background debugtext
 - make it work in wgpu
-- more abstract idea of rooms so you know which screens need to be loaded
-- need a less suck way of editing the world. 
-  if it's mostly flat, could just do ascii art in a string. 
-- collisions with the walls. 
-  if do the rooms thing could mostly cheat by just only letting you walk on the floor.
 - when designing the world,
   do the knowledge gating thing where you see a complicated puzzle early 
   and have to go somewhere else where it teaches you how to solve that type of thing. 
 - make the walls look less flat
 - hint screens in the world with text. 
   - "wasd + mouse" "try pressing escape while looking at a screen" "there's a door behind this rook. if only it would move out of the way"
+- allow copy from child app, don't just always clear app.requests
+- allow screens in different orientations
+- still render the puzzles in adjacent rooms
