@@ -38,7 +38,7 @@ fn emit_relocatable_constant(c: *SelfHosted, ty: Type, value: []u8, loc: Span) C
 fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type, loc: Span, forced_id: ?BakedVarId) Result(Ty(BakedVarId, i64), *CompileError) = {
     c.last_loc = @if(loc.is_null(), c.last_loc, loc);
     to_zero: ReadBytes = (bytes = value, i = 0);
-    c.zero_padding(type, to_zero&);  // Needed for reproducible builds!
+    @try(c.zero_padding(type, to_zero&)) return;  // Needed for reproducible builds!
     
     jit_ptr := u8.int_from_ptr(value.ptr);
 
@@ -252,7 +252,7 @@ fn from_legacy(self: *SelfHosted, legacy: BakedVar, type: Type) BakedValue = {
         fn Zeros(len) => return(template = (Zeroes = len), loc = Span.zeroed());
     };
     to_zero: ReadBytes = (bytes = bytes, i = 0);
-    current_comptime().zero_padding(type, to_zero&);
+    self.unwrap_report_error(void, current_comptime().zero_padding(type, to_zero&));
     (template = (Bytes = bytes), relocations = relocs.items(), loc = Span.zeroed())
 }
 
@@ -296,7 +296,7 @@ fn put_baked(c: *SelfHosted, v: BakedValue, jit_ptr: ?[]u8) BakedVarId #inline =
 // TODO: change the api we expose so you don't need this anymore
 fn emit_relocatable_constant_body(c: *SelfHosted, bytes: Slice(u8), ty: Type, force_default_handling: bool) Res(Slice(BakedEntry)) = {
     to_zero: ReadBytes = (bytes = bytes, i = 0);
-    c.zero_padding(ty, to_zero&);  // Needed for reproducible builds!    
+    @try(c.zero_padding(ty, to_zero&)) return;  // Needed for reproducible builds!    
     out := BakedReloc.list(temp());  
     out: BakeResult = (  // doesn't escape!
         rel = BakedReloc.list(temp()),
@@ -447,7 +447,19 @@ fn zero_padding(program: *SelfHosted, ty: Type, bytes: *ReadBytes) PRes = {
         }
         fn Struct(f) => {
             @err_assert(f.layout_done, "ICE: layout not ready") return;
-            @err_assert(!f.is_union, "TODO: you can't zero padding of a union because we don't know which varient is active.") return;
+            if f.is_union {
+                // sad that not everything can be baked or used as a $const arg 
+                // but allowing uninit memory in there is worse. 
+                // there's always the work around of putting explicit padding fields with zeroed default value. 
+                // TODO: could allow when padding is in the same place in all variants. 
+                msg :: "you can't zero padding of a union that contains padding bytes because we don't know which variant is active.";
+                // allowing if already all zeroes techincally fragile because uninit memory might be zeroes sometimes but i really want to allow `zeroed(@union(...))`
+                data := bytes.bytes.subslice(bytes.i, info.stride_bytes.zext());
+                @err_assert(!any_padding_bytes(program, ty) || is_all_zeroes(data), msg) return;
+                bytes.i += info.stride_bytes.zext();  
+                return(.Ok);
+            };
+            
             prev := 0;
             start := bytes.i;
             for f.fields { t |
@@ -461,7 +473,7 @@ fn zero_padding(program: *SelfHosted, ty: Type, bytes: *ReadBytes) PRes = {
         }
         fn Bool() => {
             b := bytes.bytes[bytes.i];
-            @debug_assert(b == 0 || b == 1, "zero_padding a junk bool: %", b);
+            @err_assert(b == 0 || b == 1, "zero_padding a junk bool: %", b) return;
             bytes.i += 1;
         }
         @default => {
@@ -470,6 +482,35 @@ fn zero_padding(program: *SelfHosted, ty: Type, bytes: *ReadBytes) PRes = {
         };
     };
     .Ok
+}
+
+any_padding_bytes :: fn(self: *SelfHosted, ty: Type) bool = {
+    ty := self.raw_type(ty);
+    stride_bytes := self.get_info(ty)[].stride_bytes;
+    @match(self.get_type(ty)) {
+        fn Tagged(f) => for f.cases { _, inner |
+            tag_size :: 8;
+            payload_size := self.get_info(inner)[].stride_bytes;
+            @if(stride_bytes != payload_size + tag_size) return(true);
+            @if(any_padding_bytes(self, inner)) return(true);
+        };
+        fn Array(it) => return(any_padding_bytes(self, it.inner));
+        fn Struct(f) => {
+            if !f.is_union {
+                off := 0;
+                each f.fields { t |
+                    @if(off != t.byte_offset) return(true);
+                    off += self.get_info(t.ty)[].stride_bytes.zext();
+                };
+                @if(off != stride_bytes.zext()) return(true);
+            };
+            each f.fields { t |  
+                @if(any_padding_bytes(self, t.ty)) return(true);
+            };
+        }
+        @default => ();
+    };
+    false
 }
 
 to_values :: fn(program: *SelfHosted, $T: Type, v: T) Values #generic = {
