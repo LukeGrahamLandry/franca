@@ -4,6 +4,8 @@
 - oo compiler bug! `zero_padding() didn't work on a @tagged constant` when trying to bake objects array. 
   and indeed it's uninit memory (the bytes change). it works if `Room`'s Vec2's union is a struct instead.  
   wasn't `@try`-ing it so silently gave up when it had a union. its fine if there's no padding. 
+- im running into too many screens for the default pool sizes when just playing around so need to start save system sooner rather than later. 
+- mandelbrot puzzle (detect current colour, make the floor an obstical when unsolved)
 
 ## (Jul 17-19)
 

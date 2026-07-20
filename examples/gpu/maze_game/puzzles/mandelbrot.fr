@@ -1,0 +1,64 @@
+
+App :: import("@/examples/gpu/mandelbrot.fr").State;
+Instance :: @struct {
+    target_colour: u32;
+    init: @struct(c: Vec2, zoom: f32, wrap: i32);
+    floor: Wall;  // TODO: choice of solid when solved vs unsolved for barrier vs path
+};
+
+fn render(sgl: *Sgl.Self, it: *Instance, self: *App) void = {
+}
+
+fn collision(p: Vec3, it: *Instance, self: *App) bool = {
+    v := it.floor.v&;
+    lo := v[0].min(v[1]).min(v[2]).min(v[3]);
+    hi := v[0].max(v[1]).max(v[2]).max(v[3]);
+    on_ground := p.x > lo.x && p.x < hi.x && p.z > lo.z && p.z < hi.z;
+    on_ground && !check_solved(it, self)
+}
+
+// TODO: maybe allow multiple target colours 
+//       because theres a few shades of green that are close. 
+//       or just make the wrap lower
+// TODO: some visual indication of how close you are to solved
+// TODO: cache and only run when app was dirty this frame
+fn check_solved(it: *Instance, self: *App) bool = {
+    solved := false;
+    uni := self.params;
+    s := PUZZLE_LOGICAL_WIDTH.float().cast();
+    N := 4;
+    prev: u32 = 0;
+    range(0, N*N) { I |
+        x, y := I.udiv_mod(N);
+        p := vec2(cast(x.float() / N.float()), cast(y.float() / N.float()));
+
+        C := p * s;
+        i := evaluate(C, uni);
+        hue := i.intcast().mod(uni.wrap).i32_to_f32() / uni.wrap.i32_to_f32();
+        r, g, b := hsv2rgb(hue.cast(), 1.0, 1.0);
+        c := pack_rgba(r, g, b, 255);
+        if i >= uni.limit.intcast() {
+            c = pack_rgba(0, 0, 0, 255);
+        };
+        
+        if I != 0 && c != prev {
+            return false;
+        };
+        prev = c;
+    };
+    prev == it.target_colour
+}
+
+// TODO: stop pasting this!
+hsv2rgb :: fn(H: f64, S: f64, V: f64) Ty(i64, i64, i64) = {
+    H *= 360.0;
+    f :: fn(n) => {
+        k := fmod(n.float() + (H / 60.0), 6.0);
+        int(abs(V - V * S * max(0.0, min(min(k, 4 - k), 1.0))) * 255.0)
+    };
+    (f(5), f(3), f(1))
+};
+
+#use("@/graphics/lib.fr");
+#use("@/examples/gpu/maze_game/world.fr");
+

@@ -30,6 +30,18 @@ Shaders :: @struct {
     };
     fs   :: fn(in: OutV #input, uni: UniF #uniform(0)) Shaders.OutF = {
         C := @swizzle in.pos.xy;
+        i := evaluate(C, uni);
+        if i >= uni.limit.intcast() {
+            return(frag_color = splat(0));
+        }
+        
+        i := i.intcast().mod(uni.wrap).i32_to_f32() / uni.wrap.i32_to_f32();
+        out := hsv2rgb(@vec(i, 1.0, 1.0)); 
+        (frag_color = @vec(out, 1.0))
+    }
+};
+
+fn evaluate(C: Vec2, uni: Shaders.UniF) i64 = {
         C := vec2D(C.x, C.y);
         C = C * vec2D(uni.scale);
         julia := uni.julia == 1;
@@ -42,15 +54,8 @@ Shaders :: @struct {
         } else {
             mandel(f32, Vec2, c.x.float(), c.y.float(), vec2(z.x.float(), z.y.float()), 4, uni.limit.intcast())
         };
-        if i >= uni.limit.intcast() {
-            return(frag_color = splat(0));
-        }
-        
-        i := i.intcast().mod(uni.wrap).i32_to_f32() / uni.wrap.i32_to_f32();
-        out := hsv2rgb(@vec(i, 1.0, 1.0)); 
-        (frag_color = @vec(out, 1.0))
-    }
-};
+        i
+}
 
 mandel :: fn($F: Type, $V: Type, cx: F, cy: F, z: V, four: F, limit: i64) i64 #generic = {
     i := 0;
@@ -160,6 +165,13 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                     t := state.saved_scale; state.saved_scale = state.params.scale; state.params.scale = t;
                     state.dirty = true;
                     return()
+                }
+                fn P() => {
+                    // TODO: higher precision float printing
+                    @println("zoom=%, c=(%, %), z=(%, %)", 1.0/state.params.scale.double(), 
+                        state.params.c_offset.x.double(), state.params.c_offset.y.double(), 
+                        state.params.z_offset.x.double(), state.params.z_offset.y.double());
+                    return();
                 }
                 @default => return();
             }

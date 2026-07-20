@@ -58,10 +58,8 @@ wasm4
   do the knowledge gating thing where you see a complicated puzzle early 
   and have to go somewhere else where it teaches you how to solve that type of thing. 
 - make the walls look less flat
-- hint screens in the world with text. 
-  - "wasd + mouse" "try pressing escape while looking at a screen" "there's a door behind this rook. if only it would move out of the way"
 - allow copy from child app, don't just always clear app.requests
-- allow screens in different orientations
+- allow screens in non-cardinal directions
 - still render the puzzles in adjacent rooms
 - i'll need to save progress eventually anyway 
   so the snapshot thing where you unload the apps when you're in a different room is a good idea, since save can reuse. 
@@ -70,3 +68,6 @@ wasm4
 - resize the apps based on their size in the projected world? (ie don't hardcode PUZZLE_LOGICAL_WIDTH)
 - all the 3d puzzle effects need to be rotatable
 - be generic about the extra 3d puzzle positioning so don't have to change so many places to add one
+- editor: allow choosing which to delete when multiple things overlap
+- editor: colour picker
+  - going to want to make a `Colour :: @struct(rgba: u32)` so can reflect on it to choose the right ui. 
