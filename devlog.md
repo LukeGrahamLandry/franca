@@ -15,6 +15,7 @@ maze_game
   - this whole thing is kinda unusable but i think the morale of just getting the minimal thing to let me see what im doing in the game is worth it. 
 - top level scope doesn't get deduplicated if imported elsewhere because it uses the old #include_std. 
   for now just hack in a new version of build_for_graphics that does it the other way. 
+- extend screen rotation special case so can be on the other wall without dealing with solving the matrix properly
 
 ## (Jul 16)
 

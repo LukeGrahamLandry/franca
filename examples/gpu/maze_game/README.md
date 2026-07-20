@@ -62,3 +62,10 @@ wasm4
 - allow copy from child app, don't just always clear app.requests
 - allow screens in different orientations
 - still render the puzzles in adjacent rooms
+- i'll need to save progress eventually anyway 
+  so the snapshot thing where you unload the apps when you're in a different room is a good idea, since save can reuse. 
+  and that will help with pools running out of space. 
+- figure out the antialiasing thing
+- resize the apps based on their size in the projected world? (ie don't hardcode PUZZLE_LOGICAL_WIDTH)
+- all the 3d puzzle effects need to be rotatable
+- be generic about the extra 3d puzzle positioning so don't have to change so many places to add one

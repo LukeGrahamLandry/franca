@@ -1,6 +1,5 @@
-// TODO: ui for placing walls, deleting walls, etc.
-// TODO: export as code in a file that gets loaded
 // TODO: debug ui that lets you edit the structs as text (use terminal.fr)?
+// TODO: link won't be unique because can delete things and they persist
 
 main :: fn() void = Easy'start(State);
 State :: @struct {
@@ -29,6 +28,7 @@ Object :: @tagged(
     Screen: @struct(pos: Vec3, size: f32, normal: Vec3, app: Str, link: i64),
     Chess: Linked(import("@/examples/gpu/maze_game/puzzles/chess.fr")),
     Life: Linked(import("@/examples/gpu/maze_game/puzzles/life.fr")),
+    Hint: Linked(import("@/examples/gpu/maze_game/puzzles/hint.fr")),
     Room: @struct(pos: Vec2, radius: f32),
 );
 
@@ -104,7 +104,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             fn Screen(it) => {
                 sgl.color = pack_rgba(255,255,0, 255);
                 p := vec2(it.pos.x, it.pos.z);
-                sgl.line(p, p + vec2(it.normal.x, it.normal.y)*0.1, 0.1);
+                sgl.line(p, p + vec2(it.normal.x, it.normal.z)*0.2, 0.1);
             };
             @default => ();
         };
@@ -225,9 +225,16 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                         fn Tile() => state.objects&.push(Tile = (a = a, b = b, y = 0, colour = pack_rgba(30, 30, 30, 255)));
                         fn Screen() => {
                             n := normalize(b - a);
+                            n := vec3(n.x, 0, n.y);
+                            p := vec3(a.x, 0.75, a.y);
+                            
+                            // bit extra to keep everything off the real walls.
+                            no_z_fighting: f32 = 0.05;  
+                            p += n*no_z_fighting;
+
                             state.objects&.push(Screen = (
-                                pos = vec3(a.x, 0.75, a.y), 
-                                normal = vec3(n.x, 0, n.y), 
+                                pos = p, 
+                                normal = n, 
                                 app = "",
                                 size = 0.5,
                                 link = state.objects.len,
@@ -259,6 +266,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                                 flip_xz = a.x > b.x,
                             )));
                         }
+                        fn Hint() => println("TODO");
                     };
                     fn HighWall() => {
                         ratio: f32 = 0.6;
@@ -335,8 +343,6 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     a := general_allocator();
     o := state.objects&;
     o[] = list(a);
-    //puzzles, rooms := init_world_map(a);
-    //load_objects_from_world(o, puzzles, rooms);
     o.push_all(import("@/examples/gpu/maze_game/map.fr")'objects);
     state.scale = 0.05;
 }
@@ -369,12 +375,15 @@ fn load_objects_from_world(o: *List(Object), puzzles: []Puzzle, rooms: []Room) v
     };
     
     each puzzles { it |
+        wall := it.wall.v&;
         lo := it.wall.v&[0].min(it.wall.v&[1]).min(it.wall.v&[2]).min(it.wall.v&[3]);
         hi := it.wall.v&[0].max(it.wall.v&[1]).max(it.wall.v&[2]).max(it.wall.v&[3]);
         link := o.len;
+        wall_right, wall_up := (wall[0] - wall[1], wall[1] - wall[2]);
+        n := cross(wall_right, wall_up).normalize();
         o.push(Screen = (
             pos = lo,
-            normal = vec3(1),
+            normal = n,
             app = it.app_name,
             size = hi.y - lo.y,
             link = link,
@@ -383,6 +392,7 @@ fn load_objects_from_world(o: *List(Object), puzzles: []Puzzle, rooms: []Room) v
             fn None() => ();
             fn Chess(data) => o.push(Chess = (link = link, data = data[]));
             fn Life(data) => o.push(Life = (link = link, data = data[]));
+            fn Hint(data) => o.push(Life = (link = link, data = data[]));
         };
     };
 }
@@ -534,9 +544,10 @@ fn objects_to_world(objects: []Object, a: Alloc) Ty([]Puzzle, []Room) = {
                 p := zeroed(Puzzle);
                 p.app_name = it.app;
                 a := vec2(it.pos.x, it.pos.z);
-                // TODO: use it.normal
-                dir := vec2(0, 1);  
-                p.wall = new_vertical(a + dir*it.size, a, it.size, it.pos.y);
+                dir := cross(it.normal, vec3(0, 1, 0));
+                dir := vec2(dir.x, dir.z);  
+                aa, bb := (a + dir*it.size, a);
+                p.wall = new_vertical(bb, aa, it.size, it.pos.y);
                 
                 // :SLOW
                 each objects { check |
@@ -547,6 +558,9 @@ fn objects_to_world(objects: []Object, a: Alloc) Ty([]Puzzle, []Room) = {
                         fn Life(jt) => if jt.link == it.link {
                             p.extra = (Life = jt.data);
                         };
+                        fn Hint(jt) => if jt.link == it.link {
+                            p.extra = (Hint = jt.data);
+                        };
                         @default => ();
                     };
                 };
@@ -555,6 +569,7 @@ fn objects_to_world(objects: []Object, a: Alloc) Ty([]Puzzle, []Room) = {
             }
             fn Chess(it) => ();
             fn Life(it) => ();
+            fn Hint(it) => ();
         };
     };
     if puzzles.len != puzzle_start || walls.len != 0 {
@@ -577,6 +592,7 @@ fn get_pos(it: *Object) Vec2 =
         fn Screen(it) => vec2(it.pos.x, it.pos.z);
         fn Chess(it) => it.data.pos;
         fn Life(it) => it.data.pos;
+        fn Hint(it) => vec2(0);  // TODO
     };
 
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {

@@ -87,6 +87,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                             on_ground = false;
                         };
                     };
+                    fn Hint() => ();
                     fn None() => ();
                 }
             };
@@ -142,6 +143,16 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     sgl.color = pack_rgba(255,255,255,255);
     
+    draw_puzzle_wall :: fn(it: *Puzzle, c: u32, no_z_fighting: f32, border_size: f32, $body: @Fn(p: Vec3) void) => {
+        sgl.color = c;
+        w := it.wall.v&;
+        center := (w[0]+w[1]+w[2]+w[3])/4;
+        wall_right, wall_up := (w[0] - w[1], w[1] - w[2]);
+        n := cross(wall_right, wall_up).normalize();
+        for w { p |
+            body(p + (p - center)*border_size + n*no_z_fighting);
+        };
+    };
     
     if true {  // HACK
         // TODO: why does the background of the text of the puzzle texture end up being transperent? 
@@ -149,9 +160,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         //       not the 3d background? i guess the glue_begin_pass(clear_value) doesn't work right? 
         //       theres also a behaviour on dirty frames only that looks a lot like the weird text highlighting in firefox. 
         //       ohh which is interesting because for web im doing a texture copy which is like what im doing here i guess. 
-        sgl.color = pack_rgba(80,40,40,255);
         each state.puzzles { it |
-            for it.wall.v& { p |
+            draw_puzzle_wall(it, pack_rgba(80,40,40,255), 0, 0) { p |
                 sgl.v3f(p);
             };
         };
@@ -160,11 +170,9 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     focus := state.puzzle_focus || -1;
     for room.puzzles { i |
         it := state.puzzles[i]&;
-        sgl.color = @if(i == focus, pack_rgba(255,255,255,255), pack_rgba(0,0,0,255));
-        w := it.wall.v&;
-        center := (w[0]+w[1]+w[2]+w[3])/4;
-        for w { p |
-            sgl.v3f(p + (p - center)*0.04 + vec3(0.001, 0,0));
+        c := @if(i == focus, pack_rgba(255,255,255,255), pack_rgba(0,0,0,255));
+        draw_puzzle_wall(it, c, -0.001, 0.04) { p |
+            sgl.v3f(p);
         };
     };
     sgl.color = pack_rgba(255,255,255,255);
@@ -178,22 +186,24 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         @match(it.extra&) {
             fn Chess(jt) => render(sgl, jt, it.cast(Puzzles.Chess));
             fn Life(jt) => render(sgl, jt, it.cast(Puzzles.Life));
+            fn Hint() => ();
             fn None() => ();
         };
     };
     
     for room.puzzles { i |
         it := state.puzzles[i]&;
-        sgl.color = pack_rgba(255,255,255,255);
         sgl.texturing_enabled = true;
         sgl.texture(it.img, (id = 0));
         sgl.begin(.QUADS);
         sgl.load_identity();
-    
+        
         uv := @const_slice(vec2(1,0), vec2(0,0), vec2(0,1), vec2(1,1));
-        enumerate it.wall.v& { i, p |
+        i := 0;
+        draw_puzzle_wall(it, pack_rgba(255,255,255,255), 0.001, 0) { p |
             sgl.u = uv[i].x; sgl.v = uv[i].y;
-            sgl.v3f(p[]);
+            sgl.v3f(p);
+            i += 1;
         };
         sgl.end();
         write_camera(state.camera&, sgl.uniforms[sgl.uniforms.len - 1].mvp&);
@@ -323,10 +333,19 @@ fn remap_mouse_to_puzzle(it: *Puzzle, c: *Camera, mouse: Vec2, screen: Vec2) Vec
     
     // now i need to know where that point in space is in the app's local coordinates
     // what i actually want is to change the basis of hit to (wall_right, wall_up, n)
-    wall_size := abs(wall[0] - wall[2]);
-    frac := (wall[0] - hit) / wall_size;
+    v := wall;
+    lo := v[0].min(v[1]).min(v[2]).min(v[3]);
+    hi := v[0].max(v[1]).max(v[2]).max(v[3]);
+    wall_size := abs(hi - lo);
+    frac := (hi - hit) / wall_size;
     
-    m := vec2(1 - frac.z, frac.y);  // TODO: this only works for this specific puzzle position
+    m := @if_else {
+        @if(wall_size.x == 0) => vec2(1 - frac.z, frac.y);
+        @if(wall_size.z == 0) => vec2(1 - frac.x, frac.y);
+        @if(wall_size.y == 0) => vec2(1 - frac.x, frac.z);  // untested (means its horizontal)
+        @else => vec2(frac.x, frac.z);  // TODO: real basis thing so it works when not axis aligned
+    };
+    
     m *= vec2(PUZZLE_LOGICAL_WIDTH.float().cast());
     m
 }
@@ -375,7 +394,6 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     
     // TODO: `forever: Arena.Allocator;`
     a := general_allocator();
-    //puzzles, rooms := init_world_map(a);
     map := import("@/examples/gpu/maze_game/map.fr").objects;
     #use("@/examples/gpu/maze_game/editor.fr");
     puzzles, rooms := objects_to_world(map, a);
@@ -404,9 +422,7 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
         it.app.frame();
         set_defaults_post_init(it, sg);
     };
-    state.camera.pos.y = 1;
-    state.camera.pos.x = 4 - 2;
-    
+    state.camera.pos = vec3(2, 1, -1);
     //state.camera.pos = vec3(-10,1,11);  // room 2; life
 }
 

@@ -18,6 +18,7 @@ Puzzle :: @struct {
         None: void,
         Chess: import("@/examples/gpu/maze_game/puzzles/chess.fr").Instance,
         Life: import("@/examples/gpu/maze_game/puzzles/life.fr").Instance,
+        Hint: import("@/examples/gpu/maze_game/puzzles/hint.fr").Instance,
     );
 
     app: *Sapp.Self;
@@ -47,102 +48,6 @@ Puzzles :: @struct {
     Hint :: import("@/examples/gpu/maze_game/puzzles/hint.fr").State;
 };
 
-WallType :: @enum(N, S, D);
-fn init_world_map(a: Alloc) Ty([]Puzzle, []Room) = {
-    rooms := @ref Room.list(a);
-    
-    walls := @ref Wall.list(a);
-    s: f32 = 4;
-    simple_room(walls, vec2(0), s*2, (.S,.S,.S,.D), pack_rgba(10, 70, 10, 255));
-    puzzles := @ref Puzzle.list(a);
-    x: f32 = s - 0.05;
-    y: f32 = -2.75;
-    S :: Type.scope_of(Puzzles);
-    inline_for get_constants(S) { $name |
-        T :: get_constant(Type, S, name[]).unwrap();
-        puzzles.push(new_puzzle(T, new_vertical(vec2(x, y+0.5), vec2(x, y), 0.5, 0.75), a));
-        y += 0.75;
-    };
-    
-    rooms.push(
-        walls = walls.items(),
-        puzzles = a.alloc_init(i64, puzzles.len, fn(i) => i),
-        bounds = (center = vec3(0), radius = sqrt(4*4*2)),
-    );
-    
-    p := vec2(0, s*2 + 1);
-    walls := @ref Wall.list(a);
-    simple_room(walls, p, s*2, (.S,.D,.S,.S), pack_rgba(10, 100, 10, 255));
-    it := new_horizontal(p + vec2(-1, -s), p + vec2(0, -s -1), 0);
-    it.c = pack_rgba(30, 30, 30, 255);
-    walls.push(it);
-    rooms.push(
-        walls = walls.items(),
-        puzzles = empty(),
-        bounds = (center = vec3(p.x, 0, p.y), radius = sqrt(4*4*2)),
-    );
-    
-    (puzzles.items(), rooms.items())
-};
-
-fn simple_room(w: *List(Wall), p: Vec2, size: f32, door: Array(WallType, 4), wall_colour: u32) void = {
-    prev := w.len;
-    s: f32 = size / 2;
-    // w.square_vertical((p + vec2(s, s), p + vec2(s, -s), p + vec2(-s, -s), p + vec2(-s, s)), 5, 0);
-    ;{
-        (h: f32, y: f32) := (5, 0);
-        c := p;
-        p: Array(Vec2, 4) = (p + vec2(s, s), p + vec2(s, -s), p + vec2(-s, -s), p + vec2(-s, s));
-        
-        @match(door&[0]) {
-            fn N() => ();
-            fn D() => {
-            }
-            fn S() => w.vertical(p&[0], p&[1], h, y);
-        };
-        
-        
-        @match(door&[1]) {
-            fn N() => ();
-            fn D() => {
-                w.vertical(c + vec2(0, -s), p&[1], h, y);
-                w.vertical(c + vec2(-1, -s), p&[2], h, y);
-                ratio: f32 = 0.6;
-                w.vertical(c + vec2(0, -s), c + vec2(-1, -s), h*ratio, y + h*(1-ratio));
-            }
-            fn S() => w.vertical(p&[1], p&[2], h, y);
-        };
-        
-        @match(door&[2]) {
-            fn N() => ();
-            fn D() => {
-            }
-            fn S() => w.vertical(p&[2], p&[3], h, y);
-        };
-        
-        @match(door&[3]) {
-            fn N() => ();
-            fn D() => {
-                w.vertical(c + vec2(0, s), p&[0], h, y);
-                w.vertical(c + vec2(-1, s), p&[3], h, y);
-                ratio: f32 = 0.6;
-                w.vertical(c + vec2(0, s), c + vec2(-1, s), h*ratio, y + h*(1-ratio));
-            }
-            fn S() => w.vertical(p&[3], p&[0], h, y);
-        };
-    };
-    
-    each w.items().slice(prev, w.len) { it |
-        it.c = wall_colour;
-    };
-    it := new_horizontal(p + vec2(s, s), p + vec2(-s, -s), 0);
-    it.c = pack_rgba(30, 30, 30, 255);
-    w.push(it);
-    it := new_horizontal(p + vec2(s, s), p + vec2(-s, -s), 5);
-    it.c = pack_rgba(200, 200, 200, 255);
-    //w.push(it);
-}
-
 new_horizontal :: fn(a: Vec2, b: Vec2, y: f32) Wall = {
     (v = (vec3(a.x, y, a.y), vec3(b.x, y, a.y), vec3(b.x, y, b.y), vec3(a.x, y, b.y)))
 };
@@ -151,14 +56,6 @@ new_vertical :: fn(a: Vec2, b: Vec2, h: f32, y: f32) Wall = {
     b := vec3(b.x, y, b.y);
     h := vec3(0, h, 0);
     (v = (a+h, b+h, b, a))
-};
-vertical :: fn(w: *List(Wall), a: Vec2, b: Vec2, h: f32, y: f32) void = 
-    w.push(new_vertical(a,b,h,y));
-square_vertical :: fn(w: *List(Wall), p: Array(Vec2, 4), h: f32, y: f32) void = {
-    w.vertical(p&[0], p&[1], h, y);
-    w.vertical(p&[1], p&[2], h, y);
-    w.vertical(p&[2], p&[3], h, y);
-    w.vertical(p&[3], p&[0], h, y);
 };
 
 fn set_defaults_post_init(it: *Puzzle, sg: *Sg.Self) void = {
@@ -194,6 +91,13 @@ fn set_defaults_post_init(it: *Puzzle, sg: *Sg.Self) void = {
                 // TODO: show error in world
                 import("@/examples/life/gui.fr")'load_pattern_bytes(s, sg, it.init_pattern)
                     .or(fn(msg) => s.show_error(@tfmt("<set_defaults_post_init:Life>\n%", msg)));
+            };
+        };
+        @case(Puzzles.Hint) => {
+            s := it.cast(Puzzles.Hint);
+            s.dirty = true;
+            @if_let(it.extra&) fn Hint(it) => {
+                s.data = it[];
             };
         };
         @default => ();
