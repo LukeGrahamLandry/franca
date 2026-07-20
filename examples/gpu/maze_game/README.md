@@ -34,6 +34,7 @@ stackie
 mandelbrot
 - maybe just you can only walk on black so have to zoom in to fill the floor?
 - have one where you can't zoom so you have to stand on the platform while it moves
+- zoom so the whole thing matches the colour of a background wall and then you can walk through it
 
 terminal: 
 - an editor with a program that affects the world in some way.

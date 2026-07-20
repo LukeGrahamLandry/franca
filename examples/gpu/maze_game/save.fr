@@ -1,0 +1,289 @@
+// TODO: it annoys me that this and bake_relocatable_value and json_reflect and hash and eq and print
+//       all really need to do the same thing but i end up doing it a billion times slightly differently :(
+
+Puzzles :: import("@/examples/gpu/maze_game/world.fr").Puzzles;
+mappings :: @static {
+    ctx: Mappings = (
+        action = init(),
+    ); ctx := ctx&;
+    
+    Puzzles :: import("@/examples/gpu/maze_game/world.fr").Puzzles;
+    @add_fields(ctx, Puzzles.Life, @const_slice(.uni, .paused, .show_info, .target_eval_speed, .eval_fraction));
+    
+    // TODO: state.load_pattern_bytes does some other stuff
+    ctx.set_repr(import("@/examples/life/eval.fr")'Memo, @struct(mc: Str), fn(repr, memo) = {
+        out := @ref u8.list(temp());
+        write(out, memo.root, memo.size);
+        repr[] = (mc = out.items());
+    }, fn(memo, repr) = {
+        it := @try(Patterns'read(memo, repr.mc)) return;
+        memo.root = it.node;
+        memo.size = it.size; 
+        .Ok
+    });
+        
+    @add_fields(ctx, Puzzles.Chess, @const_slice(.board));
+    @add_fields(ctx, import("@/examples/chess/gui.fr")'BoardView, @const_slice(.size, .board, .show_square_labels, .show_bit_board, .click_index, .promote, .ugly_pieces));
+    
+    ctx.set_repr(import("@/examples/chess/moves.fr")'Board, @struct(fen: Str), fn(repr, in) = {
+        out := @ref u8.list(temp());
+        in.writeFen(out);
+        repr[] = (fen = out.items());
+    }, fn(out, repr) = {
+        board := fromFen(repr.fen) 
+            || return(Err = "invalid fen");
+        out[] = board;
+        .Ok
+    });
+    
+    @add_fields(ctx, Puzzles.Mandelbrot, @const_slice(.params, .saved_z, .saved_scale));
+    
+    @add_fields(ctx, import("@/examples/gpu/maze_game/camera.fr")'Camera, @const_slice(.pos, .rot));
+    
+    @add_fields(ctx, Puzzles.FarmGame, @const_slice(.x,.y,.dx,.dy,.world,.click_timeout));
+    
+    // TODO: .start_time needs to get remapped on load. save current t offset from that. 
+    @add_fields(ctx, Puzzles.Stackie, @const_slice(.src,.show_generate_code,.rand_index,.i));
+    
+    @add_fields(ctx, Puzzles.Editor, @const_slice(.objects, .pos, .scale, .prev_click, .tool));
+    
+    // TODO: Circuit: write circuit.data files
+    ctx.set_repr(Puzzles.Circuit, void, fn(repr, in) = (), fn(out, repr) = .Ok);
+    // for now there's no way to edit it so doesn't matter
+    ctx.set_repr(Puzzles.Rtc, void, fn(repr, in) = (), fn(out, repr) = .Ok);
+
+    // only matters if i start changing the world defaults programatically
+    //@add_fields(ctx, Puzzles.Hint, @const_slice(.data));
+    ctx.set_repr(Puzzles.Hint, void, fn(repr, in) = (), fn(out, repr) = .Ok);
+    
+    #use("@/graphics/vec.fr");
+    ctx.set_repr(Vec2, Array(f32, 2), fn(repr, in) = { repr[] = in.v; }, fn(out, repr) = { out.v = repr[]; .Ok });
+    ctx.set_repr(Vec3, Array(f32, 3), fn(repr, in) = { repr[] = in.v; }, fn(out, repr) = { out.v = repr[]; .Ok });
+    ctx.set_repr(Vec4, Array(f32, 4), fn(repr, in) = { repr[] = in.v; }, fn(out, repr) = { out.v = repr[]; .Ok });
+    ctx.set_repr(Vec(f64, 2), Array(f64, 2), fn(repr, in) = { repr[] = in.v; }, fn(out, repr) = { out.v = repr[]; .Ok });
+    ctx.set_repr(import("@/examples/gpu/mandelbrot.fr")'F64, f64, fn(repr, in) = { repr[] = in[].double(); }, fn(out, repr) = { out[] = repr[].double(); .Ok });
+    
+    // todo: allow different vtables?
+    ctx.set_repr(Random.Rng, Array(u64, 4), fn(repr, in) = { repr[] = in.s; }, fn(out, repr) = { out[] = (s = repr[], next = Random.Rng.xoshiro256SS); .Ok });
+    
+    ctx[]
+};
+
+mappings_get :: fn($T: Type) MappingVTable = @run {
+    ::?MappingVTable;
+    ctx :: mappings;
+    a :: ctx.action&;
+    @if(@run a.get(T).is_none()) {
+        @if(@is(get_type_info_ref(T), .Int, .F32, .F64, .void, .Bool)) {
+            ctx.set_raw_bytes(T);
+        };
+        @if(@run IsCollection(List)(T)) {
+            ctx.set_repr(T, []T.Element, fn(repr, in) = {
+                repr[] = in.items();
+            }, fn(out, repr) = {
+                out.clear();
+                out.push_all(repr[]);
+                .Ok
+            });
+        };
+        @if(@run IsCollection(Slice)(T)) {
+            ctx.set_direct(T, fn(ctx, it) = {
+                ctx.out.reserve_type(i64)[] = it.len;
+                each it { it |
+                    store(ctx, @type it[], it);
+                };
+            }, fn(ctx, it) = {
+                n := ctx.in&.pop_type(i64)[];
+                it[] = temp().alloc_zeroed(T.Element, n);  // TODO: but which allocator? this is only ok when used immediately for filling in a list
+                each it { it |
+                    @try(load(ctx, @type it[], it)) return;
+                };
+                .Ok
+            });
+        };
+    };
+    a.get(T) || (.Auto)
+};
+
+allow_infer :: fn(fid: FuncId) void = {
+    func := get_function_ast(fid, false, false, false, false);
+    func.annotations&.push((name = @symbol("where"), args = @literal ()), ast_alloc());
+    func.set_flag(.Generic);
+    func.set_flag(.UnboundGenerics);
+}
+
+fn set_repr(
+    ctx: *Mappings, $T: Type, $Repr: Type, 
+    $to_repr: @Fn(repr: *Repr, in: *T) void, 
+    $from_repr: @Fn(out: *T, repr: *Repr) Result(void, Str),
+) void #generic = {
+    allow_infer(to_repr);
+    allow_infer(from_repr);
+    ctx.action&.insert(T, (WithRepr = (Repr = Repr, to_repr = to_repr, from_repr = from_repr)), ast_alloc());
+}
+
+fn set_direct(
+    ctx: *Mappings, $T: Type,
+    $store: @Fn(ctx: *StoreCtx, in: *T) void,
+    $load: @Fn(ctx: *LoadCtx, out: *T) Result(void, Str), 
+) void #generic = {
+    allow_infer(store);
+    allow_infer(load);
+    ctx.action&.insert(T, (Direct = (load = load, store = store)), ast_alloc());
+}
+
+fn set_raw_bytes(ctx: *Mappings, $T: Type) void #generic = {
+    ctx.set_direct(T, fn(ctx, it) = {
+        ctx.out.reserve_type(T)[] = it[];
+    }, fn(ctx, it) = {
+        it[] = ctx.in&.pop_type(T)[];
+        .Ok
+    })
+}
+
+// bleh, just exists because @const_slice can't forward result type
+fn add_fields(e: FatExpr) FatExpr #macro = {
+    e := e&.items();
+    args := e[2].expr.PrefixMacro.arg.items();
+    args[0] = @{ @as(Fields(@[e[1]])) @[args[0]] };
+    @{ add_fields(@[e[0]], @[e[1]], @[e[2]]) }
+}
+
+fn add_fields(ctx: *Mappings, $Parent: Type, $field_names: []Fields(Parent)) void #generic = {
+    ctx.action&.insert(Parent, (FilterFields = (
+        fields_type = Fields(Parent),
+        fields = bit_cast_unchecked([]Fields(Parent), []i64, field_names),
+    )), ast_alloc());
+}
+
+// TODO: hashtable, slice, list
+
+Mappings :: @struct {
+    action: RawHashMap(Type, MappingVTable);
+};
+
+MappingVTable :: @tagged(
+    WithRepr: @struct {
+        Repr: Type;
+        to_repr: FuncId;
+        from_repr: FuncId;
+    },
+    Direct: @struct {
+        load: FuncId;
+        store: FuncId;
+    },
+    FilterFields: @struct {
+        fields_type: Type;
+        fields: []i64;
+    },
+    Auto: void,
+);
+
+StoreCtx :: @struct {
+    out: *List(u8);
+};
+
+LoadCtx :: @struct {
+    in: []u8;
+};
+
+fn store(ctx: *StoreCtx, $T: Type, it: *T) void #generic = {
+    @inline_match(@static mappings_get(T)) {
+        fn WithRepr($v) => {
+            repr := zeroed(v.Repr);
+            (@run v'to_repr)(repr&, it);
+            store(ctx, v.Repr, repr&)
+        }
+        fn Direct($v) => return((@run v'store)(ctx, it));
+        fn Auto() => auto_store(ctx, T, it);
+        fn FilterFields($f) => {
+            fields :: bit_cast_unchecked([]i64, []f.fields_type, f.fields);
+            inline_for fields { $f | 
+                inner := T.get_field(it, f[]);
+                store(ctx, @type inner[], inner);
+            };
+        }
+    }
+}
+
+fn auto_store(ctx: *StoreCtx, $T: Type, it: *T) void #generic = {
+    @inline_match(@run T.get_type_info_ref()) {
+        fn Enum($f) => store(ctx, f.raw, bit_cast_unchecked(*T, *@run f.raw, it));
+        fn Struct($f) => {
+            @run @ct_assert(!f.is_union, @source_location, "store union: %", @run T.typename().str());
+            inline_for T.get_fields() { $f | 
+                inner := T.get_field_ptr(it, f);
+                store(ctx, @type inner[], inner);
+            };
+        }
+        fn Tagged($t) => {
+            store(ctx, Tag(T), @ref it.tag());
+            i := 0;
+            tag_value := it.tag().raw();
+            inline_for T.get_variants() { $f | 
+                if i == tag_value {
+                    inner := T.get_variant_ptr_for(it, f);
+                    store(ctx, @type inner[], inner);
+                };
+                i += 1;
+            };
+        }
+        fn Array() => each it { inner |
+            store(ctx, @type inner[], inner);
+        };
+        @default => @panic("Unsupported type for as_text %", @run T.typename().str());
+    };
+}
+
+fn load(ctx: *LoadCtx, $T: Type, it: *T) Result(void, Str) #generic = {
+    action :: @static mappings_get(T);
+    @inline_match(action) {
+        fn WithRepr($v) => {
+            repr := zeroed(v.Repr);
+            load(ctx, v.Repr, repr&);
+            @try((@run v'from_repr)(it, repr&)) return;
+        }
+        fn Direct($v) => return((@run v'load)(ctx, it));
+        fn Auto() => auto_load(ctx, T, it);
+        fn FilterFields($f) => {
+            fields :: bit_cast_unchecked([]i64, []f.fields_type, f.fields);
+            inline_for fields { $f | 
+                inner := T.get_field(it, f[]);
+                load(ctx, @type inner[], inner);
+            };
+        }
+    };
+    .Ok
+}
+
+fn auto_load(ctx: *LoadCtx, $T: Type, it: *T) Result(void, Str) #generic = {
+    @inline_match(@run T.get_type_info_ref()) {
+        fn Enum($f) => load(ctx, f.raw, bit_cast_unchecked(*T, *@run f.raw, it));
+        fn Struct($f) => {
+            @run @ct_assert(!f.is_union, @source_location, "load union: %", @run T.typename().str());
+            inline_for T.get_fields() { $f | 
+                inner := T.get_field_ptr(it, f);
+                load(ctx, @type inner[], inner);
+            };
+        }
+        fn Tagged() => {
+            t := zeroed(Tag(T));
+            load(ctx, Tag(T), t&);
+            it.tag_ptr()[] = t;
+            i := 0;
+            tag_value := t.raw();
+            inline_for T.get_variants() { $f | 
+                if i == tag_value {
+                    inner := T.get_variant_ptr_for(it, f);
+                    load(ctx, @type inner[], inner);
+                };
+                i += 1;
+            };
+        }
+        fn Array() => each it { inner |
+            load(ctx, @type inner[], inner);
+        };
+        @default => @panic("Unsupported type for as_text %", @run T.typename().str());
+    };
+    .Ok
+}
