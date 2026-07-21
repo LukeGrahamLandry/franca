@@ -1,4 +1,17 @@
 
+## (Jul 21)
+
+- terminal: use Easy'start(), also allow changing font size later
+- allow horizontal screens so can make a puzzle about matching the floor
+- get rid of an xxxxxxxxxx by making the objc import thingy a bit less fragile
+- the highlighting problem is that the texture ends up with some alpha. 
+  - when run alone the os is just looking at rgb which makes sense. 
+    firefox canvas has some random flipfloping on how it treats the alpha 
+    depending whether it thinks the element is selected maybe? idk but fixing this makes it work there too. 
+  - mandel: makes sense because no pass_action.clear, fixed by using black with full alpha instead of just 0. 
+  - debugtext: changing the `(dst,src)_factor_alpha` fixes it. what i had before was stomping the clear-ed thing with the new 0?
+    i can't say i care enough to experiment to understand all the options but it seems to look better now and not break other situations. 
+
 ## (Jul 20)
 
 - oo compiler bug! `zero_padding() didn't work on a @tagged constant` when trying to bake objects array. 

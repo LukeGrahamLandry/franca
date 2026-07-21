@@ -921,11 +921,7 @@ amd
   - ex. rn examples/terminal's repl import is hardcoded to that path so it won't get your changes to BuiltinCommands. 
   - need to write it to a file anyway when i want to 
   - main.js can diff against the find_file src and decide to send path instead of the whole string for tiny efficiency improvment in the common case where you're not typing in to the ass text box
-- fix firefox like selecting the canvas so everything is tinted your highlight colour
-  - easy to see in mandelbrot, you get real black when you click away 
-  - hopefully related to why all the debugtext demos look like garbage highlighted
-  - related to giving the canvas a tabIndex so it can get events? 
-    - also that's not enough for firefox to send it paste events so maybe i need a fake textbox and make you select that
+- giving the canvas a tabIndex is not enough for firefox to send it paste events so maybe i need a fake textbox and make you select that
 - demo: show webgpu errors in output box (not just console)
 
 ## import_wasm 

@@ -53,6 +53,9 @@ State :: @struct(
     save_file: ?Str,
     show_hover: bool,
     scrolling: bool,
+    
+    // HACK: this is a pointer because it avoids the repl needing to compile the whole import_c(stb) thing (which needs `DISABLE_IMPORT_FRC::false` in toplevelscope)
+    resample_font_f: AsFnPtr(resample_font),
 );
 
 ProcessInfo :: @struct {
@@ -140,8 +143,14 @@ fn on_init(_state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     
     // TODO: if ugly still make non-ascii bytes filled in cells (especially 0 because i use that to draw rectangles)
+    state.resample_font_f = resample_font;
+    resample_font();
+    state[] = zeroed(*State);
+}
+
+resample_font :: fn() void = {
     @if(!FEAT_FONT) return();
-    font_pixels := load_font_pixels(state.scale, general_allocator());
+    font_pixels := load_font_pixels(state.scale, temp());
     font_img: Sg.Image = state.sg.make(
         width = state.scale.int().intcast()*256,
         height = state.scale.mul(2).int().intcast(),
@@ -151,7 +160,6 @@ fn on_init(_state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     );
     state.sg.destroy(state.text.font_img);
     state.text.font_img = font_img;
-    state[] = zeroed(*State);
 };
 
 fn load_font_pixels(scale: f64, a: Alloc) []u8 #use(StbTrueType) = {
@@ -1609,6 +1617,18 @@ BuiltinCommands :: @struct {
         b := selected_buffer() || return();
         b.append_string(HELP);
     }
+    
+    set_font_scale :: fn(new_scale: f64) void = {
+        factor := new_scale / state.scale;
+        state.scale *= factor;
+        d := state.text.default_context.desc&;
+        d.char_width *= factor.cast();
+        d.char_height *= factor.cast();
+        if state.scale == state.scale.int().float() {
+            state'resample_font_f();
+        };
+        // TODO: else: still resample with scale rounded up so it looks good. just im doing it in a dumb way and fractional makes the texture size wrong and fail an assert. 
+    }
 };
 
 StbTrueType :: {
@@ -1652,4 +1672,5 @@ cmd+c/v             (copy / paste)
 backspace           (delete text)
 ctrl+a/e            (go to start/end of line)
 history();          (open a buffer listing previous commands)
+set_font_scale(state.scale*2); (zoom in)
 """;

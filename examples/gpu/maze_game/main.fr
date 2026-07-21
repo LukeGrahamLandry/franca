@@ -2,7 +2,6 @@
 State :: @struct {
     HIGH_DPI :: true;
     pipe: Sgl.Pipeline;
-    pass_action: Sg.PassAction;
     app: *Sapp.Self;
     draw: Sgl.Self;
     sg: *Sg.Self;
@@ -13,7 +12,6 @@ State :: @struct {
     active_room: i64;
     puzzle_focus: ?i64;
     dirty: bool;
-    
     screen_size: Vec2;
 };
 
@@ -114,15 +112,15 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         }
     };
     
-    // TODO: do write_camera properly (add to matrix stack before end()), don't peek in at the uniforms like this. also fix it in geo.  
     sgl := state.draw&;
     
     sgl.defaults();
     sgl.viewport(0.intcast(), 0.intcast(), sapp.width().intcast(), sapp.height().intcast(), true);
     sgl.load_pipeline(state.pipe);
+    sgl.load_identity();
+    write_camera(state.camera&, sgl);
     
     sgl.begin(.QUADS);
-    sgl.load_identity();
     
     // TODO: render adjacent rooms and always layout the world so theres a filler room with no puzzles between interesting rooms so its cheap to render two. 
     
@@ -147,19 +145,6 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         };
     };
     
-    if true {  // HACK
-        // TODO: why does the background of the text of the puzzle texture end up being transperent? 
-        //       like it should be transparent but then you should see the background of that the circuit draws, 
-        //       not the 3d background? i guess the glue_begin_pass(clear_value) doesn't work right? 
-        //       theres also a behaviour on dirty frames only that looks a lot like the weird text highlighting in firefox. 
-        //       ohh which is interesting because for web im doing a texture copy which is like what im doing here i guess. 
-        each state.puzzles { it |
-            draw_puzzle_wall(it, pack_rgba(80,40,40,255), 0, 0) { p |
-                sgl.v3f(p);
-            };
-        };
-    };
-    
     focus := state.puzzle_focus || -1;
     for room.puzzles { i |
         it := state.puzzles[i]&;
@@ -171,7 +156,6 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sgl.color = pack_rgba(255,255,255,255);
     
     sgl.end();
-    write_camera(state.camera&, sgl.uniforms[sgl.uniforms.len - 1].mvp&);
     
     for room.puzzles { i |
         it := state.puzzles[i]&;
@@ -187,7 +171,6 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sgl.texturing_enabled = true;
         sgl.texture(it.img, (id = 0));
         sgl.begin(.QUADS);
-        sgl.load_identity();
         
         uv := @const_slice(vec2(1,0), vec2(0,0), vec2(0,1), vec2(1,1));
         i := 0;
@@ -197,10 +180,14 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             i += 1;
         };
         sgl.end();
-        write_camera(state.camera&, sgl.uniforms[sgl.uniforms.len - 1].mvp&);
     };
     
-    Easy'glue_begin_pass(sapp, sg, state.pass_action);
+    pass_action := zeroed(Sg.PassAction);
+    pass_action.colors&[0] = (
+        load_action = .CLEAR,
+        clear_value = (r = 0.3, g = 0.3, b = 0.3, a = 1.0),
+    );
+    Easy'glue_begin_pass(sapp, sg, pass_action);
     sgl.draw_layer(sg, 0);
     sg.end_pass();
     sg.commit();
@@ -349,7 +336,7 @@ fn remap_mouse_to_puzzle(it: *Puzzle, c: *Camera, mouse: Vec2, screen: Vec2) Vec
     m := @if_else {
         @if(wall_size.x == 0) => vec2(@if(n.x < 0, 1 - frac.z, frac.z), frac.y);
         @if(wall_size.z == 0) => vec2(@if(n.z < 0, frac.x, 1 - frac.x), frac.y);
-        @if(wall_size.y == 0) => vec2(1 - frac.x, frac.z);  // untested (means its horizontal)
+        @if(wall_size.y == 0) => vec2(@if(n.y < 0, frac.x, 1 - frac.x), 1 - frac.z);
         @else => vec2(frac.x, frac.z);  // TODO: real basis thing so it works when not axis aligned
     };
     
@@ -370,7 +357,11 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     );
     
     init_pipeline(state.draw&, state.pipe&, sg, (
-        alpha_to_coverage_enabled = true,
+        // alpha_to_coverage makes transparent pixels not write to depth buffer?
+        // TODO: but dawn thinks `Multisample count (1) must be > 1 when alphaToCoverage is enabled.`
+        //       but also my webgpu depth stuff is unfinished so maybe it will become clear when i work on that. 
+        //       for now just don't crash even tho it looks stupid.  
+        alpha_to_coverage_enabled = SOKOL_BACKEND != .WGPU,
         depth = (
             pixel_format = .DEFAULT,
             write_enabled = true,
@@ -385,11 +376,6 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
             ..,
         ),
     ));
-    
-    state.pass_action.colors&[0] = (
-        load_action = .CLEAR,
-        clear_value = (r = 0.3, g = 0.3, b = 0.3, a = 1.0),
-    );
     
     app.lock_mouse(true);
     state.prev_frame_time = timestamp_s();

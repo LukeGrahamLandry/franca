@@ -27,14 +27,18 @@ circuit:
 farm game
 - earn enough to buy a key? 
 - survive a certain number of rounds? 
+- have shelves/farm be in the 3d world so you can take items out of the game 
+  and move them to a different instance of it in a different room.
 
 stackie
 - write a program to match a pattern on the door? 
+- have a big one with a small patch taken out and you have to match the patch (so like downscaled from the big one)
 
 mandelbrot
 - maybe just you can only walk on black so have to zoom in to fill the floor?
 - have one where you can't zoom so you have to stand on the platform while it moves
 - zoom so the whole thing matches the colour of a background wall and then you can walk through it
+- the screen is one of the grid squares of chess and controls all of them and the one that needs to match to walk on a path is a different one
 
 terminal: 
 - an editor with a program that affects the world in some way.
@@ -52,8 +56,8 @@ wasm4
 
 ## TODO
 
-- fix the weird transparent background debugtext
 - make it work in wgpu
+  - depth texture
 - when designing the world,
   do the knowledge gating thing where you see a complicated puzzle early 
   and have to go somewhere else where it teaches you how to solve that type of thing. 
@@ -71,3 +75,12 @@ wasm4
 - editor: allow choosing which to delete when multiple things overlap
 - editor: colour picker
   - going to want to make a `Colour :: @struct(rgba: u32)` so can reflect on it to choose the right ui. 
+- editor: copy paste an area
+- make embedded terminal usable
+  - needs app.requests copy
+  - should probably have a mode that disables running real commands if i want to use it as a text editor for puzzles
+- theres still a place you can walk through the wall in the life room, can just make the exit 2 wide
+- option for double sided puzzle
+  - make the back wall of the mandelbrot room match the green so the puzzle makes sense in the other direction too
+- i need to be able to colour picker the walls in the game, finding them in the list is ass. 
+  or even being able to see coordinates in the game would help. 
