@@ -14,13 +14,7 @@ Puzzle :: @struct {
     app_name: Str;
     
     // TODO: more indirection
-    extra: @tagged(
-        None: void,
-        Chess: import("@/examples/gpu/maze_game/puzzles/chess.fr").Instance,
-        Life: import("@/examples/gpu/maze_game/puzzles/life.fr").Instance,
-        Hint: import("@/examples/gpu/maze_game/puzzles/hint.fr").Instance,
-        Mandelbrot: import("@/examples/gpu/maze_game/puzzles/mandelbrot.fr").Instance,
-    );
+    extra: Extra;
 
     app: *Sapp.Self;
     img: Sg.Image;
@@ -28,26 +22,58 @@ Puzzle :: @struct {
     
     state: rawptr;
     type: Type;
+    name: PuzzleType;
     
-    prev_mouse := zeroed(Vec2);
+    prev_mouse: Vec2;
 };
 
-fn cast(it: *Puzzle, $T: Type) *T #generic = {
+fn cast(it: *Puzzle, $Name: PuzzleType) *Get(Name).App #generic = {
+    T :: Get(Name).App;
     @debug_assert_eq(T, it.type, "cast(Puzzle, %)", @run T.typename().str());
     T.ptr_from_raw(it.state)
 }
 
-Puzzles :: @struct {
-    Stackie :: import("@/examples/gpu/stackie.fr").State;
-    Life :: import("@/examples/life/gui.fr").State;
-    Circuit :: import("@/examples/circuit/gui.fr").State;
-    Chess :: import("@/examples/chess/gui.fr").State;
-    Mandelbrot :: import("@/examples/gpu/mandelbrot.fr").State;
-    Rtc :: import("@/examples/gpu/rtc.fr").State;
-    FarmGame :: import("@/examples/gpu/farm_game.fr").State;
-    Editor :: import("@/examples/gpu/maze_game/editor.fr").State;
-    Hint :: import("@/examples/gpu/maze_game/puzzles/hint.fr").State;
+NoStatePuzzle :: fn($path: Str) ScopeId = Type.scope_of(@struct {
+    fn render(sgl: *Sgl.Self, it: *Instance, self: *App) void = ();
+    fn collision(p: Vec3, it: *Instance, self: *App) bool = false;
+
+    App :: import(path).State;
+    Instance :: void;
+});
+
+Extra :: {
+    E :: {
+        cases := Ty(Symbol, Type).list(ast_alloc());
+        inline_for_enum_deref PuzzleType { $it |
+            push(cases&, (it.name_str().sym(), Get(it).Instance));
+        };
+        intern_type(Tagged = (cases = cases.as_raw(), tag = PuzzleType))
+    };
+    ::tagged_derive(E);
+    E
 };
+
+Puzzles :: @struct {
+    Hint :: import("@/examples/gpu/maze_game/puzzles/hint.fr");
+    Stackie :: NoStatePuzzle("@/examples/gpu/stackie.fr");
+    Life :: import("@/examples/gpu/maze_game/puzzles/life.fr");
+    Circuit :: NoStatePuzzle("@/examples/circuit/gui.fr");
+    Chess :: import("@/examples/gpu/maze_game/puzzles/chess.fr");
+    Mandelbrot :: import("@/examples/gpu/maze_game/puzzles/mandelbrot.fr");
+    Rtc :: NoStatePuzzle("@/examples/gpu/rtc.fr");
+    FarmGame :: NoStatePuzzle("@/examples/gpu/farm_game.fr");
+    Editor :: NoStatePuzzle("@/examples/gpu/maze_game/editor.fr");
+};
+
+PuzzleType :: {
+    names :: get_constants(Type.scope_of(Puzzles));
+    E :: create_sequential_enum(i64, names.len(), fn(i) => names[i]);
+    ::enum_derive(E);
+    E
+};
+
+fn Get(Name: PuzzleType) ScopeId #fold = 
+    get_constant(ScopeId, Type.scope_of(Puzzles), Name.name_str().sym()).unwrap();
 
 new_horizontal :: fn(a: Vec2, b: Vec2, y: f32) Wall = {
     (v = (vec3(a.x, y, a.y), vec3(b.x, y, a.y), vec3(b.x, y, b.y), vec3(a.x, y, b.y)))
@@ -59,23 +85,24 @@ new_vertical :: fn(a: Vec2, b: Vec2, h: f32, y: f32) Wall = {
     (v = (a+h, b+h, b, a))
 };
 
+// TODO: move these into the puzzle files
 fn set_defaults_post_init(it: *Puzzle, sg: *Sg.Self) void = {
-    @switch(it.type) {
-        @case(Puzzles.Stackie) => {
+    @switch(it.name) {
+        @case(.Stackie) => {
             // i want something without `t` so it doesn't keep ticking every frame until you mess with it. 
-            s := it.cast(Puzzles.Stackie);
+            s := it.cast(.Stackie);
             buf := s.src&;
             buf.clear();
             buf.push_all("xy9o");
             s.need_recompile = true;
             s.input_dirty = true;
         };
-        @case(Puzzles.FarmGame) => {
-            s := it.cast(Puzzles.FarmGame);
+        @case(.FarmGame) => {
+            s := it.cast(.FarmGame);
             s.world.paused = true;
         };
-        @case(Puzzles.Chess) => {
-            s := it.cast(Puzzles.Chess);
+        @case(.Chess) => {
+            s := it.cast(.Chess);
             s.board.size *= 3.1;
             s.dirty = true;
             @if_let(it.extra&) fn Chess(it) => {
@@ -85,8 +112,8 @@ fn set_defaults_post_init(it: *Puzzle, sg: *Sg.Self) void = {
                 };
             };
         };
-        @case(Puzzles.Life) => {
-            s := it.cast(Puzzles.Life);
+        @case(.Life) => {
+            s := it.cast(.Life);
             s.dirty = true;
             @if_let(it.extra&) fn Life(it) => {
                 // TODO: show error in world
@@ -94,15 +121,15 @@ fn set_defaults_post_init(it: *Puzzle, sg: *Sg.Self) void = {
                     .or(fn(msg) => s.show_error(@tfmt("<set_defaults_post_init:Life>\n%", msg)));
             };
         };
-        @case(Puzzles.Hint) => {
-            s := it.cast(Puzzles.Hint);
+        @case(.Hint) => {
+            s := it.cast(.Hint);
             s.dirty = true;
             @if_let(it.extra&) fn Hint(it) => {
                 s.data = it[];
             };
         };
-        @case(Puzzles.Mandelbrot) => {
-            s := it.cast(Puzzles.Mandelbrot);
+        @case(.Mandelbrot) => {
+            s := it.cast(.Mandelbrot);
             s.dirty = true;
             @if_let(it.extra&) fn Mandelbrot(it) => {
                 s.params.scale = new(1/it.init.zoom);
@@ -119,17 +146,17 @@ PUZZLE_LOGICAL_WIDTH :: 1024;
 fn new_puzzle($T: Type, wall: Wall, a: Alloc) Puzzle = {
     it := zeroed(Puzzle);
     it.wall = wall;
-    S :: Type.scope_of(Puzzles);
-    inline_for get_constants(S) { $name |
-        T2 :: get_constant(Type, S, name[]).unwrap();
+    inline_for_enum_deref PuzzleType { $Name |
+        T2 :: Get(Name).App;
         if T == T2 {
-            it.app_name = @run name[].str();
+            it.app_name = Name.name_str();
         };
     };
     it
 }
 
-fn init_puzzle($T: Type, sg: *Sg.Self, it: *Puzzle, a: Alloc) void = {
+fn init_puzzle($Name: PuzzleType, sg: *Sg.Self, it: *Puzzle, a: Alloc) void = {
+    T :: Get(Name).App;
     // TODO: this is a paste from tests/gpu.fr
     W :: PUZZLE_LOGICAL_WIDTH; H :: W;
     image: Sg.Image = sg.make(
@@ -160,6 +187,7 @@ fn init_puzzle($T: Type, sg: *Sg.Self, it: *Puzzle, a: Alloc) void = {
     it.img = image;
     it.att = at;
     it.type = T;
+    it.name = Name;
 }
 
 

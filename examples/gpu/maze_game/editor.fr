@@ -1,5 +1,4 @@
 // TODO: debug ui that lets you edit the structs as text (use terminal.fr)?
-// TODO: link won't be unique because can delete things and they persist
 
 main :: fn() void = Easy'start(State);
 State :: @struct {
@@ -20,23 +19,19 @@ State :: @struct {
     prev_click: ?Vec2;
     holding_shift: bool;
     tool: Tool;
+    
+    next_link: i64;
 };
 
 Object :: @tagged(
     Wall: @struct(a: Vec2, b: Vec2, y: f32, h: f32, colour: u32),  // veritical
     Tile: @struct(a: Vec2, b: Vec2, y: f32, colour: u32),  // horizontal
     Screen: @struct(pos: Vec3, size: f32, normal: Vec3, app: Str, link: i64),
-    Chess: Linked(import("@/examples/gpu/maze_game/puzzles/chess.fr")),
-    Life: Linked(import("@/examples/gpu/maze_game/puzzles/life.fr")),
-    Hint: Linked(import("@/examples/gpu/maze_game/puzzles/hint.fr")),
-    Mandelbrot: Linked(import("@/examples/gpu/maze_game/puzzles/mandelbrot.fr")),
+    Linked: @struct(data: Extra, link: i64),
     Room: @struct(pos: Vec2, radius: f32),
 );
 
-Linked :: fn($S: ScopeId) Type = 
-    @struct(data: S.Instance, link: i64);
-
-Tool :: @tagged(Place: Tag(Object), Delete, None, HighWall);
+Tool :: @tagged(Place: Tag(Object), Delete, None, HighWall, Linked: PuzzleType);
 
 choose_tool :: fn(key: Sapp.Keycode) ?Tool = {
     (Some = @match(key) {
@@ -44,9 +39,9 @@ choose_tool :: fn(key: Sapp.Keycode) ?Tool = {
         fn T() => (Place = .Tile);
         fn S() => (Place = .Screen);
         fn R() => (Place = .Room);
-        fn C() => (Place = .Chess);
-        fn L() => (Place = .Life);
-        fn M() => (Place = .Mandelbrot);
+        fn C() => (Linked = .Chess);
+        fn L() => (Linked = .Life);
+        fn M() => (Linked = .Mandelbrot);
         fn H() => .HighWall;
         fn D() => .Delete;
         @default => return(.None);
@@ -239,45 +234,49 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                                 normal = n, 
                                 app = "",
                                 size = 0.5,
-                                link = state.objects.len,
+                                link = state.next_link,
                             ));
+                            state.next_link += 1;
                         }
                         fn Room() => state.objects&.push(Room = (pos = a, radius = norm(a - b)));
+                        @default => todo();
+                    };
+                    fn Linked(Name) => {
+                        link := find_link(state, a, Name.name_str());
+                        data: Extra = @match(Name) {
                         fn Chess() => {
-                            link := find_link(state, a, "Chess");
-                            
                             size := abs(b.x - a.x);
                             step := size / 8;
-                            state.objects&.push(Chess = (link = link, data = (
+                            (Chess = (
                                 pos = min(a, b),
                                 step = step,
                                 flip_xz = a.x > b.x,
                                 Y = 0,
                                 H = step,
                                 init_fen = import("@/examples/chess/moves.fr").INIT_FEN,
-                            )));
+                            ))
                         }
                         fn Life() => {
-                            link := find_link(state, a, "Life");
-                            state.objects&.push(Life = (link = link, data = (
+                            (Life = (
                                 pos = min(a, b),
                                 world_size = abs(b - a),
                                 grid_size = 16,
                                 init_pattern = "",
                                 solid = (false, false),
                                 flip_xz = a.x > b.x,
-                            )));
+                            ))
                         }
                         fn Mandelbrot() => {
-                            link := find_link(state, a, "Mandelbrot");
-                            state.objects&.push(Mandelbrot = (link = link, data = (
+                            (Mandelbrot = (
                                 target_colour = 0,
                                 init = (c = vec2(-3.0, -1.0), zoom = 1/(1.0 / 300.0 / 2), wrap = 30),
                                 floor = new_horizontal(a, b, 0),
-                            )));
+                            ))
                         }
-                        fn Hint() => println("TODO");
-                    };
+                        @default => todo();
+                        };
+                        state.objects&.push(Linked = (link = link, data = data));
+                    } 
                     fn HighWall() => {
                         ratio: f32 = 0.6;
                         state.objects&.push(Wall = (a = a, b = b, h = H*ratio, y = H*(1-ratio), colour = pack_rgba(10, 100, 10, 255)));
@@ -304,7 +303,7 @@ fn find_link(state: *State, a: Vec2, app_name: Str) i64 = {
     link := -1;
     best_distance: f32 = 9999;
     each_rev state.objects { it |
-        @if_let(it) fn Screen(it) => if it.app == app_name {
+        @if_let(it) fn Screen(it) => if it.app == app_name || it.app == "" {
             check_distance := norm(vec2(it.pos.x, it.pos.z) - a);
             if check_distance < best_distance {
                 link = it.link;
@@ -354,58 +353,13 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     o := state.objects&;
     o[] = list(a);
     o.push_all(import("@/examples/gpu/maze_game/map.fr")'objects);
+    each o { it |
+        @if_let(it) fn Screen(it) => {
+            state.next_link = max(it.link, state.next_link);
+        };
+    };
+    state.next_link += 1;
     state.scale = 0.05;
-}
-
-fn load_objects_from_world(o: *List(Object), puzzles: []Puzzle, rooms: []Room) void = {
-    each rooms { it |
-        each it.walls { it |
-            h := it.v&[0].y - it.v&[3].y;
-            if h == 0 {
-                o.push(Tile = (
-                    a = vec2(it.v&[0].x, it.v&[0].z), 
-                    b = vec2(it.v&[2].x, it.v&[2].z),
-                    y = it.v&[0].y,
-                    colour = it.c
-                ));
-            } else {
-                o.push(Wall = (
-                    a = vec2(it.v&[0].x, it.v&[0].z), 
-                    b = vec2(it.v&[1].x, it.v&[1].z),
-                    y = it.v&[2].y,
-                    h = h,
-                    colour = it.c,
-                ));
-            }
-        };
-        o.push(Room = (
-            pos = vec2(it.bounds.center.x, it.bounds.center.z),
-            radius = it.bounds.radius,
-        ));
-    };
-    
-    each puzzles { it |
-        wall := it.wall.v&;
-        lo := it.wall.v&[0].min(it.wall.v&[1]).min(it.wall.v&[2]).min(it.wall.v&[3]);
-        hi := it.wall.v&[0].max(it.wall.v&[1]).max(it.wall.v&[2]).max(it.wall.v&[3]);
-        link := o.len;
-        wall_right, wall_up := (wall[0] - wall[1], wall[1] - wall[2]);
-        n := cross(wall_right, wall_up).normalize();
-        o.push(Screen = (
-            pos = lo,
-            normal = n,
-            app = it.app_name,
-            size = hi.y - lo.y,
-            link = link,
-        ));
-        @match(it.extra&) {
-            fn None() => ();
-            fn Chess(data) => o.push(Chess = (link = link, data = data[]));
-            fn Life(data) => o.push(Life = (link = link, data = data[]));
-            fn Hint(data) => o.push(Hint = (link = link, data = data[]));
-            fn Mandelbrot(data) => o.push(Mandelbrot = (link = link, data = data[]));
-        };
-    };
 }
 
 fn save_as_code(o: *List(u8), objects: *List(Object)) void = {
@@ -528,6 +482,8 @@ fn objects_to_world(objects: []Object, a: Alloc) Ty([]Puzzle, []Room) = {
         r.puzzles = a.alloc_init(i64, puzzles.len - puzzle_start, fn(i) => i + puzzle_start);
         puzzle_start = puzzles.len;
     };
+    links := @ref list(*get_variant_type(Object, .Linked), temp());
+    puzzle_links := @ref i64.list(temp());
     each objects { it |
         @match(it) {
             fn Room(it) => {
@@ -560,31 +516,10 @@ fn objects_to_world(objects: []Object, a: Alloc) Ty([]Puzzle, []Room) = {
                 aa, bb := (a + dir*it.size, a);
                 p.wall = new_vertical(bb, aa, it.size, it.pos.y);
                 
-                // :SLOW
-                each objects { check |
-                    @match(check) {
-                        fn Chess(jt) => if jt.link == it.link {
-                            p.extra = (Chess = jt.data);
-                        };
-                        fn Life(jt) => if jt.link == it.link {
-                            p.extra = (Life = jt.data);
-                        };
-                        fn Hint(jt) => if jt.link == it.link {
-                            p.extra = (Hint = jt.data);
-                        };
-                        fn Mandelbrot(jt) => if jt.link == it.link {
-                            p.extra = (Mandelbrot = jt.data);
-                        };
-                        @default => ();
-                    };
-                };
-                
                 puzzles.push(p);
+                puzzle_links.push(it.link);
             }
-            fn Chess(it) => ();
-            fn Life(it) => ();
-            fn Hint(it) => ();
-            fn Mandelbrot(it) => ();
+            fn Linked(it) => links.push(it);
         };
     };
     if puzzles.len != puzzle_start || walls.len != 0 {
@@ -596,6 +531,21 @@ fn objects_to_world(objects: []Object, a: Alloc) Ty([]Puzzle, []Room) = {
         finish_room();
     };
     
+    // :SLOW but not as bad as it was before
+    each links { it |
+        enumerate puzzles { i, p |
+            if it.link == puzzle_links[i] {
+                p.extra = it.data;
+                if PuzzleType.from_name(p.app_name) { name |
+                    p.name = name;
+                };
+                if p.extra&.tag() != p.name {
+                    @println("MAP ERROR: link=% is wrong type (% vs %)", it.link, p.extra&.tag(), p.name);
+                };
+            }
+        };
+    };
+    
     (puzzles.items(), rooms.items())
 }
 
@@ -605,10 +555,12 @@ fn get_pos(it: *Object) Vec2 =
         fn Tile(it) => it.a;
         fn Room(it) => it.pos;
         fn Screen(it) => vec2(it.pos.x, it.pos.z);
-        fn Chess(it) => it.data.pos;
-        fn Life(it) => it.data.pos;
-        fn Hint(it) => vec2(0);  // TODO
-        fn Mandelbrot(it) => vec2(0);  // TODO
+        fn Linked(it) => @match(it.data&) {
+            fn Chess(it) => it.pos;
+            fn Life(it) => it.pos;
+            fn Mandelbrot(it) => vec2(it.floor.v&[0].x, it.floor.v&[0].z);
+            @default => vec2(0);  // TODO
+        };
     };
 
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {

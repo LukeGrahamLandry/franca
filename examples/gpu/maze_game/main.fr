@@ -76,25 +76,13 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             room := state.rooms&[state.active_room]&;
             for room.puzzles { i |
                 it := state.puzzles[i]&;
-                @match(it.extra&) {
-                    fn Chess(data) => {
-                        if collision(p, data, it.cast(Puzzles.Chess)) {
-                            on_ground = false;
-                        };
+                
+                inline_for_enum_deref PuzzleType { $Name |
+                    @if(it.extra&.is(Name) && it.name == Name) 
+                    if collision(p, Extra.get_variant_ptr(it.extra&, Name), it.cast(Name)) {
+                        on_ground = false;
                     };
-                    fn Life(data) => {
-                        if collision(p, data, it.cast(Puzzles.Life)) {
-                            on_ground = false;
-                        };
-                    };
-                    fn Mandelbrot(data) => {
-                        if collision(p, data, it.cast(Puzzles.Mandelbrot)) {
-                            on_ground = false;
-                        };
-                    };
-                    fn Hint() => ();
-                    fn None() => ();
-                }
+                };
             };
         };
         
@@ -188,12 +176,9 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     for room.puzzles { i |
         it := state.puzzles[i]&;
         #use("@/examples/gpu/maze_game/puzzles/chess.fr");
-        @match(it.extra&) {
-            fn Chess(jt) => render(sgl, jt, it.cast(Puzzles.Chess));
-            fn Life(jt) => render(sgl, jt, it.cast(Puzzles.Life));
-            fn Mandelbrot(jt) => render(sgl, jt, it.cast(Puzzles.Mandelbrot));
-            fn Hint() => ();
-            fn None() => ();
+        
+        inline_for_enum_deref PuzzleType { $Name |
+            @if(it.extra&.is(Name) && it.name == Name) render(sgl, Extra.get_variant_ptr(it.extra&, Name), it.cast(Name));
         };
     };
     
@@ -265,13 +250,12 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                     // for debugging the save system. this shouldn't change anything important. 
                     it := state.puzzles[j]&;
                     ctx: Save.StoreCtx = (out = @ref u8.list(temp()));
-                    S :: Type.scope_of(Puzzles);
-                    inline_for get_constants(S) { $name |
-                        T :: get_constant(Type, S, name[]).unwrap();
+                    inline_for_enum_deref PuzzleType { $Name |
+                        T :: Get(Name).App;
                         if it.type == T {
-                            store(ctx&, T, it.cast(T));
+                            store(ctx&, T, it.cast(Name));
                             ctx: Save.LoadCtx = (in = ctx.out.items());
-                            result := load(ctx&, T, it.cast(T));
+                            result := load(ctx&, T, it.cast(Name));
                             @assert(result&.is(.Ok), "failed load: %", result.Err);
                             @assert_eq(ctx.in.len, 0, "didn't consume all bytes");
                         };
@@ -424,18 +408,16 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     state.puzzles = puzzles;
     each state.puzzles { it |
         found := false;
-        S :: Type.scope_of(Puzzles);
-        inline_for get_constants(S) { $name |
-            T :: get_constant(Type, S, name[]).unwrap();
-            if it.app_name == @run name[].str() {
+        
+        inline_for_enum_deref PuzzleType { $Name |
+            if it.app_name == @run Name.name_str() {
                 found = true;
-                init_puzzle(T, sg, it, a);
+                init_puzzle(Name, sg, it, a);
             };
         };
         if !found {
-            T :: Puzzles.Hint;
-            init_puzzle(T, sg, it, a);
-            s := it.cast(T);
+            init_puzzle(.Hint, sg, it, a);
+            s := it.cast(.Hint);
             s.msg = @afmt(a, "Missing app_name='%'", it.app_name);
             s.dirty = true;
         };
