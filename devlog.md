@@ -11,6 +11,11 @@
   - mandel: makes sense because no pass_action.clear, fixed by using black with full alpha instead of just 0. 
   - debugtext: changing the `(dst,src)_factor_alpha` fixes it. what i had before was stomping the clear-ed thing with the new 0?
     i can't say i care enough to experiment to understand all the options but it seems to look better now and not break other situations. 
+- put objects in the closest room so less dependent on insertion order
+- need to render puzzles from multiple rooms at once
+- the most annoying editing thing right now is colouring the walls. 
+  what about just opening a repl at whatever wall im looking at. 
+  now that i can embed terminal, have one blessed instance of that that teleports around. 
 
 ## (Jul 20)
 

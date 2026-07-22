@@ -362,40 +362,55 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
 }
 
 fn save_as_code(o: *List(u8), objects: *List(Object)) void = {
-    sorted_objects := @ref Object.list(objects.len, temp());
-    dowhile {
-        continue :: local_return;
-        
-        // TODO: put in closest room always
-        if objects.items().index_of(fn(it) => it.is(.Room)) { i |
-            r := objects.ordered_remove(i).unwrap();
-            room := r.Room;
-            sorted_objects.push(r);
-            sorted_start := sorted_objects.len;
-            objects.ordered_retain(fn(it) => {
-                // TODO: don't sqrt just to compare
-                distance := norm(room.pos - it.get_pos());
-                in_room := !it.is(.Room) && distance <= room.radius;
-                if in_room {
-                    sorted_objects.push(it[]);
-                };
-                !in_room
-            });
-            new := sorted_objects.items().rest(sorted_start);
-            Sort'default(Object, new) { a, b |
-                yield :: local_return;
-                pa, pb := (a.get_pos(), b.get_pos());
-                @if(pa.x != pb.x) yield(pa.x < pb.x);
-                @if(pa.y != pb.y) yield(pa.y < pb.y);
-                aa, bb := (a.tag(), b.tag());
-                aa.raw() <= bb.raw()
-            };
-            continue(true);
+    object_to_room := i64.list(objects.len, temp());
+    room_indices := i64.list(temp());
+    enumerate objects { i, it |
+        if it.is(.Room) {
+            room_indices&.push(i);
         };
-        
-        false
     };
-    sorted_objects.push_all(objects.items());
+    each objects { it |
+        best_i := -1;
+        best: f32 = 999999.0;
+        pos := it.get_pos();
+        for room_indices { i |
+            room := objects[i].Room&;
+            dist := norm_sq(pos - room.pos);
+            if dist < best && dist < room.radius*room.radius {
+                best_i = i;
+                best = dist;
+            };
+        };
+        object_to_room&.push(best_i);
+    };
+
+    sorted_objects := @ref Object.list(objects.len, temp());
+    
+    for room_indices { r |
+        sorted_objects.push(objects[r]);
+        sorted_start := sorted_objects.len;
+        enumerate objects { i, it |
+            if object_to_room[i] == r && i != r {
+                sorted_objects.push(it[]);
+            };
+        };
+        new := sorted_objects.items().rest(sorted_start);
+        Sort'default(Object, new) { a, b |
+            yield :: local_return;
+            pa, pb := (a.get_pos(), b.get_pos());
+            @if(pa.x != pb.x) yield(pa.x < pb.x);
+            @if(pa.y != pb.y) yield(pa.y < pb.y);
+            aa, bb := (a.tag(), b.tag());
+            aa.raw() <= bb.raw()
+        };
+    };
+    
+    enumerate objects { i, it |
+        if object_to_room[i] == -1 {
+            sorted_objects.push(it[]);
+        };
+    };
+    
     objects.clear();
     objects.push_all(sorted_objects.items());
     
@@ -492,6 +507,7 @@ fn objects_to_world(objects: []Object, a: Alloc) Ty([]Puzzle, []Room) = {
                 };
             
                 rooms.push(
+                    adjacent_rooms = empty(),
                     puzzles = empty(), 
                     walls = empty(), 
                     bounds = (center = vec3(it.pos.x, 0, it.pos.y), radius = it.radius),
@@ -510,21 +526,7 @@ fn objects_to_world(objects: []Object, a: Alloc) Ty([]Puzzle, []Room) = {
             fn Screen(it) => {
                 p := zeroed(Puzzle);
                 p.app_name = it.app;
-                if it.normal.y == 0 {
-                    a := vec2(it.pos.x, it.pos.z);
-                    dir := cross(it.normal, vec3(0, 1, 0));
-                    dir := vec2(dir.x, dir.z);  
-                    aa, bb := (a + dir*it.size, a);
-                    p.wall = new_vertical(bb, aa, it.size, it.pos.y);
-                } else {
-                    a := vec2(it.pos.x, it.pos.z);
-                    dir := vec2(1, 1).normalize();  
-                    if it.normal.y > 0 {
-                        dir.x *= -1;
-                    };
-                    aa, bb := (a + dir*it.size, a);
-                    p.wall = new_horizontal(bb, aa, it.pos.y);
-                };
+                p.wall = wall_from_normal(it.pos, it.normal, it.size);
                 puzzles.push(p);
                 puzzle_links.push(it.link);
             }
@@ -554,8 +556,39 @@ fn objects_to_world(objects: []Object, a: Alloc) Ty([]Puzzle, []Room) = {
             }
         };
     };
+    enumerate rooms { i, it |
+        out := @ref i64.list(a);
+        enumerate rooms { j, jt |
+            dist := norm_sq(it.bounds.center - jt.bounds.center);
+            r := it.bounds.radius + jt.bounds.radius;
+            if dist <= r*r {
+                out.push(j);
+            };
+        };
+        it.adjacent_rooms = out.items();
+    };
     
     (puzzles.items(), rooms.items())
+}
+
+wall_from_normal :: fn(point: Vec3, normal: Vec3, size: f32) Wall = {
+    it := @anon_literal(pos = point, _ = normal, _ = size);
+    if it.normal.y == 0 {
+        a := vec2(it.pos.x, it.pos.z);
+        dir := cross(it.normal, vec3(0, 1, 0));
+        dir := vec2(dir.x, dir.z);  
+        aa, bb := (a + dir*it.size, a);
+        return new_vertical(bb, aa, it.size, it.pos.y);
+    } else {
+        a := vec2(it.pos.x, it.pos.z);
+        dir := vec2(1, 1).normalize();  
+        if it.normal.y > 0 {
+            dir.x *= -1;
+        };
+        aa, bb := (a + dir*it.size, a);
+        return new_horizontal(bb, aa, it.pos.y);
+    };
+    unreachable();
 }
 
 fn get_pos(it: *Object) Vec2 = 

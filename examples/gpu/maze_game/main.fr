@@ -13,6 +13,9 @@ State :: @struct {
     puzzle_focus: ?i64;
     dirty: bool;
     screen_size: Vec2;
+    inspect_wall: ?*Wall;
+    inspect_terminal_puzzle_index: i64;
+    active_puzzles: List(i64);
 };
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -29,8 +32,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     //       the embeder needs to do it since logically it owns the Sg.Self anyway. 
     sg.hack_disable_commit_for_headless_app = true;
     // important that they get to run their event handlers and decide if dirty before skipping the real rendering. 
-    room := state.rooms&[state.active_room]&;
-    for room.puzzles { i |
+    for state.active_puzzles { i |
         it := state.puzzles[i]&;
         prev := sg.disabled_commit_calls;
         it.app.frame();
@@ -59,9 +61,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         // :SLOW
         each state.rooms { room |
             each room.walls& { wall |
-                v := wall.v&;
-                lo := v[0].min(v[1]).min(v[2]).min(v[3]);
-                hi := v[0].max(v[1]).max(v[2]).max(v[3]);
+                v := wall.vectors();
+                lo, hi := (v.lo, v.hi);
                 if hi.y == lo.y {
                     if p.x > lo.x && p.x < hi.x && p.z > lo.z && p.z < hi.z {
                         on_ground = true;
@@ -71,8 +72,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         };
         
         if on_ground {
-            room := state.rooms&[state.active_room]&;
-            for room.puzzles { i |
+            for state.active_puzzles { i |
                 it := state.puzzles[i]&;
                 
                 inline_for_enum_deref PuzzleType { $Name |
@@ -95,21 +95,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             break();
         };
     
-        best_distance: f32 = 2000;
-        best := state.active_room;
-        enumerate state.rooms { i, it |
-            distance := norm_sq(p - it.bounds.center);
-            r_sq := it.bounds.radius * it.bounds.radius;
-            if distance < best_distance && distance < r_sq {
-                best = i;
-                best_distance = distance;
-            };
-        };
-        
-        if best != state.active_room {
-            state.active_room = best;
-            @println("moved to room %", best);
-        }
+        state.redetect_active_room();
     };
     
     sgl := state.draw&;
@@ -138,15 +124,14 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sgl.color = c;
         w := it.wall.v&;
         center := (w[0]+w[1]+w[2]+w[3])/4;
-        wall_right, wall_up := (w[0] - w[1], w[1] - w[2]);
-        n := cross(wall_right, wall_up).normalize();
+        v := it.wall&.vectors();
         for w { p |
-            body(p + (p - center)*border_size + n*no_z_fighting);
+            body(p + (p - center)*border_size + v.normal*no_z_fighting);
         };
     };
     
     focus := state.puzzle_focus || -1;
-    for room.puzzles { i |
+    for state.active_puzzles { i |
         it := state.puzzles[i]&;
         c := @if(i == focus, pack_rgba(255,255,255,255), pack_rgba(0,0,0,255));
         draw_puzzle_wall(it, c, -0.001, 0.04) { p |
@@ -157,7 +142,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     sgl.end();
     
-    for room.puzzles { i |
+    for state.active_puzzles { i |
         it := state.puzzles[i]&;
         #use("@/examples/gpu/maze_game/puzzles/chess.fr");
         
@@ -166,7 +151,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         };
     };
     
-    for room.puzzles { i |
+    for state.active_puzzles { i |
         it := state.puzzles[i]&;
         sgl.texturing_enabled = true;
         sgl.texture(it.img, (id = 0));
@@ -181,6 +166,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         };
         sgl.end();
     };
+    sgl.texturing_enabled = false;
     
     pass_action := zeroed(Sg.PassAction);
     pass_action.colors&[0] = (
@@ -193,13 +179,40 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sg.commit();
 };
 
+fn redetect_active_room(state: *State) void = {
+    p := state.camera.pos;
+    best_distance: f32 = 2000;
+    best := state.active_room;
+    enumerate state.rooms { i, it |
+        distance := norm_sq(p - it.bounds.center);
+        r_sq := it.bounds.radius * it.bounds.radius;
+        if distance < best_distance && distance < r_sq {
+            best = i;
+            best_distance = distance;
+        };
+    };
+    
+    @if(best == state.active_room) return();
+    
+    state.active_room = best;
+    room := state.rooms[state.active_room]&;
+    state.active_puzzles&.clear();
+    for room.adjacent_rooms { r |
+        state.active_puzzles&.push_all(state.rooms[r].puzzles);
+    };
+    if state.inspect_wall { _ |
+        if !state.active_puzzles.items().contains(state.inspect_terminal_puzzle_index) {
+            state.active_puzzles&.push(state.inspect_terminal_puzzle_index);
+        };
+    };
+}
+
 fn choose_focus(state: *State, mouse: Vec2) ?i64 = {
     i: ?i64 = .None;
     s := PUZZLE_LOGICAL_WIDTH.float().cast();
     center := vec2(s) / 2;
     best_distance: f32 = 2000;
-    room := state.rooms&[state.active_room]&;
-    for room.puzzles { check |
+    for state.active_puzzles { check |
         it := state.puzzles[check]&;
         m := remap_mouse_to_puzzle(it, state.camera&, mouse, state.screen_size);
         check_distance := norm(m - center);
@@ -212,7 +225,13 @@ fn choose_focus(state: *State, mouse: Vec2) ?i64 = {
 }
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    if event.type == .KEY_UP && event.key_code == .C && state.puzzle_focus.is_none() {
+        open_wall_debug_screen(state);
+        return();
+    };
+
     if event.type == .KEY_DOWN && event.key_code == .ESCAPE {
+        state.inspect_wall = .None;
         it := state.puzzle_focus&;
         i := -1;
         if it.is_none() {
@@ -270,6 +289,57 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     };
 };
 
+fn open_wall_debug_screen(state: *State) void = {
+    look_dir, forward, _1 := state.camera&.directions();
+    best_dist_sq: f32 = 99999999.0;
+    hit_wall: ?*Wall = .None;
+    each state.rooms { room |
+        each room.walls { wall |
+            hit_point, m := remap_mouse_to_wall(wall, state.camera&, state.screen_size/2, state.screen_size);
+            if m.x > 0 && m.y > 0 && m.x < 1 && m.y < 1 {
+                dir_to_wall := hit_point - state.camera.pos;
+                is_forward := dot(dir_to_wall, look_dir) > 0;
+                dist := norm_sq(dir_to_wall);
+                if is_forward && dist < best_dist_sq {
+                    best_dist_sq = dist;
+                    hit_wall = (Some = wall);
+                }
+            };
+        };
+    };
+    hit_wall := hit_wall || return();
+    
+    puzzle := state.inspect_terminal_puzzle_index;
+    state.inspect_wall = (Some = hit_wall);
+    state.puzzle_focus = (Some = puzzle);
+    state.camera.delta_pos = vec3(0);
+    state.app.lock_mouse(false);
+    state.dirty = true;
+    if !state.active_puzzles.items().contains(puzzle) {
+        state.active_puzzles&.push(puzzle);
+    };
+    
+    w := hit_wall.vectors();
+    n := w.normal;
+    if dot(look_dir, n) > 0 {
+        n = -n;
+    };
+    
+    it := state.puzzles[puzzle]&;
+    new_wall :: import("@/examples/gpu/maze_game/editor.fr")'wall_from_normal;
+    pos := state.camera.pos + forward - vec3(0, 0.5, 0);
+    it.wall = new_wall(pos, n, 1);
+    
+    s := it.cast(.Terminal);
+    S :: import("@/examples/gpu/terminal.fr");
+    S'state[] = s;
+    if S'selected_buffer() { buffer |
+        buffer.append_string(@tfmt("w := import(\"@/examples/gpu/maze_game/world.fr\")'Wall.ptr_from_int(%);", fmt_hex(hit_wall)));
+    };
+    
+    // TODO: need a way of saving to map.fr after changing the colours
+}
+
 fn remap_and_push_event(state: *State, it: *Puzzle, event: Sapp.Event) void = {
     mouse := vec2(event.mouse_x, event.mouse_y);
     m := remap_mouse_to_puzzle(it, state.camera&, mouse, state.screen_size);
@@ -289,7 +359,14 @@ fn remap_and_push_event(state: *State, it: *Puzzle, event: Sapp.Event) void = {
 
 // TODO: cache this, only need to recalucate on MOUSE_MOVE
 // remap the mouse positions to be relative to the puzzle quad in 3d space
+
 fn remap_mouse_to_puzzle(it: *Puzzle, c: *Camera, mouse: Vec2, screen: Vec2) Vec2 = {
+    _, m := remap_mouse_to_wall(it.wall&, c, mouse, screen);
+    m *= vec2(PUZZLE_LOGICAL_WIDTH.float().cast());
+    m
+}
+
+fn remap_mouse_to_wall(wall: *Wall, c: *Camera, mouse: Vec2, screen: Vec2) Ty(Vec3, Vec2) = {
     mouse := vec2(mouse.x, screen.y - mouse.y);
     // a plane parallel to the projected screen, center directly forward from the camera, 
     // whose width/height matches the screen and at a distance where 1 world unit = 1 screen pixel. 
@@ -314,12 +391,11 @@ fn remap_mouse_to_puzzle(it: *Puzzle, c: *Camera, mouse: Vec2, screen: Vec2) Vec
     dir := normalize(pos - c.pos);
     
     // so then where that line intersects the app screen is where the mouse is
-    wall := it.wall.v&;
-    p0 := wall[0];
+    w := wall.vectors();
+    p0 := wall.v&[0];
     l0 := c.pos;
     l := dir;
-    wall_right, wall_up := (wall[0] - wall[1], wall[1] - wall[2]);
-    n := cross(wall_right, wall_up).normalize();
+    n := w.normal;
     
     d := (p0 - l0).dot(n) / l.dot(n);
     
@@ -327,9 +403,7 @@ fn remap_mouse_to_puzzle(it: *Puzzle, c: *Camera, mouse: Vec2, screen: Vec2) Vec
     
     // now i need to know where that point in space is in the app's local coordinates
     // what i actually want is to change the basis of hit to (wall_right, wall_up, n)
-    v := wall;
-    lo := v[0].min(v[1]).min(v[2]).min(v[3]);
-    hi := v[0].max(v[1]).max(v[2]).max(v[3]);
+    lo, hi := (w.lo, w.hi);
     wall_size := abs(hi - lo);
     frac := (hi - hit) / wall_size;
     
@@ -339,16 +413,16 @@ fn remap_mouse_to_puzzle(it: *Puzzle, c: *Camera, mouse: Vec2, screen: Vec2) Vec
         @if(wall_size.y == 0) => vec2(@if(n.y < 0, frac.x, 1 - frac.x), 1 - frac.z);
         @else => vec2(frac.x, frac.z);  // TODO: real basis thing so it works when not axis aligned
     };
-    
-    m *= vec2(PUZZLE_LOGICAL_WIDTH.float().cast());
-    m
+    (hit, m)
 }
 
 fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     state.sg = sg; state.app = app;
+    state.inspect_wall = .None;
     app.desc.enable_clipboard = true;
     state.dirty = true;
     state.puzzle_focus = .None;
+    state.active_puzzles = list(general_allocator());
     
     state.draw&.setup(
         allocator = general_allocator(),
@@ -408,13 +482,23 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
             s.dirty = true;
         };
     };
-    each state.puzzles { it |
+    state.inspect_terminal_puzzle_index = -1;
+    enumerate state.puzzles { i, it |
         it.app.hack_no_reset_temp_for_headless = true;
         it.app.frame();
         set_defaults_post_init(it, sg);
+        
+        if it.name == .Terminal && state.inspect_terminal_puzzle_index == -1 {
+            state.inspect_terminal_puzzle_index = i;
+        };
     };
+    @assert_ne(state.inspect_terminal_puzzle_index, -1, "need a terminal");
     state.camera.pos = vec3(2, 1, -1);
     //state.camera.pos = vec3(-10,1,11);  // room 2; life
+    
+    state.active_room = -1;
+    state.redetect_active_room();
+    @assert(state.active_room != -1, "start pos isn't in a room");
 }
 
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {

@@ -64,10 +64,12 @@ wasm4
 - make the walls look less flat
 - allow copy from child app, don't just always clear app.requests
 - allow screens in non-cardinal directions
-- still render the puzzles in adjacent rooms
-- i'll need to save progress eventually anyway 
-  so the snapshot thing where you unload the apps when you're in a different room is a good idea, since save can reuse. 
-  and that will help with pools running out of space. 
+- use the save system
+  - save the world state when you quit the game
+  - unload apps when you leave the room
+  - use that reflection to generate editor ui
+  - do the repr for remaining apps
+- have the inspect_wall thing work on puzzles too and give you easy text to edit from the reflection thing
 - figure out the antialiasing thing
 - resize the apps based on their size in the projected world? (ie don't hardcode PUZZLE_LOGICAL_WIDTH)
 - all the 3d puzzle effects need to be rotatable
@@ -76,11 +78,13 @@ wasm4
 - editor: colour picker
   - going to want to make a `Colour :: @struct(rgba: u32)` so can reflect on it to choose the right ui. 
 - editor: copy paste an area
+- store object positions relative to room so can rearrange the map without a huge diff?
 - make embedded terminal usable
   - needs app.requests copy
   - should probably have a mode that disables running real commands if i want to use it as a text editor for puzzles
 - theres still a place you can walk through the wall in the life room, can just make the exit 2 wide
 - option for double sided puzzle
   - make the back wall of the mandelbrot room match the green so the puzzle makes sense in the other direction too
-- i need to be able to colour picker the walls in the game, finding them in the list is ass. 
-  or even being able to see coordinates in the game would help. 
+- don't let you open a puzzle through a wall
+- instead of the room overlapping thing for adjacent puzzles,
+  maybe precompute visibility from all the tile positions in the room and merge them? 
