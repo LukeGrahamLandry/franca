@@ -361,6 +361,7 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     state.scale = 0.05;
 }
 
+// TODO: always put the Linked after the puzzle
 fn save_as_code(o: *List(u8), objects: *List(Object)) void = {
     object_to_room := i64.list(objects.len, temp());
     room_indices := i64.list(temp());
@@ -525,6 +526,8 @@ fn objects_to_world(objects: []Object, a: Alloc) Ty([]Puzzle, []Room) = {
             }
             fn Screen(it) => {
                 p := zeroed(Puzzle);
+                p.link = it.link;
+                p.suspended = .None;
                 p.app_name = it.app;
                 p.wall = wall_from_normal(it.pos, it.normal, it.size);
                 puzzles.push(p);
@@ -542,14 +545,24 @@ fn objects_to_world(objects: []Object, a: Alloc) Ty([]Puzzle, []Room) = {
         finish_room();
     };
     
+    each puzzles { p |
+        if PuzzleType.from_name(p.app_name) { name |
+            p.name = name;
+        } else {
+            p.name = .Hint;
+            p.extra = (Hint = (
+                msg = @afmt(a, "Missing app_name='%'", p.app_name),
+                colour = pack_rgba(255,255,255,255),
+                scale = 3,
+            ));
+        }
+    };
+    
     // :SLOW but not as bad as it was before
     each links { it |
         enumerate puzzles { i, p |
             if it.link == puzzle_links[i] {
                 p.extra = it.data;
-                if PuzzleType.from_name(p.app_name) { name |
-                    p.name = name;
-                };
                 if p.extra&.tag() != p.name {
                     @println("MAP ERROR: link=% is wrong type (% vs %)", it.link, p.extra&.tag(), p.name);
                 };

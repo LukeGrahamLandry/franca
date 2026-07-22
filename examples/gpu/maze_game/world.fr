@@ -15,6 +15,8 @@ Puzzle :: @struct {
     app_name: Str;
     
     // TODO: more indirection
+    // this is the init data from a Linked in map.fr. 
+    // it doesn't change in the game and isn't included in the save files. 
     extra: Extra;
 
     app: *Sapp.Self;
@@ -26,6 +28,8 @@ Puzzle :: @struct {
     name: PuzzleType;
     
     prev_mouse: Vec2;
+    suspended: ?[]u8;
+    link: i64;
 };
 
 fn cast(it: *Puzzle, $Name: PuzzleType) *Get(Name).App #generic = {
@@ -76,6 +80,19 @@ PuzzleType :: {
 
 fn Get(Name: PuzzleType) ScopeId #fold = 
     get_constant(ScopeId, Type.scope_of(Puzzles), Name.name_str().sym()).unwrap();
+
+fn can_suspend(it: PuzzleType) bool #fold = 
+    @is(it, .Chess, .Mandelbrot, .FarmGame, .Editor, .Rtc, .Hint, .Life);
+
+// TODO: should probably just do vtable instead because this way will take longer to compile. 
+// TODO: if theres a bunch of apps listed that i don't actually use in the world yet, could filter out here at comptime to compile less. 
+fn as_const(it: *Puzzle, $body: @Fn(Name: PuzzleType) void) void = {
+    inline_for_enum_deref PuzzleType { $Name |
+        if it.name == Name {
+            body(Name);
+        };
+    };
+}
 
 new_horizontal :: fn(a: Vec2, b: Vec2, y: f32) Wall = {
     (v = (vec3(a.x, y, a.y), vec3(b.x, y, a.y), vec3(b.x, y, b.y), vec3(a.x, y, b.y)))
@@ -162,18 +179,6 @@ fn set_defaults_post_init(it: *Puzzle, sg: *Sg.Self) void = {
 }
 
 PUZZLE_LOGICAL_WIDTH :: 1024;
-
-fn new_puzzle($T: Type, wall: Wall, a: Alloc) Puzzle = {
-    it := zeroed(Puzzle);
-    it.wall = wall;
-    inline_for_enum_deref PuzzleType { $Name |
-        T2 :: Get(Name).App;
-        if T == T2 {
-            it.app_name = Name.name_str();
-        };
-    };
-    it
-}
 
 fn init_puzzle($Name: PuzzleType, sg: *Sg.Self, it: *Puzzle, a: Alloc) void = {
     T :: Get(Name).App;

@@ -56,19 +56,37 @@ wasm4
 
 ## TODO
 
+- takes so long to compile (2300ms -safe) 
 - make it work in wgpu
   - depth texture
+  - for website give fake file system a way to access local storage for save file
 - when designing the world,
   do the knowledge gating thing where you see a complicated puzzle early 
   and have to go somewhere else where it teaches you how to solve that type of thing. 
 - make the walls look less flat
 - allow copy from child app, don't just always clear app.requests
 - allow screens in non-cardinal directions
-- use the save system
-  - save the world state when you quit the game
-  - unload apps when you leave the room
+- save system
+  - instead of needing to remember to change save_file_magic, 
+    include schema from the reflection info? 
+    do it per puzzle type so can keep save file when adding new ones? 
+  - which allocator slices are loaded into is fucked
+  - auto save when you make progress instead of keybind. 
+    or maybe in the middle of suspend_for_room_change so a few extra are suspended already. 
+    keep prev save_data bytes for each puzzle and autosave when one changes? 
+  - cmd+w needs to send QUIT_REQUESTED so can auto save then too. 
+    maybe that's good enough, doing it hyperactively is really just because im afraid of crashes. 
+  - cli arg for save path
+  - button to reset save file for testing
+  - debug program that dumps the primitives in save file as text with field names
   - use that reflection to generate editor ui
   - do the repr for remaining apps
+  - wasteful extra init-suspend-restore cycle on first load. 
+  - load_world needs to cope with load() returning error. also rn restore() will crash if that happens. 
+    also not validating up front that it parse correctly if !active so you might only find out later. 
+- ui for resetting a specific puzzle to initial state if you mess it up when you don't understand the controls yet? 
+  the annoying thing is that it could reveal hidden/connected puzzles. 
+  idk how to do it in a way that isn't tacky. 
 - have the inspect_wall thing work on puzzles too and give you easy text to edit from the reflection thing
 - figure out the antialiasing thing
 - resize the apps based on their size in the projected world? (ie don't hardcode PUZZLE_LOGICAL_WIDTH)
@@ -88,3 +106,5 @@ wasm4
 - don't let you open a puzzle through a wall
 - instead of the room overlapping thing for adjacent puzzles,
   maybe precompute visibility from all the tile positions in the room and merge them? 
+- wasteful when there's multiple of an app so could share immutable img/shader/etc. 
+  but i think the simplicity is totally worth it for now. 

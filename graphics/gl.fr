@@ -47,6 +47,9 @@ Sg :: import("@/graphics/gfx.fr");
 Desc :: @struct(
     max_vertices: i32 = 65536,
     max_commands: i32 = 16384,
+    // TODO: rn `defaults` is ignored by setup() and always calls create_defaults. 
+    // TODO: should have one global `Shared` that can be used by multiple Self contexts (like sokol does). 
+    //       for now im lazy and each context owns a unique one. :UniqueSharedIsWasteful
     defaults: Shared = (),
     // when true, you need to manually call ctx.rewind() and ctx.update_vertex_buffer(). 
     // my idea is that this gives a smoother transition between the immediate mode api 
@@ -311,6 +314,7 @@ fn destroy(ctx: *Self, sg: *Sg.Self, a: Alloc) void = {
     sg.destroy(ctx.vbuf);
     sg.destroy_pipeline(ctx.def_pip&);
     sg.remove_commit_listener(make_commit_listener(ctx));
+    discard(ctx.defaults, sg);  // :UniqueSharedIsWasteful
     sg.pop_debug_group();
 
     ctx[] = zeroed(@type ctx[]);
@@ -401,7 +405,6 @@ fn matrix(ctx: *Self, mode: MatrixMode) *Matrix =
 fn matrix(ctx: *Self) *Matrix = 
     matrix(ctx, ctx.cur_matrix_mode);
 
-// create resources which are shared between all contexts
 fn create_defaults(sg: *Sg.Self) Shared = {
     sg.push_debug_group("sokol-gl");
 
@@ -431,12 +434,11 @@ fn create_defaults(sg: *Sg.Self) Shared = {
     (shd = shd, img = img, smp = smp)
 }
 
-// discard resources which are shared between all contexts
-fn discard(self: Shared, sg: *Self) void = {
+fn discard(self: Shared, sg: *Sg.Self) void = {
     sg.push_debug_group("sokol-gl");
-    sg.destroy_image(self.def_img);
-    sg.destroy_sampler(self.def_smp);
-    sg.destroy_shader(self.shd);
+    sg.destroy(self.img);
+    sg.destroy(self.smp);
+    sg.destroy(self.shd);
     sg.pop_debug_group();
 }
 
@@ -502,21 +504,9 @@ fn setup(sgl: *Self, desc: Desc) void = {
     sgl[] = zeroed(@type sgl[]);
     sgl.init_cookie = init_cookie;
     @debug_assert(desc.sg.valid, "must setup sg before sgl");
+    // :UniqueSharedIsWasteful
     desc.defaults = create_defaults(desc.sg);  // tODO
     init_context(sgl, desc&);
-}
-
-fn shutdown(sgl: *Self) void = {
-    @debug_assert(init_cookie == sgl.init_cookie);
-    // contexts own a pipeline, so destroy contexts before pipelines
-    //destroy_context(sgl.default_context&);
-    // TODO
-    //for (int i = 0; i < sgl.pip_pool.pool.size; i++) {
-    //    pipeline_t* pip = &sgl.pip_pool.pips[i];
-    //    destroy_pipeline(make_pip_id(pip.slot.id));
-    //};
-    discard_common(sgl);
-    sgl.init_cookie = 0;
 }
 
 fn load_pipeline(ctx: *Self, pip: Pipeline) void #inline = {

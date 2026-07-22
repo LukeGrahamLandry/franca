@@ -8,6 +8,7 @@ State :: @struct {
     prev_frame_time: f64;
     camera: Camera;
     rooms: []Room;
+    // they can be suspended (state pointers will be null) so only look at the ones in `active_puzzles`
     puzzles: []Puzzle;
     active_room: i64;
     puzzle_focus: ?i64;
@@ -46,11 +47,12 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         return();
     };
 
+    only_flying := state.camera.delta_pos.x == 0 && state.camera.delta_pos.z == 0;
     moved := state.camera.delta_pos.norm_sq() != 0;
     prev_pos := state.camera.pos;
     update_camera(state.camera&, dt);
     
-    if moved {
+    if moved && !only_flying {
         break :: local_return;
         on_ground := false;
         p := state.camera.pos;
@@ -75,8 +77,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             for state.active_puzzles { i |
                 it := state.puzzles[i]&;
                 
-                inline_for_enum_deref PuzzleType { $Name |
-                    @if(it.extra&.is(Name) && it.name == Name) 
+                as_const(it) { $Name |
+                    @if(it.extra&.is(Name)) 
                     if collision(p, Extra.get_variant_ptr(it.extra&, Name), it.cast(Name)) {
                         on_ground = false;
                     };
@@ -95,7 +97,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             break();
         };
     
-        state.redetect_active_room();
+        state.redetect_active_room(false);
     };
     
     sgl := state.draw&;
@@ -146,8 +148,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         it := state.puzzles[i]&;
         #use("@/examples/gpu/maze_game/puzzles/chess.fr");
         
-        inline_for_enum_deref PuzzleType { $Name |
-            @if(it.extra&.is(Name) && it.name == Name) render(sgl, Extra.get_variant_ptr(it.extra&, Name), it.cast(Name));
+        as_const(it) { $Name |
+            @if(it.extra&.is(Name)) render(sgl, Extra.get_variant_ptr(it.extra&, Name), it.cast(Name));
         };
     };
     
@@ -179,7 +181,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sg.commit();
 };
 
-fn redetect_active_room(state: *State) void = {
+fn redetect_active_room(state: *State, first_frame: bool) void = {
     p := state.camera.pos;
     best_distance: f32 = 2000;
     best := state.active_room;
@@ -192,7 +194,8 @@ fn redetect_active_room(state: *State) void = {
         };
     };
     
-    @if(best == state.active_room) return();
+    @if(best == state.active_room && !first_frame) return();
+    old_active := state.active_puzzles.items().shallow_copy(temp());
     
     state.active_room = best;
     room := state.rooms[state.active_room]&;
@@ -205,7 +208,9 @@ fn redetect_active_room(state: *State) void = {
             state.active_puzzles&.push(state.inspect_terminal_puzzle_index);
         };
     };
-}
+    
+    suspend_for_room_change(state, old_active);
+}    
 
 fn choose_focus(state: *State, mouse: Vec2) ?i64 = {
     i: ?i64 = .None;
@@ -225,8 +230,15 @@ fn choose_focus(state: *State, mouse: Vec2) ?i64 = {
 }
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    if event.key_code == .LEFT_CONTROL {
+        state.camera.speed.pos *= @if(event.type == .KEY_UP, 0.2, 5);
+    };
     if event.type == .KEY_UP && event.key_code == .C && state.puzzle_focus.is_none() {
         open_wall_debug_screen(state);
+        return();
+    };
+    if event.type == .KEY_DOWN && event.key_code == .S && event.modifiers.get(.super) == 1 && !event.key_repeat && state.puzzle_focus.is_none() {
+        save_world_file(state);
         return();
     };
 
@@ -255,16 +267,11 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 if event.modifiers.get(.shift) != 0 {
                     // for debugging the save system. this shouldn't change anything important. 
                     it := state.puzzles[j]&;
-                    ctx: Save.StoreCtx = (out = @ref u8.list(temp()));
-                    inline_for_enum_deref PuzzleType { $Name |
-                        T :: Get(Name).App;
-                        if it.type == T {
-                            store(ctx&, T, it.cast(Name));
-                            ctx: Save.LoadCtx = (in = ctx.out.items());
-                            result := load(ctx&, T, it.cast(Name));
-                            @assert(result&.is(.Ok), "failed load: %", result.Err);
-                            @assert_eq(ctx.in.len, 0, "didn't consume all bytes");
-                        };
+                    if it.name.can_suspend() {
+                        @println("debug save %", it.name);
+                        suspend(it);
+                        @println("- % bytes", it.suspended.unwrap().len());
+                        restore(state, it);
                     };
                 };
                 
@@ -467,19 +474,8 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     state.rooms = rooms;
     state.puzzles = puzzles;
     each state.puzzles { it |
-        found := false;
-        
-        inline_for_enum_deref PuzzleType { $Name |
-            if it.app_name == @run Name.name_str() {
-                found = true;
-                init_puzzle(Name, sg, it, a);
-            };
-        };
-        if !found {
-            init_puzzle(.Hint, sg, it, a);
-            s := it.cast(.Hint);
-            s.msg = @afmt(a, "Missing app_name='%'", it.app_name);
-            s.dirty = true;
+        as_const(it) { $Name |
+            init_puzzle(Name, sg, it, a);
         };
     };
     state.inspect_terminal_puzzle_index = -1;
@@ -496,9 +492,135 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     state.camera.pos = vec3(2, 1, -1);
     //state.camera.pos = vec3(-10,1,11);  // room 2; life
     
-    state.active_room = -1;
-    state.redetect_active_room();
-    @assert(state.active_room != -1, "start pos isn't in a room");
+    state.redetect_active_room(true);
+    load_world_file(state);
+}
+
+fn suspend_for_room_change(state: *State, old_active: []i64) void = {
+    new_active := state.active_puzzles.items().shallow_copy(temp());
+    new_active&.unordered_retain(fn(it) => !old_active.contains(it[]));
+    old_active&.unordered_retain(fn(it) => !state.active_puzzles.items().contains(it[]));
+    
+    for old_active { i |
+        suspend(state.puzzles[i]&);
+    };
+    
+    for new_active { i |
+        restore(state, state.puzzles[i]&);
+    };
+}
+
+fn suspend(it: *Puzzle) void = {
+    @if(!can_suspend(it.name)) return();
+    @assert(it.suspended.is_none(), "already has suspend data");
+    
+    a := general_allocator();
+    ctx: Save.StoreCtx = (out = @ref u8.list(a));
+    as_const(it) { $Name |
+        @if(!can_suspend(Name)) unreachable();
+        store(ctx&, Get(Name).App, it.cast(Name));
+        // TODO: maybe everyone should just get an arena
+        it.suspended = (Some = ctx.out.shrink_to_fit());
+        it.app.call_cleanup();
+        a.dealloc_one(Sapp.Self, it.app);
+        a.dealloc_one(Get(Name).App, it.cast(Name));
+        it.app = zeroed(@type it.app);
+        it.state = zeroed(@type it.state);
+    };
+}
+
+fn restore(state: *State, it: *Puzzle) void = {
+    @if(!can_suspend(it.name)) return();
+    save_data := it.suspended&.take() || return();  // else: first time loading this puzzle so nothing to restore
+    
+    as_const(it) { $Name |
+        @if(!can_suspend(Name)) unreachable();
+        W :: PUZZLE_LOGICAL_WIDTH; H :: W;
+        app, user := import("@/tests/gpu.fr")'local_scope'init_headless_app2(Get(Name).App, state.sg, it.att, W, H, general_allocator());
+        it.app = app;
+        it.state = Get(Name).App.raw_from_ptr(user);
+        
+        it.app.hack_no_reset_temp_for_headless = true;
+        it.app.frame();
+        set_defaults_post_init(it, state.sg);
+        
+        ctx: Save.LoadCtx = (in = save_data);
+        result := load(ctx&, Get(Name).App, it.cast(Name));
+        @assert(result&.is(.Ok), "failed load: %", result.Err);
+        @assert_eq(ctx.in.len, 0, "didn't consume all bytes");
+        // TODO: if it has strings they need to get copied out
+        // :FUCKED :FUCKED slices load into temp actually which is useless 
+        // TODO: load Hint ends up with data.msg pointing a temp() because 
+        //       `it[] = temp().alloc_zeroed(T.Element, n);`
+        // TODO: wrong if called from load_world
+        // general_allocator().dealloc(save_data);
+        
+        // shouldn't need to mark dirty. still have the old texture and the idea is that state doesn't change when saved. 
+        // tho maybe for the ones that tick it could be cool to have them tick while you're away
+        // becuase theres often a faster way to simulate a bunch of ticks at once (life,stackie)
+    };
+}
+
+save_file_path :: "target/francamazegamesavefile.out";
+save_file_magic :: "FR\0game0".peek_type(i64)[];
+
+fn save_world(state: *State, out: *List(u8)) void = {
+    ctx: Save.StoreCtx = (out = out);
+    store(ctx&, i64, @ref save_file_magic);
+    store(ctx&, Camera, state.camera&);
+    store(ctx&, i64, @ref state.puzzles.len);
+    each state.puzzles { it |
+        active := it.suspended.is_none();
+        @if(active) suspend(it);
+        if it.suspended { data |
+            store(ctx&, i64, @ref it.link);
+            store(ctx&, []u8, @ref data);
+        };
+        @if(active) restore(state, it);
+    };
+}
+
+fn load_world(state: *State, save_data: []u8) void = {
+    ctx: Save.LoadCtx = (in = save_data);
+    magic := 0;
+    _ := load(ctx&, i64, magic&);
+    _ := load(ctx&, Camera, state.camera&);
+    count := 0;
+    _ := load(ctx&, i64, count&);
+    range(0, count) { _ |
+        link := 0;
+        _ := load(ctx&, i64, link&);
+        data := "";
+        _ := load(ctx&, []u8, data&);
+        if state.puzzles.find(fn(it) => it.link == link) { it |
+            active := it.suspended.is_none();
+            @if(active) suspend(it);
+            it.suspended = (Some = data);
+            @if(active) restore(state, it);
+        };
+    };
+    @assert_eq(ctx.in.len, 0, "extra save data");
+}
+
+fn save_world_file(state: *State) void = {
+    out := @ref u8.list(temp());
+    save_world(state, out);
+    #use("@/lib/sys/fs.fr");
+    if write_entire_file(save_file_path, out.items()) {
+        @println("saved to %", save_file_path);
+    } else {
+        @println("failed to write save file");
+    };
+}
+
+fn load_world_file(state: *State) void = {
+    if read_entire_file(temp(), save_file_path) { data |
+        @println("loading save: %", save_file_path);
+        load_world(state, data);
+        state.redetect_active_room(false);
+    } else {
+        @println("no save file found");
+    };
 }
 
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {

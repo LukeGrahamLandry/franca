@@ -1,4 +1,15 @@
 
+## (Jul 22)
+
+- emit_ir bug?? no, its that shader compiler is mutating asts after sema 
+  so order dependent if function is called on both cpu+gpu.
+- unload apps when screens are far away. 
+  - with that kinda working, saving to a file so you can resume playing is trivial. 
+    that's satisfying progress. kinda feels like a real game now. haven't really done that before. 
+  - plug some leaks. memory matters more than when it was just for tests/gpu.fr. 
+    - now have an easy way to check for gfx resource leaks (just spam save until POOL_EXHAUSTED)
+    - pipeline's have a shader. chess SearchGlobals. Sgl.Shared. 
+
 ## (Jul 21)
 
 - terminal: use Easy'start(), also allow changing font size later

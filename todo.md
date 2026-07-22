@@ -1,10 +1,8 @@
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
-TODO: could be interesting to have a new app hook for taking a snapshot 
-      so when not loaded could store the state more efficiently than all the allocated vertex buffers. 
-      ex. chess just needs a fen+selected square+zoom. etc. 
 
+- leak detector for gpu resources in on_cleanup
 - one of the hare tests broke in sr.ht when they took out the old version of ubuntu.
   make sure it's not my fault
 - recap of language woes
@@ -20,6 +18,7 @@ TODO: could be interesting to have a new app hook for taking a snapshot
   - the way the global scope of the main file works is unusual. 
     maybe there should be an explicit way to add things to it and just 
     default to `main :: import("whatever").main` so you don't default to the weird double declaring types if you try to import your main file. 
+    for now build_for_graphics2 is the hack to work around this problem by opting in to the more sane behaviour. 
 - see todo comments:
   - life/README.md
   - circuit/README.md
