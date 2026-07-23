@@ -16,6 +16,7 @@ State :: @struct {
     screen_size: Vec2;
     inspect_wall: ?*Wall;
     inspect_terminal_puzzle_index: i64;
+    trophy_hint_puzzle_index: i64;
     active_puzzles: List(i64);
 };
 
@@ -97,7 +98,12 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             break();
         };
     
+        start := timestamp();
         state.redetect_active_room(false);
+        t := timestamp() - start;
+        if t > 30 {
+            @println("changed rooms in %ms", t);
+        };
     };
     
     sgl := state.draw&;
@@ -132,6 +138,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         };
     };
     
+    // TODO: i want mandlebrot to be double sided but still have the border when focused
     focus := state.puzzle_focus || -1;
     for state.active_puzzles { i |
         it := state.puzzles[i]&;
@@ -256,6 +263,9 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         // TODO: deal with puzzle.state.pan_keys_pressed
         state.camera.delta_pos = vec3(0);
         state.dirty = true;
+        if it { i |
+            record_click(state, i[]);
+        };
         return();
     };
     
@@ -276,6 +286,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 };
                 
                 if i != j {
+                    record_click(state, j);
                     state.puzzle_focus = (Some = j);
                     state.dirty = true;
                     return();
@@ -424,6 +435,7 @@ fn remap_mouse_to_wall(wall: *Wall, c: *Camera, mouse: Vec2, screen: Vec2) Ty(Ve
 }
 
 fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
+    init_start := timestamp();
     state.sg = sg; state.app = app;
     state.inspect_wall = .None;
     app.desc.enable_clipboard = true;
@@ -478,22 +490,60 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
             init_puzzle(Name, sg, it, a);
         };
     };
-    state.inspect_terminal_puzzle_index = -1;
     enumerate state.puzzles { i, it |
         it.app.hack_no_reset_temp_for_headless = true;
         it.app.frame();
         set_defaults_post_init(it, sg);
-        
-        if it.name == .Terminal && state.inspect_terminal_puzzle_index == -1 {
-            state.inspect_terminal_puzzle_index = i;
-        };
     };
-    @assert_ne(state.inspect_terminal_puzzle_index, -1, "need a terminal");
+    
+    LINK_TERMINAL_INSPECT :: 2;
+    LINK_HINT_TROHY :: 87;
+    state.inspect_terminal_puzzle_index = state.puzzles.index_of(fn(it) => it.link == LINK_TERMINAL_INSPECT).expect("LINK_TERMINAL_INSPECT");
+    @assert_eq(state.puzzles[state.inspect_terminal_puzzle_index].name, .Terminal);
+    state.trophy_hint_puzzle_index = state.puzzles.index_of(fn(it) => it.link == LINK_HINT_TROHY).expect("LINK_HINT_TROHY");
+    @assert_eq(state.puzzles[state.trophy_hint_puzzle_index].name, .Hint);
+    
     state.camera.pos = vec3(2, 1, -1);
     //state.camera.pos = vec3(-10,1,11);  // room 2; life
     
     state.redetect_active_room(true);
     load_world_file(state);
+    
+    // TODO: 250ms seems :SLOW
+    // every restore() call has to run the app's init: 
+    // - life's set_bytes the whole memo tables takes 50ms 
+    // - terminal's repl init has to make a compiler ctx takes 80ms (should delay until first use?)
+    // TODO: at least don't init things that aren't loaded yet
+    @println("on_init took %ms", timestamp() - init_start);
+}
+
+fn record_click(state: *State, i: i64) void = {
+    it := state.puzzles[i]&;
+    @if(it.clicked && i != state.trophy_hint_puzzle_index) return();
+    it.clicked = true;
+
+    it := state.puzzles[state.trophy_hint_puzzle_index]&;
+    @if(it.suspended.is_some()) return();
+    
+    count := zeroed(EnumMap(PuzzleType, @struct(total: i64, clicked: i64)));
+    each state.puzzles& { it |
+        count&[it.name].total += 1; 
+        count&[it.name].clicked += int(it.clicked); 
+    };
+    s := it.cast(.Hint);
+    msg := u8.list(general_allocator());  // :LEAK
+    @fmt(msg&, "click to update\n\n");
+    total, clicked := (0, 0);
+    each count& { name, it |
+        if it.total != 0 && can_suspend(name) {
+            @fmt(msg&, "% %/%\n", name, it.clicked, it.total);
+            clicked += it.clicked;
+            total += it.total;
+        };
+    };
+    @fmt(msg&, "\n%\%\n", int(clicked.float() / total.float() * 100));
+    s.msg = msg&.shrink_to_fit();
+    s.dirty = true;
 }
 
 fn suspend_for_room_change(state: *State, old_active: []i64) void = {
@@ -562,44 +612,63 @@ fn restore(state: *State, it: *Puzzle) void = {
 }
 
 save_file_path :: "target/francamazegamesavefile.out";
-save_file_magic :: "FR\0game0".peek_type(i64)[];
+SaveFile :: @struct {
+    MAGIC :: "FR\0game1".peek_type(i64)[];
+    magic: i64;
+    camera: Camera;
+    puzzles: List(@struct {
+        link: i64;
+        data: []u8;
+        clicked: bool;
+    });
+};
 
+// TODO: compute the save data of the default states of each puzzle and don't include that in the save file if they match
 fn save_world(state: *State, out: *List(u8)) void = {
-    ctx: Save.StoreCtx = (out = out);
-    store(ctx&, i64, @ref save_file_magic);
-    store(ctx&, Camera, state.camera&);
-    store(ctx&, i64, @ref state.puzzles.len);
+    save: SaveFile = (
+        magic = SaveFile.MAGIC, 
+        camera = state.camera,
+        puzzles = list(temp()),
+    );
     each state.puzzles { it |
         active := it.suspended.is_none();
         @if(active) suspend(it);
         if it.suspended { data |
-            store(ctx&, i64, @ref it.link);
-            store(ctx&, []u8, @ref data);
+            save.puzzles&.push(link = it.link, data = data, clicked = it.clicked);
         };
         @if(active) restore(state, it);
     };
+    
+    ctx: Save.StoreCtx = (out = out);
+    store(ctx&, SaveFile, save&);
 }
 
+// TODO: make sure first frame is dirty
 fn load_world(state: *State, save_data: []u8) void = {
+    magic := save_data.peek_type(i64)[];
+    if magic != SaveFile.MAGIC {
+        println("invalid save file magic");
+        return();
+    };
+    save: SaveFile = (
+        magic = 0, 
+        camera = state.camera,
+        puzzles = list(temp()),
+    );
     ctx: Save.LoadCtx = (in = save_data);
-    magic := 0;
-    _ := load(ctx&, i64, magic&);
-    _ := load(ctx&, Camera, state.camera&);
-    count := 0;
-    _ := load(ctx&, i64, count&);
-    range(0, count) { _ |
-        link := 0;
-        _ := load(ctx&, i64, link&);
-        data := "";
-        _ := load(ctx&, []u8, data&);
-        if state.puzzles.find(fn(it) => it.link == link) { it |
+    _ := load(ctx&, SaveFile, save&);
+    @assert_eq(ctx.in.len, 0, "extra save data");
+    
+    state.camera = save.camera;
+    each save.puzzles { save |
+        if state.puzzles.find(fn(it) => it.link == save.link) { it |
+            it.clicked = save.clicked;
             active := it.suspended.is_none();
             @if(active) suspend(it);
-            it.suspended = (Some = data);
+            it.suspended = (Some = save.data);
             @if(active) restore(state, it);
         };
     };
-    @assert_eq(ctx.in.len, 0, "extra save data");
 }
 
 fn save_world_file(state: *State) void = {

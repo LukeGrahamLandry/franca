@@ -1,6 +1,8 @@
 
 a 3d world containing screens running some of my other examples programs.
 
+[![demo](https://img.youtube.com/vi/E0jMBol_KSI/0.jpg)](https://www.youtube.com/watch?v=E0jMBol_KSI)
+
 ## TODO: Puzzle Ideas
 
 chess:  
@@ -54,6 +56,8 @@ viewer
 wasm4
 - get enough points in tetris
 
+trophy room that shows you how many puzzles are solved/unsolved of each type. 
+
 ## TODO
 
 - takes so long to compile (2300ms -safe) 
@@ -67,6 +71,7 @@ wasm4
 - allow copy from child app, don't just always clear app.requests
 - allow screens in non-cardinal directions
 - save system
+  - stutter when changing rooms with Life is unplayable
   - instead of needing to remember to change save_file_magic, 
     include schema from the reflection info? 
     do it per puzzle type so can keep save file when adding new ones? 
