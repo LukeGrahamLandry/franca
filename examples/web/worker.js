@@ -89,7 +89,7 @@ function write_args(args) {
     return p;
 }
 
-import { webgpu_wasm_exports, init_gpu, ESCAPE_MAIN, reset_G, get_G } from "./target/gfx.js";
+import { webgpu_wasm_exports, init_gpu, ESCAPE_MAIN, reset_G, get_G } from "./gfx.js";
 export const imports = {
     main: {
         memory: null,

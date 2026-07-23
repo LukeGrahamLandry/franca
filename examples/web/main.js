@@ -79,7 +79,7 @@ const handle = (resolve, handle_app_request) => (_msg) => {
 
 function get_worker() {
     if (thread_pool.length == 0) {
-        let w = new Worker(`worker.js?v=${manifest_version}`, { type: "module" });
+        let w = new Worker(worker_url, { type: "module" });
         w.onerror = (e) => {
             console.error(e);
             show(e.message);
@@ -94,7 +94,7 @@ function get_worker() {
 }
 
 
-import { add_events } from "./target/app.js";
+import { add_events } from "./app.js";
 
 let real_start_time;
 const start_message = "Run";
@@ -215,12 +215,13 @@ function new_memory() {
     }); 
 }
 
+const worker_url = `./${manifest_version}/worker.js`;
 // _: my hope is that i can ask it to prefetch everything i want and then it will be faster on the workers via magic.   
 let [wasm_module, manifest, rootfs, _worker_script] = await Promise.all([
-    load_wasm(),
-    fetch("target/manifest.json?v=" + manifest_version).then(async (it) => await it.json()),
+    load_wasm(`./${manifest_version}/demo.wasm`),
+    fetch(`./${manifest_version}/manifest.json`).then(async (it) => await it.json()),
     fetch(`mirror/${manifest_version}`).then(async (it) => await it.arrayBuffer()),
-    fetch(`worker.js?v=${manifest_version}`),
+    fetch(worker_url),
 ]);
 
 console.log(manifest);
@@ -295,8 +296,8 @@ document.getElementById("example").onchange = function () {
 };
 show_compilers();
 
-async function load_wasm() {
-    let res = await fetch(`target/demo.wasm?v=${manifest_version}`);
+async function load_wasm(url) {
+    let res = await fetch(url);
     if (res.status !== 200) document.getElementById("err").innerText = res.status;
     // TODO: this is the compressed size but progress is uncompressed :(
     const total = res.headers.get("content-length");

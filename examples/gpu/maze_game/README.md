@@ -63,6 +63,9 @@ trophy room that shows you how many puzzles are solved/unsolved of each type.
 - takes so long to compile (2300ms -safe) 
 - make it work in wgpu
   - depth texture
+  - web: use less memory
+  - web: lock mouse
+  - web: full screen and precompiled
   - for website give fake file system a way to access local storage for save file
 - when designing the world,
   do the knowledge gating thing where you see a complicated puzzle early 

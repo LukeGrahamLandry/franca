@@ -1,12 +1,11 @@
 driver :: fn(vtable: *ImportVTable) void = {
     ci := Foreign.ENV.GITHUB_REPOSITORY.get_environment_variable().is_some();
     franca := get_executable_path(temp());
-    make_dirs_or_crash("target/web/target");
 
     ok := run_cmd_blocking(franca, @slice("graphics/web/webgpu_api.fr"));
     @assert(ok, "failed build");
     ok := run_cmd_blocking(franca, @slice("examples/default_driver.fr", "build", 
-        "examples/os/host/web.fr", "-o", "target/web/target/demo.wasm", 
+        "examples/os/host/web.fr", "-o", "target/demo.wasm",
         "-arch", "wasm32", "-dynamiclib", "-keep-names", "-wasm_threads",
         "-unsafe",
     ));
@@ -33,31 +32,38 @@ driver :: fn(vtable: *ImportVTable) void = {
     manifest := u8.list(temp());
     m&.dump_json(manifest&);
     
-    copy :: fn(dest, src) => write_entire_file_or_crash(dest, read_entire_file_or_crash(temp(), src));
-    write_entire_file_or_crash("target/web/target/manifest.json", manifest.items());
-    copy("target/web/target/app.js", "graphics/web/app.js");
-    copy("target/web/target/gfx.js", "graphics/web/gfx.js");
-    copy("target/web/target/webgpu.g.js", "target/franca/webgpu.g.js");
-    copy("target/web/main.js", "examples/web/main.js");
-    copy("target/web/worker.js", "examples/web/worker.js");
-    copy("target/web/index.html", "examples/web/index.html");
-    
-    // just for running the tests in node but has to be in the same place for relative path imports in the worker 
-    copy("target/web/test.js", "tests/test.js");
-    
     mirror_path := "target/web/mirror";
     cache_path := "target/franca/fetch";
     make_dirs_or_crash(mirror_path);
     make_dirs_or_crash(cache_path);
     root_fs := flatten_fs(temp());
     hash := Sha256'hex(root_fs);
-    hash_path := "target/web/target/rootfs_hash.txt";
+    target_dir := @tfmt("target/web/%", hash);
+    make_dirs_or_crash(target_dir);
+    
+    hash_path := "target/web/rootfs_hash.txt";
     need_write := true;
     if read_entire_file(temp(), hash_path) { old_hash |
         need_write = hash != old_hash;
         if need_write {
             _ := Syscall'remove(@fmt_cstr("%/%", mirror_path, old_hash));
             _ := Syscall'remove(@fmt_cstr("%/%.out", cache_path, old_hash));
+            
+            // TODO: factor out recursive delete
+            dir := @tfmt("target/web/%", old_hash);
+            walk_directory_unordered dir.as_cstr() { entry |
+                @if(entry.name != "." && entry.name != "..")
+                @match(entry.type) {
+                    fn File() => {
+                        _ := Syscall'remove(@fmt_cstr("%/%", dir, entry.name));
+                    }
+                    fn Directory() => {
+                        // TODO: doesn't matter here, i have no directories
+                    }
+                    @default => ();
+                }
+            };
+            _ := Syscall'remove(dir.as_cstr());
         };
     };
     commit = hash;
@@ -68,14 +74,36 @@ driver :: fn(vtable: *ImportVTable) void = {
         copy(@tfmt("%/%.out", cache_path, hash), @tfmt("%/%", mirror_path, hash));
     };
     
+    Target :: fn(file: Str) Str => @tfmt("%/%", target_dir, file);
+    
+    main_js_target := Target("main.js");
+    copy :: fn(dest, src) => write_entire_file_or_crash(dest, read_entire_file_or_crash(temp(), src));
+    write_entire_file_or_crash(Target("manifest.json"), manifest.items());
+    copy(Target("app.js"), "graphics/web/app.js");
+    copy(Target("gfx.js"), "graphics/web/gfx.js");
+    copy(Target("webgpu.g.js"), "target/franca/webgpu.g.js");
+    copy(main_js_target, "examples/web/main.js");
+    copy(Target("worker.js"), "examples/web/worker.js");
+    copy(Target("demo.wasm"), "target/demo.wasm");
+    
     // TODO: this is slowly approching crazy town...
+    template := "$$TARGET$$";
+    index_html_in := read_entire_file_or_crash(temp(), "examples/web/index.html");
+    i := index_html_in.index_of_slice(template).unwrap();
+    index_html_out := u8.list(temp());
+    index_html_out&.push_all(index_html_in.slice(0, i));
+    index_html_out&.push_all(hash);
+    index_html_out&.push_all(index_html_in.rest(i + template.len));
+    
+    write_entire_file_or_crash("target/web/index.html", index_html_out.items());
+    
         default := "\"----------------------------------------------------------------\"";
         prefix := "let manifest_version = ";
-        main_js := read_entire_file_or_crash(temp(), "target/web/main.js");
+        main_js := read_entire_file_or_crash(temp(), main_js_target);
         dest := main_js.rest(prefix.len).slice(0, default.len);
         @assert(main_js.starts_with(prefix) && dest == default && commit.len == dest.len - 2);
         dest.slice(1, commit.len + 1).copy_from(commit);
-        write_entire_file_or_crash("target/web/main.js", main_js);
+        write_entire_file_or_crash(main_js_target, main_js);
     if ci || cli_args().contains(fn(it) => it[] == "-mirror") {
         // mirror any deps used by the examples so the web demo can get them from its own domain to get around CORS
         ok := run_cmd_blocking(franca, @slice("tests/run_tests.fr", "fetch"));

@@ -2,6 +2,8 @@
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
+- life: initial screen with no cli args needs to let you draw
+- generate a favicon because the error in console pisses me off
 - leak detector for gpu resources in on_cleanup
 - one of the hare tests broke in sr.ht when they took out the old version of ubuntu.
   make sure it's not my fault
@@ -236,7 +238,7 @@ reproducibility
     is used at comptime behind a jit_shim because it will change compilation order. 
 - :TodoSketchyRepro
     - os/build/user.elf: FuncId order changed (and those are used for mangling in the elf symbol table)
-    - target/web/target/demo.wasm across different arches. 
+    - target/demo.wasm across different arches. 
     - the Symbol order ones (stackie, emit_c) are still fragile, 
       but think now it's not target based but just random, 
       can't reliably create the problem when compiling alone with the release compiler. 
