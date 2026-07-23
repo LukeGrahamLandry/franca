@@ -14,10 +14,10 @@ State :: @struct {
     puzzle_focus: ?i64;
     dirty: bool;
     screen_size: Vec2;
-    inspect_wall: ?*Wall;
     inspect_terminal_puzzle_index: i64;
     trophy_hint_puzzle_index: i64;
     active_puzzles: List(i64);
+    enable_cheats: bool;
 };
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -48,6 +48,9 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         return();
     };
 
+    if !state.enable_cheats {
+        state.camera.delta_pos.y = 0;
+    };
     only_flying := state.camera.delta_pos.x == 0 && state.camera.delta_pos.z == 0;
     moved := state.camera.delta_pos.norm_sq() != 0;
     prev_pos := state.camera.pos;
@@ -88,8 +91,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         };
         
         // it's convenient to be able to fly through walls for now
-        // TODO: gate this behind a cheat mode or something
-        if state.camera.pos.y > 2 {
+        if state.camera.pos.y > 2 && state.enable_cheats {
             on_ground = true;
         };
         
@@ -99,7 +101,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         };
     
         start := timestamp();
-        state.redetect_active_room(false);
+        state.redetect_active_room();
         t := timestamp() - start;
         if t > 30 {
             @println("changed rooms in %ms", t);
@@ -188,7 +190,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sg.commit();
 };
 
-fn redetect_active_room(state: *State, first_frame: bool) void = {
+fn redetect_active_room(state: *State) void = {
     p := state.camera.pos;
     best_distance: f32 = 2000;
     best := state.active_room;
@@ -201,7 +203,8 @@ fn redetect_active_room(state: *State, first_frame: bool) void = {
         };
     };
     
-    @if(best == state.active_room && !first_frame) return();
+    // note: at first load (active_room,active_puzzles) are zero init so need to treat that as a room change. 
+    @if(best == state.active_room && state.active_puzzles.len != 0) return();
     old_active := state.active_puzzles.items().shallow_copy(temp());
     
     state.active_room = best;
@@ -210,7 +213,7 @@ fn redetect_active_room(state: *State, first_frame: bool) void = {
     for room.adjacent_rooms { r |
         state.active_puzzles&.push_all(state.rooms[r].puzzles);
     };
-    if state.inspect_wall { _ |
+    if state.enable_cheats {
         if !state.active_puzzles.items().contains(state.inspect_terminal_puzzle_index) {
             state.active_puzzles&.push(state.inspect_terminal_puzzle_index);
         };
@@ -219,11 +222,11 @@ fn redetect_active_room(state: *State, first_frame: bool) void = {
     suspend_for_room_change(state, old_active);
 }    
 
-fn choose_focus(state: *State, mouse: Vec2) ?i64 = {
+fn choose_focus(state: *State, mouse: Vec2, error_margin: f32) ?i64 = {
     i: ?i64 = .None;
     s := PUZZLE_LOGICAL_WIDTH.float().cast();
     center := vec2(s) / 2;
-    best_distance: f32 = 2000;
+    best_distance: f32 = s * error_margin;
     for state.active_puzzles { check |
         it := state.puzzles[check]&;
         m := remap_mouse_to_puzzle(it, state.camera&, mouse, state.screen_size);
@@ -237,9 +240,14 @@ fn choose_focus(state: *State, mouse: Vec2) ?i64 = {
 }
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    if event.key_code == .F3 && event.type == .KEY_UP && state.puzzle_focus.is_none() {
+        state.enable_cheats = !state.enable_cheats;
+    };
     if event.key_code == .LEFT_CONTROL {
         state.camera.speed.pos *= @if(event.type == .KEY_UP, 0.2, 5);
     };
+    
+    @if(state.enable_cheats)
     if event.type == .KEY_UP && event.key_code == .C && state.puzzle_focus.is_none() {
         open_wall_debug_screen(state);
         return();
@@ -250,47 +258,40 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     };
 
     if event.type == .KEY_DOWN && event.key_code == .ESCAPE {
-        state.inspect_wall = .None;
-        it := state.puzzle_focus&;
-        i := -1;
-        if it.is_none() {
-            i = choose_focus(state, state.screen_size/2) || -1;
-        };
-        
-        it[] = @if(it.is_some() || i == -1, .None, (Some = i));  // TODO: trace the one you're looking at
-        sapp.lock_mouse(!it.is_some());
-        // TODO: you still keep moving if you were holding the button while pressing escape
-        // TODO: deal with puzzle.state.pan_keys_pressed
-        state.camera.delta_pos = vec3(0);
-        state.dirty = true;
-        if it { i |
-            record_click(state, i[]);
+        if state.puzzle_focus.is_some() {
+            state.set_focus(.None);
+        } else {
+            state.set_focus(choose_focus(state, state.screen_size/2, 2));
         };
         return();
+    };
+    
+    if event.type == .MOUSE_DOWN && event.mouse_button == .MIDDLE && state.puzzle_focus.is_none() {
+        if choose_focus(state, state.screen_size/2, 2) { i |
+            return state.set_focus(Some = i);
+        };
     };
     
     @if(event.type != .RESIZED)
     if state.puzzle_focus { i |
         if event.type == .MOUSE_DOWN && event.mouse_button == .MIDDLE {
             mouse := vec2(event.mouse_x, event.mouse_y);
-            if choose_focus(state, mouse) { j |
+            if choose_focus(state, mouse, 0.75) { j |
+                @if(state.enable_cheats)
                 if event.modifiers.get(.shift) != 0 {
                     // for debugging the save system. this shouldn't change anything important. 
                     it := state.puzzles[j]&;
-                    if it.name.can_suspend() {
                         @println("debug save %", it.name);
                         suspend(it);
                         @println("- % bytes", it.suspended.unwrap().len());
                         restore(state, it);
-                    };
                 };
                 
                 if i != j {
-                    record_click(state, j);
-                    state.puzzle_focus = (Some = j);
-                    state.dirty = true;
-                    return();
+                    return state.set_focus(Some = j);
                 }
+            } else {
+                return state.set_focus(.None); // clicked off any puzzle
             };
         };
     
@@ -306,6 +307,18 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         state.screen_size = vec2(sapp.framebuffer_width.float().cast(), sapp.framebuffer_height.float().cast());
     };
 };
+
+fn set_focus(state: *State, it: ?i64) void = {
+    state.puzzle_focus = it;
+    state.app.lock_mouse(!it.is_some());
+    // TODO: you still keep moving if you were holding the button while pressing escape
+    // TODO: deal with puzzle.state.pan_keys_pressed
+    state.camera.delta_pos = vec3(0);
+    state.dirty = true;
+    if it { i |
+        record_click(state, i);
+    };
+}
 
 fn open_wall_debug_screen(state: *State) void = {
     look_dir, forward, _1 := state.camera&.directions();
@@ -328,7 +341,6 @@ fn open_wall_debug_screen(state: *State) void = {
     hit_wall := hit_wall || return();
     
     puzzle := state.inspect_terminal_puzzle_index;
-    state.inspect_wall = (Some = hit_wall);
     state.puzzle_focus = (Some = puzzle);
     state.camera.delta_pos = vec3(0);
     state.app.lock_mouse(false);
@@ -344,6 +356,7 @@ fn open_wall_debug_screen(state: *State) void = {
     };
     
     it := state.puzzles[puzzle]&;
+    @if(it.suspended.is_some()) restore(state, it);
     new_wall :: import("@/examples/gpu/maze_game/editor.fr")'wall_from_normal;
     pos := state.camera.pos + forward - vec3(0, 0.5, 0);
     it.wall = new_wall(pos, n, 1);
@@ -437,7 +450,6 @@ fn remap_mouse_to_wall(wall: *Wall, c: *Camera, mouse: Vec2, screen: Vec2) Ty(Ve
 fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     init_start := timestamp();
     state.sg = sg; state.app = app;
-    state.inspect_wall = .None;
     app.desc.enable_clipboard = true;
     state.dirty = true;
     state.puzzle_focus = .None;
@@ -485,17 +497,8 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     puzzles, rooms := objects_to_world(map, a);
     state.rooms = rooms;
     state.puzzles = puzzles;
-    each state.puzzles { it |
-        as_const(it) { $Name |
-            init_puzzle(Name, sg, it, a);
-        };
-    };
-    enumerate state.puzzles { i, it |
-        it.app.hack_no_reset_temp_for_headless = true;
-        it.app.frame();
-        set_defaults_post_init(it, sg);
-    };
-    
+    state.camera.pos = vec3(2, 1, -1);
+
     LINK_TERMINAL_INSPECT :: 2;
     LINK_HINT_TROHY :: 87;
     state.inspect_terminal_puzzle_index = state.puzzles.index_of(fn(it) => it.link == LINK_TERMINAL_INSPECT).expect("LINK_TERMINAL_INSPECT");
@@ -503,17 +506,14 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     state.trophy_hint_puzzle_index = state.puzzles.index_of(fn(it) => it.link == LINK_HINT_TROHY).expect("LINK_HINT_TROHY");
     @assert_eq(state.puzzles[state.trophy_hint_puzzle_index].name, .Hint);
     
-    state.camera.pos = vec3(2, 1, -1);
-    //state.camera.pos = vec3(-10,1,11);  // room 2; life
-    
-    state.redetect_active_room(true);
+    each state.puzzles { it |
+        // TODO: i guess don't need to init all the textures up front either
+        init_puzzle_texture(sg, it);
+        it.suspended = (Some = empty()); // :EmptySaveDataMeansDefault
+    };
     load_world_file(state);
+    state.redetect_active_room();
     
-    // TODO: 250ms seems :SLOW
-    // every restore() call has to run the app's init: 
-    // - life's set_bytes the whole memo tables takes 50ms 
-    // - terminal's repl init has to make a compiler ctx takes 80ms (should delay until first use?)
-    // TODO: at least don't init things that aren't loaded yet
     @println("on_init took %ms", timestamp() - init_start);
 }
 
@@ -535,7 +535,7 @@ fn record_click(state: *State, i: i64) void = {
     @fmt(msg&, "click to update\n\n");
     total, clicked := (0, 0);
     each count& { name, it |
-        if it.total != 0 && can_suspend(name) {
+        if it.total != 0 {
             @fmt(msg&, "% %/%\n", name, it.clicked, it.total);
             clicked += it.clicked;
             total += it.total;
@@ -561,13 +561,11 @@ fn suspend_for_room_change(state: *State, old_active: []i64) void = {
 }
 
 fn suspend(it: *Puzzle) void = {
-    @if(!can_suspend(it.name)) return();
     @assert(it.suspended.is_none(), "already has suspend data");
     
     a := general_allocator();
     ctx: Save.StoreCtx = (out = @ref u8.list(a));
     as_const(it) { $Name |
-        @if(!can_suspend(Name)) unreachable();
         store(ctx&, Get(Name).App, it.cast(Name));
         // TODO: maybe everyone should just get an arena
         it.suspended = (Some = ctx.out.shrink_to_fit());
@@ -580,19 +578,27 @@ fn suspend(it: *Puzzle) void = {
 }
 
 fn restore(state: *State, it: *Puzzle) void = {
-    @if(!can_suspend(it.name)) return();
-    save_data := it.suspended&.take() || return();  // else: first time loading this puzzle so nothing to restore
+    @assert(it.suspended.is_some(), "restore() but already running");
+    save_data := it.suspended&.take().unwrap();
     
     as_const(it) { $Name |
-        @if(!can_suspend(Name)) unreachable();
-        W :: PUZZLE_LOGICAL_WIDTH; H :: W;
-        app, user := import("@/tests/gpu.fr")'local_scope'init_headless_app2(Get(Name).App, state.sg, it.att, W, H, general_allocator());
-        it.app = app;
-        it.state = Get(Name).App.raw_from_ptr(user);
+        init_puzzle_state(Name, it, state.sg, general_allocator());
         
         it.app.hack_no_reset_temp_for_headless = true;
+        // TODO: i don't want it to write the texture here. 
+        //       i want to keep the old one so don't have to force dirty. 
+        //       but do need to call on_init to setup the defaults. 
+        //       which would be fine if i make the rule that temp() 
+        //       is reset between on_init and first frame. 
         it.app.frame();
         set_defaults_post_init(it, state.sg);
+        
+        if save_data.len == 0 {
+            // :EmptySaveDataMeansDefault
+            // this is a bit of a hack for the beginning of a new save to delay 
+            // init-ing puzzles you haven't seen yet until they're loaded for the first time. 
+            return();
+        };
         
         ctx: Save.LoadCtx = (in = save_data);
         result := load(ctx&, Get(Name).App, it.cast(Name));
@@ -633,7 +639,8 @@ fn save_world(state: *State, out: *List(u8)) void = {
     each state.puzzles { it |
         active := it.suspended.is_none();
         @if(active) suspend(it);
-        if it.suspended { data |
+        data := it.suspended.unwrap();
+        if data.len != 0 {
             save.puzzles&.push(link = it.link, data = data, clicked = it.clicked);
         };
         @if(active) restore(state, it);
@@ -667,6 +674,8 @@ fn load_world(state: *State, save_data: []u8) void = {
             @if(active) suspend(it);
             it.suspended = (Some = save.data);
             @if(active) restore(state, it);
+        } else {
+            @println("corrupted save: link=% doesn't exist in world", save.link);
         };
     };
 }
@@ -686,7 +695,6 @@ fn load_world_file(state: *State) void = {
     if read_entire_file(temp(), save_file_path) { data |
         @println("loading save: %", save_file_path);
         load_world(state, data);
-        state.redetect_active_room(false);
     } else {
         @println("no save file found");
     };
@@ -696,7 +704,9 @@ fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sg.destroy_pipeline(state.pipe&);
     state.draw&.destroy(sg, general_allocator());
     each state.puzzles { it |
-        it.app.call_cleanup();
+        if it.suspended.is_none() {
+            it.app.call_cleanup();
+        };
     };
 }
 

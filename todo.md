@@ -2,6 +2,9 @@
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
+- experiment if macos shader cache just by hash of executable or is it by source of the shader 
+  so i should try to not put funcid/type numbers in the generated shader code so the cache works better when developing? 
+  init time difference is very visible in samply so you can tell if you hit the cache. 
 - life: initial screen with no cli args needs to let you draw
 - generate a favicon because the error in console pisses me off
 - leak detector for gpu resources in on_cleanup

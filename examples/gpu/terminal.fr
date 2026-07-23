@@ -42,7 +42,7 @@ State :: @struct(
     lock_to_bottom: bool,
     history: RawList(Str),
     history_index: i64,
-    repl: Repl.ReplState,
+    repl: ?Repl.ReplState,
     dirty: bool,
     theme: ColourTheme,
     last_click_time: i64,
@@ -85,20 +85,7 @@ fn on_init(_state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     sapp := state.app;
     allocator := general_allocator();
-    @if(FEAT_REPL) {
-        // TODO: this can't use @source_file_name() because of the web demo
-        prelude := "#include_std(\"lib/core.fr\");#include_std(\"examples/gpu/terminal.fr\");\n";
-        prelude := @tfmt("%\nSOKOL_BACKEND :: RenderBackend.%;\n", prelude, SOKOL_BACKEND);
-        state.repl = ReplFns'init(allocator, prelude);
-        src := @tfmt("#use(BuiltinCommands); real_state := State.ptr_from_int(%); state[] = real_state; state := state[];", raw_from_ptr(State, state[]));
-        res := ReplFns'run(state.repl&, src);
-        if res&.is_err() {
-            out: List(u8) = list(temp());
-            fr := state.repl.program.comp();
-            fr'vtable'fmt_error(fr.data, res.Err, out&);
-            panic(out.items());
-        };
-    };
+    state.repl = .None;  // delay compiler setup until first use
     state.scratch = list(u8, 4*1024*1024, allocator);  // :BigOutputBuffer
     state.lock_to_bottom = true;
     state.history_index = 0;
@@ -147,6 +134,26 @@ fn on_init(_state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     resample_font();
     state[] = zeroed(*State);
 }
+
+fn get_repl(state: *State) *Repl.ReplState = {
+    @assert(FEAT_REPL, "!FEAT_REPL");
+    @if(state.repl.is_some()) return(state.repl&.unwrap());
+    
+    // TODO: this can't use @source_file_name() because of the web demo
+    prelude := "#include_std(\"lib/core.fr\");#include_std(\"examples/gpu/terminal.fr\");\n";
+    prelude := @tfmt("%\nSOKOL_BACKEND :: RenderBackend.%;\n", prelude, SOKOL_BACKEND);
+    state.repl = (Some = ReplFns'init(general_allocator(), prelude));
+    repl := state.repl&.unwrap();
+    src := @tfmt("#use(BuiltinCommands); real_state := State.ptr_from_int(%); state[] = real_state; state := state[];", raw_from_ptr(State, state));
+    res := ReplFns'run(repl, src);
+    if res&.is_err() {
+        out: List(u8) = list(temp());
+        fr := repl.program.comp();
+        fr'vtable'fmt_error(fr.data, res.Err, out&);
+        panic(out.items());
+    };
+    repl
+};
 
 resample_font :: fn() void = {
     @if(!FEAT_FONT) return();
@@ -1326,10 +1333,11 @@ exec_franca :: fn(buffer: *TextBuffer, raw_command: Str) void = {
     }
     
     buffer.append_string("\n");
-        result := ReplFns'run(state.repl&, raw_command);
+        repl := state[].get_repl();
+        result := ReplFns'run(repl, raw_command);
         if result&.is_err() {
             out: List(u8) = list(temp());
-            fr := state.repl.program.comp();
+            fr := repl.program.comp();
             fr'vtable'fmt_error(fr.data, result.Err, out&);
             buffer.append_string(out.items());
         };
@@ -1462,9 +1470,9 @@ fn on_cleanup(_state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.history&.drop(a);
     // TODO: do this first and drop multiple times to decrement refs
     state.buffer_stack&.drop();
-    @if(FEAT_REPL) state.repl&.drop();
+    @if(FEAT_REPL) @if(state.repl.is_some()) state[].get_repl().drop();
     
-    state[] = zeroed(*State)
+    state[] = zeroed(*State);
 }
 
 search_for_selected :: fn(b: *TextBuffer) void = {

@@ -3,6 +3,8 @@ a 3d world containing screens running some of my other examples programs.
 
 [![demo](https://img.youtube.com/vi/E0jMBol_KSI/0.jpg)](https://www.youtube.com/watch?v=E0jMBol_KSI)
 
+press f3 to enable cheats (shift/space to fly, c to inspect wall). 
+
 ## TODO: Puzzle Ideas
 
 chess:  
@@ -12,6 +14,7 @@ chess:
 - another one where you just have to win 
   (or same room, two doors, one only unlocks if you win). 
 - start with just one rook on the board blocking the door and you can take the king in one move
+- have a coridor where you're above the chess game in another room and can walk on top of the pieces so need to arange a path
 
 life:  
 - the grid is the floor and you can only walk on the solid cells. 
@@ -31,6 +34,7 @@ farm game
 - survive a certain number of rounds? 
 - have shelves/farm be in the 3d world so you can take items out of the game 
   and move them to a different instance of it in a different room.
+- buy a chess piece in the shop and bring it to a board to win
 
 stackie
 - write a program to match a pattern on the door? 
@@ -41,6 +45,7 @@ mandelbrot
 - have one where you can't zoom so you have to stand on the platform while it moves
 - zoom so the whole thing matches the colour of a background wall and then you can walk through it
 - the screen is one of the grid squares of chess and controls all of them and the one that needs to match to walk on a path is a different one
+  - or the square you need to move to to win is a mandelbrot of the wrong colour and you have to change it before the chess lets you make that move. 
 
 terminal: 
 - an editor with a program that affects the world in some way.
@@ -57,9 +62,21 @@ wasm4
 - get enough points in tetris
 
 trophy room that shows you how many puzzles are solved/unsolved of each type. 
+- rn i have one that counts screens clicked which is good enough if all puzzle chains lead to a hint room. 
+
+editor
+- have one that syncs to the world as the prize at the end
 
 ## TODO
 
+- always allow entering flat mode even if no puzzle so you can use that to pause the game to get your mouse back
+- record a run through that i can replay as a test. replay.fr can make a comeback perhaps. 
+  will have to redo anytime i change the world or rules but it's better than nothing. 
+- config to lower memo table size for Chess/Life instances for puzzles that don't need big perf. 
+  i guess on_init has to look at the state struct because normal path will zero init which can use default 
+  and the game can poke in smaller numbers early. 
+- the mandelbrot square flickers red on the frame where life gets suspended. which could give away the hidden puzzle early. 
+- fix the rooms. life unloads when you can still see it in the blue hallway 
 - takes so long to compile (2300ms -safe) 
 - make it work in wgpu
   - depth texture
@@ -108,6 +125,8 @@ trophy room that shows you how many puzzles are solved/unsolved of each type.
 - make embedded terminal usable
   - needs app.requests copy
   - should probably have a mode that disables running real commands if i want to use it as a text editor for puzzles
+  - suspending the repl is going to be nontrivial. i do have bake_relocatable_value
+    so i could do it. the problem is just when its supposed to alias a world thing like inspect_wall. 
 - theres still a place you can walk through the wall in the life room, can just make the exit 2 wide
 - option for double sided puzzle
   - make the back wall of the mandelbrot room match the green so the puzzle makes sense in the other direction too

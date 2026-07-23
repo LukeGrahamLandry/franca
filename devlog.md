@@ -1,4 +1,17 @@
 
+## (Jul 23)
+
+- web/build.fr: every time i redeploy it's broken for a bit until i force refresh. 
+  i don't trust my `?v=${}` hack, instead put all the files in a folder named by hash of all the source so they can't be cached seperately. 
+  thus far that seems better (sample size of 1 so meaningless). 
+- maze_game init is too slow. 
+  - note when profiling: macos caches compiled shaders so first run after compiling an executable will be slower (can see in samply)
+  - terminal: delay repl setup until the first time you run a franca command. 
+    ~80ms after a keypress is much less noticible than contributing to startup (and eventually room switching).  
+  - don't init all puzzles to defaults on first load. treat them as suspended until they're room is loaded. 
+    so now first room doesn't get called twice and others don't get called at all.
+- disable the debug flight by default because easy to press shift by mistake
+
 ## (Jul 22)
 
 - emit_ir bug?? no, its that shader compiler is mutating asts after sema 
