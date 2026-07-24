@@ -71,6 +71,18 @@ Puzzles :: @struct {
     Terminal :: NoStatePuzzle("@/examples/gpu/terminal.fr");
 };
 
+// if theres a bunch of apps listed that i don't actually use in the world yet, filtering out of as_const lets it compile faster.
+puzzles_used_in_map :: @static {
+    #use("@/lib/collections/enum_map.fr");
+    used := zeroed(EnumSet(PuzzleType));
+    each import("@/examples/gpu/maze_game/map.fr")'objects { it |
+        @if_let(it) fn Screen(it) => if PuzzleType.from_name(it.app) { it |
+            used&.set(it);
+        };
+    };
+    used
+};
+
 PuzzleType :: {
     names :: get_constants(Type.scope_of(Puzzles));
     E :: create_sequential_enum(i64, names.len(), fn(i) => names[i]);
@@ -82,13 +94,16 @@ fn Get(Name: PuzzleType) ScopeId #fold =
     get_constant(ScopeId, Type.scope_of(Puzzles), Name.name_str().sym()).unwrap();
 
 // TODO: should probably just do vtable instead because this way will take longer to compile. 
-// TODO: if theres a bunch of apps listed that i don't actually use in the world yet, could filter out here at comptime to compile less. 
 fn as_const(it: *Puzzle, $body: @Fn(Name: PuzzleType) void) void = {
+    ::puzzles_used_in_map;
     inline_for_enum_deref PuzzleType { $Name |
+        @if(@run puzzles_used_in_map.get(Name))
         if it.name == Name {
             body(Name);
+            return();
         };
     };
+    unreachable();
 }
 
 new_horizontal :: fn(a: Vec2, b: Vec2, y: f32) Wall = {
@@ -152,7 +167,10 @@ fn set_defaults_post_init(it: *Puzzle, sg: *Sg.Self) void = {
             s := it.cast(.Hint);
             s.dirty = true;
             @if_let(it.extra&) fn Hint(it) => {
-                s.data = it[];
+                s.msg&.clear();
+                s.msg&.push_all(it.msg);
+                s.colour = it.colour;
+                s.scale = it.scale;
             };
         };
         @case(.Mandelbrot) => {

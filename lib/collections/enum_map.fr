@@ -41,7 +41,7 @@ fn EnumMap($Key: Type, $Value: Type) Type = {
 fn OptionalEnumMap($Key: Type, $Value: Type) Type = {
     Self :: @struct {
         data: EnumMap(Key, Value);
-        valid: import("@/lib/collections/bit_set.fr")'StaticBitSet(Key.enum_count());
+        valid: EnumSet(Key);
     };
     
     fn empty() Self = zeroed(Self);
@@ -50,24 +50,41 @@ fn OptionalEnumMap($Key: Type, $Value: Type) Type = {
     fn insert(self: *Self, key: Key, value: Value) ?Value = {
         prev := self.data&[key];
         self.data&[key] = value;
-        if self.valid&.get_set(key.raw().int()) {
+        if self.valid&.get_set(key) {
             return(Some = prev);
         };
         .None
     }
     
     fn get(self: *Self, key: Key) ?Value = {
-        @if(!self.valid&.get_set(key.raw().int()), .None, (Some = self.data&[key]))
+        @if(!self.valid&.get_set(key), .None, (Some = self.data&[key]))
     }
     
     fn each(self: *Self, $body: @Fn(k: Key, v: *Value) void) void = {
-        enumerate self.data.data& { k, v |
+        each self.data& { k, v |
             if self.valid&.get(k) {
-                k := bit_cast_unchecked(i64, Key, k);
                 body(k, v);
             };
         };
     }
+    
+    Self
+}
+
+fn EnumSet($Key: Type) Type = {
+    Self :: @struct(data: import("@/lib/collections/bit_set.fr")'StaticBitSet(Key.enum_count()));
+    
+    @run {
+        info := get_type_info_ref(Key);
+        assert(info.is(.Enum), "EnumMap key must be enum");
+        assert(info[].Enum.sequential, "for now, EnumSet requires sequential integer values");
+    };
+    
+    fn empty() Self = zeroed(Self);
+    fn get(self: *Self, i: Key) bool = self.data&.get(i.raw().int());
+    fn set(self: *Self, i: Key) void = self.data&.set(i.raw().int());
+    fn get_set(self: *Self, i: Key) bool = self.data&.get_set(i.raw().int());
+    fn count_ones(self: *Self) i64 = self.data&.count_ones();
     
     Self
 }

@@ -69,6 +69,8 @@ editor
 
 ## TODO
 
+- visual feedback for toggling cheats mode
+- see comments in puzzles/mandelbrot.fr
 - always allow entering flat mode even if no puzzle so you can use that to pause the game to get your mouse back
 - record a run through that i can replay as a test. replay.fr can make a comeback perhaps. 
   will have to redo anytime i change the world or rules but it's better than nothing. 
@@ -91,11 +93,17 @@ editor
 - allow copy from child app, don't just always clear app.requests
 - allow screens in non-cardinal directions
 - save system
+  - world save include type on each puzzle so don't die if want to change it and doesn't match
+  - dont save the Hint data when its a junk one because name was unset
   - stutter when changing rooms with Life is unplayable
   - instead of needing to remember to change save_file_magic, 
     include schema from the reflection info? 
     do it per puzzle type so can keep save file when adding new ones? 
   - which allocator slices are loaded into is fucked
+    it's fine if its just for going into a list or to be translated for a repr. 
+    but it's an easy mistake to make.
+    ex. editor doesn't work because of Object.Screen.app and Object.Linked.Extra.(init_fen, init_pattern)
+    :SaveSliceAllocator
   - auto save when you make progress instead of keybind. 
     or maybe in the middle of suspend_for_room_change so a few extra are suspended already. 
     keep prev save_data bytes for each puzzle and autosave when one changes? 
@@ -135,3 +143,13 @@ editor
   maybe precompute visibility from all the tile positions in the room and merge them? 
 - wasteful when there's multiple of an app so could share immutable img/shader/etc. 
   but i think the simplicity is totally worth it for now. 
+- at some point the map should be loaded as data not code
+- i keep needing to google "fen editor" to make the chess rooms. 
+  should just add a mode to examples/chess/gui.fr that lets you place pieces. 
+- Object.Screen needs certain disabled inputs so can't cheat the idea even tho the standalone programs need to let you set the whole state 
+  (ex. chess fen paste or life draw/pattern/pause once i want to force you to interact with the world while it changes)
+- chess open a door for winning
+- check that init fens don't have impossible castle rights
+- for the yellow mandelbrot chess hallway one to make sense from the other direction the wall blocker needs to be thin i guess so its actually just the transition between squares you can't walk on. 
+- have the existing room give you another door if you win the game. 
+  one of the paths lead to a new full board that you just have to win so you learn that can do stuff too. 

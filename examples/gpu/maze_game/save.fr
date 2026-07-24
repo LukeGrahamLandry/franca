@@ -47,7 +47,7 @@ mappings :: @static {
     // TODO: .start_time needs to get remapped on load. save current t offset from that. 
     @add_fields(ctx, Get(.Stackie).App, @const_slice(.src,.show_generate_code,.rand_index,.i));
     
-    @add_fields(ctx, Get(.Editor).App, @const_slice(.objects, .pos, .scale, .prev_click, .tool));
+    @add_fields(ctx, Get(.Editor).App, @const_slice(/*.objects, :SaveSliceAllocator*/ .pos, .scale, .prev_click, .tool));
     
     // TODO: write circuit.data files
     ctx.set_repr(Get(.Circuit).App, void, fn(repr, in) = (), fn(out, repr) = .Ok);
@@ -56,7 +56,7 @@ mappings :: @static {
     // TODO: buffer contents/stack, cursor position, scale/colour, history
     ctx.set_repr(Get(.Terminal).App, void, fn(repr, in) = (), fn(out, repr) = .Ok);
 
-    @add_fields(ctx, Get(.Hint).App, @const_slice(.data));
+    @add_fields(ctx, Get(.Hint).App, @const_slice(.colour, .msg, .scale));
     
     #use("@/graphics/vec.fr");
     ctx.set_repr(Vec2, Array(f32, 2), fn(repr, in) = { repr[] = in.v; }, fn(out, repr) = { out.v = repr[]; .Ok });
@@ -90,13 +90,13 @@ mappings_get :: fn($T: Type) MappingVTable = @run {
         };
         @if(@run IsCollection(Slice)(T)) {
             ctx.set_direct(T, fn(ctx, it) = {
-                ctx.out.reserve_type(i64)[] = it.len;
+                store(ctx, i64, it.len&);
                 each it { it |
                     store(ctx, @type it[], it);
                 };
             }, fn(ctx, it) = {
-                @if(ctx.in.len < 8) return(Err = "truncated");
-                n := ctx.in&.pop_type(i64)[];
+                n := 0;
+                @try(load(ctx, i64, n&)) return;
                 it[] = temp().alloc_zeroed(T.Element, n);  // TODO: but which allocator? this is only ok when used immediately for filling in a list
                 // :SLOW if they're all primitives and no padding
                 each it { it |
@@ -245,16 +245,16 @@ fn load(ctx: *LoadCtx, $T: Type, it: *T) Result(void, Str) #generic = {
     @inline_match(action) {
         fn WithRepr($v) => {
             repr := zeroed(v.Repr);
-            load(ctx, v.Repr, repr&);
+            @try(load(ctx, v.Repr, repr&)) return;
             @try((@run v'from_repr)(it, repr&)) return;
         }
         fn Direct($v) => return((@run v'load)(ctx, it));
-        fn Auto() => auto_load(ctx, T, it);
+        fn Auto() => return(auto_load(ctx, T, it));
         fn FilterFields($f) => {
             fields :: bit_cast_unchecked([]i64, []f.fields_type, f.fields);
             inline_for fields { $f | 
                 inner := T.get_field(it, f[]);
-                load(ctx, @type inner[], inner);
+                @try(load(ctx, @type inner[], inner)) return;
             };
         }
     };
@@ -263,30 +263,30 @@ fn load(ctx: *LoadCtx, $T: Type, it: *T) Result(void, Str) #generic = {
 
 fn auto_load(ctx: *LoadCtx, $T: Type, it: *T) Result(void, Str) #generic = {
     @inline_match(@run T.get_type_info_ref()) {
-        fn Enum($f) => load(ctx, f.raw, bit_cast_unchecked(*T, *@run f.raw, it));
+        fn Enum($f) => return(load(ctx, f.raw, bit_cast_unchecked(*T, *@run f.raw, it)));
         fn Struct($f) => {
             @run @ct_assert(!f.is_union, @source_location, "load union: %", @run T.typename().str());
             inline_for T.get_fields() { $f | 
                 inner := T.get_field_ptr(it, f);
-                load(ctx, @type inner[], inner);
+                @try(load(ctx, @type inner[], inner)) return;
             };
         }
         fn Tagged() => {
             t := zeroed(Tag(T));
-            load(ctx, Tag(T), t&);
+            @try(load(ctx, Tag(T), t&)) return;
             it.tag_ptr()[] = t;
             i := 0;
             tag_value := t.raw();
             inline_for T.get_variants() { $f | 
                 if i == tag_value {
                     inner := T.get_variant_ptr_for(it, f);
-                    load(ctx, @type inner[], inner);
+                    @try(load(ctx, @type inner[], inner)) return;
                 };
                 i += 1;
             };
         }
         fn Array() => each it { inner |
-            load(ctx, @type inner[], inner);
+            @try(load(ctx, @type inner[], inner)) return;
         };
         @default => @panic("Unsupported type for load %", @run T.typename().str());
     };

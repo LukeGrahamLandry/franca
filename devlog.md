@@ -11,6 +11,8 @@
   - don't init all puzzles to defaults on first load. treat them as suspended until they're room is loaded. 
     so now first room doesn't get called twice and others don't get called at all.
 - disable the debug flight by default because easy to press shift by mistake
+- free save_data. Hint.msg remember allocator so loading doesn't point at temp. 
+  maybe i can just keep kicking the can down the road and declare there shall be no slices, only lists that work well with the default init thing. 
 
 ## (Jul 22)
 
@@ -36,6 +38,7 @@
   - debugtext: changing the `(dst,src)_factor_alpha` fixes it. what i had before was stomping the clear-ed thing with the new 0?
     i can't say i care enough to experiment to understand all the options but it seems to look better now and not break other situations. 
 - put objects in the closest room so less dependent on insertion order
+- wasted some time trying to do the project to screen space for debugtext to put coordinates in the world so you can find walls but gave up before it worked. 
 - need to render puzzles from multiple rooms at once
 - the most annoying editing thing right now is colouring the walls. 
   what about just opening a repl at whatever wall im looking at. 
