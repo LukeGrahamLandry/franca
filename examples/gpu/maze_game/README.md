@@ -153,3 +153,21 @@ editor
 - for the yellow mandelbrot chess hallway one to make sense from the other direction the wall blocker needs to be thin i guess so its actually just the transition between squares you can't walk on. 
 - have the existing room give you another door if you win the game. 
   one of the paths lead to a new full board that you just have to win so you learn that can do stuff too. 
+- try to have the screens oriented so you don't have to think about mirroring them / rotating. 
+  ex. chess is off by 90 degrees, but it's annoying because you want the chess board to not be blocked by pieces. 
+  start having an extra border square so it can be near of the board on the black side?
+- the chess yellow where you can't walk because of mandelbrot impies that you won't be able to walk on the other yellow one that's just supposed to be about doing the chess game. 
+- have an indicator for when you've already solved the puzzle a hint applies to? 
+- make the hints poems to tie in another of my interests
+- mandelbrot:
+  - colour pick current colour from world for making new puzzles
+  - better feedback when you're very close to getting the right colour
+  - be more strict about number of matching pixels
+- don't let you clip through the diagonal between chess pieces
+- preserve the legal component of movement when diagonal against a wall
+- have a fullscreen mode for the in game screens
+- ugh, map.fr slice of structs is a pain because no result type. 
+  maybe nows the time to give up and switch to loading a text version of save.fr reflection thing. 
+- farm
+  - positions use Vec2 and pass_action be a local
+  - icon for crow and drought

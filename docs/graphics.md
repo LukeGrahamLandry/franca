@@ -20,7 +20,7 @@ abstraction layer.
 
 - app_events: tries to use all features of app.fr and debugtext.fr
 - geo: decompresses LAZ files, draws 3d point clouds, and lets you fly around
-- farm_game: a 2d game drawn with coloured rectangles
+- farm_game: a 2d game
 - grep for "@/graphics/" in the examples folder
 
 ## other places to find words

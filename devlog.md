@@ -1,4 +1,22 @@
 
+## (Jul 25)
+
+- mirror the editor rendering
+- life: step on first dirty frame wouldn't compute state.eval_speed (becuase event is before render) so would fail assert
+- making farmgame a bit more playable before adding it to mazegame
+  - the abstract symbols are going to be too much to learn at once. 
+    plus texture is less paste-y to draw in the 3d world. 
+    made some ugly textures that are better than nothing. 
+    the strat is to do it first in https://www.pixilart.com/draw so its not super painful to edit 
+    and then convert it to a string so i don't have to deal with loading an image. i want to keep the farm game as a simple example. 
+  - fix rotted message after drought
+  - i don't like the "click for rubles" thing anymore
+  - don't draw when paused
+  - show requests on the truck instead of as text
+  - timers use seconds instead of frames
+- farm shelves in the 3d world and give player an inventory so you can move things to a different instance of the game 
+- last room and any gaps were loading all puzzles. fixed that. 
+
 ## (Jul 23)
 
 - web/build.fr: every time i redeploy it's broken for a bit until i force refresh. 

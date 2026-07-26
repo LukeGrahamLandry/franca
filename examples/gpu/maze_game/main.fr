@@ -18,6 +18,7 @@ State :: @struct {
     trophy_hint_puzzle_index: i64;
     active_puzzles: List(i64);
     enable_cheats: bool;
+    inventory: GameItem;
 };
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -179,6 +180,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     sgl.texturing_enabled = false;
     
+    have_inventory := inventory_draw_ui(state, sgl);
+    
     pass_action := zeroed(Sg.PassAction);
     pass_action.colors&[0] = (
         load_action = .CLEAR,
@@ -186,9 +189,69 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     );
     Easy'glue_begin_pass(sapp, sg, pass_action);
     sgl.draw_layer(sg, 0);
+    @if(have_inventory) sgl.draw_layer(sg, 1);
     sg.end_pass();
     sg.commit();
 };
+
+fn inventory_draw_ui(state: *State, sgl: *Sgl.Self) bool = {
+    if state.inventory&.is(.FarmGame) && state.inventory.FarmGame&.is(.None) {
+        return false;
+    };
+    have_inventory := !state.inventory&.is(.FarmGame) || !state.inventory.FarmGame&.is(.None);
+    farm_game_texture: ?Sg.Image = .None;
+    for state.active_puzzles { i |
+        it := state.puzzles[i]&;
+        if it.name == .FarmGame {
+            farm_game_texture = (Some = it.cast(.FarmGame)[].img);
+        };
+    };
+    if state.inventory&.is(.FarmGame) && farm_game_texture.is_none() {
+        return false;
+    };
+    
+    sgl.layer_id = 1;
+    sgl.defaults();
+    sgl.viewport(0.intcast(), 0.intcast(), state.app.width().intcast(), state.app.height().intcast(), true);
+    sgl.load_pipeline(state.pipe);
+    sgl.load_identity();
+    
+    aspect := state.camera.perspective.aspect;
+    size := vec2(100) / state.screen_size;
+    start := vec2(1) - size*1.25;
+    c1, c2 := (start, start + size);
+    sgl.begin(.QUADS);
+    sgl.color = pack_rgba(10,10,10,255);
+    sgl.v2f(c1.x, c1.y);
+    sgl.v2f(c2.x, c1.y);
+    sgl.v2f(c2.x, c2.y);
+    sgl.v2f(c1.x, c2.y);
+    sgl.end();
+    
+    @match(state.inventory) {
+        fn FarmGame(object) => if farm_game_texture { img |
+            sgl.texturing_enabled = true;
+            sgl.texture(img, (id = 0));
+            sgl.begin(.QUADS);
+            #use("@/examples/gpu/farm_game.fr");
+        
+            tex, colour := get_texture(object);
+            sgl.color = colour;
+            u1, v1, u2, v2 := uv_for_texture(tex);
+            sgl.v2f_t2f(c1.x, c1.y, u1, v1);
+            sgl.v2f_t2f(c2.x, c1.y, u2, v1);
+            sgl.v2f_t2f(c2.x, c2.y, u2, v2);
+            sgl.v2f_t2f(c1.x, c2.y, u1, v2);
+            
+            sgl.end();
+            sgl.texturing_enabled = false;
+        }
+        @default => ();
+    };
+    sgl.layer_id = 0;
+    sgl.texturing_enabled = false;
+    true
+}
 
 fn redetect_active_room(state: *State) void = {
     p := state.camera.pos;
@@ -218,6 +281,7 @@ fn redetect_active_room(state: *State) void = {
             state.active_puzzles&.push(state.inspect_terminal_puzzle_index);
         };
     };
+    //@println("adjacent: %; active: %;", room.adjacent_rooms, state.active_puzzles.items());
     
     suspend_for_room_change(state, old_active);
 }    
@@ -272,6 +336,13 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         };
     };
     
+    
+    if event.type == .KEY_DOWN && event.key_code == .SPACE && state.puzzle_focus.is_none() {
+        if inventory_pickup(state) {
+            return();
+        };
+    };
+    
     @if(event.type != .RESIZED)
     if state.puzzle_focus { i |
         if event.type == .MOUSE_DOWN && event.mouse_button == .MIDDLE {
@@ -319,6 +390,42 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         state.screen_size = vec2(sapp.framebuffer_width.float().cast(), sapp.framebuffer_height.float().cast());
     };
 };
+
+// TODO: make this more generic once i have more programs with items
+// TODO: maybe the controls should be raycast to the square like it is for opening screen. 
+//       idk if i prefer consistancy with the 3d or consistancy with the farm game's controls. 
+fn inventory_pickup(state: *State) bool = {
+    for state.active_puzzles { i |
+        it := state.puzzles[i]&;
+        p := state.camera.pos;
+        self := it;
+        as_const(it) { $Name |
+            @if(Name == .FarmGame) @if_let(it.extra&) fn FarmGame(it) => {
+                self := self.cast(Name);
+                start := vec2(it.pos.x, it.pos.z);
+                Y0 := it.pos.y + 0.02;
+                fraction: f32 = 0.1;
+                each self.world.shelves { shelf |
+                    c1 := start + vec2(fraction);
+                    c2 := c1 + vec2(1 - fraction*2);
+                    
+                    if p.x > c1.x && p.z > c1.y && p.x < c2.x && p.z < c2.y {
+                        // hit!
+                        @if_let(state.inventory&) fn FarmGame(src) => {
+                            dest := shelf.item&;
+                            t := src[]; src[] = dest[]; dest[] = t;
+                            self.force_draw = true;
+                            return true;
+                        };
+                    };
+                    
+                    start += it.dir;
+                };
+            };
+        };
+    };
+    false
+}
 
 fn set_focus(state: *State, it: ?i64) void = {
     state.puzzle_focus = it;
@@ -466,6 +573,7 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     state.dirty = true;
     state.puzzle_focus = .None;
     state.active_puzzles = list(general_allocator());
+    state.inventory = (FarmGame = .None);
     
     state.draw&.setup(
         allocator = general_allocator(),
@@ -628,9 +736,10 @@ fn restore(state: *State, it: *Puzzle) void = {
 
 save_file_path :: "target/francamazegamesavefile.out";
 SaveFile :: @struct {
-    MAGIC :: "FR\0game1".peek_type(i64)[];
+    MAGIC :: "FR\0game2".peek_type(i64)[];
     magic: i64;
     camera: Camera;
+    inventory: GameItem;
     enable_cheats: bool;
     puzzles: List(@struct {
         link: i64;
@@ -643,6 +752,7 @@ fn save_world(state: *State, out: *List(u8)) void = {
     save: SaveFile = (
         magic = SaveFile.MAGIC, 
         camera = state.camera,
+        inventory = state.inventory,
         enable_cheats = state.enable_cheats,
         puzzles = list(temp()),
     );
@@ -672,6 +782,7 @@ fn load_world(state: *State, save_data: []u8) void = {
     save: SaveFile = (
         magic = 0, 
         camera = state.camera,
+        inventory = state.inventory,
         puzzles = list(temp()),
         enable_cheats = false,
     );
@@ -682,6 +793,7 @@ fn load_world(state: *State, save_data: []u8) void = {
     
     a := general_allocator();
     state.camera = save.camera;
+    state.inventory = save.inventory;
     state.enable_cheats = save.enable_cheats;
     each save.puzzles { save |
         if state.puzzles.find(fn(it) => it.link == save.link) { it |
