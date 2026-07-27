@@ -56,7 +56,9 @@ mappings :: @static {
     // TODO: buffer contents/stack, cursor position, scale/colour, history
     ctx.set_repr(Get(.Terminal).App, void, fn(repr, in) = (), fn(out, repr) = .Ok);
 
-    @add_fields(ctx, Get(.Hint).App, @const_slice(.colour, .msg, .scale));
+    // currently the only types are dynamically computed (like trophy room) or fixed from map data. either way saving isn't useful
+    // @add_fields(ctx, Get(.Hint).App, @const_slice(.colour, .msg, .scale));
+    ctx.set_repr(Get(.Hint).App, void, fn(repr, in) = (), fn(out, repr) = .Ok);
     
     #use("@/graphics/vec.fr");
     ctx.set_repr(Vec2, Array(f32, 2), fn(repr, in) = { repr[] = in.v; }, fn(out, repr) = { out.v = repr[]; .Ok });
@@ -291,4 +293,309 @@ fn auto_load(ctx: *LoadCtx, $T: Type, it: *T) Result(void, Str) #generic = {
         @default => @panic("Unsupported type for load %", @run T.typename().str());
     };
     .Ok
+}
+
+fn store_text(ctx: *StoreCtx, $T: Type, it: *T) void #generic = {
+    out := ctx.out;
+    @if(@run (IsCollection(Slice)(T) && T != Str)) {
+        @fmt(out, "(");
+        each it { it |
+            store_text(ctx, T.Element, it);
+            @fmt(out, ",");
+        };
+        out.len -= int(out.items().ends_with(","));
+        @fmt(out, ")");
+        return();
+    };
+    
+    @if(@run(T != u32 && @is(get_type_info_ref(T), .Int, .F32, .F64, .void, .Bool))) {
+        @fmt(out, "%", it[]);
+        return();
+    };
+    @if(T == Vec2) @fmt(out, "vec2");
+    @if(T == Vec3) @fmt(out, "vec3");
+
+    #use("@/graphics/lib.fr");
+    @inline_switch(T) {
+        @case(void) => @fmt(out, "()");
+        // TODO: just use \x00 non-printable characters
+        @case(Str) => {
+            if it[].contains("\n".ascii()) {
+                @fmt(out, "\"\"\"%\"\"\"", it[]);
+            } else {
+                @fmt(out, "\"%\"", it[]);
+            };
+        };
+        @case(u32) => @fmt(out, "%", fmt_hex(it[]));
+        @default => ({
+            @inline_match(@static mappings_get(T)) {
+                fn WithRepr($v) => {
+                    repr := zeroed(v.Repr);
+                    (@run v'to_repr)(repr&, it);
+                    store_text(ctx, v.Repr, repr&)
+                }
+                fn Direct($v) => {
+                    @panic("TODO: %", T.typename().str());
+                }
+                fn Auto() => auto_store_text(ctx, T, it);
+                fn FilterFields($f) => @panic("TODO: %", T.typename().str());
+            };
+        });
+    };
+}
+
+fn auto_store_text(ctx: *StoreCtx, $T: Type, it: *T) void #generic = {
+    out := ctx.out;
+    @inline_match(@run T.get_type_info_ref()) {
+        fn Enum($f) => {
+            @fmt(out, ".%", it[].name_str());
+        }
+        fn Struct($f) => {
+            @run @ct_assert(!f.is_union, @source_location, "store union: %", @run T.typename().str());
+            out.push_all("(");
+            inline_for T.get_fields() { $f | 
+                inner := T.get_field_ptr(it, f);
+                @fmt(out, "%=", @run f[].name.str());
+                store_text(ctx, @type inner[], inner);
+                @fmt(out, ", ");
+            };
+            out.len -= int(out.items().ends_with(" "));
+            out.push_all(")");
+        }
+        fn Tagged($t) => {
+            @fmt(out, "(% = ", it.tag());
+            
+            i := 0; // TODO : inline_enumerate
+            tag_value := it.tag().raw();
+            // TODO: @inline_switch.
+            inline_for T.get_variants() { $f | 
+                if i == tag_value {
+                    inner := T.get_variant_ptr_for(it, f);
+                    store_text(ctx, @type inner[], inner);
+                };
+                i += 1;
+            };
+            out.push_all(")");
+        }
+        fn Array($f) => {
+            store_text(ctx, []f.inner, @ref it.items());
+        }
+        @default => @panic("Unsupported type for store %", @run T.typename().str());
+    };
+}
+
+Error :: @struct(msg: Str, byte: i64, line: i64, col: i64);
+fn load_text_top(in: []u8, it: ~T) Result(void, Error) #where = {
+    ctx: LoadCtx = (in = in);
+    res := load_text(ctx&, @type it[], it);
+    if res&.is(.Ok) {
+        ctx&.eat_whitespace();
+        if ctx.in.len != 0 {
+            res = (Err = "extra bytes at the end of load_text");
+        };
+    };
+   
+    @if_let(res) fn Err(msg) => {
+        i := in.len - ctx.in.len;
+        line, col := (1, 1);
+        for in.slice(0, i) { c |
+            col += 1;
+            if c == "\n".ascii() {
+                line += 1;
+                col = 1;
+            };
+        }; 
+        return(Err = (msg = msg, byte = i, line = line, col = col));
+    };
+    
+    .Ok
+}
+
+fn load_text(ctx: *LoadCtx, $T: Type, it: *T) Result(void, Str) #generic = {
+    @if(@run (IsCollection(Slice)(T) && T != Str)) {
+        result := @ref T.Element.list(general_allocator());  // :SaveSliceAllocator
+        @try(ctx.eat_punct("(")) return;
+        while => !ctx.in.starts_with(")") {
+            it := result.push_uninit();
+            @try(load_text(ctx, T.Element, it)) return;
+            @try(ctx.eat_punct(",")) return;
+        };
+        @try(ctx.eat_punct(")")) return;
+        it[] = result.shrink_to_fit();
+        return(.Ok);
+    };
+    
+    @if(@run(@is(get_type_info_ref(T), .F32, .F64))) {
+        n, rest := parse_float(ctx.in);
+        @if(rest.len == ctx.in.len) return(Err = "expected number");
+        ctx.in = rest;
+        it[] = @if(@run(T == f32), n.cast(), n);
+        return(.Ok);
+    };
+    
+    @if(@run(T != u32 && @is(get_type_info_ref(T), .Int))) {
+        negative := ctx.in.starts_with("-");
+        ctx.in = ctx.in.rest(int(negative));
+        n, rest := convert_number(ctx.in, 10, dec_digit);
+        @if(rest.len == ctx.in.len) return(Err = "expected number");
+        ctx.in = rest;
+        if negative {
+            n = -n;
+        };
+        // TODO: ugh
+        it[] = bit_cast_unchecked(i64, T, n);
+        return(.Ok);
+    };
+    
+    @if(T == Vec2) @try(ctx.eat_punct("vec2")) return;
+    @if(T == Vec3) @try(ctx.eat_punct("vec3")) return;
+    
+    #use("@/graphics/lib.fr");
+    @inline_switch(T) {
+        @case(Str) => {
+            if ctx.in.starts_with("\"\"\"") {
+                i := 3;
+                while => !ctx.in.rest(i).starts_with("\"\"\"") {
+                    i += 1;
+                    @if(i >= ctx.in.len) return(Err = "unterminated string")
+                };
+                it[] = ctx.in.slice(3, i);
+                ctx.in = ctx.in.rest(i + 3);
+            } else {
+                i := 1;
+                @if(i >= ctx.in.len) return(Err = "unterminated string");
+                while => ctx.in[i] != "\"".ascii() {
+                    i += 1;
+                    @if(i >= ctx.in.len) return(Err = "unterminated string");
+                };
+                it[] = ctx.in.slice(1, i);
+                ctx.in = ctx.in.rest(i+1);
+            };
+            it[] = it[].shallow_copy(general_allocator());  // :SaveSliceAllocator
+        };
+        @case(u32) => {
+            @try(ctx.eat_punct("0x")) return;
+            n, rest := convert_number(ctx.in, 16, hex_digit);
+            @if(rest.len == ctx.in.len) return(Err = "expected number");
+            ctx.in = rest;
+            it[] = n.trunc();
+        };
+        @case(void) => @try(ctx.eat_punct("()")) return;
+        @case(bool) => {
+            name := @try(ctx.eat_ident()) return;
+            it[] = @switch(name) {
+                @case("true") => true;
+                @case("false") => false;
+                @default => return(Err = "invalid bool");
+            };
+        };
+        @default => ({
+            @inline_match(@static mappings_get(T)) {
+                fn WithRepr($v) => {
+                    repr := zeroed(v.Repr);
+                    @try(load_text(ctx, v.Repr, repr&)) return;
+                    @try((@run v'from_repr)(it, repr&)) return;
+                }
+                fn Direct($v) => @panic("TODO: %", T.typename().str());
+                fn Auto() => return(auto_load_text(ctx, T, it));
+                fn FilterFields($f) => @panic("TODO: %", T.typename().str());
+            };
+        });
+    };
+    .Ok
+}
+
+fn auto_load_text(ctx: *LoadCtx, $T: Type, it: *T) Result(void, Str) #generic = {
+    @inline_match(@run T.get_type_info_ref()) {
+        fn Enum($f) => {
+            @try(ctx.eat_punct(".")) return;
+            name := @try(ctx.eat_ident()) return;
+            it[] = T.from_name(name) || return(Err = @tfmt("invalid enum name '%'", name));
+        }
+        fn Struct($f) => {
+            @try(ctx.eat_punct("(")) return;
+            inline_for T.get_fields() { $f | 
+                name := @try(ctx.eat_ident()) return;
+                @if(name != @run f[].name.str()) return(Err = @tfmt("field name expected '%' but found '%'", @run f[].name.str(), name));
+                @try(ctx.eat_punct("=")) return;
+                inner := T.get_field_ptr(it, f);
+                @try(load_text(ctx, @type inner[], inner)) return;
+                @try(ctx.eat_punct(",")) return;
+            };
+            @try(ctx.eat_punct(")")) return;
+        }
+        fn Tagged($t) => {
+            @try(ctx.eat_punct("(")) return;
+            name := @try(ctx.eat_ident()) return;
+            t := Tag(T).from_name(name) || return(Err = @tfmt("invalid case name '%'", name));
+            @try(ctx.eat_punct("=")) return;
+            it.tag_ptr()[] = t;
+            
+            i := 0; // TODO : inline_enumerate
+            tag_value := t.raw();
+            // TODO: @inline_switch.
+            inline_for T.get_variants() { $f | 
+                if i == tag_value {
+                    inner := T.get_variant_ptr_for(it, f);
+                    @try(load_text(ctx, @type inner[], inner)) return;
+                };
+                i += 1;
+            };
+            @try(ctx.eat_punct(")")) return;
+        }
+        fn Array($f) => {
+            @try(ctx.eat_punct("(")) return;
+            enumerate it { i, it |
+                @try(load_text(ctx, f.inner, it)) return;
+                @if(i != f.len.zext() - 1) @try(ctx.eat_punct(",")) return;
+            };
+            @try(ctx.eat_punct(")")) return;
+        }
+        @default => @panic("Unsupported type for store %", @run T.typename().str());
+    };
+    .Ok
+}
+
+fn eat_whitespace(self: *LoadCtx) void = {
+    while => self.in.len > 0 && self.in[0].is_ascii_whitespace() {
+        self.in = self.in.rest(1);
+    };
+    
+    @if(!self.in.starts_with("/*")) return();
+    self.in = self.in.rest(2);
+    while => !self.in.starts_with("*/") {
+        @if(self.in.len == 0) return();
+        self.in = self.in.rest(1);
+    };
+    self.in = self.in.rest(2);
+    self.eat_whitespace();
+}
+
+fn eat_punct(self: *LoadCtx, s: Str) Result(void, Str) = {
+    self.eat_whitespace();
+    @if(!self.in.starts_with(s)) return(Err = @tfmt("expected '%'", s));
+    self.in = self.in.rest(s.len);
+    self.eat_whitespace();
+    .Ok
+}
+
+fn eat_ident(self: *LoadCtx) Result(Str, Str) = {
+    self.eat_whitespace();
+    i := 0;
+    if true {
+        break :: local_return;
+        loop {
+            @if(i >= self.in.len) break();
+            c := self.in[i];
+            valid := c.is_ascii_alpha() || c.is_ascii_digit() || c == "_".ascii();
+            if !valid {
+                break();
+            };
+            i += 1;
+        };
+    };
+    name := self.in.slice(0, i);
+    self.in = self.in.rest(i);
+    self.eat_whitespace();
+    (Ok = name)
 }

@@ -19,6 +19,8 @@ State :: @struct {
     active_puzzles: List(i64);
     enable_cheats: bool;
     inventory: GameItem;
+    debug_map_objects: List(Editor.Object);
+    last_save_timestamp: f64;
 };
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -304,18 +306,18 @@ fn choose_focus(state: *State, mouse: Vec2, error_margin: f32) ?i64 = {
 }
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
-    if event.key_code == .F3 && event.type == .KEY_UP && state.puzzle_focus.is_none() {
-        state.enable_cheats = !state.enable_cheats;
+    @if(event.type == .QUIT_REQUESTED) save_world_file(state);
+
+    // TODO: the version of this that easy.fr adds should send QUIT_REQUESTED    
+    if event.type == .KEY_DOWN && event.key_code == .W && event.modifiers.get(.super) != 0 {
+        save_world_file(state);
     };
+    
+    @if(check_cheats(state, event)) return();
     if event.key_code == .LEFT_CONTROL {
         state.camera.speed.pos *= @if(event.type == .KEY_UP, 0.2, 5);
     };
     
-    @if(state.enable_cheats)
-    if event.type == .KEY_UP && event.key_code == .C && state.puzzle_focus.is_none() {
-        open_wall_debug_screen(state);
-        return();
-    };
     if event.type == .KEY_DOWN && event.key_code == .S && event.modifiers.get(.super) == 1 && !event.key_repeat && state.puzzle_focus.is_none() {
         save_world_file(state);
         return();
@@ -336,7 +338,6 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         };
     };
     
-    
     if event.type == .KEY_DOWN && event.key_code == .SPACE && state.puzzle_focus.is_none() {
         if inventory_pickup(state) {
             return();
@@ -348,28 +349,6 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         if event.type == .MOUSE_DOWN && event.mouse_button == .MIDDLE {
             mouse := vec2(event.mouse_x, event.mouse_y);
             if choose_focus(state, mouse, 0.75) { j |
-                if state.enable_cheats {
-                if event.modifiers.get(.shift) != 0 {
-                    // for debugging the save system. this shouldn't change anything important. 
-                    it := state.puzzles[j]&;
-                        @println("debug save %", it.name);
-                        suspend(it);
-                        @println("- % bytes", it.suspended.unwrap().len());
-                        restore(state, it);
-                };
-                
-                // TODO: maybe this should be part of the real game in case you make a mistake
-                if event.modifiers.get(.super) != 0 {
-                    it := state.puzzles[j]&;
-                    @println("clear save data link=% %", it.link, it.name);
-                    suspend(it);
-                    general_allocator().dealloc(u8, it.suspended.unwrap());
-                    it.suspended = (Some = "");
-                    restore(state, it);
-                };
-                
-                };
-                
                 if i != j {
                     return state.set_focus(Some = j);
                 }
@@ -428,67 +407,32 @@ fn inventory_pickup(state: *State) bool = {
 }
 
 fn set_focus(state: *State, it: ?i64) void = {
+    I := it || (state.puzzle_focus || -1);
     state.puzzle_focus = it;
     state.app.lock_mouse(!it.is_some());
     // TODO: you still keep moving if you were holding the button while pressing escape
     // TODO: deal with puzzle.state.pan_keys_pressed
     state.camera.delta_pos = vec3(0);
     state.dirty = true;
+    
     if it { i |
         record_click(state, i);
+    } else {
+        if I != state.inspect_terminal_puzzle_index {
+            state.check_auto_save();
+        };
     };
 }
 
-fn open_wall_debug_screen(state: *State) void = {
-    look_dir, forward, _1 := state.camera&.directions();
-    best_dist_sq: f32 = 99999999.0;
-    hit_wall: ?*Wall = .None;
-    each state.rooms { room |
-        each room.walls { wall |
-            hit_point, m := remap_mouse_to_wall(wall, state.camera&, state.screen_size/2, state.screen_size);
-            if m.x > 0 && m.y > 0 && m.x < 1 && m.y < 1 {
-                dir_to_wall := hit_point - state.camera.pos;
-                is_forward := dot(dir_to_wall, look_dir) > 0;
-                dist := norm_sq(dir_to_wall);
-                if is_forward && dist < best_dist_sq {
-                    best_dist_sq = dist;
-                    hit_wall = (Some = wall);
-                }
-            };
-        };
+// not too often because suspend+resume everything is slow. 
+// generally this doesn't matter because quitting the game saves first but crashing is a risk.
+fn check_auto_save(state: *State) void = {
+    now := timestamp_s();
+    if now - state.last_save_timestamp > 120 {
+        state.last_save_timestamp = now;
+        save_world_file(state);
     };
-    hit_wall := hit_wall || return();
-    
-    puzzle := state.inspect_terminal_puzzle_index;
-    state.puzzle_focus = (Some = puzzle);
-    state.camera.delta_pos = vec3(0);
-    state.app.lock_mouse(false);
-    state.dirty = true;
-    if !state.active_puzzles.items().contains(puzzle) {
-        state.active_puzzles&.push(puzzle);
-    };
-    
-    w := hit_wall.vectors();
-    n := w.normal;
-    if dot(look_dir, n) > 0 {
-        n = -n;
-    };
-    
-    it := state.puzzles[puzzle]&;
-    @if(it.suspended.is_some()) restore(state, it);
-    new_wall :: import("@/examples/gpu/maze_game/editor.fr")'wall_from_normal;
-    pos := state.camera.pos + forward - vec3(0, 0.5, 0);
-    it.wall = new_wall(pos, n, 1);
-    
-    s := it.cast(.Terminal);
-    S :: import("@/examples/gpu/terminal.fr");
-    S'state[] = s;
-    if S'selected_buffer() { buffer |
-        buffer.append_string(@tfmt("w := import(\"@/examples/gpu/maze_game/world.fr\")'Wall.ptr_from_int(%);", fmt_hex(hit_wall)));
-    };
-    
-    // TODO: need a way of saving to map.fr after changing the colours
-}
+};
 
 fn remap_and_push_event(state: *State, it: *Puzzle, event: Sapp.Event) void = {
     mouse := vec2(event.mouse_x, event.mouse_y);
@@ -567,7 +511,8 @@ fn remap_mouse_to_wall(wall: *Wall, c: *Camera, mouse: Vec2, screen: Vec2) Ty(Ve
 }
 
 fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
-    init_start := timestamp();
+    init_start := timestamp_s();
+    state.last_save_timestamp = init_start;
     state.sg = sg; state.app = app;
     app.desc.enable_clipboard = true;
     state.dirty = true;
@@ -612,20 +557,14 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     
     // TODO: `forever: Arena.Allocator;`
     a := general_allocator();
-    map := import("@/examples/gpu/maze_game/map.fr").objects;
+    map := map_objects;
     #use("@/examples/gpu/maze_game/editor.fr");
     puzzles, rooms := objects_to_world(map, a);
     state.rooms = rooms;
     state.puzzles = puzzles;
     state.camera.pos = vec3(2, 1, -1);
-
-    LINK_TERMINAL_INSPECT :: 2;
-    LINK_HINT_TROHY :: 87;
-    state.inspect_terminal_puzzle_index = state.puzzles.index_of(fn(it) => it.link == LINK_TERMINAL_INSPECT).expect("LINK_TERMINAL_INSPECT");
-    @assert_eq(state.puzzles[state.inspect_terminal_puzzle_index].name, .Terminal);
-    state.trophy_hint_puzzle_index = state.puzzles.index_of(fn(it) => it.link == LINK_HINT_TROHY).expect("LINK_HINT_TROHY");
-    @assert_eq(state.puzzles[state.trophy_hint_puzzle_index].name, .Hint);
     
+    state.find_special_puzzles();
     each state.puzzles { it |
         // TODO: i guess don't need to init all the textures up front either
         init_puzzle_texture(sg, it);
@@ -634,7 +573,20 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     load_world_file(state);
     state.redetect_active_room();
     
-    @println("on_init took %ms", timestamp() - init_start);
+    // TODO: maybe don't waste memory until enable cheats
+    state.debug_map_objects = list(general_allocator());
+    state.debug_map_objects&.push_all(Editor.map_objects);
+    
+    @println("on_init took %ms", timestamp() - int(init_start * 1000));
+}
+
+fn find_special_puzzles(state: *State) void = {
+    LINK_TERMINAL_INSPECT :: 2;
+    LINK_HINT_TROHY :: 87;
+    state.inspect_terminal_puzzle_index = state.puzzles.index_of(fn(it) => it.link == LINK_TERMINAL_INSPECT).expect("LINK_TERMINAL_INSPECT");
+    @assert_eq(state.puzzles[state.inspect_terminal_puzzle_index].name, .Terminal);
+    state.trophy_hint_puzzle_index = state.puzzles.index_of(fn(it) => it.link == LINK_HINT_TROHY).expect("LINK_HINT_TROHY");
+    @assert_eq(state.puzzles[state.trophy_hint_puzzle_index].name, .Hint);
 }
 
 fn record_click(state: *State, i: i64) void = {
@@ -676,6 +628,9 @@ fn suspend_for_room_change(state: *State, old_active: []i64) void = {
     for old_active { i |
         suspend(state.puzzles[i]&);
     };
+    
+    // this is the least wasteful time to save because it has to suspend everything, so saves an extra reset of `new_active`
+    state.check_auto_save();
     
     for new_active { i |
         restore(state, state.puzzles[i]&);
@@ -742,6 +697,7 @@ SaveFile :: @struct {
     inventory: GameItem;
     enable_cheats: bool;
     puzzles: List(@struct {
+        type: PuzzleType;  // let it use defaults instead of crashing if you change the type of a puzzle in the inspect terminal while playing. 
         link: i64;
         data: []u8;
         clicked: bool;
@@ -761,6 +717,7 @@ fn save_world(state: *State, out: *List(u8)) void = {
         @if(active) suspend(it);
         data := it.suspended.unwrap();
         save.puzzles&.push(
+            type = it.name,
             link = it.link, 
             data = data.shallow_copy(temp()), // bleh, might restore immediately which would free before it gets written out. wasteful. 
             clicked = it.clicked,
@@ -795,14 +752,19 @@ fn load_world(state: *State, save_data: []u8) void = {
     state.camera = save.camera;
     state.inventory = save.inventory;
     state.enable_cheats = save.enable_cheats;
+    // TODO: if loading from file, save it if corrupted so doesn't get overwritten by something else when autosaving just in case it's useful. 
     each save.puzzles { save |
         if state.puzzles.find(fn(it) => it.link == save.link) { it |
+            if it.name == save.type {
             it.clicked = save.clicked;
             active := it.suspended.is_none();
             @if(active) suspend(it);
             a.dealloc(u8, it.suspended.unwrap());
             it.suspended = (Some = save.data.shallow_copy(a));
             @if(active) restore(state, it);
+            } else {
+                @println("corrupted save: link=% expected type=% but save.type=%", save.link, it.name, save.type);
+            };
         } else {
             @println("corrupted save: link=% doesn't exist in world", save.link);
         };
@@ -845,3 +807,4 @@ driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics2(vtable, @sou
 #use("@/examples/gpu/maze_game/camera.fr");
 #use("@/examples/gpu/maze_game/world.fr");
 Save :: import("@/examples/gpu/maze_game/save.fr");
+#use("@/examples/gpu/maze_game/inspect.fr");

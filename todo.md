@@ -7,6 +7,7 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
   so i should try to not put funcid/type numbers in the generated shader code so the cache works better when developing? 
   init time difference is very visible in samply so you can tell if you hit the cache. 
 - life: initial screen with no cli args needs to let you draw
+- life: grow the board to let you draw if you click off the edge
 - generate a favicon because the error in console pisses me off
 - leak detector for gpu resources in on_cleanup
 - one of the hare tests broke in sr.ht when they took out the old version of ubuntu.
@@ -25,6 +26,8 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
     maybe there should be an explicit way to add things to it and just 
     default to `main :: import("whatever").main` so you don't default to the weird double declaring types if you try to import your main file. 
     for now build_for_graphics2 is the hack to work around this problem by opting in to the more sane behaviour. 
+  - need to stop with the absolute import paths. it should be sane to copy paste a folder and make a new program. 
+    hard to decide exactly what i want tho, there's other notes here somewhere. 
 - see todo comments:
   - life/README.md
   - circuit/README.md

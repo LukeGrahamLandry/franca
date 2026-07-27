@@ -1,4 +1,12 @@
 
+## (Jul 26)
+
+- load the world map as data. overkill rn but i think it opens up better things. 
+- hot reloading of the world map text from a terminal in game
+  - move the cursor to the thing you're looking at. kinda convoluted tracking of lines but 
+    now it's better than the previous repl one (and don't have to deal with converting world state back to editor's Object). 
+- autosave
+
 ## (Jul 25)
 
 - mirror the editor rendering

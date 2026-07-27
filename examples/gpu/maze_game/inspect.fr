@@ -1,0 +1,206 @@
+
+fn check_cheats(state: *State, event: *Sapp.Event) bool = {
+    if event.key_code == .F3 && event.type == .KEY_UP && state.puzzle_focus.is_none() {
+        state.enable_cheats = !state.enable_cheats;
+        return true;
+    };
+    @if(!state.enable_cheats) return(false);
+    
+    if state.puzzle_focus { i |
+        if event.type == .MOUSE_DOWN && event.mouse_button == .MIDDLE {
+            mouse := vec2(event.mouse_x, event.mouse_y);
+            if choose_focus(state, mouse, 0.75) { j |
+                if event.modifiers.get(.shift) != 0 {
+                    // for debugging the save system. this shouldn't change anything important. 
+                    it := state.puzzles[j]&;
+                        @println("debug save %", it.name);
+                        suspend(it);
+                        @println("- % bytes", it.suspended.unwrap().len());
+                        restore(state, it);
+                };
+                
+                // TODO: maybe this should be part of the real game in case you make a mistake
+                if event.modifiers.get(.super) != 0 {
+                    it := state.puzzles[j]&;
+                    @println("clear save data link=% %", it.link, it.name);
+                    suspend(it);
+                    general_allocator().dealloc(u8, it.suspended.unwrap());
+                    it.suspended = (Some = "");
+                    restore(state, it);
+                };
+            };
+        };
+    
+        if event.type == .KEY_DOWN {
+            if event.key_code == .S && event.modifiers.get(.super) == 1 && i == state.inspect_terminal_puzzle_index {
+                save_to_file := event.modifiers.get(.shift) == 1;
+                reload_map_debug_screen(state, save_to_file);
+                return true;
+            };
+        };
+    } else {
+        if event.type == .KEY_UP {
+            if event.key_code == .X {
+                open_map_debug_screen(state, false, .None);
+                return true;
+            };
+        };
+    };
+    false
+}
+
+Terminal :: import("@/examples/gpu/terminal.fr");
+fn create_terminal(state: *State) *Terminal.TextBuffer = {
+    puzzle := state.inspect_terminal_puzzle_index;
+    state.set_focus(Some = puzzle);
+    if !state.active_puzzles.items().contains(puzzle) {
+        state.active_puzzles&.push(puzzle);
+    };
+    it := state.puzzles[puzzle]&;
+    @if(it.suspended.is_some()) restore(state, it);
+
+    s := it.cast(.Terminal);
+    Terminal'state[] = s;
+    Terminal'selected_buffer().unwrap()
+}
+
+// TODO: if none, use current room instead
+// :SLOW but really doesn't matter
+fn raycast_object(state: *State) ?i64 = {
+    look_dir, _0, _1 := state.camera&.directions();
+    best_dist_sq: f32 = 99999999.0;
+    hit: ?i64 = .None;
+    puzzle_i := -1;
+    enumerate state.debug_map_objects { i, it |
+        continue :: local_return;
+        
+        if it.is(.Screen) {
+            puzzle_i += 1;
+            if puzzle_i == state.inspect_terminal_puzzle_index {
+                // don't count the one summoned right in front of you
+                continue();
+            };
+        };
+        
+        wall := @match(it) {
+            fn Wall(it) => new_vertical(it.a, it.b, it.h, it.y);
+            fn Tile(it) => new_horizontal(it.a, it.b, it.y);
+            fn Screen(it) => Editor'wall_from_normal(it.pos, it.normal, it.size);
+            @default => continue();
+        };
+        hit_point, m := remap_mouse_to_wall(wall&, state.camera&, state.screen_size/2, state.screen_size);
+        if m.x > 0 && m.y > 0 && m.x < 1 && m.y < 1 {
+            dir_to_wall := hit_point - state.camera.pos;
+            is_forward := dot(dir_to_wall, look_dir) > 0;
+            dist := norm_sq(dir_to_wall);
+            if is_forward && dist < best_dist_sq {
+                best_dist_sq = dist;
+                hit = (Some = i);
+            }
+        };
+    };
+    hit
+}
+
+// TODO: have a keybind for reloading from file on disk so can use a nice text editor instead of mine. 
+// TODO: maybe place it at hit pos plus wall normal like before so you can always see it. rn its hard to use in small hallways.
+// TODO: version of this that does it for your save data instead. 
+//       but now the nested []u8 instead of a structured thing is annoying. 
+// TODO: persist the text changes if you move it without saving to world? or at least some visual indicator of not synced. 
+fn open_map_debug_screen(state: *State, save_to_file: bool, keep_wall: ?Wall) void = {
+    it := state.puzzles[state.inspect_terminal_puzzle_index]&;
+    if keep_wall { keep_wall |
+        it.wall = keep_wall;
+    } else {
+        _0, forward, _1 := state.camera&.directions();
+        // TODO: this is annoying. needed by cause remap_mouse_to_wall is lazy and can only cope with one axis
+        if abs(forward.x) > abs(forward.z) {
+            forward = vec3(@if(forward.x < 0, -1, 1),0,0);
+        } else {
+            forward = vec3(0,0,@if(forward.z < 0, -1, 1));
+        };
+        pos := state.camera.pos + forward - vec3(0, 0.5, 0);
+        it.wall = Editor'wall_from_normal(pos, -forward, 1);
+    };
+    buffer := create_terminal(state);
+    
+    out := @ref u8.list(temp());
+    lines := @ref i64.list(state.debug_map_objects.len, temp());
+    save_as_code(out, state.debug_map_objects&, (Some = lines));
+    if save_to_file {
+        // TODO: store this path on the state so it can be a cli arg
+        if !write_entire_file("examples/gpu/maze_game/map.fr", out.items()) {
+            println(out.items());
+            println("FAILED TO WRITE");
+        };
+    };
+    buffer.clear_text();
+    buffer.append_string(out.items());
+    
+    if raycast_object(state) { i |
+        buffer.move_to(lines[i], 1);
+    };
+}
+Editor :: import("@/examples/gpu/maze_game/editor.fr");
+
+// :LEAK slices in the old Objects, old puzzles/rooms slices themselves
+fn reload_map_debug_screen(state: *State, save_to_file: bool) void = {
+    it := state.puzzles[state.inspect_terminal_puzzle_index]&;
+    keep_wall := it.wall;
+    a := general_allocator();
+    new := Editor.Object.list(a);
+    buffer := create_terminal(state);
+    if !load_text_from_buffer(buffer, new&) {
+        return();
+    };
+    
+    state.debug_map_objects&.drop();
+    state.debug_map_objects = new;
+    sg := state.sg;
+    
+    in := @ref u8.list(temp());
+    save_world(state, in);
+    each state.puzzles { it |
+        @if(it.suspended.is_none()) suspend(it);  // runs on_cleanup
+        a.dealloc(u8, it.suspended.unwrap());
+        sg.destroy(it.att);
+        sg.destroy(it.img);
+        sg.destroy(it.d_img);
+    };
+    state.active_puzzles&.clear();
+    
+    puzzles, rooms := objects_to_world(state.debug_map_objects.items(), a);
+    state.puzzles = puzzles;
+    state.rooms = rooms;
+    // TODO: check first and error instead of crash if they deleted a special one
+    state.find_special_puzzles();  
+    each state.puzzles { it |
+        init_puzzle_texture(sg, it);
+        it.suspended = (Some = empty());
+    };
+    load_world(state, in.items());
+    state.redetect_active_room();
+    
+    open_map_debug_screen(state, save_to_file, (Some = keep_wall));
+}
+
+fn load_text_from_buffer(buffer: *Terminal.TextBuffer, it: ~T) bool #where = {
+    in := @ref u8.list(temp());
+    each buffer.lines { line |
+        in.push_all(line.str());
+        in.push_all("\n");
+    };
+    res := load_text_top(in.items(), it);
+    @if_let(res) fn Err(msg) => {
+        // the place inserting a comment would break something is in a multiline string but the only error there is "unterminated" so it would be at the end anyway. 
+        s := @tfmt("\n/*% (byte=%,line=%,col=%)*/", msg.msg, msg.byte, msg.line, msg.col);
+        buffer.insert_string(s, 0, msg.line - 1);
+        buffer.move_to(msg.line - 1, msg.col);
+        return false;
+    };
+    true
+}
+
+#use("@/examples/gpu/maze_game/main.fr");
+#use("@/examples/gpu/maze_game/world.fr");
+#use("@/graphics/lib.fr");

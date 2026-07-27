@@ -67,6 +67,8 @@ trophy room that shows you how many puzzles are solved/unsolved of each type.
 editor
 - have one that syncs to the world as the prize at the end
 
+the whole game in a screen so you get to be in a different place in the world and can use it to teleport kinda would be cool. 
+
 ## TODO
 
 - visual feedback for toggling cheats mode
@@ -80,6 +82,7 @@ editor
 - the mandelbrot square flickers red on the frame where life gets suspended. which could give away the hidden puzzle early. 
 - fix the rooms. life unloads when you can still see it in the blue hallway 
 - takes so long to compile (2300ms -safe) 
+  - filtering out the apps i dont use yet helped, ~1750, but still
 - make it work in wgpu
   - depth texture
   - web: use less memory
@@ -93,8 +96,6 @@ editor
 - allow copy from child app, don't just always clear app.requests
 - allow screens in non-cardinal directions
 - save system
-  - world save include type on each puzzle so don't die if want to change it and doesn't match
-  - dont save the Hint data when its a junk one because name was unset
   - stutter when changing rooms with Life is unplayable
   - instead of needing to remember to change save_file_magic, 
     include schema from the reflection info? 
@@ -104,17 +105,11 @@ editor
     but it's an easy mistake to make.
     ex. editor doesn't work because of Object.Screen.app and Object.Linked.Extra.(init_fen, init_pattern)
     :SaveSliceAllocator
-  - auto save when you make progress instead of keybind. 
-    or maybe in the middle of suspend_for_room_change so a few extra are suspended already. 
-    keep prev save_data bytes for each puzzle and autosave when one changes? 
-  - cmd+w needs to send QUIT_REQUESTED so can auto save then too. 
-    maybe that's good enough, doing it hyperactively is really just because im afraid of crashes. 
   - cli arg for save path
   - button to reset save file for testing
   - debug program that dumps the primitives in save file as text with field names
   - use that reflection to generate editor ui
   - do the repr for remaining apps
-  - wasteful extra init-suspend-restore cycle on first load. 
   - load_world needs to cope with load() returning error. also rn restore() will crash if that happens. 
     also not validating up front that it parse correctly if !active so you might only find out later. 
 - ui for resetting a specific puzzle to initial state if you mess it up when you don't understand the controls yet? 
@@ -129,12 +124,16 @@ editor
 - editor: colour picker
   - going to want to make a `Colour :: @struct(rgba: u32)` so can reflect on it to choose the right ui. 
 - editor: copy paste an area
+- editor: the sorting actually makes it less stable when you edit the world if you change room arragement. maybe it just be insertion order.
 - store object positions relative to room so can rearrange the map without a huge diff?
 - make embedded terminal usable
   - needs app.requests copy
   - should probably have a mode that disables running real commands if i want to use it as a text editor for puzzles
   - suspending the repl is going to be nontrivial. i do have bake_relocatable_value
     so i could do it. the problem is just when its supposed to alias a world thing like inspect_wall. 
+  - on_cleanup: "... leaked ref count"
+  - can't press escape to pop buffer stack because it exits the screen
+  - editor mode where up/down arrows just move the cursor instead of history
 - theres still a place you can walk through the wall in the life room, can just make the exit 2 wide
 - option for double sided puzzle
   - make the back wall of the mandelbrot room match the green so the puzzle makes sense in the other direction too
@@ -143,7 +142,6 @@ editor
   maybe precompute visibility from all the tile positions in the room and merge them? 
 - wasteful when there's multiple of an app so could share immutable img/shader/etc. 
   but i think the simplicity is totally worth it for now. 
-- at some point the map should be loaded as data not code
 - i keep needing to google "fen editor" to make the chess rooms. 
   should just add a mode to examples/chess/gui.fr that lets you place pieces. 
 - Object.Screen needs certain disabled inputs so can't cheat the idea even tho the standalone programs need to let you set the whole state 
@@ -166,8 +164,9 @@ editor
 - don't let you clip through the diagonal between chess pieces
 - preserve the legal component of movement when diagonal against a wall
 - have a fullscreen mode for the in game screens
-- ugh, map.fr slice of structs is a pain because no result type. 
-  maybe nows the time to give up and switch to loading a text version of save.fr reflection thing. 
 - farm
   - positions use Vec2 and pass_action be a local
   - icon for crow and drought
+- better error messages (show line number) for load_text
+- same in game hot reloading inspect thing with the visual editor.fr
+- cli arg for world map. i like the idea of people being able to share levels.
