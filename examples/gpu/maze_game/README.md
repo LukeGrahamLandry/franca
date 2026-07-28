@@ -3,7 +3,7 @@ a 3d world containing screens running some of my other examples programs.
 
 [![demo](https://img.youtube.com/vi/E0jMBol_KSI/0.jpg)](https://www.youtube.com/watch?v=E0jMBol_KSI)
 
-press f3 to enable cheats (shift/space to fly, c to inspect wall). 
+press f3 to enable cheats (shift/space to fly, x to inspect wall). 
 
 ## TODO: Puzzle Ideas
 
@@ -81,8 +81,10 @@ the whole game in a screen so you get to be in a different place in the world an
   and the game can poke in smaller numbers early. 
 - the mandelbrot square flickers red on the frame where life gets suspended. which could give away the hidden puzzle early. 
 - fix the rooms. life unloads when you can still see it in the blue hallway 
+  and the blue corner isn't in any room at all. 
 - takes so long to compile (2300ms -safe) 
   - filtering out the apps i dont use yet helped, ~1750, but still
+    half of that is FEAT_REPL for terminal but once i add circuit/gui.fr i'll need the compiler anyway so not really worth changing. 
 - make it work in wgpu
   - depth texture
   - web: use less memory
@@ -115,7 +117,6 @@ the whole game in a screen so you get to be in a different place in the world an
 - ui for resetting a specific puzzle to initial state if you mess it up when you don't understand the controls yet? 
   the annoying thing is that it could reveal hidden/connected puzzles. 
   idk how to do it in a way that isn't tacky. 
-- have the inspect_wall thing work on puzzles too and give you easy text to edit from the reflection thing
 - figure out the antialiasing thing
 - resize the apps based on their size in the projected world? (ie don't hardcode PUZZLE_LOGICAL_WIDTH)
 - all the 3d puzzle effects need to be rotatable
@@ -146,7 +147,6 @@ the whole game in a screen so you get to be in a different place in the world an
   should just add a mode to examples/chess/gui.fr that lets you place pieces. 
 - Object.Screen needs certain disabled inputs so can't cheat the idea even tho the standalone programs need to let you set the whole state 
   (ex. chess fen paste or life draw/pattern/pause once i want to force you to interact with the world while it changes)
-- chess open a door for winning
 - check that init fens don't have impossible castle rights
 - for the yellow mandelbrot chess hallway one to make sense from the other direction the wall blocker needs to be thin i guess so its actually just the transition between squares you can't walk on. 
 - have the existing room give you another door if you win the game. 
@@ -154,19 +154,26 @@ the whole game in a screen so you get to be in a different place in the world an
 - try to have the screens oriented so you don't have to think about mirroring them / rotating. 
   ex. chess is off by 90 degrees, but it's annoying because you want the chess board to not be blocked by pieces. 
   start having an extra border square so it can be near of the board on the black side?
-- the chess yellow where you can't walk because of mandelbrot impies that you won't be able to walk on the other yellow one that's just supposed to be about doing the chess game. 
 - have an indicator for when you've already solved the puzzle a hint applies to? 
-- make the hints poems to tie in another of my interests
 - mandelbrot:
   - colour pick current colour from world for making new puzzles
   - better feedback when you're very close to getting the right colour
   - be more strict about number of matching pixels
 - don't let you clip through the diagonal between chess pieces
 - preserve the legal component of movement when diagonal against a wall
-- have a fullscreen mode for the in game screens
+- maybe child_fullscreen should send resize event and stop doing force_render_target 
+  and stop remapping events and just directly run that child. would probably be less code. 
+- discoverable interface for child_fullscreen
 - farm
   - positions use Vec2 and pass_action be a local
   - icon for crow and drought
 - better error messages (show line number) for load_text
 - same in game hot reloading inspect thing with the visual editor.fr
 - cli arg for world map. i like the idea of people being able to share levels.
+- don't make the app textures early, only on first load
+- for the ones that tick it could be cool to have them tick while you're away
+  because theres often a faster way to simulate a bunch of ticks at once (life,stackie)
+- push_as_tls to hide cli args from the apps
+- chess repitition draw won't work when suspend because it's not in fen
+- instead of each app type needing to deal with unlockable door, have one that points at a link=xxx with different condition. 
+- comptime validate that map.fr init data parses (ex. chess fen, life pattern)

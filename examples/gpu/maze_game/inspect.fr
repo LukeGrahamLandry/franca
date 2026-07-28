@@ -14,19 +14,21 @@ fn check_cheats(state: *State, event: *Sapp.Event) bool = {
                     // for debugging the save system. this shouldn't change anything important. 
                     it := state.puzzles[j]&;
                         @println("debug save %", it.name);
-                        suspend(it);
+                        suspend(state, it, true);
                         @println("- % bytes", it.suspended.unwrap().len());
                         restore(state, it);
+                        return true;
                 };
                 
                 // TODO: maybe this should be part of the real game in case you make a mistake
                 if event.modifiers.get(.super) != 0 {
                     it := state.puzzles[j]&;
                     @println("clear save data link=% %", it.link, it.name);
-                    suspend(it);
+                    suspend(state, it, true);
                     general_allocator().dealloc(u8, it.suspended.unwrap());
                     it.suspended = (Some = "");
                     restore(state, it);
+                    return true;
                 };
             };
         };
@@ -102,6 +104,7 @@ fn raycast_object(state: *State) ?i64 = {
     hit
 }
 
+// TODO: same thing with editor.fr
 // TODO: have a keybind for reloading from file on disk so can use a nice text editor instead of mine. 
 // TODO: maybe place it at hit pos plus wall normal like before so you can always see it. rn its hard to use in small hallways.
 // TODO: version of this that does it for your save data instead. 
@@ -112,15 +115,15 @@ fn open_map_debug_screen(state: *State, save_to_file: bool, keep_wall: ?Wall) vo
     if keep_wall { keep_wall |
         it.wall = keep_wall;
     } else {
-        _0, forward, _1 := state.camera&.directions();
+        _0, forward, right := state.camera&.directions();
         // TODO: this is annoying. needed by cause remap_mouse_to_wall is lazy and can only cope with one axis
         if abs(forward.x) > abs(forward.z) {
             forward = vec3(@if(forward.x < 0, -1, 1),0,0);
         } else {
             forward = vec3(0,0,@if(forward.z < 0, -1, 1));
         };
-        pos := state.camera.pos + forward - vec3(0, 0.5, 0);
-        it.wall = Editor'wall_from_normal(pos, -forward, 1);
+        pos := state.camera.pos.floor() + forward - vec3(0, 0.5, 0);
+        it.wall = Editor'wall_from_normal(pos, -forward, 0.5);
     };
     buffer := create_terminal(state);
     
@@ -129,9 +132,12 @@ fn open_map_debug_screen(state: *State, save_to_file: bool, keep_wall: ?Wall) vo
     save_as_code(out, state.debug_map_objects&, (Some = lines));
     if save_to_file {
         // TODO: store this path on the state so it can be a cli arg
-        if !write_entire_file("examples/gpu/maze_game/map.fr", out.items()) {
+        path := "examples/gpu/maze_game/map.fr";
+        if !write_entire_file(path, out.items()) {
             println(out.items());
             println("FAILED TO WRITE");
+        } else {
+            @println("wrote %", path);
         };
     };
     buffer.clear_text();
@@ -160,13 +166,7 @@ fn reload_map_debug_screen(state: *State, save_to_file: bool) void = {
     
     in := @ref u8.list(temp());
     save_world(state, in);
-    each state.puzzles { it |
-        @if(it.suspended.is_none()) suspend(it);  // runs on_cleanup
-        a.dealloc(u8, it.suspended.unwrap());
-        sg.destroy(it.att);
-        sg.destroy(it.img);
-        sg.destroy(it.d_img);
-    };
+    destroy_all_puzzles(state);
     state.active_puzzles&.clear();
     
     puzzles, rooms := objects_to_world(state.debug_map_objects.items(), a);
@@ -175,7 +175,6 @@ fn reload_map_debug_screen(state: *State, save_to_file: bool) void = {
     // TODO: check first and error instead of crash if they deleted a special one
     state.find_special_puzzles();  
     each state.puzzles { it |
-        init_puzzle_texture(sg, it);
         it.suspended = (Some = empty());
     };
     load_world(state, in.items());

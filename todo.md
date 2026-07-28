@@ -2,6 +2,7 @@
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
+- graphics/app.fr: why both first_frame,init_called
 - `@if_let` doesn't work if the @tagged only has one case. 
 - experiment if macos shader cache just by hash of executable or is it by source of the shader 
   so i should try to not put funcid/type numbers in the generated shader code so the cache works better when developing? 

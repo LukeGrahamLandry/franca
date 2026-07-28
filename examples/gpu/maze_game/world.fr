@@ -23,6 +23,7 @@ Puzzle :: @struct {
     img: Sg.Image;
     att: Sg.Attachments;
     d_img: Sg.Image;
+    have_textures: bool;
     
     state: rawptr;
     name: PuzzleType;
@@ -146,6 +147,25 @@ fn set_defaults_post_init(it: *Puzzle, sg: *Sg.Self) void = {
         };
         @case(.FarmGame) => {
             s := it.cast(.FarmGame);
+            @if_let(it.extra&) fn FarmGame(it) => {
+                Instance :: import("@/examples/gpu/maze_game/puzzles/farm.fr").Instance;
+                s.reset = (v = reset_farm, u = Instance.raw_from_ptr(it));
+                s.world&.drop();
+                s'reset'v(s.reset.u, s.world&);
+                s.world&.next_round(s.reset);
+                reset_farm :: fn(u: rawptr, w: *import("@/examples/gpu/farm_game.fr").World) void = {
+                    it := Instance.ptr_from_raw(u);
+                    load_default_world(zeroed(rawptr), w);
+                    
+                    w.money = it.init.money;
+                    each w.shelves { it |
+                        it.item = .None;
+                    };
+                    range(0, min(it.init.shelves.len, w.shelves.len)) { i |
+                        w.shelves[i].item = it.init.shelves[i];
+                    };
+                }
+            };
             s.world.paused = true;
             s.force_draw = true;
         };
@@ -203,6 +223,9 @@ fn set_defaults_post_init(it: *Puzzle, sg: *Sg.Self) void = {
 PUZZLE_LOGICAL_WIDTH :: 1024;
 
 fn init_puzzle_texture(sg: *Sg.Self, it: *Puzzle) void = {
+    @debug_assert(!it.have_textures);
+    it.have_textures = true;
+    
     // TODO: this is a paste from tests/gpu.fr
     W :: PUZZLE_LOGICAL_WIDTH; H :: W;
     image: Sg.Image = sg.make(
@@ -230,6 +253,14 @@ fn init_puzzle_texture(sg: *Sg.Self, it: *Puzzle) void = {
     it.img = image;
     it.att = at;
     it.d_img = dimage;
+}
+
+fn destroy_puzzle_texture(sg: *Sg.Self, it: *Puzzle) void = {
+    it.have_textures = false;
+    sg.destroy(it.att);
+    sg.destroy(it.img);
+    sg.destroy(it.d_img);
+    it.att.id = 0; it.img.id = 0; it.d_img.id = 0;
 }
 
 fn init_puzzle_state($Name: PuzzleType, it: *Puzzle, sg: *Sg.Self, a: Alloc) void = {

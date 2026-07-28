@@ -1,4 +1,15 @@
 
+## (Jul 27)
+
+- farm: InitialWorld
+- creating all the app textures at the beginning and keeping forever won't scale to big world
+- the way i was calling frame() in restore was wrong anyway because not hack_disable_commit_for_headless_app (and can't add it because VALIDATE_UPDATEBUF_ONCE)
+- in restore, just doing call_init() instead of frame() fixes the flicker, 
+  but only if i save the textures of suspended screens which i don't want to do. 
+  actually the only reason it matters is the rooms are setup wrong and let you see a puzzle the instant it loads.
+- allow opening a screen in fullscreen so you don't have to deal with positioning yourself if you don't want to. 
+  for now keeping it the square texture and doing a convoluted thing to center it. 
+
 ## (Jul 26)
 
 - load the world map as data. overkill rn but i think it opens up better things. 

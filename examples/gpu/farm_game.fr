@@ -13,6 +13,7 @@ State :: @struct(
     img: Sg.Image,
     force_draw: bool,
     prev_frame_time: f64,
+    reset: @struct(v: @FnPtr(u: rawptr, w: *World) void, u: rawptr),  // for maze_game embedding
 );
 
 World :: @struct(
@@ -93,7 +94,7 @@ config :: @struct {
     );
 };
 
-fn load_default_world(self: *World) void = {
+fn load_default_world(_: rawptr, self: *World) void = {
     allocator := general_allocator();
     self[] = (
         player = (pos = (x = 150.0, y = 150.0)),
@@ -165,12 +166,12 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         clear_value = (r = 0.3, g = 0.3, b = 0.3, a = 1.0),
     );
     
-    state.world&.load_default_world();
-    
-    state.world&.next_round();
+    state.reset = (v = load_default_world, u = zeroed(rawptr));
+    state'reset'v(state.reset.u, state.world&);
+    state.world&.next_round(state.reset);
 };
 
-fn next_round(world: *World) void = {
+fn next_round(world: *World, reset: FieldType(State, .reset)) void = {
     extra_time := world.round_timer;
     world.round_timer = world.next_round_timer;
     world.next_round_timer -= 5;
@@ -197,15 +198,10 @@ fn next_round(world: *World) void = {
         };
     } else {
         prev_round := world.round_number;
-        world.requests&.drop();
-        world.farm&.drop();
-        world.sprinklers&.drop();
-        world.shops&.drop();
-        world.shelves&.drop();
-        world.msg&.drop();
+        world.drop();
         
-        world.load_default_world();
-        world.next_round();
+        reset'v(reset.u, world);
+        world.next_round(reset);
     };
 }
 
@@ -294,7 +290,7 @@ do_update :: fn(state: *State) void = {
     w.msg_timer -= dt;
     w.round_timer -= dt;
     if state.world.round_timer <= 0 {
-        state.world&.next_round();
+        state.world&.next_round(state.reset);
     };
     if state.world.msg_timer <= 0 {
         state.world.msg.len = 0;
@@ -683,7 +679,7 @@ fn do_interact(state: *State) void = {
             price := config.crops[crop.type.raw()].sale;
             state.world.money += price;
             if r.len == 0 {
-                state.world&.next_round();
+                state.world&.next_round(state.reset);
             };
             @say("sold % for % rubles", crop.type, price);
         };
@@ -718,8 +714,11 @@ fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sg.destroy_pipeline(state.pipe&);
     state.draw&.destroy(sg, general_allocator());
     sg.destroy(state.img);
-    
-    w := state.world&;
+    state.world&.drop();
+}
+
+fn drop(w: *World) void = {
+    w.shops&.drop();
     w.farm&.drop();
     w.shelves&.drop();
     w.sprinklers&.drop();

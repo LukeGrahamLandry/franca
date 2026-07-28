@@ -12,6 +12,7 @@ State :: @struct {
     puzzles: []Puzzle;
     active_room: i64;
     puzzle_focus: ?i64;
+    child_fullscreen: bool;
     dirty: bool;
     screen_size: Vec2;
     inspect_terminal_puzzle_index: i64;
@@ -48,6 +49,42 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.dirty = state.dirty || state.camera.delta_pos.norm() != 0;
     
     if Easy'should_skip_frame(sapp, state.dirty&) {
+        return();
+    };
+    
+    pass_action := zeroed(Sg.PassAction);
+    pass_action.colors&[0] = (
+        load_action = .CLEAR,
+        clear_value = (r = 0.3, g = 0.3, b = 0.3, a = 1.0),
+    );
+    
+    sgl := state.draw&;
+    sgl.defaults();
+    sgl.viewport(0.intcast(), 0.intcast(), state.app.width().intcast(), state.app.height().intcast(), true);
+    sgl.load_pipeline(state.pipe);
+    sgl.load_identity();
+    
+    if state.child_fullscreen {
+        sgl.texturing_enabled = true;
+        it := state.puzzles[state.puzzle_focus.unwrap()]&;
+        sgl.texture(it.img, (id = 0));
+        aspect := state.camera.perspective.aspect;
+        c1, c2 := @if(aspect > 1, 
+            (vec2(-1/aspect, -1), vec2(1/aspect, 1)),
+            (vec2(-1, -aspect), vec2(1, aspect)));
+        sgl.color = pack_rgba(255,255,255,255);
+        sgl.begin(.QUADS);
+        sgl.v2f_t2f(c1.x, c1.y, 0, 1);
+        sgl.v2f_t2f(c2.x, c1.y, 1, 1);
+        sgl.v2f_t2f(c2.x, c2.y, 1, 0);
+        sgl.v2f_t2f(c1.x, c2.y, 0, 0);
+        sgl.end();
+        sgl.texturing_enabled = false;
+        
+        Easy'glue_begin_pass(sapp, sg, pass_action);
+        sgl.draw_layer(sg, 0);
+        sg.end_pass();
+        sg.commit();
         return();
     };
 
@@ -111,18 +148,11 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         };
     };
     
-    sgl := state.draw&;
-    
-    sgl.defaults();
-    sgl.viewport(0.intcast(), 0.intcast(), sapp.width().intcast(), sapp.height().intcast(), true);
-    sgl.load_pipeline(state.pipe);
-    sgl.load_identity();
     write_camera(state.camera&, sgl);
     
     sgl.begin(.QUADS);
     
-    // TODO: render adjacent rooms and always layout the world so theres a filler room with no puzzles between interesting rooms so its cheap to render two. 
-    
+    // TODO: merge all the walls into one mesh and send it to gpu once?
     each state.rooms { room |
     each room.walls { wall |
         sgl.color = wall.c;
@@ -148,7 +178,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     for state.active_puzzles { i |
         it := state.puzzles[i]&;
         c := @if(i == focus, pack_rgba(255,255,255,255), pack_rgba(0,0,0,255));
-        draw_puzzle_wall(it, c, -0.001, 0.04) { p |
+        draw_puzzle_wall(it, c, -0.003, 0.04) { p |
             sgl.v3f(p);
         };
     };
@@ -184,11 +214,6 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     have_inventory := inventory_draw_ui(state, sgl);
     
-    pass_action := zeroed(Sg.PassAction);
-    pass_action.colors&[0] = (
-        load_action = .CLEAR,
-        clear_value = (r = 0.3, g = 0.3, b = 0.3, a = 1.0),
-    );
     Easy'glue_begin_pass(sapp, sg, pass_action);
     sgl.draw_layer(sg, 0);
     @if(have_inventory) sgl.draw_layer(sg, 1);
@@ -196,6 +221,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sg.commit();
 };
 
+// TODO: there's like junk pixels around the edges somehow?
 fn inventory_draw_ui(state: *State, sgl: *Sgl.Self) bool = {
     if state.inventory&.is(.FarmGame) && state.inventory.FarmGame&.is(.None) {
         return false;
@@ -327,6 +353,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         if state.puzzle_focus.is_some() {
             state.set_focus(.None);
         } else {
+            state.child_fullscreen = event.modifiers.get(.alt) == 1;
             state.set_focus(choose_focus(state, state.screen_size/2, 2));
         };
         return();
@@ -334,6 +361,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     
     if event.type == .MOUSE_DOWN && event.mouse_button == .MIDDLE && state.puzzle_focus.is_none() {
         if choose_focus(state, state.screen_size/2, 2) { i |
+            state.child_fullscreen = event.modifiers.get(.alt) == 1;
             return state.set_focus(Some = i);
         };
     };
@@ -346,10 +374,12 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     
     @if(event.type != .RESIZED)
     if state.puzzle_focus { i |
+        @if(!state.child_fullscreen)
         if event.type == .MOUSE_DOWN && event.mouse_button == .MIDDLE {
             mouse := vec2(event.mouse_x, event.mouse_y);
             if choose_focus(state, mouse, 0.75) { j |
                 if i != j {
+                    state.child_fullscreen = event.modifiers.get(.alt) == 1;
                     return state.set_focus(Some = j);
                 }
             } else {
@@ -418,6 +448,7 @@ fn set_focus(state: *State, it: ?i64) void = {
     if it { i |
         record_click(state, i);
     } else {
+        state.child_fullscreen = false;
         if I != state.inspect_terminal_puzzle_index {
             state.check_auto_save();
         };
@@ -436,7 +467,20 @@ fn check_auto_save(state: *State) void = {
 
 fn remap_and_push_event(state: *State, it: *Puzzle, event: Sapp.Event) void = {
     mouse := vec2(event.mouse_x, event.mouse_y);
-    m := remap_mouse_to_puzzle(it, state.camera&, mouse, state.screen_size);
+    m := @if(state.child_fullscreen, {
+        real_frac := mouse / state.screen_size;
+        aspect := state.camera.perspective.aspect;
+        c1, c2 := @if(aspect > 1, 
+            (vec2(-1/aspect, -1), vec2(1/aspect, 1)),
+            (vec2(-1, -aspect), vec2(1, aspect)));
+        c1 = c1 / 2 + vec2(0.5);
+        c2 = c2 / 2 + vec2(0.5);
+        fake_size := c2 - c1;
+        fake_frac := (real_frac - c1) / fake_size;
+        fake_frac * PUZZLE_LOGICAL_WIDTH.float().cast()
+    }, {
+        remap_mouse_to_puzzle(it, state.camera&, mouse, state.screen_size)
+    });
     
     event.mouse_x = m.x;
     event.mouse_y = m.y;
@@ -566,8 +610,6 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     
     state.find_special_puzzles();
     each state.puzzles { it |
-        // TODO: i guess don't need to init all the textures up front either
-        init_puzzle_texture(sg, it);
         it.suspended = (Some = empty()); // :EmptySaveDataMeansDefault
     };
     load_world_file(state);
@@ -626,7 +668,7 @@ fn suspend_for_room_change(state: *State, old_active: []i64) void = {
     old_active&.unordered_retain(fn(it) => !state.active_puzzles.items().contains(it[]));
     
     for old_active { i |
-        suspend(state.puzzles[i]&);
+        suspend(state, state.puzzles[i]&, false);
     };
     
     // this is the least wasteful time to save because it has to suspend everything, so saves an extra reset of `new_active`
@@ -637,38 +679,46 @@ fn suspend_for_room_change(state: *State, old_active: []i64) void = {
     };
 }
 
-fn suspend(it: *Puzzle) void = {
+fn suspend(state: *State, it: *Puzzle, for_save_system: bool) void = {
     @assert(it.suspended.is_none(), "already has suspend data");
     
     a := general_allocator();
     ctx: Save.StoreCtx = (out = @ref u8.list(a));
     as_const(it) { $Name |
         store(ctx&, Get(Name).App, it.cast(Name));
-        // TODO: maybe everyone should just get an arena
-        it.suspended = (Some = ctx.out.shrink_to_fit());
         it.app.call_cleanup();
-        a.dealloc_one(Sapp.Self, it.app);
         a.dealloc_one(Get(Name).App, it.cast(Name));
-        it.app = zeroed(@type it.app);
-        it.state = zeroed(@type it.state);
     };
+    
+    it.suspended = (Some = ctx.out.shrink_to_fit());
+    a.dealloc_one(Sapp.Self, it.app);
+    it.app = zeroed(@type it.app);
+    it.state = zeroed(@type it.state);
+    
+    if !for_save_system {
+        // TODO: could me more efficient and pool them here before going to gfx because all textures are the same.
+        destroy_puzzle_texture(state.sg, it);
+    };  // else: intend to immediately restore() so don't bother
 }
 
 fn restore(state: *State, it: *Puzzle) void = {
     @assert(it.suspended.is_some(), "restore() but already running");
     save_data := it.suspended&.take().unwrap();
+    if !it.have_textures {
+        init_puzzle_texture(state.sg, it);
+    };
     
     as_const(it) { $Name |
         init_puzzle_state(Name, it, state.sg, general_allocator());
         
         it.app.hack_no_reset_temp_for_headless = true;
-        // TODO: i don't want it to write the texture here. 
-        //       i want to keep the old one so don't have to force dirty. 
-        //       but do need to call on_init to setup the defaults. 
-        //       which would be fine if i make the rule that temp() 
-        //       is reset between on_init and first frame. 
-        it.app.frame();
+        // TODO: for consistancy, should always reset temp after init
+        it.app.first_frame = false;
+        it.app.call_init();
         set_defaults_post_init(it, state.sg);
+        
+        // textures are unloaded when suspended so need to rerender even tho state should be the same as it was before. 
+        @if(Name == .FarmGame, { it.cast(Name)[].force_draw = true; }, { it.cast(Name)[].dirty = true; }); 
         
         if save_data.len == 0 {
             // :EmptySaveDataMeansDefault
@@ -682,10 +732,6 @@ fn restore(state: *State, it: *Puzzle) void = {
         @assert(result&.is(.Ok), "failed load: %", result.Err);
         @assert_eq(ctx.in.len, 0, "didn't consume all bytes; %", Name);
         general_allocator().dealloc(u8, save_data);
-        
-        // shouldn't need to mark dirty. still have the old texture and the idea is that state doesn't change when saved. 
-        // tho maybe for the ones that tick it could be cool to have them tick while you're away
-        // becuase theres often a faster way to simulate a bunch of ticks at once (life,stackie)
     };
 }
 
@@ -714,7 +760,7 @@ fn save_world(state: *State, out: *List(u8)) void = {
     );
     each state.puzzles { it |
         active := it.suspended.is_none();
-        @if(active) suspend(it);
+        @if(active) suspend(state, it, true);
         data := it.suspended.unwrap();
         save.puzzles&.push(
             type = it.name,
@@ -758,7 +804,7 @@ fn load_world(state: *State, save_data: []u8) void = {
             if it.name == save.type {
             it.clicked = save.clicked;
             active := it.suspended.is_none();
-            @if(active) suspend(it);
+            @if(active) suspend(state, it, true);
             a.dealloc(u8, it.suspended.unwrap());
             it.suspended = (Some = save.data.shallow_copy(a));
             @if(active) restore(state, it);
@@ -794,11 +840,16 @@ fn load_world_file(state: *State) void = {
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sg.destroy_pipeline(state.pipe&);
     state.draw&.destroy(sg, general_allocator());
+    destroy_all_puzzles(state);
+    state.active_puzzles&.drop();
+}
+
+fn destroy_all_puzzles(state: *State) void = {
     each state.puzzles { it |
-        if it.suspended.is_none() {
-            it.app.call_cleanup();
-        };
+        @if(it.suspended.is_none()) suspend(state, it, false);
+        general_allocator().dealloc(u8, it.suspended.unwrap());
     };
+    state.puzzles = empty();
 }
 
 main :: fn() void = Easy'start(State);
