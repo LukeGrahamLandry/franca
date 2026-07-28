@@ -309,7 +309,6 @@ fn redetect_active_room(state: *State) void = {
             state.active_puzzles&.push(state.inspect_terminal_puzzle_index);
         };
     };
-    //@println("adjacent: %; active: %;", room.adjacent_rooms, state.active_puzzles.items());
     
     suspend_for_room_change(state, old_active);
 }    
@@ -319,11 +318,14 @@ fn choose_focus(state: *State, mouse: Vec2, error_margin: f32) ?i64 = {
     s := PUZZLE_LOGICAL_WIDTH.float().cast();
     center := vec2(s) / 2;
     best_distance: f32 = s * error_margin;
+    look_dir, _0, _1 := state.camera&.directions();
     for state.active_puzzles { check |
         it := state.puzzles[check]&;
         m := remap_mouse_to_puzzle(it, state.camera&, mouse, state.screen_size);
         check_distance := norm(m - center);
-        if check_distance < best_distance {
+        // TODO: should be that you can't do it through walls at all but this thing with the normal is better than nothing (at least until i want to allow some that are double sided)
+        w := it.wall&.vectors();
+        if check_distance < best_distance && dot(look_dir, w.normal) < 0 {
             i = (Some = check);
             best_distance = check_distance;
         };
@@ -423,7 +425,7 @@ fn inventory_pickup(state: *State) bool = {
                         @if_let(state.inventory&) fn FarmGame(src) => {
                             dest := shelf.item&;
                             t := src[]; src[] = dest[]; dest[] = t;
-                            self.force_draw = true;
+                            self.dirty = true;
                             return true;
                         };
                     };
@@ -540,16 +542,21 @@ fn remap_mouse_to_wall(wall: *Wall, c: *Camera, mouse: Vec2, screen: Vec2) Ty(Ve
     hit := l0 + l*d;
     
     // now i need to know where that point in space is in the app's local coordinates
-    // what i actually want is to change the basis of hit to (wall_right, wall_up, n)
+    
     lo, hi := (w.lo, w.hi);
     wall_size := abs(hi - lo);
     frac := (hi - hit) / wall_size;
-    
     m := @if_else {
         @if(wall_size.x == 0) => vec2(@if(n.x < 0, 1 - frac.z, frac.z), frac.y);
         @if(wall_size.z == 0) => vec2(@if(n.z < 0, frac.x, 1 - frac.x), frac.y);
         @if(wall_size.y == 0) => vec2(@if(n.y < 0, frac.x, 1 - frac.x), 1 - frac.z);
-        @else => vec2(frac.x, frac.z);  // TODO: real basis thing so it works when not axis aligned
+        @else => {
+            // :NotNormalized
+            // this would work for all the cases above but is slower. 
+            // TODO: cache the inverse matrix for this puzzle
+            local := change_basis((w.right, w.up, w.normal), hit - wall.v&[0]);
+            vec2(1 + local.x, -local.y)
+        };
     };
     (hit, m)
 }
@@ -718,7 +725,7 @@ fn restore(state: *State, it: *Puzzle) void = {
         set_defaults_post_init(it, state.sg);
         
         // textures are unloaded when suspended so need to rerender even tho state should be the same as it was before. 
-        @if(Name == .FarmGame, { it.cast(Name)[].force_draw = true; }, { it.cast(Name)[].dirty = true; }); 
+        it.cast(Name)[].dirty = true;
         
         if save_data.len == 0 {
             // :EmptySaveDataMeansDefault
@@ -859,3 +866,65 @@ driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics2(vtable, @sou
 #use("@/examples/gpu/maze_game/world.fr");
 Save :: import("@/examples/gpu/maze_game/save.fr");
 #use("@/examples/gpu/maze_game/inspect.fr");
+
+fn change_basis(col: Array(Vec3, 3), v: Vec3) Vec3 = {
+    m := zeroed(Sgl.Matrix);
+    range(0, 3) { c |
+        range(0, 3) { r |
+            m&[r, c] = col&[c]&[r];
+        };
+    };
+    m := inverse(m&, 3);
+    v := vec4(v.x, v.y, v.z, 0);
+    v := m * v;
+    vec3(v.x, v.y, v.z)
+}
+
+fn inverse(m: *Sgl.Matrix, s: i64) Sgl.Matrix = {
+    result := zeroed(Sgl.Matrix);
+    det := determinant(m, s);
+    @if(det == 0) return(result);
+
+    range(0, s) { r |
+        range(0, s) { c |
+            result&[c, r] = cofactor(m, r, c, s) / det;
+        };
+    };
+    result
+}
+
+fn cofactor(m: *Sgl.Matrix, row: i64, col: i64, s: i64) f32 = {
+    sign: f32 = @if((row + col).umod(2) == 0, 1, -1);
+    m2 := submatrix(m, row, col, s);
+    determinant(m2&, s - 1) * sign
+}
+
+fn determinant(m: *Sgl.Matrix, s: i64) f32 = {
+    if s == 2 {
+        return((m[0, 0] * m[1, 1]) - (m[1, 0] * m[0, 1]));
+    };
+    
+    det: f32 = 0;
+    range(0, s) { r |
+        det += m[r, 0] * cofactor(m, r, 0, s);
+    };
+    det
+}
+
+fn submatrix(m: *Sgl.Matrix, row: i64, col: i64, s: i64) Sgl.Matrix = {
+    result := zeroed(Sgl.Matrix);
+    rr := 0;
+    range(0, s) { r |
+        if r != row {
+            cc := 0;
+            range(0, s) { c |
+                if c != col {
+                    result&[rr, cc] = m[r, c];
+                    cc += 1;
+                };
+            };
+            rr += 1;
+        };
+    };
+    result
+}

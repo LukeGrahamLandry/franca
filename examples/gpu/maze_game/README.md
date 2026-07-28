@@ -79,9 +79,9 @@ the whole game in a screen so you get to be in a different place in the world an
 - config to lower memo table size for Chess/Life instances for puzzles that don't need big perf. 
   i guess on_init has to look at the state struct because normal path will zero init which can use default 
   and the game can poke in smaller numbers early. 
-- the mandelbrot square flickers red on the frame where life gets suspended. which could give away the hidden puzzle early. 
 - fix the rooms. life unloads when you can still see it in the blue hallway 
   and the blue corner isn't in any room at all. 
+  and you can see mandelbrot square flicker on the first frame it resumes. 
 - takes so long to compile (2300ms -safe) 
   - filtering out the apps i dont use yet helped, ~1750, but still
     half of that is FEAT_REPL for terminal but once i add circuit/gui.fr i'll need the compiler anyway so not really worth changing. 
@@ -96,7 +96,7 @@ the whole game in a screen so you get to be in a different place in the world an
   and have to go somewhere else where it teaches you how to solve that type of thing. 
 - make the walls look less flat
 - allow copy from child app, don't just always clear app.requests
-- allow screens in non-cardinal directions
+- wall_from_normal: allow vertical tilt (y != 0 but not full horizontal)
 - save system
   - stutter when changing rooms with Life is unplayable
   - instead of needing to remember to change save_file_magic, 
@@ -163,6 +163,8 @@ the whole game in a screen so you get to be in a different place in the world an
 - preserve the legal component of movement when diagonal against a wall
 - maybe child_fullscreen should send resize event and stop doing force_render_target 
   and stop remapping events and just directly run that child. would probably be less code. 
+  - stopping other puzzles in the room from ticking is either a bad inconsistancy or a good performance thing. 
+    if i do that, might want to suspend so they don't get one frame with a big delta t. 
 - discoverable interface for child_fullscreen
 - farm
   - positions use Vec2 and pass_action be a local
@@ -177,3 +179,5 @@ the whole game in a screen so you get to be in a different place in the world an
 - chess repitition draw won't work when suspend because it's not in fen
 - instead of each app type needing to deal with unlockable door, have one that points at a link=xxx with different condition. 
 - comptime validate that map.fr init data parses (ex. chess fen, life pattern)
+- the objects_to_world MAP ERROR checks should be shown in game when using inspect terminal. 
+  and should have option to fail compilation can run that in ci. 

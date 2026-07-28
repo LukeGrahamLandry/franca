@@ -11,7 +11,7 @@ State :: @struct(
     h: i64,
     pressed: Array(bool, 4),
     img: Sg.Image,
-    force_draw: bool,
+    dirty: bool,
     prev_frame_time: f64,
     reset: @struct(v: @FnPtr(u: rawptr, w: *World) void, u: rawptr),  // for maze_game embedding
 );
@@ -140,7 +140,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     allocator := general_allocator();
     sapp.set_window_title("Arstotzkan Farmer 4");
     state.img = sg.make(bake_texture());
-    state.force_draw = true;
+    state.dirty = true;
     state.draw&.setup(
         allocator = allocator,
         sg = sg,
@@ -233,20 +233,21 @@ do_update :: fn(state: *State) void = {
     // TODO: maybe that should be an upgrade you buy. that would be fun. 
     w.player.pos.x += config.player_speed * w.player.dx * dt;
     w.player.pos.y += config.player_speed * w.player.dy * dt;
+    if w.player.dx != 0 || w.player.dy != 0 {
+        state.dirty = true;
+    };
     
     // The Farm
     drought := state.world&.check_hazard(config.drought, dt);
     unordered_retain state.world.farm& { planted | 
-        planted.timer -= dt;
-        if planted.timer <= 0 {
+        if tick_timer(state, planted.timer&, dt) {
             planted.crop.age = .Ready;
         };
         
         ok := true;
         @match(planted.drought&) {
             fn Some(t) => {
-                t[] -= dt;
-                if t[] <= 0 {
+                if tick_timer(state, t, dt) {
                     ok = false;
                     @fmt(state.world.msg&, "a drought killed your %\n", planted.crop.type);  
                     state.world.msg_timer = 3;
@@ -254,6 +255,7 @@ do_update :: fn(state: *State) void = {
             }
             fn None() => if drought && !state.world&.in_sprinkler(planted.pos) {
                 planted.drought = (Some = { xx := config.drought; xx.time });
+                state.dirty = true;
             }
         };
         
@@ -276,8 +278,7 @@ do_update :: fn(state: *State) void = {
             it.crow_timer = { xx := config.crow; xx.time };
         };
         if it.crow_hp != 0 {
-            it.crow_timer -= dt;
-            if it.crow_timer <= 0 {
+            if tick_timer(state, it.crow_timer&, dt) {
                 @fmt(state.world.msg&, "a crow took your %\n", it.item&.tag()); 
                 state.world.msg_timer = 3;
                 it.item = .None;
@@ -287,24 +288,34 @@ do_update :: fn(state: *State) void = {
     };
 
     // Rounds
-    w.msg_timer -= dt;
-    w.round_timer -= dt;
-    if state.world.round_timer <= 0 {
+    if tick_timer(state, w.round_timer&, dt) {
         state.world&.next_round(state.reset);
     };
+    w.msg_timer -= dt;
     if state.world.msg_timer <= 0 {
         state.world.msg.len = 0;
     };
     
     world := state.world&;
     // this is here instead of in next_round() because i want the paused end screen to show the state of the world with the progress you made before resetting. 
-    if world.round_timer == 1 && world.requests.len > 0 {
+    if world.round_timer < 1 && world.requests.len > 0 {
         @fmt(world.msg&, "Time's up. You lost on round %!", world.round_number);
         world.paused = true;
         world.msg_timer = 1;
-        state.prev_frame_time = timestamp_s();
     };
 };
+
+fn tick_timer(state: *State, t: *f64, dt: f64) bool = {
+    prev := t[];
+    t[] -= dt;
+    if prev.floor() != t[].floor() {
+        // this is used for timers that are shown on the screen (rounded as ints). 
+        // don't need to redraw if player didn't move and no timers changed. 
+        // TODO: could be even more obsessive and try to start new timers close on whole seconds so they all change on the same frame. rn this helps less the more is on your farm. 
+        state.dirty = true;
+    };
+    t[] <= 0
+}
 
 fn check_hazard(world: *World, hazard: HazardConfig, dt: f64) bool = {
     chance := hazard.chance + (hazard.scaling * world.round_number.float());
@@ -324,17 +335,13 @@ fn in_sprinkler(world: *World, plant: Pos) bool = {
 SOILD :: 7;  // tex
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
-    dirty := state.force_draw || !state.world.paused;
-    @if(Easy'should_skip_frame(sapp, dirty&)) return();
-    state.force_draw = false;
-    w := state.world&;
-    
     state.w = sapp.width();
     state.h = sapp.height();
-    if !state.world.paused {
+    w := state.world&;
+    if !w.paused {
         do_update(state);
     };
-    
+    @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
     sgl := state.draw&;
     sdtx := state.text.default_context&;
     
@@ -517,7 +524,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     if event.type == .KEY_DOWN && !event.key_repeat {
         if event.key_code == .P {
             state.world.paused = !state.world.paused;
-            state.force_draw = true;
+            state.dirty = true;
             state.prev_frame_time = timestamp_s();
         };
         
@@ -555,6 +562,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
 };
 
 fn do_interact(state: *State) void = {
+    state.dirty = true;
     player := state.world.player&;
     
     DONE :: return;

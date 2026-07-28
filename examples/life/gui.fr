@@ -185,8 +185,9 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         mouse_rel := mouse / state.uni.scale;
         pos := state.uni.pos + mouse_rel;
         // TODO: draw a line if moved the mouse multiple cells in one frame. 
-        state.memo&.set_pixel(v2(pos.x.int(), pos.y.int()), event.modifiers.get(.shift) == 0);
-        state.dirty = true;
+        grow_if_needed(state) {
+            state.memo&.set_pixel(v2(pos.x.int(), pos.y.int()), event.modifiers.get(.shift) == 0);
+        };
         return();
     };
 
@@ -385,13 +386,24 @@ fn tick(state: *State) void = {
         state.eval_speed = 1;
     };
 
+    grow_if_needed(state) {
+        state.memo&.eval(state.eval_speed, true);
+    };
+}
+
+fn grow_if_needed(state: *State, $body: @Fn() void) void = {
     state.dirty = true;
     old_size := state.memo.size;
-    state.memo&.eval(state.eval_speed, true);
+    body();
     new_size := state.memo.size;
-    if old_size != new_size {
-        factor := (new_size / old_size).intcast().float();
-        state.uni.pos += state.uni.canvas / factor;
+    if old_size < new_size {
+        factor := new_size / old_size;
+        grow := state.uni.canvas / 2;
+        while => factor > 1 {
+            state.uni.pos += grow;
+            factor /= 2;
+            grow *= 2;
+        };
         resize_canvas(state, state.sg, new_size);
     };
 }
@@ -424,12 +436,17 @@ fn recenter(state: *State) void = {
     state.uni.pos = zeroed(Vec(f64, 2));
 }
 
-set_pixel :: fn(memo: *Memo, pos: V2, value: bool) bool = {
-    size := memo.size;
-    @if(!hit_square(pos, v2(0), v2(size))) return(false);
+set_pixel :: fn(memo: *Memo, pos: V2, value: bool) void = {
+    if !hit_square(pos, v2(0), v2(memo.size)) {
+        @if(!value) return();
+        while => memo.size < 1.shift_left(29) && !hit_square(pos, v2(0), v2(memo.size)) {
+            memo.root = memo.zero_fill_grow(memo.root&, memo.size);
+            pos += v2(memo.size) / 2;
+            memo.size *= 2;
+        };
+    };
     memo.gc_reserve(memo.size.trailing_zeros());
-    memo.root = recur(memo, memo.root, size, v2(0), pos, value);
-    return true;
+    memo.root = recur(memo, memo.root, memo.size, v2(0), pos, value);
     
     // nodes are immutable because interned/reused.
     // to change a pixel need to rebuild the chain from root to base. 

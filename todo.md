@@ -2,13 +2,14 @@
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
+- figure out how to make my programs a real macos app. 
+  rn Terminal.app existing just to run my terminal uses more cpu at rest than mine does. 
+  only 2% of a core which is nothing but i don't like it and i have the luxury of being petty. 
 - graphics/app.fr: why both first_frame,init_called
 - `@if_let` doesn't work if the @tagged only has one case. 
 - experiment if macos shader cache just by hash of executable or is it by source of the shader 
   so i should try to not put funcid/type numbers in the generated shader code so the cache works better when developing? 
   init time difference is very visible in samply so you can tell if you hit the cache. 
-- life: initial screen with no cli args needs to let you draw
-- life: grow the board to let you draw if you click off the edge
 - generate a favicon because the error in console pisses me off
 - leak detector for gpu resources in on_cleanup
 - one of the hare tests broke in sr.ht when they took out the old version of ubuntu.

@@ -1,4 +1,12 @@
 
+## (Jul 28)
+
+- farm: can skip frames if rendered timer didn't change. 
+  makes the resting cpu if you do nothing without pausing 8% -> <1% of a core.  
+  pointless thing to be spending time on but makes be feel better 
+  because in maze_game it's reasonable to have a few going at once without actually playing them. 
+- remap_mouse_to_wall: allow non-axis-aligned, makes open_map_debug_screen less annoying
+
 ## (Jul 27)
 
 - farm: InitialWorld
@@ -9,6 +17,7 @@
   actually the only reason it matters is the rooms are setup wrong and let you see a puzzle the instant it loads.
 - allow opening a screen in fullscreen so you don't have to deal with positioning yourself if you don't want to. 
   for now keeping it the square texture and doing a convoluted thing to center it. 
+- life: grow the board to let you draw if you click off the edge. 
 
 ## (Jul 26)
 
