@@ -127,6 +127,17 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                         on_ground = false;
                     };
                 };
+                
+                each it.locks { lock |
+                    if lock.locked {
+                        v := lock.floor&.vectors();
+                        lo, hi := (v.lo, v.hi);
+                        hit := p.x > lo.x && p.x < hi.x && p.z > lo.z && p.z < hi.z;
+                        if hit {
+                            on_ground = false;
+                        };
+                    };
+                };
             };
         };
         
@@ -439,7 +450,8 @@ fn inventory_pickup(state: *State) bool = {
 }
 
 fn set_focus(state: *State, it: ?i64) void = {
-    I := it || (state.puzzle_focus || -1);
+    prev := state.puzzle_focus;
+    I := it || (prev || -1);
     state.puzzle_focus = it;
     state.app.lock_mouse(!it.is_some());
     // TODO: you still keep moving if you were holding the button while pressing escape
@@ -453,6 +465,31 @@ fn set_focus(state: *State, it: ?i64) void = {
         state.child_fullscreen = false;
         if I != state.inspect_terminal_puzzle_index {
             state.check_auto_save();
+        };
+    };
+    
+    if prev { i |
+        update_locked_tiles(state, i);
+    };
+}
+
+// TODO: this won't work for ones that can change while you're not focusing them. 
+//       but changing it will kinda break the farm ones because you could get stuck if you forget to pause it. 
+// TODO: the `locked` in the save file will desync if you add/remove to the middle of the list in the map. 
+// TODO: move this to the individual puzzles/*.fr
+fn update_locked_tiles(state: *State, i: i64) void = {
+    it := state.puzzles[i]&;
+    each it.locks { lock |
+         lock.locked = @match(it.name) {
+            fn Mandelbrot() => @match(lock.cond) {
+                fn TargetColour(c) => !check_solved(it.cast(.Mandelbrot), c);
+                @default => true;
+            };
+            fn FarmGame() => @match(lock.cond) {
+                fn FarmRound(n) => it.cast(.FarmGame)[].world.round_number < n;
+                @default => true;
+            };
+            @default => true;
         };
     };
 }
@@ -754,10 +791,14 @@ SaveFile :: @struct {
         link: i64;
         data: []u8;
         clicked: bool;
+        locked_mask: i64;  // TODO: maybe these should have their own `link` too so stable when you add one. 
     });
 };
 
 fn save_world(state: *State, out: *List(u8)) void = {
+    if state.puzzle_focus { i |
+        update_locked_tiles(state, i);
+    };
     save: SaveFile = (
         magic = SaveFile.MAGIC, 
         camera = state.camera,
@@ -769,11 +810,18 @@ fn save_world(state: *State, out: *List(u8)) void = {
         active := it.suspended.is_none();
         @if(active) suspend(state, it, true);
         data := it.suspended.unwrap();
+        locked_mask := -1;
+        enumerate it.locks { i, it |
+            if !it.locked {
+                locked_mask = locked_mask.bit_and(bit_not(1.shift_left(i)));
+            };
+        };
         save.puzzles&.push(
             type = it.name,
             link = it.link, 
             data = data.shallow_copy(temp()), // bleh, might restore immediately which would free before it gets written out. wasteful. 
             clicked = it.clicked,
+            locked_mask = locked_mask,
         );
         @if(active) restore(state, it);
     };
@@ -814,6 +862,9 @@ fn load_world(state: *State, save_data: []u8) void = {
             @if(active) suspend(state, it, true);
             a.dealloc(u8, it.suspended.unwrap());
             it.suspended = (Some = save.data.shallow_copy(a));
+            enumerate it.locks { i, it |
+                it.locked = save.locked_mask.bit_and(1.shift_left(i)) != 0;
+            };
             @if(active) restore(state, it);
             } else {
                 @println("corrupted save: link=% expected type=% but save.type=%", save.link, it.name, save.type);
@@ -852,6 +903,7 @@ fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 }
 
 fn destroy_all_puzzles(state: *State) void = {
+    set_focus(state, .None);
     each state.puzzles { it |
         @if(it.suspended.is_none()) suspend(state, it, false);
         general_allocator().dealloc(u8, it.suspended.unwrap());

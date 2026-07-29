@@ -46,6 +46,7 @@ mandelbrot
 - zoom so the whole thing matches the colour of a background wall and then you can walk through it
 - the screen is one of the grid squares of chess and controls all of them and the one that needs to match to walk on a path is a different one
   - or the square you need to move to to win is a mandelbrot of the wrong colour and you have to change it before the chess lets you make that move. 
+- the screen is one of the 3d shelves for farmgame and you can't use until its the right colour
 
 terminal: 
 - an editor with a program that affects the world in some way.
@@ -160,7 +161,11 @@ the whole game in a screen so you get to be in a different place in the world an
   - better feedback when you're very close to getting the right colour
   - be more strict about number of matching pixels
 - don't let you clip through the diagonal between chess pieces
+  (the farm doors also have this problem)
 - preserve the legal component of movement when diagonal against a wall
+- do something if a puzzle change causes the place you were standing to become a collission. 
+  (life,mandelbrot,chess) so you don't get stuck. maybe each have a known safe point to teleport you to? 
+  or just move to closest valid tile. 
 - maybe child_fullscreen should send resize event and stop doing force_render_target 
   and stop remapping events and just directly run that child. would probably be less code. 
   - stopping other puzzles in the room from ticking is either a bad inconsistancy or a good performance thing. 
@@ -169,15 +174,12 @@ the whole game in a screen so you get to be in a different place in the world an
 - farm
   - positions use Vec2 and pass_action be a local
   - icon for crow and drought
-- better error messages (show line number) for load_text
 - same in game hot reloading inspect thing with the visual editor.fr
 - cli arg for world map. i like the idea of people being able to share levels.
-- don't make the app textures early, only on first load
 - for the ones that tick it could be cool to have them tick while you're away
   because theres often a faster way to simulate a bunch of ticks at once (life,stackie)
 - push_as_tls to hide cli args from the apps
 - chess repitition draw won't work when suspend because it's not in fen
-- instead of each app type needing to deal with unlockable door, have one that points at a link=xxx with different condition. 
 - comptime validate that map.fr init data parses (ex. chess fen, life pattern)
 - the objects_to_world MAP ERROR checks should be shown in game when using inspect terminal. 
   and should have option to fail compilation can run that in ci. 

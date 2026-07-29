@@ -2,7 +2,6 @@
 Instance :: @struct {
     colour: u32;
     msg: Str;
-    scale: f32;
 };
 
 App :: State;
@@ -12,7 +11,6 @@ fn collision(p: Vec3, it: *Instance, self: *App) bool = false;
 State :: @struct {
     colour: u32;
     msg: List(u8);
-    scale: f32;
     text: Sdtx.Self;
     dirty: bool;
 };
@@ -20,8 +18,10 @@ State :: @struct {
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
     sdtx := state.text.default_context&;
+    
+    sdtx.pos = vec2(0);
+    sdtx.glyph_size = scale_to_fit(state.msg.items());
     sdtx.color = state.colour;
-    sdtx.canvas(sapp, 1/state.scale);
     sdtx.put(state.msg.items());
     
     pass_action := zeroed(Sg.PassAction);
@@ -38,7 +38,6 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.colour = pack_rgba(255,255,255,255);
     state.msg = list(general_allocator());
-    state.scale = 3;
     state.dirty = true;
     state.text&.setup(
         allocator = general_allocator(),
@@ -47,6 +46,24 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         context = (max_commands = 1, char_buf_size = 512),
     );
 }
+
+scale_to_fit :: fn(msg: Str) Vec2 = {
+    line, col, max_col := (1, 0, 0);
+    for msg { c |
+        if c == "\n".ascii() {
+            line += 1;
+            max_col = max(col, max_col);
+            col = 0;
+        } else {
+            col += 1;
+        };
+    };
+    max_col = max(col, max_col);
+    
+    x := cast(1.0 / max_col.float());
+    y := cast(1.0 / line.float());
+    vec2(x, min(y, x * 2))
+};
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = ();
 driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());

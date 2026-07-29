@@ -1,4 +1,8 @@
 
+## (Jul 29)
+
+- hint: automatically set scale to fit all text
+
 ## (Jul 28)
 
 - farm: can skip frames if rendered timer didn't change. 
@@ -6,6 +10,9 @@
   pointless thing to be spending time on but makes be feel better 
   because in maze_game it's reasonable to have a few going at once without actually playing them. 
 - remap_mouse_to_wall: allow non-axis-aligned, makes open_map_debug_screen less annoying
+- instead of each app type needing to deal with unlockable door, have one that points at a link=xxx with different condition. 
+  - now i can have a mandelbrot that chooses between multiple directions. 
+  - farm: unlock door at certain round
 
 ## (Jul 27)
 
