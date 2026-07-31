@@ -1,55 +1,126 @@
 
-State :: @struct {
+MazeGameState :: State;
+State :: @rec @struct {
     HIGH_DPI :: true;
-    pipe: Sgl.Pipeline;
     app: *Sapp.Self;
-    draw: Sgl.Self;
     sg: *Sg.Self;
     prev_frame_time: f64;
-    camera: Camera;
     rooms: []Room;
     // they can be suspended (state pointers will be null) so only look at the ones in `active_puzzles`
     puzzles: []Puzzle;
-    active_room: i64;
-    puzzle_focus: ?i64;
-    child_fullscreen: bool;
-    dirty: bool;
-    screen_size: Vec2;
     inspect_terminal_puzzle_index: i64;
     trophy_hint_puzzle_index: i64;
+    default_player_puzzle_index: i64;
     active_puzzles: List(i64);
-    enable_cheats: bool;
-    inventory: GameItem;
     debug_map_objects: List(Editor.Object);
     last_save_timestamp: f64;
+    dt: f32;
+    
+    player: *Player #use;  // this points into one of the puzzle's state allocations. 
+    active_player_depth: i64;  // (0 or 1) because only top guy calls frame()
+    any_screens_dirty: bool;
+    frame_counter: i64;
 };
 
-fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
-    // before the drop frame check so the first move after idle isn't a jump
-    now := timestamp_s();
-    dt := (now - state.prev_frame_time).cast();
-    state.prev_frame_time = now;
+Player :: Get(.Player).State;
 
+fn tick_screens(state: *State) void = {
+    sg := state.sg;
     // TODO: without this, the app's on_render calls sg.commit() but for this program 
     //       i just want it to add passes and the commit happens once in the 3d on_render.
     //       if commit is called early, the 3d world walls etc. don't get drawn 
     //       (which is any frames where user.state.dirty=true without this hack). 
     //       solution might be headless app never calls commit and 
     //       the embeder needs to do it since logically it owns the Sg.Self anyway. 
+    prev := sg.hack_disable_commit_for_headless_app;
     sg.hack_disable_commit_for_headless_app = true;
+    state.any_screens_dirty = false;
     // important that they get to run their event handlers and decide if dirty before skipping the real rendering. 
-    for state.active_puzzles { i |
-        it := state.puzzles[i]&;
-        prev := sg.disabled_commit_calls;
-        it.app.frame();
-        dirty := sg.disabled_commit_calls != prev;
-        state.dirty = state.dirty || dirty;
+    dowhile {
+        // this refcellhell is because a Player moving can trigger redetect_active_room which will recalculate active_puzzles while looping.  
+        active_puzzles := state.active_puzzles.items().shallow_copy(temp());
+        
+        // trying to make sure any Player screens know they'll be dirty even if they're drawn early. 
+        // TODO: this isn't good enough when controlling a Player3 through Player2, 
+        //       the Player3 drawn in Player2 uses a stale texture when rotating (moving works tho). 
+        //       problem is Player2 not being marked dirty? in my specific world it works if swap Player2<->Player3 
+        //       so it's order dependent. so need to seperate out movement events from where decide to skip for non-dirty? 
+        //       because these deltas won't be set yet because events are queued until frame(). 
+        //       :NestedScreenDirty
+        d := state.any_screens_dirty&;
+        for active_puzzles { i |
+            it := state.puzzles[i]&;
+            as_const(it) { $Name |
+                s := it.cast(Name);
+                d[] = d[] || s.dirty;
+                @if(Name == .Player) {   // :NestedScreenDirty
+                    d[] = d[] || s.camera.delta_pos.norm_sq() != 0 || s.camera.delta_rot.norm_sq() != 0;
+                };
+            };
+        };
+        
+        for active_puzzles { i |
+            continue :: local_return;
+            it := state.puzzles[i]&;
+            if it.render_frame_index == state.frame_counter || it.suspended.is_some() {
+                // only reachable on frames where a child Player changed rooms. 
+                continue();
+            };
+            it.app.mouse.locked = state.app.mouse.locked;
+            it.app.mouse.shown = state.app.mouse.shown;
+        
+            it.render_frame_index = state.frame_counter;
+            prev := sg.disabled_commit_calls;
+            it.app.frame();
+            dirty := sg.disabled_commit_calls != prev;
+            state.any_screens_dirty = state.any_screens_dirty || dirty;
+            
+            r, a, A := (it.app.requests&, state.app.requests&, state.app);
+            if r.set_clipboard { it |
+                a.set_clipboard = (Some = it);
+            };
+            if r.mouse_locked != A.mouse.locked {
+                a.mouse_locked = r.mouse_locked;
+            } 
+            if r.mouse_shown != A.mouse.shown {
+                a.mouse_shown = r.mouse_shown;
+            };
+            it.app.clear_requests();
+        };
+        
+        done := true;
+        for state.active_puzzles { i |
+            it := state.puzzles[i]&;
+            done = done && it.render_frame_index == state.frame_counter;
+        };
+        !done
     };
-    sg.hack_disable_commit_for_headless_app = false;
-    state.dirty = state.dirty || state.camera.delta_pos.norm() != 0;
-    
-    if Easy'should_skip_frame(sapp, state.dirty&) {
-        return();
+    sg.hack_disable_commit_for_headless_app = prev;
+}
+
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    if state.active_player_depth == 0 {
+        state.frame_counter += 1;
+        state.puzzles[state.default_player_puzzle_index].render_frame_index = state.frame_counter;
+        // before the drop frame check so the first move after idle isn't a jump
+        now := timestamp_s();
+        state.dt = (now - state.prev_frame_time).cast();
+        state.prev_frame_time = now;
+        
+        tick_screens(state);
+        
+        state.dirty = false;
+        if Easy'should_skip_frame(sapp, state.any_screens_dirty&) {
+            return();
+        };
+    } else {
+        // TODO: (if not focused) could do better and only look at the active_screens that are in its view
+        // :NestedScreenDirty ugh, need to mix in state.dirty again because child Player won't have done events to see mouse move before the first time any_screens_dirty is done. 
+        state.dirty = state.dirty || state.any_screens_dirty;
+        if Easy'should_skip_frame(sapp, state.dirty&) {
+            // TODO: return();
+        };
+        state.any_screens_dirty = true;
     };
     
     pass_action := zeroed(Sg.PassAction);
@@ -64,9 +135,10 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sgl.load_pipeline(state.pipe);
     sgl.load_identity();
     
+    if state.puzzle_focus { puzzle_focus |
     if state.child_fullscreen {
         sgl.texturing_enabled = true;
-        it := state.puzzles[state.puzzle_focus.unwrap()]&;
+        it := state.puzzles[puzzle_focus]&;
         sgl.texture(it.img, (id = 0));
         aspect := state.camera.perspective.aspect;
         c1, c2 := @if(aspect > 1, 
@@ -87,6 +159,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sg.commit();
         return();
     };
+    };
 
     if !state.enable_cheats {
         state.camera.delta_pos.y = 0;
@@ -94,7 +167,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     only_flying := state.camera.delta_pos.x == 0 && state.camera.delta_pos.z == 0;
     moved := state.camera.delta_pos.norm_sq() != 0;
     prev_pos := state.camera.pos;
-    update_camera(state.camera&, dt);
+    update_camera(state.camera&, state.dt);
     
     if moved && !only_flying {
         break :: local_return;
@@ -152,7 +225,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         };
     
         start := timestamp();
-        state.redetect_active_room();
+        state.redetect_active_room(false);
         t := timestamp() - start;
         if t > 30 {
             @println("changed rooms in %ms", t);
@@ -292,10 +365,9 @@ fn inventory_draw_ui(state: *State, sgl: *Sgl.Self) bool = {
     true
 }
 
-fn redetect_active_room(state: *State) void = {
-    p := state.camera.pos;
+fn compute_active_room(state: *State, p: Vec3) i64 = {
     best_distance: f32 = 2000;
-    best := state.active_room;
+    best := state.rooms.len - 1;
     enumerate state.rooms { i, it |
         distance := norm_sq(p - it.bounds.center);
         r_sq := it.bounds.radius * it.bounds.radius;
@@ -304,24 +376,59 @@ fn redetect_active_room(state: *State) void = {
             best_distance = distance;
         };
     };
-    
-    // note: at first load (active_room,active_puzzles) are zero init so need to treat that as a room change. 
-    @if(best == state.active_room && state.active_puzzles.len != 0) return();
+    best
+}
+
+fn redetect_active_room(state: *State, first: bool) void = {
+    best := compute_active_room(state, state.camera.pos);
+    @if(best == state.active_room && !first) return();
     old_active := state.active_puzzles.items().shallow_copy(temp());
     
     state.active_room = best;
-    room := state.rooms[state.active_room]&;
+    
     state.active_puzzles&.clear();
-    for room.adjacent_rooms { r |
-        state.active_puzzles&.push_all(state.rooms[r].puzzles);
-    };
+    state.active_puzzles&.push(state.default_player_puzzle_index);
     if state.enable_cheats {
-        if !state.active_puzzles.items().contains(state.inspect_terminal_puzzle_index) {
-            state.active_puzzles&.push(state.inspect_terminal_puzzle_index);
-        };
+        state.active_puzzles&.push(state.inspect_terminal_puzzle_index);
     };
     
-    suspend_for_room_change(state, old_active);
+    again := false;
+    i := 0;
+    while => i < state.active_puzzles.len {
+        p := state.active_puzzles[i];
+        it := state.puzzles[p]&;
+        if it.name == .Player {
+            if it.suspended.is_none() {
+                s := it.cast(.Player);
+                s.active_room = compute_active_room(state, s.camera.pos);
+                room := state.rooms[s.active_room]&;
+                for room.adjacent_rooms { r |
+                    for state.rooms[r].puzzles { j |
+                        if !state.active_puzzles.items().contains(j) {
+                            state.active_puzzles&.push(j);
+                        };
+                    };
+                };
+            } else {
+                // loaded a player screen this frame, but have to wait for it to be
+                // restored before can know it's camera position to add other screens in its's adjacent rooms. 
+                again = true;
+            };
+        };
+        
+        i += 1;
+    };
+    
+    new_active := suspend_for_room_change(state, old_active);
+    if again && new_active.len != 0 {
+        // without first=true here it won't work after restoring a child Player if zero init active_room happens to be right. 
+        redetect_active_room(state, true);
+    };
+    
+    for state.active_puzzles { i |
+        it := state.puzzles[i]&;
+        @debug_assert(it.suspended.is_none(), "redetect_active_room: active puzzle is suspended i=% link=%", i, it.link);
+    };
 }    
 
 fn choose_focus(state: *State, mouse: Vec2, error_margin: f32) ?i64 = {
@@ -401,6 +508,8 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         };
     
         it := state.puzzles[i]&;
+        
+        @debug_assert_ne(it.link, LINK_DEFAULT_PLAYER, "the Player screen for default player should never be focused");
         remap_and_push_event(state, it, event[]);
         return();
     };
@@ -408,6 +517,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     state.dirty = true;
     fly_controller(state.camera&, event);
     if event.type == .RESIZED {
+        @debug_assert_eq(state.active_player_depth, 0);
         update_aspect(state.camera&, sapp);
         state.screen_size = vec2(sapp.framebuffer_width.float().cast(), sapp.framebuffer_height.float().cast());
     };
@@ -450,6 +560,10 @@ fn inventory_pickup(state: *State) bool = {
 }
 
 fn set_focus(state: *State, it: ?i64) void = {
+    if it { i |
+        p := state.puzzles.index(state.default_player_puzzle_index);
+    };
+
     prev := state.puzzle_focus;
     I := it || (prev || -1);
     state.puzzle_focus = it;
@@ -497,6 +611,8 @@ fn update_locked_tiles(state: *State, i: i64) void = {
 // not too often because suspend+resume everything is slow. 
 // generally this doesn't matter because quitting the game saves first but crashing is a risk.
 fn check_auto_save(state: *State) void = {
+    @if(state.active_player_depth > 0) return();
+    
     now := timestamp_s();
     if now - state.last_save_timestamp > 120 {
         state.last_save_timestamp = now;
@@ -504,9 +620,8 @@ fn check_auto_save(state: *State) void = {
     };
 };
 
-fn remap_and_push_event(state: *State, it: *Puzzle, event: Sapp.Event) void = {
-    mouse := vec2(event.mouse_x, event.mouse_y);
-    m := @if(state.child_fullscreen, {
+fn remap_mouse_to_puzzle(state: *State, it: *Puzzle, mouse: Vec2) Vec2 = {
+    @if(state.child_fullscreen, {
         real_frac := mouse / state.screen_size;
         aspect := state.camera.perspective.aspect;
         c1, c2 := @if(aspect > 1, 
@@ -519,19 +634,30 @@ fn remap_and_push_event(state: *State, it: *Puzzle, event: Sapp.Event) void = {
         fake_frac * PUZZLE_LOGICAL_WIDTH.float().cast()
     }, {
         remap_mouse_to_puzzle(it, state.camera&, mouse, state.screen_size)
-    });
+    })
+}
+
+fn remap_and_push_event(state: *State, it: *Puzzle, event: Sapp.Event) void = {
+    mouse := vec2(event.mouse_x, event.mouse_y);
+    m := remap_mouse_to_puzzle(state, it, mouse);
     
     event.mouse_x = m.x;
     event.mouse_y = m.y;
     
     if event.type == .MOUSE_MOVE {
-        d := m - it.prev_mouse;
+        // this needs to work when mouse locked (for PuzzleType.Player) which means the actual pos won't change. 
+        // so can't just remember last remapped mouse pos for `d := m - it.prev_mouse;` without the extra remap. 
+        // if try to switch back be careful of big jump on first focus when prev_mouse is outdated. 
+        // ... i gotta stop obsessing until i can actually see it in a profiler (which will never happen). 
+        d := vec2(event.mouse_dx, event.mouse_dy);
+        fake_prev_abs := mouse - d;
+        fake_prev_rel := remap_mouse_to_puzzle(state, it, fake_prev_abs);
+        d := m - fake_prev_rel;
         event.mouse_dx = d.x;
         event.mouse_dy = d.y;
     };
     
     it.app.events&.push(event);
-    it.prev_mouse = m;
 }
 
 // TODO: cache this, only need to recalucate on MOUSE_MOVE
@@ -598,23 +724,14 @@ fn remap_mouse_to_wall(wall: *Wall, c: *Camera, mouse: Vec2, screen: Vec2) Ty(Ve
     (hit, m)
 }
 
-fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
-    init_start := timestamp_s();
-    state.last_save_timestamp = init_start;
-    state.sg = sg; state.app = app;
-    app.desc.enable_clipboard = true;
-    state.dirty = true;
-    state.puzzle_focus = .None;
-    state.active_puzzles = list(general_allocator());
-    state.inventory = (FarmGame = .None);
-    
-    state.draw&.setup(
+fn init_draw(draw: *Sgl.Self, pipe: *Sgl.Pipeline, sg: *Sg.Self) void = {
+    draw.setup(
         allocator = general_allocator(),
         sg = sg,
         max_vertices = 1_000_000,
     );
     
-    init_pipeline(state.draw&, state.pipe&, sg, (
+    init_pipeline(draw, pipe, sg, (
         // alpha_to_coverage makes transparent pixels not write to depth buffer?
         // TODO: but dawn thinks `Multisample count (1) must be > 1 when alphaToCoverage is enabled.`
         //       but also my webgpu depth stuff is unfinished so maybe it will become clear when i work on that. 
@@ -634,14 +751,18 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
             ..,
         ),
     ));
+}
+
+fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
+    init_start := timestamp_s();
+    state.last_save_timestamp = init_start;
+    
+    state.sg = sg; state.app = app;
+    app.desc.enable_clipboard = true;
+    state.active_puzzles = list(general_allocator());
     
     app.lock_mouse(true);
     state.prev_frame_time = timestamp_s();
-    
-    state.camera.perspective = (aspect = 1, fovy = deg_to_rad(70), znear = 0.01, zfar = 1000.0);
-    update_aspect(state.camera&, app);
-    state.screen_size = vec2(app.framebuffer_width.float().cast(), app.framebuffer_height.float().cast());
-    state.camera.speed = (pos = 0.09 * 30.0, rot = 0.005 * 30.0);
     
     // TODO: `forever: Arena.Allocator;`
     a := general_allocator();
@@ -650,14 +771,29 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     puzzles, rooms := objects_to_world(map, a);
     state.rooms = rooms;
     state.puzzles = puzzles;
-    state.camera.pos = vec3(2, 1, -1);
     
     state.find_special_puzzles();
     each state.puzzles { it |
         it.suspended = (Some = empty()); // :EmptySaveDataMeansDefault
     };
     load_world_file(state);
-    state.redetect_active_room();
+    
+    if SOKOL_BACKEND == .WGPU {
+        // TODO: "[...] includes writable usage and another usage in the same synchronization scope." 
+        //       i assume that's the situation that metal manifests as the pink blur around the edges when you move. 
+        each state.puzzles { it |
+            if it.name == .Player && it.link != LINK_DEFAULT_PLAYER {
+                it.name = .Hint;
+                it.extra = (Hint = (msg = "todo: webgpu", colour = 0xffffffff));
+                it.suspended = (Some = empty());
+            };
+        };
+    };
+    
+    p := state.puzzles.index(state.default_player_puzzle_index);
+    state.active_puzzles&.push(state.default_player_puzzle_index);
+    restore(state, p);
+    state.redetect_active_room(true);
     
     // TODO: maybe don't waste memory until enable cheats
     state.debug_map_objects = list(general_allocator());
@@ -666,6 +802,7 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
     @println("on_init took %ms", timestamp() - int(init_start * 1000));
 }
 
+LINK_DEFAULT_PLAYER :: 1;
 fn find_special_puzzles(state: *State) void = {
     LINK_TERMINAL_INSPECT :: 2;
     LINK_HINT_TROHY :: 87;
@@ -673,6 +810,8 @@ fn find_special_puzzles(state: *State) void = {
     @assert_eq(state.puzzles[state.inspect_terminal_puzzle_index].name, .Terminal);
     state.trophy_hint_puzzle_index = state.puzzles.index_of(fn(it) => it.link == LINK_HINT_TROHY).expect("LINK_HINT_TROHY");
     @assert_eq(state.puzzles[state.trophy_hint_puzzle_index].name, .Hint);
+    state.default_player_puzzle_index = state.puzzles.index_of(fn(it) => it.link == LINK_DEFAULT_PLAYER).expect("LINK_DEFAULT_PLAYER");
+    @assert_eq(state.puzzles[state.default_player_puzzle_index].name, .Player);
 }
 
 fn record_click(state: *State, i: i64) void = {
@@ -706,7 +845,7 @@ fn record_click(state: *State, i: i64) void = {
     s.dirty = true;
 }
 
-fn suspend_for_room_change(state: *State, old_active: []i64) void = {
+fn suspend_for_room_change(state: *State, old_active: []i64) []i64 = {
     new_active := state.active_puzzles.items().shallow_copy(temp());
     new_active&.unordered_retain(fn(it) => !old_active.contains(it[]));
     old_active&.unordered_retain(fn(it) => !state.active_puzzles.items().contains(it[]));
@@ -721,9 +860,11 @@ fn suspend_for_room_change(state: *State, old_active: []i64) void = {
     for new_active { i |
         restore(state, state.puzzles[i]&);
     };
+    new_active
 }
 
 fn suspend(state: *State, it: *Puzzle, for_save_system: bool) void = {
+    //@println("SUSPEND(i=%, link=%)", ptr_diff(state.puzzles.ptr, it), it.link);
     @assert(it.suspended.is_none(), "already has suspend data");
     
     a := general_allocator();
@@ -732,6 +873,9 @@ fn suspend(state: *State, it: *Puzzle, for_save_system: bool) void = {
         store(ctx&, Get(Name).App, it.cast(Name));
         it.app.call_cleanup();
         a.dealloc_one(Get(Name).App, it.cast(Name));
+    };
+    if it.link == LINK_DEFAULT_PLAYER {
+        state.player = zeroed(@type state.player);
     };
     
     it.suspended = (Some = ctx.out.shrink_to_fit());
@@ -746,6 +890,7 @@ fn suspend(state: *State, it: *Puzzle, for_save_system: bool) void = {
 }
 
 fn restore(state: *State, it: *Puzzle) void = {
+    //@println("RESTORE(i=%, link=%)", ptr_diff(state.puzzles.ptr, it), it.link);
     @assert(it.suspended.is_some(), "restore() but already running");
     save_data := it.suspended&.take().unwrap();
     if !it.have_textures {
@@ -755,11 +900,23 @@ fn restore(state: *State, it: *Puzzle) void = {
     as_const(it) { $Name |
         init_puzzle_state(Name, it, state.sg, general_allocator());
         
-        it.app.hack_no_reset_temp_for_headless = true;
+        @if(Name == .Player) {
+            it.cast(.Player)[].real_state = state;
+        };
+        
+        it.app.hack_no_reset_temp_and_no_handle_requests_for_headless = true;
         // TODO: for consistancy, should always reset temp after init
         it.app.first_frame = false;
         it.app.call_init();
         set_defaults_post_init(it, state.sg);
+
+        @if(Name == .Player) if it.link == LINK_DEFAULT_PLAYER {
+            @debug_assert_eq(state.active_player_depth, 0, "TODO: full restore (ex. save) from child");
+            state.player = it.cast(.Player);
+            app := state.app;
+            state.screen_size = vec2(app.framebuffer_width.float().cast(), app.framebuffer_height.float().cast());
+            update_aspect(state.camera&, app);
+        };
         
         // textures are unloaded when suspended so need to rerender even tho state should be the same as it was before. 
         it.cast(Name)[].dirty = true;
@@ -783,9 +940,6 @@ save_file_path :: "target/francamazegamesavefile.out";
 SaveFile :: @struct {
     MAGIC :: "FR\0game2".peek_type(i64)[];
     magic: i64;
-    camera: Camera;
-    inventory: GameItem;
-    enable_cheats: bool;
     puzzles: List(@struct {
         type: PuzzleType;  // let it use defaults instead of crashing if you change the type of a puzzle in the inspect terminal while playing. 
         link: i64;
@@ -801,11 +955,9 @@ fn save_world(state: *State, out: *List(u8)) void = {
     };
     save: SaveFile = (
         magic = SaveFile.MAGIC, 
-        camera = state.camera,
-        inventory = state.inventory,
-        enable_cheats = state.enable_cheats,
         puzzles = list(temp()),
     );
+    
     each state.puzzles { it |
         active := it.suspended.is_none();
         @if(active) suspend(state, it, true);
@@ -828,6 +980,10 @@ fn save_world(state: *State, out: *List(u8)) void = {
     
     ctx: Save.StoreCtx = (out = out);
     store(ctx&, SaveFile, save&);
+    
+    // TODO: need to do this because of child Player. 
+    //       but consider that state.player can be fucked? 
+    // state.redetect_active_room(true);
 }
 
 // TODO: make sure first frame is dirty
@@ -839,10 +995,7 @@ fn load_world(state: *State, save_data: []u8) void = {
     };
     save: SaveFile = (
         magic = 0, 
-        camera = state.camera,
-        inventory = state.inventory,
         puzzles = list(temp()),
-        enable_cheats = false,
     );
     ctx: Save.LoadCtx = (in = save_data);
     _ := load(ctx&, SaveFile, save&);
@@ -850,9 +1003,6 @@ fn load_world(state: *State, save_data: []u8) void = {
     @debug_assert_eq(save.magic, SaveFile.MAGIC);
     
     a := general_allocator();
-    state.camera = save.camera;
-    state.inventory = save.inventory;
-    state.enable_cheats = save.enable_cheats;
     // TODO: if loading from file, save it if corrupted so doesn't get overwritten by something else when autosaving just in case it's useful. 
     each save.puzzles { save |
         if state.puzzles.find(fn(it) => it.link == save.link) { it |
@@ -896,13 +1046,12 @@ fn load_world_file(state: *State) void = {
 }
 
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
-    sg.destroy_pipeline(state.pipe&);
-    state.draw&.destroy(sg, general_allocator());
     destroy_all_puzzles(state);
     state.active_puzzles&.drop();
 }
 
 fn destroy_all_puzzles(state: *State) void = {
+    println("destroy_all_puzzles");
     set_focus(state, .None);
     each state.puzzles { it |
         @if(it.suspended.is_none()) suspend(state, it, false);

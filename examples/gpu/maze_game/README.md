@@ -129,7 +129,6 @@ the whole game in a screen so you get to be in a different place in the world an
 - editor: the sorting actually makes it less stable when you edit the world if you change room arragement. maybe it just be insertion order.
 - store object positions relative to room so can rearrange the map without a huge diff?
 - make embedded terminal usable
-  - needs app.requests copy
   - should probably have a mode that disables running real commands if i want to use it as a text editor for puzzles
   - suspending the repl is going to be nontrivial. i do have bake_relocatable_value
     so i could do it. the problem is just when its supposed to alias a world thing like inspect_wall. 
@@ -183,3 +182,15 @@ the whole game in a screen so you get to be in a different place in the world an
 - comptime validate that map.fr init data parses (ex. chess fen, life pattern)
 - the objects_to_world MAP ERROR checks should be shown in game when using inspect terminal. 
   and should have option to fail compilation can run that in ci. 
+- player
+  - don't let it focus itself
+  - middle click outside the square when full screen to escape
+  - strict square middle click bounding box instead of current circle
+  - escape should pop one level?
+  - default to locked when focusing inner screen
+  - inner screen remember focus state (in save file as link instead of index)
+  - dirty in child screen doesn't work at all :NestedScreenDirty
+  - cmd+middle to reset state needs to go to most deeply nested child not outer one. 
+  - initial pos/rot in map 
+  - you keep moving in the inner one if you unfocus while move key is pressed
+  - webgpu doesn't like same texture being used as read and write

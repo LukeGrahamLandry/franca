@@ -2,6 +2,14 @@
 ## (Jul 29)
 
 - hint: automatically set scale to fit all text
+- added screen that's a new camera sharing the same world. 
+  - thought about trying to use the same `draw` instance but for now do the simple thing. 
+  - confused by something in active_puzzles being suspended in on_render.
+    was because it will change in the middle of iteration if one of the cameras switches rooms.
+  - now really need to forward app.requests so child player can lock the mouse. 
+    that killed the mouse rotation in the child because locked means mouse_moved events don't actually change the mosue pos 
+    so my old way of recomputing the delta relative to previous pos doesn't work. 
+    new way using the actual delta numbers also has side benefit of no jump on the first mouse_moved event on some other screen after selecting the child. 
 
 ## (Jul 28)
 

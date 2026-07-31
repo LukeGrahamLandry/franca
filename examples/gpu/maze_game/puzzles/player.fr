@@ -1,0 +1,79 @@
+ fn render(sgl: *Sgl.Self, it: *Instance, self: *App) void = ();
+ fn collision(p: Vec3, it: *Instance, self: *App) bool = false;
+
+ fn on_event(child: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    push_child(child, sapp) { state |
+        on_event(state, sapp, event);
+    };
+ };
+ 
+ fn on_render(child: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    push_child(child, sapp) { state |
+        on_render(state, sapp, sg);
+    };
+ };
+ 
+ fn push_child(child: *State, sapp: *Sapp.Self, $body: @Fn(real_state: *MazeGameState) void) void = {
+    state := child.real_state;
+    state.active_player_depth += 1;
+    parent := state.player;
+    state.player = child;
+    parent_app := state.app;
+    state.app = sapp;
+    
+    body(state);
+    
+    state.app = parent_app;
+    state.player = parent;
+    state.active_player_depth -= 1;
+ }
+ 
+ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
+     state.puzzle_focus = .None;
+     state.inventory = (FarmGame = .None);
+     state.camera.perspective = (aspect = 1, fovy = deg_to_rad(70), znear = 0.01, zfar = 1000.0);
+     update_aspect(state.camera&, app);
+     state.screen_size = vec2(app.framebuffer_width.float().cast(), app.framebuffer_height.float().cast());
+     state.camera.speed = (pos = 0.09 * 30.0, rot = 0.005 * 30.0);
+     state.camera.pos = vec3(2, 1, -1);
+     state.dirty = true;
+     
+     init_draw(state.draw&, state.pipe&, sg);
+ };
+ 
+ 
+ fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    sg.destroy_pipeline(state.pipe&);
+    state.draw&.destroy(sg, general_allocator());
+ }
+ 
+ State :: @struct {
+     camera: Camera;
+     inventory: GameItem;
+     enable_cheats: bool;
+     
+     active_room: i64;
+     puzzle_focus: ?i64;
+     child_fullscreen: bool;
+     
+     screen_size: Vec2;
+     dirty: bool;
+     real_state: *MazeGameState;
+     // TODO: having multiple of these is wasteful but makes it easy to think about. 
+     //       should be able to have one and keep same vertices and just change 
+     //       the uniforms in the recorded commands. harder if i want to use 
+     //       the matrix transforms more because camera uniforms are at the beginning. 
+     //       but maybe they don't have to be? 
+     draw: Sgl.Self;
+     pipe: Sgl.Pipeline;
+ };
+ 
+ Instance :: void;
+ App :: State;
+ 
+ 
+ #use("@/examples/gpu/maze_game/camera.fr");
+ #use("@/examples/gpu/maze_game/main.fr"); 
+ #use("@/examples/gpu/maze_game/world.fr"); 
+ #use("@/graphics/lib.fr");
+ 

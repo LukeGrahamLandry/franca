@@ -1,4 +1,12 @@
 
+---
+
+DO THE FUCKING INLINING SORT ORDER THING   
+BECAUSE SEEING SAMPLES OF VEC(SUB,ADD,MAX)   
+IS GOING TO MAKE ME LOSE MY FUCKING MIND  
+
+---
+
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
