@@ -7,12 +7,16 @@ fn check_cheats(state: *State, event: *Sapp.Event) bool = {
     @if(!state.enable_cheats) return(false);
     
     if state.puzzle_focus { i |
+        it := state.puzzles[i]&;
+        while => it.name == .Player && it.cast(.Player)[].puzzle_focus.is_some() {
+            // affect inner most child not outer one. 
+            i = it.cast(.Player)[].puzzle_focus.Some;
+            it = state.puzzles[i]&;
+        };
+        
         if event.type == .MOUSE_DOWN && event.mouse_button == .MIDDLE {
-            mouse := vec2(event.mouse_x, event.mouse_y);
-            if choose_focus(state, mouse, 0.75) { j |
                 if event.modifiers.get(.shift) != 0 {
                     // for debugging the save system. this shouldn't change anything important. 
-                    it := state.puzzles[j]&;
                         @println("debug save %", it.name);
                         suspend(state, it, true);
                         @println("- % bytes", it.suspended.unwrap().len());
@@ -22,7 +26,6 @@ fn check_cheats(state: *State, event: *Sapp.Event) bool = {
                 
                 // TODO: maybe this should be part of the real game in case you make a mistake
                 if event.modifiers.get(.super) != 0 {
-                    it := state.puzzles[j]&;
                     @println("clear save data link=% %", it.link, it.name);
                     suspend(state, it, true);
                     general_allocator().dealloc(u8, it.suspended.unwrap());
@@ -30,7 +33,6 @@ fn check_cheats(state: *State, event: *Sapp.Event) bool = {
                     restore(state, it);
                     return true;
                 };
-            };
         };
     
         if event.type == .KEY_DOWN {
@@ -46,6 +48,29 @@ fn check_cheats(state: *State, event: *Sapp.Event) bool = {
                 open_map_debug_screen(state, false, .None);
                 return true;
             };
+            
+            if event.key_code == .SLASH && event.modifiers.get(.super) != 0 {
+                if choose_focus(state, state.screen_size/2) { i |
+                    it := state.puzzles[i]&;
+                    @match(it.name) {
+                        fn Mandelbrot() => {
+                            s := it.cast(.Mandelbrot);
+                            p := s.params&;
+                            @println("zoom=%, c=(%, %), z=(%, %)", 1.0/p.scale.double(), 
+                                p.c_offset.x.double(), p.c_offset.y.double(), 
+                                p.z_offset.x.double(), p.z_offset.y.double());
+                            if current_colour(s) { c |
+                                @println("current_colour=%", fmt_hex(c));
+                            };
+                        }
+                        @default => ();
+                    };
+                } else {
+                    c := state.camera&;
+                    @println("pos=vec3(%, %, %), rot=vec2(%, %)", c.pos.x, c.pos.y, c.pos.z, c.rot.x, c.rot.y);
+                }
+            };
+            
         };
     };
     false
@@ -174,7 +199,7 @@ fn reload_map_debug_screen(state: *State, save_to_file: bool) void = {
         it.suspended = (Some = empty());
     };
     load_world(state, in.items());
-    state.redetect_active_room(false);
+    state.redetect_active_room(true);
     
     open_map_debug_screen(state, save_to_file, (Some = keep_wall));
 }

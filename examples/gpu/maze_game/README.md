@@ -156,7 +156,6 @@ the whole game in a screen so you get to be in a different place in the world an
   start having an extra border square so it can be near of the board on the black side?
 - have an indicator for when you've already solved the puzzle a hint applies to? 
 - mandelbrot:
-  - colour pick current colour from world for making new puzzles
   - better feedback when you're very close to getting the right colour
   - be more strict about number of matching pixels
 - don't let you clip through the diagonal between chess pieces
@@ -185,12 +184,30 @@ the whole game in a screen so you get to be in a different place in the world an
 - player
   - don't let it focus itself
   - middle click outside the square when full screen to escape
-  - strict square middle click bounding box instead of current circle
-  - escape should pop one level?
-  - default to locked when focusing inner screen
   - inner screen remember focus state (in save file as link instead of index)
   - dirty in child screen doesn't work at all :NestedScreenDirty
-  - cmd+middle to reset state needs to go to most deeply nested child not outer one. 
-  - initial pos/rot in map 
   - you keep moving in the inner one if you unfocus while move key is pressed
   - webgpu doesn't like same texture being used as read and write
+  - cheats in child will crash when it tries to save the world i think
+  - horizontal camera rotation speed when >2 players and last is at an angle feels wrong (way too slow). 
+
+---
+
+create a situation where you can't have all the mandelbrots black 
+without an extra player screen (because you need them to be a colour to walk on them). 
+only count the ones with clicked=true, so it gets harder the more world you've explored. 
+
+i cannot open this fine door
+'til you retrace your tracks
+and mandelbrots you've seen before
+display the colour black.
+
+--- 
+
+hard farm game near the start (where you learn mandelbrot floor). 
+schedule extra droughts so you're forced to borrow a watering can.  
+
+if you don't know how to play
+i'll let you know the plan
+explore the world another way
+and find a watering can. 

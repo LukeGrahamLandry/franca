@@ -1,4 +1,9 @@
 
+## (Jul 31)
+
+- trying to improve the feel of the controls when using nested Player. 
+  - always lock the mouse if you're controlling the camera at any level and never use mouse pos for middle click while its locked. 
+
 ## (Jul 29)
 
 - hint: automatically set scale to fit all text

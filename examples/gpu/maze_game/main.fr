@@ -431,21 +431,22 @@ fn redetect_active_room(state: *State, first: bool) void = {
     };
 }    
 
-fn choose_focus(state: *State, mouse: Vec2, error_margin: f32) ?i64 = {
+fn choose_focus(state: *State, mouse: Vec2) ?i64 = {
     i: ?i64 = .None;
     s := PUZZLE_LOGICAL_WIDTH.float().cast();
-    center := vec2(s) / 2;
-    best_distance: f32 = s * error_margin;
+    best_distance: f32 = 99999;
     look_dir, _0, _1 := state.camera&.directions();
     for state.active_puzzles { check |
         it := state.puzzles[check]&;
-        m := remap_mouse_to_puzzle(it, state.camera&, mouse, state.screen_size);
-        check_distance := norm(m - center);
-        // TODO: should be that you can't do it through walls at all but this thing with the normal is better than nothing (at least until i want to allow some that are double sided)
         w := it.wall&.vectors();
-        if check_distance < best_distance && dot(look_dir, w.normal) < 0 {
-            i = (Some = check);
-            best_distance = check_distance;
+        check_distance := norm_sq(state.camera.pos - it.wall.v&[0]);
+        if dot(look_dir, w.normal) < 0 && check_distance < best_distance {
+            m := remap_mouse_to_puzzle(it, state.camera&, mouse, state.screen_size);
+            // TODO: should be that you can't do it through walls at all but this thing with the normal is better than nothing (at least until i want to allow some that are double sided)
+            if m.x >= 0 && m.y >= 0 && m.x < s && m.y < s {
+                i = (Some = check);
+                best_distance = check_distance;
+            };
         };
     };
     i
@@ -470,17 +471,24 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     };
 
     if event.type == .KEY_DOWN && event.key_code == .ESCAPE {
-        if state.puzzle_focus.is_some() {
+        break :: local_return;
+        if state.puzzle_focus { i |
+            it := state.puzzles[i]&;
+            if it.name == .Player && it.cast(.Player)[].puzzle_focus.is_some() {
+                // let it get pushed to child instead so escape pops one level from the bottom. 
+                break();
+            };
+        
             state.set_focus(.None);
         } else {
             state.child_fullscreen = event.modifiers.get(.alt) == 1;
-            state.set_focus(choose_focus(state, state.screen_size/2, 2));
+            state.set_focus(choose_focus(state, state.screen_size/2));
         };
         return();
     };
     
     if event.type == .MOUSE_DOWN && event.mouse_button == .MIDDLE && state.puzzle_focus.is_none() {
-        if choose_focus(state, state.screen_size/2, 2) { i |
+        if choose_focus(state, state.screen_size/2) { i |
             state.child_fullscreen = event.modifiers.get(.alt) == 1;
             return state.set_focus(Some = i);
         };
@@ -494,10 +502,17 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     
     @if(event.type != .RESIZED)
     if state.puzzle_focus { i |
+        // only do choose_focus with the real mouse position (instead of center of screen) 
+        // when mouse is shown. avoids being about to focus a Player with your mouse not  
+        // over its screen so the next middle click just escapes instead of being able 
+        // to select a new screen from the child's center position. 
+        // (if only one Player, mouse_locked==puzzle_focus.is_none() and this doesn't matter)
+        @if(!state.app.mouse.locked)
         @if(!state.child_fullscreen)
         if event.type == .MOUSE_DOWN && event.mouse_button == .MIDDLE {
+            break :: local_return;
             mouse := vec2(event.mouse_x, event.mouse_y);
-            if choose_focus(state, mouse, 0.75) { j |
+            if choose_focus(state, mouse) { j |
                 if i != j {
                     state.child_fullscreen = event.modifiers.get(.alt) == 1;
                     return state.set_focus(Some = j);
@@ -560,14 +575,17 @@ fn inventory_pickup(state: *State) bool = {
 }
 
 fn set_focus(state: *State, it: ?i64) void = {
-    if it { i |
-        p := state.puzzles.index(state.default_player_puzzle_index);
-    };
-
     prev := state.puzzle_focus;
     I := it || (prev || -1);
     state.puzzle_focus = it;
-    state.app.lock_mouse(!it.is_some());
+    ;{
+        it := it;
+        while => it.is_some() && state.puzzles[it.Some].name == .Player {
+            it = state.puzzles[it.Some]&.cast(.Player)[].puzzle_focus;
+        };
+        state.app.lock_mouse(!it.is_some());
+    };
+
     // TODO: you still keep moving if you were holding the button while pressing escape
     // TODO: deal with puzzle.state.pan_keys_pressed
     state.camera.delta_pos = vec3(0);
@@ -620,7 +638,7 @@ fn check_auto_save(state: *State) void = {
     };
 };
 
-fn remap_mouse_to_puzzle(state: *State, it: *Puzzle, mouse: Vec2) Vec2 = {
+fn remap_mouse_to_active_puzzle(state: *State, it: *Puzzle, mouse: Vec2) Vec2 = {
     @if(state.child_fullscreen, {
         real_frac := mouse / state.screen_size;
         aspect := state.camera.perspective.aspect;
@@ -639,7 +657,7 @@ fn remap_mouse_to_puzzle(state: *State, it: *Puzzle, mouse: Vec2) Vec2 = {
 
 fn remap_and_push_event(state: *State, it: *Puzzle, event: Sapp.Event) void = {
     mouse := vec2(event.mouse_x, event.mouse_y);
-    m := remap_mouse_to_puzzle(state, it, mouse);
+    m := remap_mouse_to_active_puzzle(state, it, mouse);
     
     event.mouse_x = m.x;
     event.mouse_y = m.y;
@@ -651,7 +669,7 @@ fn remap_and_push_event(state: *State, it: *Puzzle, event: Sapp.Event) void = {
         // ... i gotta stop obsessing until i can actually see it in a profiler (which will never happen). 
         d := vec2(event.mouse_dx, event.mouse_dy);
         fake_prev_abs := mouse - d;
-        fake_prev_rel := remap_mouse_to_puzzle(state, it, fake_prev_abs);
+        fake_prev_rel := remap_mouse_to_active_puzzle(state, it, fake_prev_abs);
         d := m - fake_prev_rel;
         event.mouse_dx = d.x;
         event.mouse_dy = d.y;
@@ -789,10 +807,6 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
             };
         };
     };
-    
-    p := state.puzzles.index(state.default_player_puzzle_index);
-    state.active_puzzles&.push(state.default_player_puzzle_index);
-    restore(state, p);
     state.redetect_active_room(true);
     
     // TODO: maybe don't waste memory until enable cheats
@@ -1023,6 +1037,10 @@ fn load_world(state: *State, save_data: []u8) void = {
             @println("corrupted save: link=% doesn't exist in world", save.link);
         };
     };
+    
+    p := state.puzzles.index(state.default_player_puzzle_index);
+    state.active_puzzles&.push(state.default_player_puzzle_index);
+    restore(state, p);
 }
 
 fn save_world_file(state: *State) void = {
@@ -1051,7 +1069,6 @@ fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 }
 
 fn destroy_all_puzzles(state: *State) void = {
-    println("destroy_all_puzzles");
     set_focus(state, .None);
     each state.puzzles { it |
         @if(it.suspended.is_none()) suspend(state, it, false);
