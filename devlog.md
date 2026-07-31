@@ -3,6 +3,7 @@
 
 - trying to improve the feel of the controls when using nested Player. 
   - always lock the mouse if you're controlling the camera at any level and never use mouse pos for middle click while its locked. 
+- locks that need all puzzles to be in a certain state
 
 ## (Jul 29)
 

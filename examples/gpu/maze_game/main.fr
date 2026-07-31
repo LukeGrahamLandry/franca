@@ -463,13 +463,9 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     @if(check_cheats(state, event)) return();
     if event.key_code == .LEFT_CONTROL {
         state.camera.speed.pos *= @if(event.type == .KEY_UP, 0.2, 5);
+        // TODO: if you save while control is pressed it resets your speed so you're super slow when you release
     };
     
-    if event.type == .KEY_DOWN && event.key_code == .S && event.modifiers.get(.super) == 1 && !event.key_repeat && state.puzzle_focus.is_none() {
-        save_world_file(state);
-        return();
-    };
-
     if event.type == .KEY_DOWN && event.key_code == .ESCAPE {
         break :: local_return;
         if state.puzzle_focus { i |
@@ -621,7 +617,26 @@ fn update_locked_tiles(state: *State, i: i64) void = {
                 fn FarmRound(n) => it.cast(.FarmGame)[].world.round_number < n;
                 @default => true;
             };
+            fn Hint() => @match(lock.cond) {
+                fn AllSolved(name) => update_solve_progress(state, it, name);
+                @default => true;
+            };
             @default => true;
+        };
+    };
+    
+    // TOOD: when leaving Player without unfocusing the inner thing, recurse in case it changed?
+    
+    leaving := it;
+    if @is(leaving.name, .Mandelbrot, .Chess) {
+        each state.puzzles { progress |
+            if progress.name == .Hint && progress.suspended.is_none() {
+                each progress.locks { lock |
+                    @if_let(lock.cond) fn AllSolved(name) => if leaving.name == name {
+                        lock.locked = update_solve_progress(state, progress, name);
+                    };
+                };
+            }
         };
     };
 }
@@ -632,7 +647,7 @@ fn check_auto_save(state: *State) void = {
     @if(state.active_player_depth > 0) return();
     
     now := timestamp_s();
-    if now - state.last_save_timestamp > 120 {
+    if now - state.last_save_timestamp > 60 {
         state.last_save_timestamp = now;
         save_world_file(state);
     };
@@ -802,7 +817,7 @@ fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
         each state.puzzles { it |
             if it.name == .Player && it.link != LINK_DEFAULT_PLAYER {
                 it.name = .Hint;
-                it.extra = (Hint = (msg = "todo: webgpu", colour = 0xffffffff));
+                it.extra = (Hint = (msg = "todo: webgpu"));
                 it.suspended = (Some = empty());
             };
         };
@@ -828,6 +843,54 @@ fn find_special_puzzles(state: *State) void = {
     @assert_eq(state.puzzles[state.default_player_puzzle_index].name, .Player);
 }
 
+// TODO: annoying that this (click to update) only works when you leave 
+// TODO: eventually this restoring everything won't scale for large worlds. could cache a word of last state on the Puzzle itself. 
+fn update_solve_progress(state: *State, progress: *Puzzle, name: PuzzleType) bool = {
+    s := progress.cast(.Hint);
+    s.dirty = true;
+    msg := s.msg&;
+    msg.clear();
+    @fmt(msg, "click to update\n\n");
+    total, done := (0, 0);
+    each state.puzzles { it |
+        if it.name == name && it.clicked {
+            active := it.suspended.is_none();
+            @if(!active) restore(state, it);
+            total += 1;
+            
+            @match(name) {
+                fn Mandelbrot() => {
+                    c := current_colour(it.cast(.Mandelbrot));
+                    if c { c |
+                        done += int(c == 0xff000000);
+                        r, g, b := (c.bit_and(255), c.shift_right_logical(8).bit_and(255), c.shift_right_logical(16).bit_and(255));
+                        push_hex_byte(msg, r.trunc(), false);
+                        @fmt(msg, " ");
+                        push_hex_byte(msg, g.trunc(), false);
+                        @fmt(msg, " ");
+                        push_hex_byte(msg, b.trunc(), false);
+                        @fmt(msg, "\n");
+                        // TODO: would be nice to make the text the right colour
+                    } else {
+                        @fmt(msg, "?? ?? ??\n");
+                    };
+                }
+                fn Chess() => {
+                    self := it.cast(.Chess)[].board&;
+                    result := self.board&.gameOverReason(self.lists&);
+                    done += int(result == .WhiteWins);
+                    @fmt(msg, "%\n", result);
+                }
+                @default => @fmt(msg, "todo puzzle type\n");
+            };
+            
+            @if(!active) suspend(state, it, false);
+        };
+    };
+    @fmt(msg, "\n%\%\n", int(done.float() / total.float() * 100));
+    done < total
+}
+
 fn record_click(state: *State, i: i64) void = {
     it := state.puzzles[i]&;
     @if(it.clicked && i != state.trophy_hint_puzzle_index) return();
@@ -838,7 +901,7 @@ fn record_click(state: *State, i: i64) void = {
     
     count := zeroed(EnumMap(PuzzleType, @struct(total: i64, clicked: i64)));
     enumerate state.puzzles& { i, it |
-        if i != state.inspect_terminal_puzzle_index {
+        if i != state.inspect_terminal_puzzle_index && i != state.default_player_puzzle_index {
         count&[it.name].total += 1; 
         count&[it.name].clicked += int(it.clicked); 
         };
@@ -1037,7 +1100,10 @@ fn load_world(state: *State, save_data: []u8) void = {
             @println("corrupted save: link=% doesn't exist in world", save.link);
         };
     };
-    
+    after_load(state);
+}
+
+fn after_load(state: *State) void = {
     p := state.puzzles.index(state.default_player_puzzle_index);
     state.active_puzzles&.push(state.default_player_puzzle_index);
     restore(state, p);
@@ -1060,6 +1126,7 @@ fn load_world_file(state: *State) void = {
         load_world(state, data);
     } else {
         @println("no save file found");
+        after_load(state);
     };
 }
 

@@ -190,24 +190,6 @@ the whole game in a screen so you get to be in a different place in the world an
   - webgpu doesn't like same texture being used as read and write
   - cheats in child will crash when it tries to save the world i think
   - horizontal camera rotation speed when >2 players and last is at an angle feels wrong (way too slow). 
-
----
-
-create a situation where you can't have all the mandelbrots black 
-without an extra player screen (because you need them to be a colour to walk on them). 
-only count the ones with clicked=true, so it gets harder the more world you've explored. 
-
-i cannot open this fine door
-'til you retrace your tracks
-and mandelbrots you've seen before
-display the colour black.
-
---- 
-
-hard farm game near the start (where you learn mandelbrot floor). 
-schedule extra droughts so you're forced to borrow a watering can.  
-
-if you don't know how to play
-i'll let you know the plan
-explore the world another way
-and find a watering can. 
+- create a situation where you can't have all the mandelbrots black 
+  without an extra player screen (because you need them to be a colour to walk on them). 
+- i got a bounds check once but idk what i did
