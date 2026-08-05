@@ -1,4 +1,10 @@
 
+## (Aug 1)
+
+- farm: fix pause. show multiple messages at once. 
+- term: flags for disabling things for better embedding in the game. 
+  - scale font without repl
+
 ## (Jul 31)
 
 - trying to improve the feel of the controls when using nested Player. 

@@ -28,6 +28,8 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
   - needing the extra `()` around an `@default` prong
   - error message if you accidently have ast_alloc as a list's allocator in a runtime reachable const is terrible
   - @if_let doesn't go through #use field (@match does it right)
+    - that's clearly not true because it just calls match, so maybe something to do with @rec? something about si.fr's Ast it doesn't like. 
+    - works through a value but not a `&` pointer expression?
   - @rec and ::tagged_derive would be so embarassing to teach some one
   - needing to special case single item tuples in macros is annoying
   - the thing where it looks for overloads before evaluating the types of all the arguments 
@@ -38,6 +40,8 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
     for now build_for_graphics2 is the hack to work around this problem by opting in to the more sane behaviour. 
   - need to stop with the absolute import paths. it should be sane to copy paste a folder and make a new program. 
     hard to decide exactly what i want tho, there's other notes here somewhere. 
+    need to be able to use a multi-file franca library with fetch.fr
+  - not being able to access a field on a const struct value
 - see todo comments:
   - life/README.md
   - circuit/README.md
@@ -1785,6 +1789,9 @@ needing to go find some data in the right format (and without me including a blo
   - https://github.com/ertdfgcvb/play.core/tree/master/src/programs/demos
   - https://github.com/bellard/quickjs
 - qr
+- rss "reader" (take file of feed urls, fetch them all, list posts added since last time). 
+- compute shader boids is a rite of passage im missing out on. 
+  force shader compiler to let you have mutable buffers. 
 
 ### assembler
 

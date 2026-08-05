@@ -55,6 +55,10 @@ terminal:
     - print certain characters are filled in floor
     - it has a binary and you have to disassemble/dump_wasm to get the password
     - last level could be franca repl with access to the game's State and you have to set the door to unlocked manually
+    - make you automate the farm game 
+    - like a shader where you say what colour should be at different coordinates
+      to match a pattern or match floor so you can walk like the mandelbrot ones. 
+    - start with lox: `door.locked = true;`
 
 viewer
 - the image is of an item you need and you have to move it to your side of an obstacle. 
@@ -115,6 +119,8 @@ the whole game in a screen so you get to be in a different place in the world an
   - do the repr for remaining apps
   - load_world needs to cope with load() returning error. also rn restore() will crash if that happens. 
     also not validating up front that it parse correctly if !active so you might only find out later. 
+  - switch puzzle save data to a @tagged instead of []u8 so can inspect it. 
+    (worst case it will be important to be able to manually unfuck your save if i don't have a good way to avoid infinite loops in a programming puzzle)
 - ui for resetting a specific puzzle to initial state if you mess it up when you don't understand the controls yet? 
   the annoying thing is that it could reveal hidden/connected puzzles. 
   idk how to do it in a way that isn't tacky. 
@@ -127,14 +133,13 @@ the whole game in a screen so you get to be in a different place in the world an
   - going to want to make a `Colour :: @struct(rgba: u32)` so can reflect on it to choose the right ui. 
 - editor: copy paste an area
 - editor: the sorting actually makes it less stable when you edit the world if you change room arragement. maybe it just be insertion order.
+- editor: toggle layers for the things that can overlap so you can choose which to see
 - store object positions relative to room so can rearrange the map without a huge diff?
 - make embedded terminal usable
-  - should probably have a mode that disables running real commands if i want to use it as a text editor for puzzles
   - suspending the repl is going to be nontrivial. i do have bake_relocatable_value
     so i could do it. the problem is just when its supposed to alias a world thing like inspect_wall. 
   - on_cleanup: "... leaked ref count"
   - can't press escape to pop buffer stack because it exits the screen
-  - editor mode where up/down arrows just move the cursor instead of history
 - theres still a place you can walk through the wall in the life room, can just make the exit 2 wide
 - option for double sided puzzle
   - make the back wall of the mandelbrot room match the green so the puzzle makes sense in the other direction too
@@ -193,3 +198,13 @@ the whole game in a screen so you get to be in a different place in the world an
 - create a situation where you can't have all the mandelbrots black 
   without an extra player screen (because you need them to be a colour to walk on them). 
 - i got a bounds check once but idk what i did
+- farmgame could do with slowly introducing drought, crows, shop items.
+  so need to be able to disable them in InitialWorld. 
+  ```
+  while an item's on a shelf
+  there is a risk that you must know.
+  if you leave it long enough
+  it might be stolen by a crow.
+  ```
+- rearrange first chess room so its more clear which way the pawns are moving, 
+  and so you don't block your exit if you paste it into the second room. 

@@ -30,10 +30,13 @@ Replay :: import("@/graphics/replay.fr");
 
 State :: @struct(
     HIGH_DPI :: true,
-    pass_action: Sg.PassAction,
     text: *Sdtx.Self,
+    // TODO: `buffers` was from when i was going to have multiple text boxes, now is useless. 
+    //        OR make an example program that has this State as a field and uses it as a ui with multiple editable textboxes. 
     buffers: List(*TextBuffer),
+    // these are the ones that aren't shown but can be popped back to. 
     buffer_stack: List(*TextBuffer),
+    // index in `buffers` but always 0 rn so should just get rid of it
     selected_buffer: i64,
     app: *Sapp.Self,
     sg: *Sg.Self,
@@ -53,6 +56,7 @@ State :: @struct(
     save_file: ?Str,
     show_hover: bool,
     scrolling: bool,
+    features: EnumSet(Feature),
     
     // HACK: this is a pointer because it avoids the repl needing to compile the whole import_c(stb) thing (which needs `DISABLE_IMPORT_FRC::false` in toplevelscope)
     resample_font_f: AsFnPtr(resample_font),
@@ -72,11 +76,14 @@ ColourTheme :: @struct {
     scrollbar := pack_rgba(0.05, 0.05, 0.05, 1);
 }
 
+Feature :: @enum(Repl, Exec, Kill, Search, ViewFile, DumpFile, History, RecordReplay, OpenBufferLink, Help, Edit);
+feature :: fn(it: Feature) bool = state.features&.get(it);
+
 // This needs the extra level of indirection so it can be shared with the repl. 
 state :: @static_mut zeroed(*State);
 
-fn on_init(_state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
-    state[] = _state;
+fn on_init(_state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = push_state _state {
+    state.features = full();
     state.app = sapp;
     state.sg = sg;
     init_from_cli_args();
@@ -132,7 +139,6 @@ fn on_init(_state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     // TODO: if ugly still make non-ascii bytes filled in cells (especially 0 because i use that to draw rectangles)
     state.resample_font_f = resample_font;
     resample_font();
-    state[] = zeroed(*State);
 }
 
 fn get_repl(state: *State) *Repl.ReplState = {
@@ -249,11 +255,12 @@ fn on_render(_state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     sg := state.sg;
     
-    state.pass_action.colors&[0] = (
+    pass_action := zeroed Sg.PassAction;
+    pass_action.colors&[0] = (
         load_action = .CLEAR,
         clear_value = state.theme.background,
     );
-    Easy'glue_begin_pass(state.app, sg, state.pass_action);
+    Easy'glue_begin_pass(state.app, sg, pass_action);
     
     sdtx := state.text.default_context&;
     sdtx.draw_layer(0);
@@ -458,13 +465,21 @@ handle_event :: fn(event: *Sapp.Event) void = {
         if event.key_code == .ESCAPE {
             pop_to_previous_buffer();
         };
-    
+        
+        if event.key_code == .MINUS && event.modifiers.get(.super) != 0 && state.scale > 4 {
+            BuiltinCommands'set_font_scale(state.scale - 1);
+        };
+        if event.key_code == .EQUAL && event.modifiers.get(.super) != 0 && state.scale < 64 {
+            BuiltinCommands'set_font_scale(state.scale + 1);
+        };
+        
         if event.key_code == .W && event.modifiers.get(.super) != 0 {
             // cmd+w -> exit
             state.app.requests.quit = true;
         };
         
         // ^c -> SIGINT, ^C -> SIGKILL
+        @if(feature(.Kill))
         if event.key_code == .C && event.modifiers.get(.control) != 0 {
             if state.process& { p |
                 if event.modifiers.get(.shift) != 0 {
@@ -481,11 +496,14 @@ handle_event :: fn(event: *Sapp.Event) void = {
         }
         
         echo :: BuiltinCommands.echo;
+        @if(feature(.RecordReplay))
         if event.key_code == .R && event.modifiers.get(.control) != 0 && event.modifiers.get(.shift) != 0 {
             if state.recording { it |
                 out := u8.list(temp());
                 it&.save(out&);
-                path := @tfmt("target/replay/%.bin", timestamp());
+                dir := "target/replay";
+                path := @tfmt("%/%.bin", dir, timestamp());
+                make_dirs_or_crash(dir);
                 write_entire_file_or_crash(path, out.items());
                 echo @tfmt("stopped recording. saved replay to %\n", path);
                 println(path);
@@ -529,8 +547,7 @@ handle_event :: fn(event: *Sapp.Event) void = {
             copy_from_selection(buffer);
         };
         
-        @debug_assert(buffer.lines.len > 0);
-        if event.key_code == .BACKSPACE {
+        if event.key_code == .BACKSPACE && feature(.Edit) {
             @debug_assert(buffer.cursor.y >= 0);
             l := min(buffer.cursor.y.int(), buffer.lines.len - 1);
             last := buffer.lines[l]&;
@@ -545,22 +562,27 @@ handle_event :: fn(event: *Sapp.Event) void = {
             } else {
                 new_l := max(l - 1, 0);
                 buffer.set_cursor(x = buffer.lines[new_l]&.len().float(), y = new_l.float());
-                buffer.lines&.ordered_remove(l);
+                if buffer.lines.len > 1 {
+                    buffer.lines&.ordered_remove(l);
+                };
             };
         }
         
         if @is(event.key_code, .UP, .DOWN) {
+            enable := feature(.History);
             up := event.key_code == .UP;
-            if event.modifiers.get(.super) != 0 {
+            if event.modifiers.get(.super) != 0 && enable {
                 move_to_next_command(buffer, up);
                 return();
             }
-            if event.modifiers.get(.shift) != 0 {
+            if event.modifiers.get(.shift) != 0 || !enable {
                 delta: f64 = @if(up, -1, 1);
                 buffer.set_cursor(x = buffer.cursor.x, y = buffer.cursor.y + delta);  
                 return();
             };
-            move_in_history(buffer, up);
+            if enable {
+                move_in_history(buffer, up);
+            };
         };
         
         if event.key_code == .A && event.modifiers.get(.control) != 0 {
@@ -588,11 +610,7 @@ handle_event :: fn(event: *Sapp.Event) void = {
             if state.save_file { path |
                 // :SLOW
                 out := u8.list(temp());
-                each buffer.lines& { line |
-                    out&.push_all(line.str());
-                    out&.push_all("\n");
-                };
-                out.len -= int(out.len != 0);  // remove trailing new line
+                get_string(buffer, out&);
                 if write_entire_file(path, out.items()) {
                     @println("wrote % bytes to %", out.len, path);
                 } else {
@@ -602,7 +620,8 @@ handle_event :: fn(event: *Sapp.Event) void = {
         };
         
         if event.key_code == .ENTER {
-            if event.modifiers.get(.shift) != 0 {
+            enable := feature(.Exec) || feature(.Repl) || feature(.Help);
+            if event.modifiers.get(.shift) != 0 || !enable {
                 buffer.insert_string("\n", buffer.cursor.x.int(), buffer.cursor.y.int());
                 buffer.cursor.x = 0;
                 return();
@@ -621,6 +640,7 @@ handle_event :: fn(event: *Sapp.Event) void = {
     buffer := selected_buffer() || return();
     
     // if it's ascii and not a keyboard shortcut, insert a character at the cursor. 
+    @if(feature(.Edit))
     if event.type == .CHAR && event.char_code < 127 && event.char_code >= 32 && event.modifiers.get(.super) == 0 {
         s: Str = (ptr = ptr_cast_unchecked(u32, u8, event.char_code&), len = 1);
         l := min(buffer.cursor.y.int(), buffer.lines.len - 1);
@@ -630,7 +650,7 @@ handle_event :: fn(event: *Sapp.Event) void = {
     };
     
     @match(event.type) {
-        fn CLIPBOARD_PASTED() => {
+        fn CLIPBOARD_PASTED() => if feature(.Edit) {
             buffer.insert_string(event.pasted, buffer.cursor.x.int(), buffer.cursor.y.int());
         }
         fn MOUSE_SCROLL() => {
@@ -644,12 +664,20 @@ handle_event :: fn(event: *Sapp.Event) void = {
             buffer.render.x += event.mouse_dx.cast() * -1.0 / state.scale;
             buffer.render.y += event.mouse_dy.cast() * -1.0 / (state.scale * 2);
         }
-        fn FILES_DROPPED() => if event.drop.len == 1 {
+        fn FILES_DROPPED() => if event.drop.len == 1 && feature(.Edit) {
             buffer.append_string(event.drop[0]);
         };
         @default => ();
     };
 };
+
+fn get_string(buffer: *TextBuffer, out: *List(u8)) void = {
+    each buffer.lines& { line |
+        out.push_all(line.str());
+        out.push_all("\n");
+    };
+    out.len -= int(out.len != 0);  // remove trailing new line
+}
 
 copy_from_selection :: fn(self: *TextBuffer) void = {
     buf := u8.list(temp());
@@ -701,8 +729,10 @@ move_to_next_command :: fn(b: *TextBuffer, up: bool) void = {
 }
 
 update_hover :: fn(event: *Sapp.Event) void = {
+    enable := feature(.ViewFile) || feature(.DumpFile) || feature(.OpenBufferLink);
+
     // only show which text will be the link while holding command (the rectangle is too annoying otherwise) 
-    state.show_hover = event.modifiers.get(.super) != 0;
+    state.show_hover = event.modifiers.get(.super) != 0 && enable;
     
     b, pos := find_mouse(event) || return();
     new_hover := find_link_at(b, pos.y.int(), pos.x.int());
@@ -752,7 +782,7 @@ open_hovered_link :: fn(b: *TextBuffer, shift: bool) void = {
     @if(start < 0 || end > line.len) return();
     link := line.slice(start, end);
     
-    if shift {
+    if shift && feature(.ViewFile) {
         // TODO: is there an env var im supposed to look at to know your default editor? 
         sys_capture_exec(@slice("zed".as_cstr(), link.as_cstr(), zeroed(CStr)));
     } else {
@@ -769,7 +799,7 @@ open_link :: fn(full_link: Str) void = {
         
     // TODO: do something less insane than this. need out of band links. 
     //       rn you can type @@B1234, click it, and crash yourself, which is stupid. 
-    if link.starts_with("@@B") {
+    if link.starts_with("@@B") && feature(.OpenBufferLink) {
         break :: local_return;
         for link.rest(3) { c |
             @if(!c.is_ascii_digit()) break();
@@ -785,7 +815,10 @@ open_link :: fn(full_link: Str) void = {
         return();
     };
     
+    @if(!feature(.DumpFile) && !feature(.ViewFile)) return();
+    
     contents := read_entire_file(temp(), link) || {
+        @if(!feature(.ViewFile)) return();
         if dir_exists(link) {
             // TODO: un-chdir when you pop tho
             BuiltinCommands'cd(link);
@@ -811,6 +844,11 @@ open_link :: fn(full_link: Str) void = {
         for(cmd, fn(it) => { dest.append_string(it); dest.append_string(" "); });
         exec_program(dest, make_args_for_exec(cmd[0], cmd.rest(1), temp()));
     } else {
+        if !feature(.ViewFile) {
+            pop_to_previous_buffer();
+            return();
+        };
+    
         dest.append_string(contents);
     };
     dest.move_to(line, col);
@@ -881,7 +919,9 @@ opener_programs :: @const_slice(
     "examples/dump_macho.fr", "examples/dump_elf.fr", "backend/meta/dump_bin.fr", 
     "examples/dump_wasm.fr", "examples/dump_devicetree.fr", "examples/show_tar.fr",
 );
+// TODO: use hexdump if invalid unicode
 choose_opener_for :: fn(contents: []u8) ?i64 = {
+    @if(!feature(.DumpFile)) return(.None);
     @if(contents.len < 8) return(.None);
     magic8 := contents.peek_type(u64)[];
     magic4: u32 = magic8.trunc();
@@ -937,7 +977,7 @@ find_link_at :: fn(b: *TextBuffer, line: i64, col: i64) ?Ty(i64, i64, i64) = {
 fn selected_buffer() ?*TextBuffer = {
     if(state.selected_buffer >= state.buffers.len, => return(.None));
     b := state.buffers[state.selected_buffer];
-    @debug_assert(b.lines.len > 0);
+    @debug_assert_gt(b.lines.len, 0, "missing empty line");
     (Some = b)
 }
 
@@ -1016,6 +1056,7 @@ TextStorage :: @struct(
 TextBuffer :: @struct(
     storage: *TextStorage #use,
     threads_ref_count: i64,
+    view: (@struct(
     at: Rect,
     cursor: Pos,
     render: Pos,  // visual scroll position
@@ -1029,6 +1070,7 @@ TextBuffer :: @struct(
     //       - when new text comes in from a process
     //       - when you type and add text to the line
     hover: ?Ty(i64, i64, i64),   // (line, start col, end col)
+    )) #use,
 );
 
 #use("@/lib/sys/sync/mutex.fr");
@@ -1050,6 +1092,7 @@ fn fix(sel: Selection) Selection = {
     sel
 }
 
+// TODO: do i really care about having an extra version that doesn't change render position? (could just have move_to())
 fn set_cursor(self: *TextBuffer, pos: Pos) void = {
     y := pos.y.max(0).min(self.lines.len.float() - 1);
     self.cursor.y = y;
@@ -1305,6 +1348,8 @@ fn exec_autodetect(buffer: *TextBuffer, raw_command: Str) void = {
     if(raw_command == "", => return());
     
     push_history(raw_command);
+    
+    @if(feature(.Help))
     if raw_command == "help" {
         buffer.append_string(HELP);
         return();
@@ -1318,6 +1363,8 @@ fn exec_autodetect(buffer: *TextBuffer, raw_command: Str) void = {
 }
 
 push_history :: fn(raw_command: Str) void = {
+    @if(!feature(.History)) return();
+    
     allocator := general_allocator();
     @debug_assert(state.history.len >= 2);
     if state.history[state.history.len - 2] != raw_command {
@@ -1329,7 +1376,9 @@ push_history :: fn(raw_command: Str) void = {
 }
 
 exec_franca :: fn(buffer: *TextBuffer, raw_command: Str) void = {
+    @if(!feature(.Repl)) return();
     @if(!FEAT_REPL) return(buffer.append_string("\n(error: FEAT_REPL=false)\n"));
+    
     
     if !raw_command.ends_with(";") {
         raw_command = buffer.lines&[buffer.lines.len - 1]&.str();
@@ -1421,6 +1470,7 @@ fn exec_program(buffer: *TextBuffer, raw_command: Str) void = {
 }
 
 fn exec_program(buffer: *TextBuffer, cmd: []CStr) void = {
+    @if(!feature(.Exec)) return();
     buffer.append_string("\n");
     if state.process.is_none() {
         start_time := timestamp();
@@ -1447,12 +1497,15 @@ fn append_bar(b: *TextBuffer) void = {
     b.append_string("\n");
 }
 
-fn on_cleanup(_state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
-    state[] = _state;
+fn on_cleanup(_state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = push_state _state {
     state.text.shutdown();
     
     // TODO: state.recording
-    // TODO: state.process; kill it
+    
+    if state.process& { p |
+        Posix'kill(p.pid, Posix.SIG.KILL);
+        // TODO: wait for it to die so can close the pipes
+    };
     
     a := general_allocator();
     for state.search_tasks { it |
@@ -1464,23 +1517,31 @@ fn on_cleanup(_state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     state.search_tasks&.drop();
     for state.buffers { it |
-        @if(it.threads_ref_count != 1 || it.ref_count != 1) @eprintln("[terminal.fr] ERROR: TextBuffer leaked ref count");
+        it.drop();
+    };
+    for state.buffer_stack { it |
         it.drop();
     };
     state.buffers&.drop();
-    state.scratch&.clear();
+    state.buffer_stack&.drop();
+    state.scratch&.drop();
     for state.history { it |
         a.dealloc(u8, it);
     };
     state.history&.drop(a);
-    // TODO: do this first and drop multiple times to decrement refs
-    state.buffer_stack&.drop();
     @if(FEAT_REPL) @if(state.repl.is_some()) state[].get_repl().drop();
-    
-    state[] = zeroed(*State);
+}
+
+push_state :: fn(s: *State, $body: @Fn() void) void = {
+    prev := state[];
+    state[] = s;
+    @must_return body();
+    state[] = prev;
 }
 
 search_for_selected :: fn(b: *TextBuffer) void = {
+    @if(!feature(.Search)) return();
+    
     self := state.search_tasks.items().find(fn(it) => it.have_work == 0);
     self := self || {
         it := general_allocator().box_zeroed(SearchTask);
@@ -1686,4 +1747,5 @@ backspace           (delete text)
 ctrl+a/e            (go to start/end of line)
 history();          (open a buffer listing previous commands)
 set_font_scale(state.scale*2); (zoom in)
+cmd+(-/+)           (zoom out/in)
 """;
