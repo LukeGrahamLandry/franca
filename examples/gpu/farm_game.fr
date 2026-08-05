@@ -26,8 +26,8 @@ World :: @struct(
     money: i64,
     timer: f64,
     farm_area: Rect,
-    msg: List(u8),
-    msg_timer: f64,
+    text: List(u8),
+    msg: List(@struct(len: i64, timer: f64)),
     truck_area: Rect,
     round_timer: f64,
     next_round_timer: f64,
@@ -79,8 +79,8 @@ config :: @struct {
     first_round_timer :: 60;
     crops :: @const_slice(@as(CropConfig)
         (time = 5, seed = 1, sale = 2, colour = red),
-        (time = 15, seed = 3, sale = 5, colour = white),
-        (time = 25, seed = 15, sale = 25, colour = yellow),
+        (time = 15, seed = 3, sale = 6, colour = white),
+        (time = 25, seed = 15, sale = 30, colour = yellow),
         (time = 60, seed = 30, sale = 60, colour = green),
     );
     items :: @const_slice(@as(ItemConfig)
@@ -106,10 +106,11 @@ fn load_default_world(_: rawptr, self: *World) void = {
         truck_area = (pos = (x = 350.0 + 500.0 + 40, y = 300.0), w = 200.0, h = 200.0),
         farm = list(allocator),
         msg = list(allocator),
+        text = list(allocator),
         requests = list(allocator),
         next_round_timer = config.first_round_timer,
         rng = Random.xoshiro256SS.new_seeded(),
-        timer = 0, msg_timer = 0, round_timer = 0, round_number = 0,
+        timer = 0, round_timer = 0, round_number = 0,
         paused = false,
     );
     range(0, 5) {i|
@@ -178,14 +179,13 @@ fn next_round(world: *World, reset: FieldType(State, .reset)) void = {
     world.next_round_timer = max(world.next_round_timer, config.min_round_timer);
     world.round_number += 1;
     
-    world.msg&.clear();
-    world.msg_timer = 100;
     if world.requests.len == 0 {
         bonus := int(extra_time / 5);
         world.money += bonus;
-        @if(bonus != 0)
-        @fmt(world.msg&, "Order fulfilled early! you earned % bonus rubles", bonus);
-
+        if bonus != 0 {
+            @fmt_msg(world, "Order fulfilled early! you earned % bonus rubles", bonus);
+        };
+        
         lo, hi := (4, 7);
         n := world.rng&.rand_int(lo, hi);
         range(0, n) { _ |
@@ -239,6 +239,7 @@ do_update :: fn(state: *State) void = {
     
     // The Farm
     drought := state.world&.check_hazard(config.drought, dt);
+    drought_had_effect := false;
     unordered_retain state.world.farm& { planted | 
         if tick_timer(state, planted.timer&, dt) {
             planted.crop.age = .Ready;
@@ -249,23 +250,25 @@ do_update :: fn(state: *State) void = {
             fn Some(t) => {
                 if tick_timer(state, t, dt) {
                     ok = false;
-                    @fmt(state.world.msg&, "a drought killed your %\n", planted.crop.type);  
-                    state.world.msg_timer = 3;
+                    @fmt_msg(state.world&, "a drought killed your %", planted.crop.type);  
                 }
             }
             fn None() => if drought && !state.world&.in_sprinkler(planted.pos) {
                 planted.drought = (Some = { xx := config.drought; xx.time });
                 state.dirty = true;
+                drought_had_effect = true;
             }
         };
         
         rot_time := -2.0 * config.crops[planted.crop.type.raw()].time;
         if planted.timer <= rot_time { 
             ok = false;
-            @fmt(state.world.msg&, "your % rotted\n", planted.crop.type);
-            state.world.msg_timer = 3; 
+            @fmt_msg(state.world&, "your % rotted", planted.crop.type);
         };
         ok
+    };
+    if drought_had_effect {
+        @fmt_msg(state.world&, "drought!");
     };
     
     // The Crows
@@ -279,8 +282,7 @@ do_update :: fn(state: *State) void = {
         };
         if it.crow_hp != 0 {
             if tick_timer(state, it.crow_timer&, dt) {
-                @fmt(state.world.msg&, "a crow took your %\n", it.item&.tag()); 
-                state.world.msg_timer = 3;
+                @fmt_msg(state.world&, "a crow took your %", it.item&.tag()); 
                 it.item = .None;
                 it.crow_hp = 0;
             };
@@ -291,17 +293,24 @@ do_update :: fn(state: *State) void = {
     if tick_timer(state, w.round_timer&, dt) {
         state.world&.next_round(state.reset);
     };
-    w.msg_timer -= dt;
-    if state.world.msg_timer <= 0 {
-        state.world.msg.len = 0;
+    world := state.world&;
+    
+    each world.msg { it |
+        it.timer -= dt;
+    };
+    if world.msg.len > 0 && world.msg[0].timer < 0 {  // :SLOW
+        it := world.msg&.pop_front_slow().unwrap();
+        s := world.text&.items();
+        s.slice(0, s.len - it.len).copy_from(s.rest(it.len));
+        world.text.len -= it.len;
+        state.dirty = true;
     };
     
-    world := state.world&;
     // this is here instead of in next_round() because i want the paused end screen to show the state of the world with the progress you made before resetting. 
     if world.round_timer < 1 && world.requests.len > 0 {
-        @fmt(world.msg&, "Time's up. You lost on round %!", world.round_number);
+        @fmt_msg(world, "Time's up. You lost on round %!", world.round_number);
         world.paused = true;
-        world.msg_timer = 1;
+        world.round_timer = 0;
     };
 };
 
@@ -355,10 +364,18 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sdtx.pos.y = 0.0;
     sdtx.put(@tfmt("You have % rubles.    Round %\n", state.world.money, state.world.round_number));
     sdtx.put(@tfmt("Shipment due in %\n", int(state.world.round_timer)));
-    if state.world.msg_timer > 0 {
-        sdtx.color = pack_rgba(1.0, 0.5, 0.2, 1.0);
-        sdtx.pos.y += 1;
-        sdtx.put(state.world.msg.items());
+    a: f32 = 1.0;
+    start, stop := (state.world.text.len, state.world.text.len);
+    each_rev state.world.msg& { it |
+        if it.timer > 0 {
+            start -= it.len;
+            sdtx.color = pack_rgba(1.0, 0.5, 0.2, a);
+            sdtx.pos.y += 1;
+            sdtx.pos.x = 0;
+            sdtx.put(state.world.text.items().slice(start, stop));
+            a *= 0.8;
+            stop = start;
+        };
     };
     if state.world.paused {
         sdtx.color = pack_rgba(1.0, 0.5, 0.2, 1.0);
@@ -568,13 +585,10 @@ fn do_interact(state: *State) void = {
     DONE :: return;
     
     say :: fn(a: FatExpr) FatExpr #macro = @{
-        state.world.msg&.clear();
-        @[format_into(@{ state.world.msg& }, a&.items(), a.loc)];
-        @fmt(state.world.msg&, "\n");
-        state.world.msg_timer = 100;
+        @[fmt_msg(prepend_tuple(@{ state.world& }, a))];
         DONE();
-    }
-    
+    };
+
     each state.world.shelves { shelf | 
         if center_overlaps(player.pos, base_size, shelf.pos, base_size) {
             if player.inventory&.is(.Scarecrow) && !shelf.scarecrow {
@@ -622,7 +636,7 @@ fn do_interact(state: *State) void = {
             fn Crop(crop) => {
                 // Try to plant a seed
                 crop.age == Growth.Seed 
-                    || @say("The % is fully grown. It can't be planted it again.", crop.type);
+                    || @say("The % is fully grown. It can't be planted again.", crop.type);
                 player.inventory = .None;
                 state.world.farm&.push(
                     pos = player.pos, 
@@ -731,7 +745,18 @@ fn drop(w: *World) void = {
     w.shelves&.drop();
     w.sprinklers&.drop();
     w.requests&.drop();
+    w.text&.drop();
     w.msg&.drop();
+}
+
+fn fmt_msg(arg: FatExpr) FatExpr #macro = {
+    args := arg&.items();
+    @{ 
+        w := @[args[0]];
+        n := w.text.len;
+        @[format_into(@{ w.text& }, args.rest(1), arg.loc)];
+        w.msg&.push(len = w.text.len - n, timer = 3);
+    }
 }
 
 bake_texture :: fn() Sg.Image.Desc = {
