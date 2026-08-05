@@ -96,6 +96,7 @@ the whole game in a screen so you get to be in a different place in the world an
   - web: lock mouse
   - web: full screen and precompiled
   - for website give fake file system a way to access local storage for save file
+  - Lox'run_catch uses longjmp for runtime errors
 - when designing the world,
   do the knowledge gating thing where you see a complicated puzzle early 
   and have to go somewhere else where it teaches you how to solve that type of thing. 
@@ -195,6 +196,13 @@ the whole game in a screen so you get to be in a different place in the world an
   - webgpu doesn't like same texture being used as read and write
   - cheats in child will crash when it tries to save the world i think
   - horizontal camera rotation speed when >2 players and last is at an angle feels wrong (way too slow). 
+- lox (puzzles/code.fr)
+  - don't run the code synchronously when leaving the screen. 
+    store the vm on the State and have a different run loop that ticks a certain number of instructions each frame. 
+    this would also avoid infinite loops hanging the whole everything. 
+    update_locked_tiles gets more complicated.
+  - more complex puzzles
+  - be safe about errors for running out of stack
 - create a situation where you can't have all the mandelbrots black 
   without an extra player screen (because you need them to be a colour to walk on them). 
 - i got a bounds check once but idk what i did

@@ -1,0 +1,97 @@
+
+State :: @struct {
+    terminal: Terminal.State #use;  // #use so everyone has .dirty
+    // this looks stupid rn as a reminder that i want to let the code run across multiple frames
+};
+
+Instance :: @struct {
+    text: Str;
+    features: EnumSet(Terminal.Feature);
+    lang: Language;
+};
+
+Language :: @enum(u8) (Inspect, Lox);
+
+fn update(self: *App, it: *Instance) bool = {
+    if it.lang != .Lox {
+        return(true);
+    };
+    locked := true;
+Terminal'push_state(self.terminal&) {
+    src := @ref u8.list(temp());
+    buf := Terminal'selected_buffer().unwrap();
+    get_string(buf, src);
+    
+    vm := @ref @zeroed Lox'Vm;
+    vm.init();
+    vm.print_callback = fn(vm, _, value) = @fmt(Lox.Vm.ptr_from_raw(vm)[].errors&, "%\n", value);
+    
+    if true {
+        break :: local_return;
+        r := vm.interpret(src.items(), true);
+        @if(r != .Ok) break();
+        
+        update_fn := vm.globals&.get(vm.copy_string("update")) 
+            || break(@fmt(vm.errors&, "expected a function named 'update'"));
+        
+        _ := try(vm) {
+            // class Door{}; Door().locked = true;
+            Lox'Opcodes'Class(vm, vm.copy_string("Door").to_value()); // push Door;
+            vm.call_value(vm.peek(0), 0);  // pop Door; push door; 
+            door := vm.peek();
+            vm.push(true.to_value());
+            Lox'Opcodes'SetProperty(vm, vm.copy_string("locked").to_value());  // pop true; pop door; push true; 
+            Lox'Opcodes'Pop(vm); // pop true
+            vm.push(door);  // :!
+            
+            // call `update(door)`
+            /*ugh*/ {
+                it := vm.Lox'allocate_obj(Lox.ObjFunction);
+                it.name = "toplevel";
+                it := vm.new_closure(it);
+                vm.push_frame(it, 0)
+            };
+            vm.push(update_fn);
+            vm.push(door);
+            vm.call_value(vm.peek(1), 1);
+            vm.run();
+            vm.pop(); // discard update()'s return value
+            
+            Lox'Opcodes'GetProperty(vm, vm.copy_string("locked").to_value());  // :!
+            locked = !vm.pop().Lox'is_falsy();
+        };
+    };
+    
+    // want to show print/errors on the screen but not force you 
+    // to delete it before running again so comment out each line. 
+    prefix := "\n// output:\n// ";
+    src.len = src.items().index_of_slice(prefix) || src.len;
+    src.push_all(prefix);
+    for vm.errors& { c |
+        if c == "\n".ascii() {
+            @fmt(src, "\n// ");
+        } else {
+            src.push(c);
+        };
+    };
+    src.push_all("\n");
+    buf.clear_text();  // :SLOW
+    buf.append_string(src.items());
+
+    vm.drop();
+};
+locked
+}
+
+App :: State;
+fn render(sgl: *Sgl.Self, it: *Instance, self: *App) void = ();
+fn collision(p: Vec3, it: *Instance, self: *App) bool = false;
+
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = on_render(state.terminal&, sapp, sg);
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = on_init(state.terminal&, sapp, sg);
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = on_event(state.terminal&, sapp, event);
+fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = on_cleanup(state.terminal&, sapp, sg);
+#use("@/graphics/lib.fr");
+
+Lox :: import("@/examples/lox/lox_main.fr").Lox;
+Terminal :: import("@/examples/gpu/terminal.fr");

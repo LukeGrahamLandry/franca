@@ -143,35 +143,36 @@ fn interpret(self: *Vm, function: *ObjFunction, collect_errors: bool) InterpretR
     self.stack_top = self.stack.ptr;
     
     closure := self.new_closure(function);
-    self.frames&.push(
-        closure = closure, ip = 
-        function.chunk.code.index_unchecked(0), 
-        first_local = ptr_diff(self.stack.ptr, self.stack_top),
-    );
     self.push(closure.to_value());
+    self.push_frame(closure, 0);
     
     self.except = .None;
     if !collect_errors {
         self.run();
         return(.Ok);
     };
-    
+    try(self, => self.run())
+}
+
+fn try(self: *Vm, $body: @Fn() void) InterpretResult = {
+    @debug_assert(self.except.is_none(), "not reentrant");
     except := @uninitialized JumpBuf;
     self.except = (Some = except&);
-    @match(try(except&)) {
+    r: InterpretResult = @match(try(except&)) {
         fn Try() => {
-            self.run();
+            body();
             .Ok
         }
         fn Catch() => .RuntimeError;
-    }
+    };
+    self.except = .None;
+    r
 }
 
 is_falsy :: fn(v: Value) bool = v.is_bool().and(=> v.to_bool().not()).or(v.is_nil()); 
 
 fn run(self: *Vm) void = {
     end := self.frames.len - 1;
-    self.frame = self.frames[self.frames.len - 1]&;
     if !self.frame.function.aot.is_null() {
         f := bit_cast_unchecked(rawptr, OpFn, self.frame.function.aot);
         return f(self);
@@ -183,12 +184,12 @@ fn run(self: *Vm) void = {
         @debug_assert(ptr_diff(frame.function.chunk.code.maybe_uninit.ptr, ip[]) < frame.function.chunk.code.len, "fell off the end of function");
         self.trace_inst();
         instruction := self.read_byte();
+        i := @as(OpCode) instruction;
         
         S :: Type.scope_of(Opcodes);
         inline_for get_constants(S) { $name |
             fid :: FuncId.get_constant(S, name[]).unwrap();
             op :: OpCode.from_name(name[].str()).unwrap();
-            i := @as(OpCode) instruction;
             if op == i {
                 @if(has_value_literal(op), 
                     fid(self, self.read_constant()), 
@@ -518,13 +519,10 @@ fn call_value(self: *Vm, callee: Value, arg_count: i64) void = {
     if arg_count != f.arity {
         self.runtime_error2(@tfmt("expected % arguments but got %", f.arity, arg_count));
     }
-    s := ptr_diff(self.stack.ptr, self.stack_top);
+    
+    @debug_assert(self.frames.len > 0, "call_value outside run loop");
     caller_aot := !self.frame.function.aot.is_null();
-    self.frames&.push(
-        closure = f, ip = f.chunk.code.index_unchecked(0), 
-        first_local = s - arg_count - 1, 
-    );
-    self.frame = self.frames[self.frames.len - 1]&;
+    self.push_frame(f, arg_count);
     
     if !self.frame.function.aot.is_null() {
         f := bit_cast_unchecked(rawptr, OpFn, self.frame.function.aot);
@@ -538,6 +536,16 @@ fn call_value(self: *Vm, callee: Value, arg_count: i64) void = {
         f := bit_cast_unchecked(rawptr, OpFn, self.xxxxx);
         return f(self);
     };
+}
+
+fn push_frame(self: *Vm, f: *ObjClosure, arg_count: i64) void = {
+    s := ptr_diff(self.stack.ptr, self.stack_top);
+    self.frames&.push(
+        closure = f, 
+        ip = f.chunk.code.index_unchecked(0),  // will be null if aot 
+        first_local = s - arg_count - 1, 
+    );
+    self.frame = self.frames[self.frames.len - 1]&;
 }
 
 #inline fn read_byte(self: *Vm) u8 = {
@@ -596,7 +604,7 @@ fn runtime_error2(self: *Vm, msg: Str) Never = {
         p := chunk.code&.as_ptr();
         i := p.ptr_diff(frame.ip);
         // aot doesn't give debug info because it doesn't track ip
-        line := @if(chunk.lines.len != 0, chunk.lines[i], -1);  
+        line := @if(i.ult(chunk.lines.len), chunk.lines[i], -1);  
         @fmt(self.errors&, "\n[line %] in %", line, frame.function.name);
     };
     except := self.except 

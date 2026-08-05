@@ -10,6 +10,7 @@ IS GOING TO MAKE ME LOSE MY FUCKING MIND
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
+- lox/lox_main.fr: exit with status if there was an error so works with normal lox test runner
 - figure out how to make my programs a real macos app. 
   rn Terminal.app existing just to run my terminal uses more cpu at rest than mine does. 
   only 2% of a core which is nothing but i don't like it and i have the luxury of being petty. 

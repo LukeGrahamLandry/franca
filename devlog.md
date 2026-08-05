@@ -1,4 +1,9 @@
 
+## (Aug 5)
+
+- maze_game: a trivial puzzle that makes you write lox code. 
+  the api for calling the vm is a bit error prone. 
+
 ## (Aug 1)
 
 - farm: fix pause. show multiple messages at once. 

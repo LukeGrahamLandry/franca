@@ -58,7 +58,7 @@ mappings :: @static {
     //       in progress search? can't have the @@B pointer links. 
     //       repl is nontrivial. 
     ctx.set_repr(Get(.Terminal).App, @struct(text: Str, view: FieldType(Terminal.TextBuffer, .view)), fn(repr, in) = {
-        Terminal'push_state(in) {
+        Terminal'push_state(in.terminal&) {
             out := @ref u8.list(temp());
             buf := selected_buffer().unwrap();
             get_string(buf, out);
@@ -66,8 +66,9 @@ mappings :: @static {
             repr.view = buf.view;
         };
     }, fn(out, repr) = {
-        Terminal'push_state(out) {
+        Terminal'push_state(out.terminal&) {
             buf := selected_buffer().unwrap();
+            clear_text(buf);
             append_string(buf, repr.text);
             buf.view = repr.view;
         };
@@ -124,6 +125,25 @@ mappings_get :: fn($T: Type) MappingVTable = @run {
                 // :SLOW if they're all primitives and no padding
                 each it { it |
                     @try(load(ctx, @type it[], it)) return;
+                };
+                .Ok
+            });
+        };
+        
+        // TODO: IsCollection relies on instantiating it on T.Element, 
+        //       but that's not always allowed because enumset requires the key be an enum.
+        //@if(@run IsCollection(EnumSet)(T)) {
+        @if(@run has_const_field(T, @symbol hack_this_is_enum_set)) {
+            ctx.set_repr(T, []T.Element, fn(repr, in) = {
+                o := @ref T.Element.list(temp());
+                for in { k |
+                    o.push(k);
+                };
+                repr[] = o.items();
+            }, fn(out, repr) = {
+                out[] = empty();
+                for repr { k |
+                    out.set(k);
                 };
                 .Ok
             });
