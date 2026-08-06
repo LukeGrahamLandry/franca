@@ -21,6 +21,9 @@
 
 > macos / web only
 
+- maze_game: puzzle game with screens that affect a 3d world
+- life/gui: conway with hashlife
+- circuit/gui: logic gate simulator (demos: a minimal 8 bit cpu from nand gates in my own ugly hdl and can import save files from turingcomplete.game)
 - terminal: minimal terminal emulator that can exec processes and show thier output.
 - chess/gui: play chess against the machine
 - stackie: a clone of https://c50.fingswotidun.com
@@ -32,7 +35,9 @@
 - hello_triangle: everyone's favourite program
 - trivial_compute: add arrays on the gpu
 - geo: decompress a LAZ file and render the point cloud
-- **unfinished**: depth_test, epicycles, lambda
+- epicycles: fourier transform to draw a shape with circles
+- tests/external/wasm4.fr: fantasy console
+- **unfinished**: depth_test
 
 ## languages
 
@@ -74,3 +79,4 @@
 - bloat: parses the output of objdump and reports the space taken by each function (cli:objdump)
 - view_image: print a jpeg of the mona lisa to the terminal by importing a c library (lib:wuffs)
 - ascii_table: uses stb_truetype and stb_image_write to generate a simple image
+- web/(serve, get): minimal https (server, client) with mbedtls 

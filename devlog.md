@@ -3,6 +3,18 @@
 
 - maze_game: a trivial puzzle that makes you write lox code. 
   the api for calling the vm is a bit error prone. 
+- dump_macho
+  - support multiarchitecture binaries. 
+  - buffer the output. time to dump `Google Chrome Framework`: 4030ms -> 760ms 
+    (and that's a bad case for buffering the whole 224mb output so wasting twice the memory / 25% time on resizing the list in an arena). 
+- `@format(...) a` is uglier than `@afmt(a, ...)`; `@fmt_cstr("%", s)` is uglier (and slower) than `s.as_cstr()`;
+- trash broken lsp, useless vscode extension, unfinished lambda calculus example 
+---
+- make epicycles actually work
+  - i was shifting the frequencies to center on zero when drawing but not when generating
+  - when drawing the `t` values used to sample points need to be evenly spaced out over 2pi stepping by 1/(number of coeficients)
+- chess: i was treating every move as a capture when stepping the counter for threefold repitition
+  so it never happened and bot wouldn't try to win instead of sit there forever
 
 ## (Aug 1)
 

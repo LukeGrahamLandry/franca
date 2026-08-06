@@ -17,21 +17,18 @@
 //
 // TODO: don't morph as though it the window were square
 
-// (i think): len(in) is number of points and len(out) is number of circles. they don't need to match. 
-//            but that doesn't seem true, it works much better when they're the same? 
+// len(in) is number of points and len(out) is number of circles. they don't need to match but too many isn't better. 
 fn discrete_fourier(in: []Vec2, out: []Vec2) void = {
     enumerate out { k, X |
         result := vec2(0, 0);
-        t := -2.0 * PI * k.float() / in.len.float();
+        k := shift_freq(k).cast();
+        t := -2.0 * PI * k / in.len.float();
         enumerate in { n, x |
             result += complex_mul(x[], pow_ei((t * n.float()).cast()));
         };
-        // TODO: i feel like im making up the extra '/' here but otherwise the numbers get way too big
         X[] = result / vec2(in.len.float().cast());
     };
 }
-
-// This is :ugly and also doesn't work! wip!
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sgl := state.draw&;
@@ -42,7 +39,10 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sgl.load_pipeline(state.pipe);
     
     sgl.begin(.LINES);
-    t := fmod(sg.frame_index.zext().float() / 100.0, PI*2.0).cast();
+    
+    steps := state.coefficients.len.max(1);
+    t := cast(sg.frame_index.zext().mod(steps).float() / steps.float() * PI*2.0);
+    
     point := vec2(0.0);
     last_point := point;
     
@@ -51,8 +51,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sgl.v3f(0.0, 0.0, 0.0);  
     
     enumerate state.coefficients { ii, C |
-        i := ii + 1;
-        c := (i/2).float().cast() * @if(i.mod(2) == 0, 1, -1);
+        c := shift_freq(ii);
         point += complex_mul(C[], pow_ei(t * c));
         sgl.v3f(point.x, point.y, 0.0);  
         
@@ -68,8 +67,6 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sgl.end();
     
     sgl.draw_points(state.points.items(), 100);
-    sgl.draw_points(state.coefficients.items(), 200);
-    steps :: 100.0;
     
     points := state.coefficients.items();
     green := 0;
@@ -79,17 +76,16 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     last_point := vec2(0.0);
     first_point: ?Vec2 = .None;
     range(0, steps) { i |
-        step: f32 = cast(PI * 2.0 / steps);
+        step: f32 = cast(PI * 2.0 / steps.float());
         t := i.float().cast() * step;
         point := vec2(0.0);
         enumerate points { i, C |
-            i := i + 1;
-            c := (i/2).float().cast() * @if(i.mod(2) == 0, 1, -1);
+            c := shift_freq(i);
             point += complex_mul(C[], pow_ei(t * c));
         }; 
         hit := abs(t-outer_t) <= step/2;
         sgl.point_size = 5.0;
-        sgl.color = pack_rgba(i * 255 / steps.int(), green, @if(hit, 255, 0), 255);
+        sgl.color = pack_rgba(i * 255 / steps, green, @if(hit, 255, 0), 255);
         if first_point.is_none() && sgl.cur_prim_type == .LINES {
             first_point = (Some = point);
         } else {
@@ -181,6 +177,11 @@ fn circle(sgl: *Sgl.Self, r: f32, c: Vec3, n: i64) void = {
         sgl.v3f(aa.x + c.x, aa.y + c.y, c.z);
         sgl.v3f(bb.x + c.x, bb.y + c.y, c.z);
     };
+}
+
+shift_freq :: fn(i: i64) f32 = {
+    i := i + 1;
+    (i/2).float().cast() * @if(i.mod(2) == 0, 1, -1)
 }
 
 fn complex_mul(a: Vec2, b: Vec2) Vec2 = 

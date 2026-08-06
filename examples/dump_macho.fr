@@ -1,11 +1,12 @@
 #!/usr/bin/env franca
 //! I think writing a pretty printer for a file format is good practice for trying to emit them myself. 
 //! https://en.wikipedia.org/wiki/Mach-O
-//! note: if you're ever tempted to use this code for something don't forget to use buffered printing. :SLOW
 // TODO:
 //      - segment_offset is virtual offset from first interesting segment NOT file offset
 //      - warn if __TEXT is not file offset 0
 //      - warn if fixup chain segment_offset is not in the right segment
+//      - say at the end if there were any warnings that were printed (because those could be a compiler mistake and debugging those is the point of this program)
+//      - panic hook that prints the buffered output if you bounds check fail?
 
 main :: fn() void = {
     args := cli_args();
@@ -13,19 +14,38 @@ main :: fn() void = {
     path := args[args.len - 1].str(); 
     bytes := temp().read_to_string_or_crash(path).items(); // :panic
     
-    @println("Read % bytes from %", bytes.len, path);
-    dump(bytes);
+    out := @ref u8.list(1.shift_left(16), temp());
+    @fmt(out, "Read % bytes from %\n", bytes.len, path);
+    dump(out, bytes);
+    print(out.items());
 }
 
-dump :: fn(bytes: []u8) void = {
+dump :: fn(out: *List(u8), bytes: []u8) void = {
     full_bytes := bytes;
     
     header := bytes&.pop_type(MachoHeader);
-    @println("[Header] %", header);
     
     // most errors i try to just report and not crash, but this one it's more likely that you passed the wrong file by mistake
     @assert_ne(header.magic, import("@/backend/elf/bits.fr").MAGIC, "expected a Mach-O file but that is an ELF file");
-    @assert_ne(header.magic, 0xBEBAFECA, "fat Mach-O file is not supported");
+    
+    if header.magic == 0xBEBAFECA {
+        // my compiler doesn't output these but many real apps are one. 
+        bytes := full_bytes.rest(4);
+        count := bytes&.pop_type(u32)[].byte_swap();
+        @fmt(out, "multiarch: (magic = %, count = %)\n", header.magic, count);
+        range(0, count.zext()) { i |
+            H :: @struct(type: u32, subtype: u32, offset: u32, size: u32, align: u32);
+            ::DeriveFmt(H);
+            h := bytes&.pop_type(H);
+            H.byte_swap_fields(h);
+            @fmt(out, "===\n=== multiarch[%]: %\n", i, h);
+            child := full_bytes.subslice(h.offset.zext(), h.size.zext());
+            dump(out, child);
+        };
+        return();
+    };
+    
+    @fmt(out, "[Header] %\n", header);
     @assert_eq(header.magic, macho_magic, "macho bad magic");
     
     total := 0;
@@ -34,130 +54,129 @@ dump :: fn(bytes: []u8) void = {
     range(0, header.commands_count.zext()) { i |
         beginning_len := bytes.len;
         header := bytes&.pop_type(LoadCommandHeader);
-        @println("  [Load Command %] %", i, header);
+        @fmt(out, "  [Load Command %] %\n", i, header);
         if header.size.mod(8) != 0 {
-            @eprintln("WARN: this load command's size is not a multple of 8 bytes. thats probably bad for business");
+            @fmt(out, "WARN: this load command's size is not a multple of 8 bytes. thats probably bad for business\n");
         };
         @switch(header.type) {
             @case(LoadCommand.SegmentLoad.raw()) => {
                 header := bytes&.pop_type(SegmentLoad);
-                @println("        [Segment Load] %", header);
-                @println("      name: %", header.name&.str());
+                @fmt(out, "        [Segment Load] %\n", header);
+                @fmt(out, "      name: %\n", header.name&.str());
                 
                 // note: its fine if there's no sections. like __LINKEDIT.
                 range(0, header.section_count.zext()) { i |
                     header := bytes&.pop_type(SegmentSection);
-                    @println("      [Section %] %", i, header);  // this index is misleading. really it should include the preceding ones. 
-                    @println("          section_name: %", header.section_name&.str());
-                    @println("          segment_name: %", header.segment_name&.str());
+                    @fmt(out, "      [Section %] %\n", i, header);  // this index is misleading. really it should include the preceding ones. 
+                    @fmt(out, "          section_name: %\n", header.section_name&.str());
+                    @fmt(out, "          segment_name: %\n", header.segment_name&.str());
                     
                     if header.relocations_count != 0 {
-                        @println("          % relocations:", header.relocations_count);
+                        @fmt(out, "          % relocations:\n", header.relocations_count);
                         T :: RelocationFields;
                         relocations := ptr_cast_unchecked(u8, T, full_bytes.ptr.offset(header.relocations_file_offset.zext()));
                         relocations: []T = (ptr = relocations, len = header.relocations_count.zext());
                         for relocations { r | 
-                            @println("          - %", r&);
+                            @fmt(out, "          - %\n", r&);
                         };
                     };
                 };
-                //@println("current offset is %", ptr_diff(start, bytes.ptr));
             };
             @case(LoadCommand.LinkEditSymbolInfo.raw()) => {
                 command := bytes&.pop_type(LinkEditSymbolInfo);
-                @println("    [__LINKEDIT Symbol Info] %", command);
+                @fmt(out, "    [__LINKEDIT Symbol Info] %\n", command);
                 // Offset from the beginning of the file. (the data will be after all the load commands).
                 // (index in __stubs = index in LinkEditSymbolTable)
                 if command.indirect_symbol_count > 0 {
-                    println("        Indirect Symbols:");
+                    @fmt(out, "        Indirect Symbols:\n");
                 };
                 indirect_bytes := full_bytes.slice(command.indirect_symbol_offset.zext(), full_bytes.len);
                 range(0, command.indirect_symbol_count.zext()) { i | 
                     if i.mod(10) == 0 {
-                        if(i != 0, => print("\n"));
-                        print("        ");
+                        if(i != 0, => @fmt(out, "\n"));
+                        @fmt(out, "        ");
                     };
                     symbol_index := indirect_bytes&.pop_type(u32);
                     ::FmtPad(i64);
                     ::FmtPad(u32);
-                    @print("(% = %), ", f_pad(i, 3, .After), f_pad(symbol_index[], 3, .Before));
+                    @fmt(out, "(% = %), ", f_pad(i, 3, .After), f_pad(symbol_index[], 3, .Before));
                 };
-                print("\n");
+                @fmt(out, "\n");
             };
             @case(LoadCommand.LinkEditSymbolTable.raw()) => {
                 command := bytes&.pop_type(LinkEditSymbolTable);
                 if 24 != (@as(i64) header.size.zext()) {
-                    eprintln("WARN: bad fixed command size");
+                    @fmt(out, "WARN: bad fixed command size\n");
                 };
-                @println("    [__LINKEDIT Symbol Table] %", command);
+                @fmt(out, "    [__LINKEDIT Symbol Table] %\n", command);
                 // Offsets from the beginning of the file. (the data will be after all the load commands).
                 symbols_bytes := full_bytes.slice(command.symbols_offset.zext(), full_bytes.len);
                 strings_bytes := full_bytes.slice(command.strings_offset.zext(), full_bytes.len);
                 
                 range(0, command.symbol_count.zext()) { i |
                     command := symbols_bytes&.pop_type(SymbolEntry);
-                    @println("      [Symbol %] %", i, command);
+                    @fmt(out, "      [Symbol %] %\n", i, command);
                     name: CStr = (ptr = strings_bytes.ptr.offset(command.name_offset.zext()));
                     name := name.str();
                     if name.len + command.name_offset.zext() < strings_bytes.len {
-                        @println("          name: %", name);
+                        @fmt(out, "          name: %\n", name);
                     } else {
-                        eprintln("WARN: string goes out of bounds of string table");
+                        @fmt(out, "WARN: string goes out of bounds of string table\n");
                     };
                 };
             };
             @case(LoadCommand.MinimumOsVersion.raw()) => {
                 command := bytes&.pop_type(MinimumOsVersion);
-                @println("    [Minimum Os Version] %", command);
+                @fmt(out, "    [Minimum Os Version] %\n", command);
                 range(0, command.number_of_tools_used.zext()) { i |
-                    @println("        [Tool %] %", i, bytes&.pop_type(ToolType));
+                    @fmt(out, "        [Tool %] %\n", i, bytes&.pop_type(ToolType));
                 };
             };
             @case(LoadCommand.LinkLibrary.raw()) => 
-                with_trailing_string(bytes&, header, LinkLibrary, "Link Library");
+                with_trailing_string(out, bytes&, header, LinkLibrary, "Link Library");
             @case(LoadCommand.LoadDynamicLinker.raw()) => 
-                with_trailing_string(bytes&, header, LoadDynamicLinker, "Load Dynamic Linker");
+                with_trailing_string(out, bytes&, header, LoadDynamicLinker, "Load Dynamic Linker");
             @case(LoadCommand.LinkLibrarySelf.raw()) => 
-                with_trailing_string(bytes&, header, LinkLibrary, "Link Library Self");
+                with_trailing_string(out, bytes&, header, LinkLibrary, "Link Library Self");
             @case(LoadCommand.MainEntryPoint.raw()) => {
                 command := bytes&.pop_type(MainEntryPoint);
-                @println("    [Main Entry Point] %", command);
+                @fmt(out, "    [Main Entry Point] %\n", command);
             };
             @case(LoadCommand.SourceVersion.raw()) => {
                 command := bytes&.pop_type(SourceVersion);
-                @println("    [Source Version] %", command);
+                @fmt(out, "    [Source Version] %\n", command);
             };
             @case(LoadCommand.FunctionStarts.raw()) => {
                 command := bytes&.pop_type(LinkEditBlob);
-                @println("    [Function Starts] %", command);
+                @fmt(out, "    [Function Starts] %\n", command);
                 // first number is offset from start of __TEXT to first function. the rest are delta to next function. 
                 function_starts := full_bytes.slice(command.offset.zext(), command.offset.zext() + command.size.zext());
                 i := 0;
                 while => !function_starts.is_empty() {
                     if i.mod(20) == 0 {
-                        if(i != 0, => print("\n"));
-                        print("        ");
+                        if(i != 0, => @fmt(out, "\n"));
+                        @fmt(out, "        ");
                     };
                     value, rest, ok := read_leb128_unsigned(function_starts);
                     assert(ok, "failed to read a leb128");
-                    @print("%, ", value);
+                    @fmt(out, "%, ", value);
                     function_starts = rest;
                     i += 1;
                 };
-                println("");
+                @fmt(out, "\n");
             };
             @case(LoadCommand.DataInCode.raw()) => {
                 command := bytes&.pop_type(LinkEditBlob);
-                @println("    [Data In Code] %", command);
+                @fmt(out, "    [Data In Code] %\n", command);
                 data := full_bytes.slice(command.offset.zext(), command.offset.zext() + command.size.zext());
                 count := data.len / DataInCodeEntry.size_of();
                 range(0, count) { i |
-                    @println("      [%] %", i, data&.pop_type(DataInCodeEntry));
+                    @fmt(out, "      [%] %\n", i, data&.pop_type(DataInCodeEntry));
                 };
             };
             @case(LoadCommand.CodeSigneture.raw()) => {
                 command := bytes&.pop_type(LinkEditBlob);
-                @println("    [Code Signeture] %", command);
+                @fmt(out, "    [Code Signeture] %\n", command);
                 data := full_bytes.slice(command.offset.zext(), command.offset.zext() + command.size.zext());
                 full_data := data;
                 ::DeriveFmt(SuperBlob);
@@ -165,11 +184,11 @@ dump :: fn(bytes: []u8) void = {
                 data := data;
                 it := data&.pop_type(SuperBlob);
                 SuperBlob.byte_swap_fields(it);
-                @println("        [SuperBlob] %", it);
+                @fmt(out, "        [SuperBlob] %\n", it);
                 range(0, it.blob_count.zext()) { it |
                     it := data&.pop_type(Ty(u32, u32))[]; it := it&;
                     Ty(u32, u32).byte_swap_fields(it); 
-                    @println("        - %", it);
+                    @fmt(out, "        - %\n", it);
                     
                     off := it._1.zext();
                     it := full_data.subslice(off, 8).peek_type(Ty(u32, u32))[]; it := it&;
@@ -182,11 +201,11 @@ dump :: fn(bytes: []u8) void = {
                             it := data.peek_type(CodeDirectory)[]; it := it&;
                             CodeDirectory.byte_swap_fields(it); 
                             ::DeriveFmt(CodeDirectory);
-                            @println("          CODEDIRECTORY%", it);
+                            @fmt(out, "          CODEDIRECTORY%\n", it);
                             
                             ident := data.rest(it.identOffset.zext());
                             ident := ident&.pop_cstr();
-                            @println("          ident = %", ident);
+                            @fmt(out, "          ident = %\n", ident);
                             
                             size_special_hashes := it.nSpecialSlots.zext() * it.hashSize.zext();
                             hashes0 := data.subslice(it.hashOffset.zext() - size_special_hashes, size_special_hashes);
@@ -205,68 +224,66 @@ dump :: fn(bytes: []u8) void = {
                                 };
                             };
                             
-                            out := u8.list(temp());
-                            @fmt(out&, "          --- special hashes --- \n");
-                            show_hashes(out&, hashes0, "S", it.nSpecialSlots.zext());
-                            @fmt(out&, "          --- code hashes --- \n");
-                            show_hashes(out&, hashes1, "C", 0);
-                            print(out.items());
+                            @fmt(out, "          --- special hashes --- \n");
+                            show_hashes(out, hashes0, "S", it.nSpecialSlots.zext());
+                            @fmt(out, "          --- code hashes --- \n");
+                            show_hashes(out, hashes1, "C", 0);
                         };
                         @case(CSMAGIC_EMBEDDED_ENTITLEMENTS) => {
-                            @println("          EMBEDDED_ENTITLEMENTS%", it);
-                            println(data.rest(8));
+                            @fmt(out, "          EMBEDDED_ENTITLEMENTS%\n", it);
+                            @fmt(out, "%\n", data.rest(8));
                         };
-                        @default => @println("          unknown%", it);
+                        @default => @fmt(out, "          unknown%\n", it);
                     };
                 };
                 
             };
             @case(LoadCommand.ApplicationUuid.raw()) => {
                 command := bytes&.pop_type(ApplicationUuid);
-                @println("    [Application UUID] %", command);
+                @fmt(out, "    [Application UUID] %\n", command);
             };
             @case(LoadCommand.ChainedFixups.raw()) => {
                 // https://github.com/qyang-nj/llios/blob/main/dynamic_linking/chained_fixups.md
                 command := bytes&.pop_type(LinkEditBlob);
-                @println("    [Chained Fixups] %", command);
+                @fmt(out, "    [Chained Fixups] %\n", command);
                 full_data := full_bytes.slice(command.offset.zext(), command.offset.zext() + command.size.zext());
                 data := full_data;
                 header := data&.pop_type(ChainedFixupsHeader);
-                @println("        %", header);
+                @fmt(out, "        %\n", header);
                 starts_data := full_data.slice(header.starts_offset.zext(), full_data.len);
                 full_starts_data := starts_data;
                 seg_count := starts_data&.pop_type(u32)[];
-                @println("           chained_starts_in_image.seg_count %", seg_count);
+                @fmt(out, "           chained_starts_in_image.seg_count %\n", seg_count);
                 range(0, seg_count.zext()) { segment_index |
                     offset_to_csis := starts_data&.pop_type(u32)[];
                     if offset_to_csis != 0 {
                         starts_data := full_starts_data;
                         if full_data.len < offset_to_csis.zext() {
-                            @eprintln("WARN: offset_to_csis = %", offset_to_csis);
+                            @fmt(out, "WARN: offset_to_csis = %\n", offset_to_csis);
                         };
                         starts_data.ptr = starts_data.ptr.offset(offset_to_csis.zext());
                         starts_data.len -= offset_to_csis.zext();
-                        @print("           %. off=% ", segment_index, offset_to_csis);
+                        @fmt(out, "           %. off=% ", segment_index, offset_to_csis);
                         starts := starts_data&.pop_type(ChainedStartsInSegment);
-                        @print("ChainedStartsInSegment: %", starts);
+                        @fmt(out, "ChainedStartsInSegment: %", starts);
                         if starts.size >= command.size {
-                            @eprintln("WARN: starts size is greater than while chained fixups section...");
+                            @fmt(out, "\nWARN: starts size is greater than while chained fixups section..\n");
                         };
                         if starts.page_count != 0 {
                             // the struct has alignment padding that eats the first entry of the variable length array. 
                             starts_data.ptr = starts_data.ptr.offset(-2); // take it back now yall
                             starts_data.len += 2;
-                            base_file_offset := get_virtual_page(full_bytes, starts.segment_offset.to_signed(), segment_index); 
-                            @println(" [segment_offset -> file offset %]", base_file_offset);
+                            base_file_offset := get_virtual_page(out, full_bytes, starts.segment_offset.to_signed(), segment_index); 
+                            @fmt(out, " [segment_offset -> file offset %]\n", base_file_offset);
                             range(0, starts.page_count.zext()) { i | 
                                 offset_to_fixup := starts_data&.pop_type(u16)[];
                                 if offset_to_fixup == page_start_no_fixups {
                                     // no fixups on this page
-                                    @println("               - %. ---", i);
+                                    @fmt(out, "               - %. ---\n", i);
                                 } else {
-                                    @println("               - %. page_start: %", i, offset_to_fixup);
+                                    @fmt(out, "               - %. page_start: %\n", i, offset_to_fixup);
                                     if offset_to_fixup >= starts.page_size {
-                                        @eprintln("WARN: fixup outside page, thats probably not good.");
+                                        @fmt(out, "WARN: fixup outside page, thats probably not good.\n");
                                     };
                                     // now we have a fun linked list to traverse.
                                     // TODO: check pointer format on the header before doing this 
@@ -278,9 +295,9 @@ dump :: fn(bytes: []u8) void = {
                                         page_data.len -= next_offset;
                                         reloc := ptr_cast_unchecked(u8, ChainedReloc, page_data.ptr)[];
                                         if get(reloc.bind, .is_bind) == 1 {
-                                            @println("                  - (Bind = %)", reloc.bind&);
+                                            @fmt(out, "                  - (Bind = %)\n", reloc.bind&);
                                         } else {
-                                            @println("                  - (Rebase = %)", reloc.rebase&);
+                                            @fmt(out, "                  - (Rebase = %)\n", reloc.rebase&);
                                         };
                                         next_offset = get(reloc.bind, .next) * 4;
                                         next_offset != 0
@@ -289,13 +306,13 @@ dump :: fn(bytes: []u8) void = {
                             };
                         };
                     } else {
-                        @println("           %. ---", segment_index);
+                        @fmt(out, "           %. ---\n", segment_index);
                     };
                 };
                 imports_data := full_data.slice(header.imports_offset.zext(), full_data.len);
                 symbols_data := full_data.slice(header.symbols_offset.zext(), full_data.len);
                 
-                println("           Imports:");
+                @fmt(out, "           Imports:\n");
                 range(0, header.imports_count.zext()) { i |
                     if header.imports_format == 1 {
                         import := imports_data&.pop_type(ChainedImport);
@@ -305,46 +322,44 @@ dump :: fn(bytes: []u8) void = {
                             name = n.str();
                             if name.len + (@as(i64) header.symbols_offset.zext()) > full_data.len {
                                 name = "";
-                                eprintln("WARN: name of out bounds");
+                                @fmt(out, "WARN: name of out bounds\n");
                             };
                         };
-                        @println("           [%] % %", i, import, name);
+                        @fmt(out, "           [%] % %\n", i, import, name);
                     } else {
-                        @print("(% = %]), ", i, data&.pop_type(u64));
+                        @fmt(out, "(% = %]), ", i, data&.pop_type(u64));
                     };
                 };
             };
             @case(LoadCommand.ExportsTrie.raw()) => {
                 command := bytes&.pop_type(LinkEditBlob);
-                @println("    [Exports Trie] %", command);
+                @fmt(out, "    [Exports Trie] %\n", command);
                 data := full_bytes.slice(command.offset.zext(), command.offset.zext() + command.size.zext());
-                out := u8.list(temp());
-                show_exports_trie(out&, data);
-                print(out.items());
+                show_exports_trie(out, data);
             };
             @default => {
                 unknown += 1;
                 // -8 because we already ate the header
                 bytes.ptr = bytes.ptr.offset(header.size.zext() - 8);
                 bytes.len -= header.size.zext() - 8;
-                @println("    [dont know what that is yet]");
+                @fmt(out, "    [dont know what that is yet]\n");
             };
         };
         size_taken := beginning_len - bytes.len;
         total += size_taken;
         if size_taken != header.size.zext() {
-            @eprintln("WARN:       bad command size (cmd said %, we read %)", @as(i64) header.size.zext(), size_taken);
+            @fmt(out, "WARN:       bad command size (cmd said %, we read %)\n", @as(i64) header.size.zext(), size_taken);
             diff := (@as(i64) header.size.zext()) - size_taken;
             bytes.ptr = bytes.ptr.offset(diff);
             bytes.len -= diff;
         };
     };
-    println("Finished file");
+    @fmt(out, "Finished file\n");
     if total != header.commands_size.zext() {
-        @eprintln("load commands size mismatch. header said % bytes but we counted %", header.commands_size, total);
+        @fmt(out, "load commands size mismatch. header said % bytes but we counted %\n", header.commands_size, total);
     };
     if unknown != 0 {
-        @println("     % unknown load commands. (probably a problem with this tool, not your macho file)", unknown);
+        @fmt(out, "     % unknown load commands. (probably a problem with this tool, not your macho file)\n", unknown);
     };
 }
 
@@ -367,9 +382,8 @@ show_exports_trie :: fn(out: *List(u8), data: []u8) void = {
         // TODO: print the encoded value (its an address i think)
         range(0, terminal_size.bitcast()) { i |
             b := rest&.pop_type(u8)[];
-            t := u8.list(temp());
-            t&.push_prefixed_hex_byte(b);
-            @fmt(out, "% ", t.items());
+            out.push_prefixed_hex_byte(b);
+            @fmt(out, " ");
         };
         @fmt(out, "\n");
         first = false;
@@ -387,7 +401,7 @@ show_exports_trie :: fn(out: *List(u8), data: []u8) void = {
 };
 
 // :slow but this is only called once per segment in a program we never run
-fn get_virtual_page(full_bytes: []u8, page_offset: i64, expected_segment_index: i64) i64 = {
+fn get_virtual_page(out: *List(u8), full_bytes: []u8, page_offset: i64, expected_segment_index: i64) i64 = {
     original := page_offset;
     current_segment_index := 0;
     for_sections full_bytes { type, data | 
@@ -398,7 +412,7 @@ fn get_virtual_page(full_bytes: []u8, page_offset: i64, expected_segment_index: 
             } else {
                 if page_offset >= cmd.address.to_signed() && page_offset < to_signed(cmd.address + cmd.address_size) {
                     if current_segment_index != expected_segment_index {
-                        @eprintln("WARN: found page offset % in wrong segment % instead of %", original, current_segment_index, expected_segment_index);
+                        @fmt(out, "\nWARN: found page offset % in wrong segment % instead of %\n", original, current_segment_index, expected_segment_index);
                     };
                     off := page_offset - cmd.address.to_signed();
                     return(cmd.file_offset.to_signed() + off);
@@ -410,16 +424,16 @@ fn get_virtual_page(full_bytes: []u8, page_offset: i64, expected_segment_index: 
     @panic("didnt find in bounds page for virtual offset % (expected in segment %)", original, expected_segment_index)
 }
 
-fn with_trailing_string(bytes: *[]u8, header: *LoadCommandHeader, $Command: Type, command_name: Str) void = {
+fn with_trailing_string(out: *List(u8), bytes: *[]u8, header: *LoadCommandHeader, $Command: Type, command_name: Str) void = {
     command := bytes.pop_type(Command);
-    @println("    [%] %", command_name, command);
+    @fmt(out, "    [%] %\n", command_name, command);
     header_size :: LoadCommandHeader.size_of() + Command.size_of();
     @assert_eq(command.string_offset, header_size, "expected % string here", command_name);
     string_size: i64 = header.size.zext() - header_size;
     name: CStr = (ptr = bytes.ptr);
     name := name.str();
     assert(name.len <= string_size, "name too long");
-    @println("      filepath: %", name);
+    @fmt(out, "      filepath: %\n", name);
     // Skip the extra zero padding (added for alignment, i assume, thats nice of them).
     bytes.ptr = bytes.ptr.offset(string_size);
     bytes.len -= string_size;

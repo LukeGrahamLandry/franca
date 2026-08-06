@@ -6,9 +6,8 @@
 //! You should @fmt into a List and then print that all at once if you want it to be fast.
 //!
 
-// @tfmt("", ...); -> @afmt(temp(), "", ...);
 fn tfmt(arg: FatExpr) FatExpr #macro = 
-    @{ items(@format(@[arg]) temp()) };
+    afmt(prepend_tuple(@{ temp() }, arg));
 
 fn afmt(arg: FatExpr) FatExpr #macro = {
     args := arg&.items();
@@ -175,13 +174,6 @@ fn print(arg: FatExpr) FatExpr =
 #macro 
 fn eprint(arg: FatExpr) FatExpr = 
     print_impl_macro(STD_ERR, arg, false);
-
-#macro 
-fn format(arg: FatExpr, alloc: FatExpr) FatExpr = @{
-    out: List(u8) = list(0, @[alloc]);
-    @fmt(@prepend_tuple(out&) @[arg]);
-    out
-};
 
 print_impl_macro :: fn(fd: Fd, arg: FatExpr, new_line: bool) FatExpr = {
     args := arg&.items();
@@ -570,7 +562,7 @@ fn DeriveFmt($T: Type) void = {
     fn display(self: *T, out: *List(u8)) void = {
         @inline_match(@run T.get_type_info_ref()) {
             // TODO: have it put the $ there for you. currently even if you don't use the var it gets added as a runtime needed const and emitted. 
-            //       which is extra bad because my bake thing can't handle everything in a type info yet! -- Jul 6
+            //       -- Jul 6
             fn Struct($f) => {
                 ::assert(!f[].is_union, "TODO: format union");
                 out.push_all("(");
@@ -666,7 +658,8 @@ fn push_rep(out: *List(u8), s: Str, count: i64) void =
 
 // always temp() because i tend to just want to pass it to libc.
 fn fmt_cstr(fmt_args: FatExpr) FatExpr #macro = @{
-    msg := @format(@[fmt_args]) temp();
+    msg := u8.list(temp());
+    @fmt(@[prepend_tuple(@{ msg& }, fmt_args)]);
     msg&.push(0);
     @as(CStr) (ptr = msg.maybe_uninit.ptr)
 }
@@ -674,25 +667,6 @@ fn fmt_cstr(fmt_args: FatExpr) FatExpr #macro = @{
 fn display(v: f32, out: *List(u8)) void = {
     v: f64 = v.cast();
     display(v, out);
-}
-
-fn assert_c_str(bytes: *List(u8)) CStr = {
-    @assert(bytes.len > 0 && bytes[bytes.len - 1] == 0, "expected a c string");
-    (ptr = bytes.maybe_uninit.ptr)
-}
-
-// TODO: make Str a real type
-fn println_bytes(s: []u8) void = {
-    out := u8.list(s.len * 3, temp());
-    out&.push_all("[");
-    for s { b |
-        @fmt(out&, "%, ", b);
-    };
-    if out.len > 1 {
-        out.len -= 2;  // ", "
-    };
-    out&.push_all("]\n");
-    print(out.items());
 }
 
 // *_UNBUFFERED

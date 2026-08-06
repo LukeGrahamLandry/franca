@@ -125,13 +125,14 @@ fn load_carts(state: *State, sg: *Sg.Self) void = {
     #use("@/examples/testing.fr");
     @if_let(collect_with_extension(carts_dir, ".wasm")) fn Ok(files) => {
         w := W.cast().int();
+        img_buf := temp().alloc_uninit(u32, w*w);
         n := files.len + builtin_carts.len();
         atlas := @ref Atlas'new_square(temp(), n, w);
         carts := @ref Cart.list(n, a);
         carts.push_all(builtin_carts);
         
         @if(FEAT_LOGO_GEN) each carts {cart |
-            img := screenshot_rgba(cart[]);
+            img := screenshot_rgba(cart[], img_buf);
             cart.logo = atlas.push(img, w, w);
         };
         
@@ -153,7 +154,7 @@ fn load_carts(state: *State, sg: *Sg.Self) void = {
                     have_logo = true;
                 };
                 @if(FEAT_LOGO_GEN) if !have_logo && cart.name != "endless-runner" /*multivalue*/ { 
-                    img := screenshot_rgba(cart);
+                    img := screenshot_rgba(cart, img_buf);
                     cart.logo = atlas.push(img, w, w);
                 };
                 carts.push(cart);
@@ -167,14 +168,12 @@ fn load_carts(state: *State, sg: *Sg.Self) void = {
     };
 }
 
-screenshot_rgba :: fn(cart: Cart) []u32 = {
+screenshot_rgba :: fn(cart: Cart, buf: []u32) []u32 = {
     exports: Wasm.ExportsEnv = (_ = init(temp()));
     game := zeroed Game;
     fill_exports(exports&, game&);
     start_game(game&, cart, exports&, @ref @zeroed Wasm4.w4_Disk, true);
     game&.tick(vec2(0,0), 0, (0,0,0,0));
-    w := W.cast().int();
-    buf := temp().alloc_uninit(u32, w*w);
     iter_framebuffer game&.memory() { i, c |
         buf[i] = c;
     };
