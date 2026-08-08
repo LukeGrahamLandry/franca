@@ -942,11 +942,12 @@ oric :: """
 """.compress_font(ast_alloc());
 
 
-compress_font :: fn(readable_font_data: []u8, a: Alloc) []u8 = {
+compress_font :: fn(readable_font_data: []u8, a: Alloc) []u8 = compress_font2(readable_font_data, a, 8, 256);
+compress_font2 :: fn(readable_font_data: []u8, a: Alloc, char_pixel_height: i64, char_count: i64) []u8 = {
     char_i := 0;
     bit_i  := 0;
     line_i := 0;
-    out := a.alloc_uninit(u8, 2048);
+    out := a.alloc_uninit(u8, char_pixel_height*char_count);
     b := 0;
     start_of_line_char := 0;
     seen_bit := false;
@@ -957,7 +958,7 @@ compress_font :: fn(readable_font_data: []u8, a: Alloc) []u8 = {
             b = b.bit_or(int(at).shift_left(7 - bit_i));
             bit_i += 1;
             if bit_i == 8 {
-                out[char_i*8 + line_i] = b.trunc();
+                out[char_i*char_pixel_height + line_i] = b.trunc();
                 bit_i = 0;
                 char_i += 1;
                 b = 0;
@@ -966,7 +967,7 @@ compress_font :: fn(readable_font_data: []u8, a: Alloc) []u8 = {
         if c == "\n".ascii() && seen_bit {
             line_i += 1;
             seen_bit = false;
-            if line_i == 8 {
+            if line_i == char_pixel_height {
                 line_i = 0;
                 start_of_line_char = char_i;
             } else {
@@ -978,12 +979,12 @@ compress_font :: fn(readable_font_data: []u8, a: Alloc) []u8 = {
 };
 
 // useful if you get the font bytes from somewhere else and want to convert them to the readable format. 
-uncompress_font :: fn(font_data: []u8, out: *List(u8), chars_per_row: i64) void = {
+uncompress_font :: fn(font_data: []u8, out: *List(u8), chars_per_row: i64, char_pixel_height: i64, char_count: i64) void = {
     w := chars_per_row;
-    range(0, (255 + w - 1) / w) { c |
-        range(0, 8) { local_row_i |
+    range(0, char_count.align_to(w) / w) { c |
+        range(0, char_pixel_height) { local_row_i |
             range(c * w, (c + 1) * w) { char_i |
-                i := char_i*8 + local_row_i;
+                i := char_i*char_pixel_height + local_row_i;
                 if i < font_data.len {
                     b: i64 = font_data[i].zext();
                     range_rev(0, 8) { k |

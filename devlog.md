@@ -1,4 +1,19 @@
 
+## (Aug 7)
+
+- the projects i've enjoyed most seem to have been the emulator-ish ones so maybe should lean into that more.
+  chip8 seems to be the default emulator hello world thing. 
+  - can't assume pc will be aligned (INVADERS)
+  - https://github.com/Timendus/chip8-test-suite
+
+## (Aug 6)
+
+- one of the hare tests (os::exec::env) doesn't work in ubuntu/26.04 (which i chose at random when srht took away plucky). 
+  it seems to not be my fault because it doesn't work with pasting their own manifest and changing the image.
+  https://builds.sr.ht/~lukegrahamlandry/job/1852272 so not my department, it works in ubuntu/25.10.
+  maybe i'll email them cause that's creepy. there's no way the env binary doesn't work anymore. wtf is `coreutils: unknown program '4'`?
+- of course now that im trying to play with the inlining order, i can't reproduce the insane regression i had in lox/vm.fr. 
+
 ## (Aug 5)
 
 - maze_game: a trivial puzzle that makes you write lox code. 

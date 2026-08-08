@@ -1,0 +1,337 @@
+// https://en.wikipedia.org/wiki/CHIP-8
+HELP :: """
+arrow keys to cycle builtin roms.
+dragndrop to load a rom (or cli after --).
+
+==controls=
+1234 | 123C
+QWER | 456D
+ASDF | 789E
+ZXCV | A0BF
+===========
+""";
+
+Cpu :: @struct {
+    rng: Random.Rng;
+    registers: Array(u8, 16);
+    I: u16;
+    pc: u16;
+    sp: u8;
+    timers: Array(u8, 2);  // (delay, sound)
+    stack: Array(u16, 32);
+    memory: Array(u8, 4096);
+    display: Array(u8, 64*32);
+    screen_dirty: bool;
+    pressed: Array(bool, 16);
+    buffered_key: ?u8;
+};
+
+fn tick(self: *Cpu) void = {
+    v := self.registers&;
+    pc: i64 = self.pc.zext();
+    m :: fn(a: i64) *u8 => self.memory&.index(a.bit_and(0xFFF));
+    inst: i64 = m(pc + 1)[].zext().bit_or(m(pc)[].zext().shift_left(8));
+    self.pc += 2;
+    op := inst.shift_right_logical(12);
+    NNN, NN, X, Y := (@as(u16) inst.bit_and(0xFFF).trunc(), @as(u8) inst.bit_and(0xFF).trunc(), inst.shift_right_logical(8).bit_and(0xF), inst.shift_right_logical(4).bit_and(0xF));
+    vx, vy, vf := (v[X]&, v[Y]&, v[0xF]&);
+  
+    @switch(op) {
+        @case(0) => @switch(inst) {
+            @case(0x00E0) => {
+                self.display&.items().set_zeroed();
+                self.screen_dirty = true;
+            };
+            @case(0x00EE) =>  {
+                self.sp -= 1;
+                self.pc = self.stack&[self.sp.bit_and(31).zext()];
+            };
+            @default => ();
+        };
+        @case(1) => { self.pc = NNN; };
+        @case(2) => {
+            self.stack&[self.sp.bit_and(31).zext()] = self.pc;
+            self.sp += 1;
+            self.pc = NNN;
+        };
+        @case(3) => if vx[] == NN {| self.pc += 2; };
+        @case(4) => if vx[] != NN {| self.pc += 2; };
+        @case(5) => if vx[] == vy[] {| self.pc += 2; };
+        @case(6) => { vx[] = NN; };
+        @case(7) => { vx[] += NN; };
+        @case(8) => {
+            with_vf :: fn(flag: bool, result: u8) => { vx[] = result; vf[] = flag.int().trunc(); };
+            @switch(inst.bit_and(0xF)) {
+                @case(0) => { vx[] = vy[]; };
+                @case(1) => { vx[] = bit_or(vx[], vy[]); };
+                @case(2) => { vx[] = bit_and(vx[], vy[]); };
+                @case(3) => { vx[] = bit_xor(vx[], vy[]); };
+                @case(4) => with_vf((@as(i64) vx[].zext()) + vy[].zext() > 255, vx[] + vy[]);
+                @case(5) => with_vf(!(vy[] > vx[]), vx[] - vy[]);
+                @case(6) => with_vf(vx[].bit_and(1) == 1, vx[].shift_right_logical(1));
+                @case(7) => with_vf(!(vx[] > vy[]), vy[] - vx[]);
+                @case(0xE) => with_vf(vx[].shift_right_logical(7) == 1, vx[].shift_left(1));
+                @default => ();
+            };
+        };
+        @case(9) => if vx[] != vy[] {| self.pc += 2; };
+        @case(0xA) => { self.I = NNN; };
+        @case(0xB) => { self.pc = v[0].zext() + NNN; };
+        @case(0xC) => { vx[] = self.rng&.next().trunc().bit_and(NN); };
+        @case(0xD) => {
+            self.screen_dirty = true;
+            x, y := (vx[].bit_and(63), vy[].bit_and(31));
+            vf[] = 0;
+            range(0, NN.bit_and(0xf).zext()) { row |
+                if y.zext()+row < 32 {
+                    b := (@as(i64) m(self.I.zext() + row)[].zext());
+                    range(0, 8) { col |
+                        if col + x.zext() < 64 {
+                            slot := self.display&[(y.zext()+row)*64 + x.zext()+col]&;
+                            old := slot[];
+                            slot[] = bit_xor(old, b.shift_right_logical(7 - col).bit_and(1).trunc());
+                            if old == 1 && slot[] == 0 {
+                                vf[] = 1;
+                            };
+                        };
+                    };
+                };
+            };
+        };
+        @case(0xE) => @switch(NN) {
+            @case(0x9E) => if self.pressed&[vx[].bit_and(0xF).zext()] {| self.pc += 2; };
+            @case(0xA1) => if !self.pressed&[vx[].bit_and(0xF).zext()] {| self.pc += 2; };
+            @default => ();
+        };
+        @case(0xF) => @switch(NN) {
+            @case(0x07) => { vx[] = self.timers&[0]; };
+            @case(0x0A) => if self.buffered_key { key |
+                // spin until a key is pressed+released. 
+                if self.pressed&[key.zext()] {
+                    self.pc -= 2;
+                } else {
+                    vx[] = key;
+                    self.buffered_key = .None;
+                };
+            } else {
+                self.pc -= 2;
+            };
+            @case(0x15) => { self.timers&[0] = vx[]; };
+            @case(0x18) => { self.timers&[1] = vx[]; };
+            @case(0x1E) => { self.I += vx[].zext(); };
+            @case(0x29) => { self.I = 5 * vx[].bit_and(0xF).zext(); }  // :FontSpriteAddress
+            @case(0x33) => {
+                _tens, ones := (@as(i64) vx[].zext()).div_mod(10);
+                hundreds, tens := _tens.div_mod(10);
+                m(self.I.zext())[] = hundreds.trunc();
+                m(self.I.zext()+1)[] = tens.trunc();
+                m(self.I.zext()+2)[] = ones.trunc();
+            };
+            @case(0x55) => {
+                enumerate v.items().slice(0, X+1) { i, v |
+                    m(self.I.zext() + i)[] = v[];
+                };
+            };
+            @case(0x65) => {
+                enumerate v.items().slice(0, X+1) { i, v |
+                    v[] = m(self.I.zext() + i)[];
+                };
+            };
+            @default => ();
+        };
+        @default => unreachable();
+    };
+}
+
+fn init(self: *Cpu, rom: []u8) void = {
+    ::[]Cpu;
+    self.slice(1).interpret_as_bytes().set_bytes(0);
+    self.buffered_key = .None;
+    self.memory&.items().slice(0, font_sprites.len()).copy_from(font_sprites);  // :FontSpriteAddress
+    m := self.memory&.items().rest(0x200);
+    m.slice(0, min(rom.len, m.len)).copy_from(rom.slice(0, min(rom.len, m.len)));
+    self.pc = 0x200;
+    self.rng = Random.xoshiro256SS.new_seeded();
+}
+
+// "The font most people use" quoth https://tobiasvl.github.io/blog/write-a-chip-8-emulator
+font_sprites :: import("@/graphics/data/fonts.fr")'compress_font2("""
+@@@@.... ..@..... @@@@.... @@@@.... @..@.... @@@@.... @@@@.... @@@@.... @@@@.... @@@@.... @@@@.... @@@..... @@@@.... @@@..... @@@@.... @@@@.... 
+@..@.... .@@..... ...@.... ...@.... @..@.... @....... @....... ...@.... @..@.... @..@.... @..@.... @..@.... @....... @..@.... @....... @....... 
+@..@.... ..@..... @@@@.... @@@@.... @@@@.... @@@@.... @@@@.... ..@..... @@@@.... @@@@.... @@@@.... @@@..... @....... @..@.... @@@@.... @@@@.... 
+@..@.... ..@..... @....... ...@.... ...@.... ...@.... @..@.... .@...... @..@.... ...@.... @..@.... @..@.... @....... @..@.... @....... @....... 
+@@@@.... .@@@.... @@@@.... @@@@.... ...@.... @@@@.... @@@@.... .@...... @@@@.... @@@@.... @..@.... @@@..... @@@@.... @@@..... @@@@.... @....... 
+""", ast_alloc(), 5, 16);
+keypad :: @const_slice(Sapp.Keycode.X, ._1, ._2, ._3, .Q, .W, .E, .A, .S, .D, .Z, .C, ._4, .R, .F, .V);
+
+builtin_roms :: {
+    root := Foreign'chip8_roms();
+    files := collect_directory_ordered(root, temp(), temp())
+        || @panic("failed to ls %", root);
+    ast_alloc().alloc_init(Img, files.len) { i |
+        name := files[i].name;
+        rom := read_entire_file_or_crash(ast_alloc(), @tfmt("%/%", root, name));
+        (rom = rom)
+    }
+};
+
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    range(0, 32) { _ |
+        state.cpu&.tick();
+    };
+    each state.cpu.timers& { it |
+        it[] -= int(it[] > 0).trunc();
+    };
+    if state.cpu.buffered_key { key |
+        if !state.cpu.pressed&[key.zext()] {
+            state.cpu.buffered_key = .None;
+        }
+    };
+
+    state.dirty = state.dirty || state.cpu.screen_dirty;
+    @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
+    state.cpu.screen_dirty = false;
+    
+    data := temp().alloc_init(u32, 64*32, fn(i) => @if(state.cpu.display&[i] == 0, 
+        pack_rgba(0,0,0,255), pack_rgba(255,255,255,255)));
+    data := data.interpret_as_bytes();
+    d := zeroed(Sg.ImageData);
+    d.subimage&[0]&[0] = data;
+    sg.destroy(state.img);  // TODO: should update the texture instead of recreating it every time
+    state.img = sg.make(
+        width = 64, height = 32,
+        pixel_format = .RGBA8,
+        data = d,
+    );
+    
+    sgl := state.draw&;
+    sgl.defaults();
+    sgl.viewport(0.intcast(), 0.intcast(), sapp.width().intcast(), sapp.height().intcast(), true);
+    
+    image_aspect := 2.0;
+    sgl.texturing_enabled = true;
+    sgl.texture(state.img, (id = Sg.INVALID_ID));
+    sgl.begin(.QUADS);
+    sgl.load_identity();
+    sgl.translate(-1, 1, 0.0);
+    sgl.scale(2, 2, 0.0);
+    sgl.rotate(PI, 1.0, 0.0, 0.0);
+
+    screen_aspect := sapp.width().float() / sapp.height().float();
+    aspect := cast(screen_aspect / image_aspect);
+    (x1: f32, x2: f32, y1: f32, y2: f32) := (0, @if(aspect > 1, 1/aspect, 1), 0, @if(aspect < 1, aspect, 1));
+    sgl.v2f_t2f(x1, y1, 0, 0);
+    sgl.v2f_t2f(x2, y1, 1, 0);
+    sgl.v2f_t2f(x2, y2, 1, 1);
+    sgl.v2f_t2f(x1, y2, 0, 1);
+    sgl.end();
+    
+    Easy'glue_begin_pass(sapp, sg, (colors = ((
+        load_action = .CLEAR,
+        clear_value = (r = 0.15, g = 0.15, b = 0.15, a = 1),
+    ), ..)));
+    sgl.draw_layer(sg, 0);
+    sg.end_pass();
+    sg.commit();
+};
+
+State :: @struct {
+    draw: Sgl.Self;
+    img: Sg.Image;
+    images: List(Img);
+    image_i: i64;
+    builtin_count: i64;
+    dirty: bool;;
+    
+    cpu: Cpu;
+};
+
+Img :: @struct(rom: []u8);
+
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    sapp.desc.enable_clipboard = true;
+    sapp.desc.enable_dragndrop = true;
+    state.draw&.setup(allocator = general_allocator(), sg = sg, max_commands = 2, max_vertices = 6);
+    state.images = list(general_allocator());
+    state.dirty = true;
+
+    state.images&.push_all(builtin_roms);
+    state.builtin_count = state.images.len;
+    next_example(state, state.images.len - 1);
+    
+    started := false;
+    for cli_args() { it |
+        it := it.str();
+        if started {
+            open_rom_file(state, it);
+        } else {
+            started = it == "--";
+        };
+    };
+}
+
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    @match(event.type) {
+        fn RESIZED() => ();
+        fn KEY_DOWN() => @match(event.key_code) {
+            fn LEFT() => state.next_example(-1);
+            fn RIGHT() => state.next_example(1);
+            @default => {
+                key := keypad.index_of(fn(it) => it[] == event.key_code) || return();
+                state.cpu.pressed&[key] = true;
+                state.cpu.buffered_key = (Some = key.trunc());
+            };
+        };
+        fn KEY_UP() => @match(event.key_code) {
+            @default => {
+                key := keypad.index_of(fn(it) => it[] == event.key_code) || return();
+                state.cpu.pressed&[key] = false;
+            };
+        };
+        fn CLIPBOARD_PASTED() => {
+            open_rom_file(state, event.pasted);
+        }
+        fn FILES_DROPPED() => {
+            for event.drop { s |
+                open_rom_file(state, s);
+            };
+        }
+        @default => return();
+    };
+    state.dirty = true;
+}
+
+fn next_example(state: *State, delta: i64) void = {
+    @if(state.images.len == 0) return();
+    state.image_i = mod(state.image_i + delta + state.images.len, state.images.len);
+    init(state.cpu&, state.images[state.image_i].rom);
+}
+
+open_rom_file :: fn(state: *State, path: Str) bool = {
+    #use("@/lib/sys/fs.fr");
+    rom := read_entire_file(general_allocator(), path) || return(false);
+    state.images&.push(rom = rom);
+    state.image_i = state.images.len - 1;
+    next_example(state, 0);
+    true
+}
+
+driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
+main :: fn() void = Easy'start(State);
+#use("@/graphics/lib.fr");
+
+fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    state.draw&.destroy(sg, general_allocator());
+    sg.destroy(state.img);
+    
+    each state.images.items().rest(state.builtin_count) { it |
+        general_allocator().dealloc(u8, it.rom);
+    };
+    state.images&.drop();
+}
+
+// TODO: main menu where you choose which rom to play
+// TODO: controls for pause/play/step/clockspeed
+// TODO: debug mode that shows register/pc/i state on screen
+// TODO: sound
+// TODO: less boilerplate library for when you just want a framebuffer

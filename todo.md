@@ -4,12 +4,18 @@
 DO THE FUCKING INLINING SORT ORDER THING   
 BECAUSE SEEING SAMPLES OF VEC(SUB,ADD,MAX)   
 IS GOING TO MAKE ME LOSE MY FUCKING MIND  
+the problem might actually be that the ir i generate is just too dumb for it to realize its small until too late. 
 
 ---
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
+- web: include examples for stackie and life
+- epicycles: don't hang if they draw slow so too many points
+- infer #fold from the body
+- do my tests not work in debian/trixie? https://builds.sr.ht/~lukegrahamlandry/job/1852278
+  died in tests/exe/wasm.fr (twice) but worked when i ssh-ed in and ran it alone? 
 - graphics/easy.fr support easily building with emit_c+clang by automatically passing apple's magic linker args for each framework. 
 - lox/lox_main.fr: exit with status if there was an error so works with normal lox test runner
 - figure out how to make my programs a real macos app. 
@@ -22,8 +28,6 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
   init time difference is very visible in samply so you can tell if you hit the cache. 
 - generate a favicon because the error in console pisses me off
 - leak detector for gpu resources in on_cleanup
-- one of the hare tests broke in sr.ht when they took out the old version of ubuntu.
-  make sure it's not my fault
 - recap of language woes
   - #use of something declared there doesn't work well at top level of an imported scope
   - @rec sometimes you get the wrong type (might be about when ::tagged_derive gets run?). `.Name` vs `(Name = ())`
@@ -1441,9 +1445,6 @@ actually that's a bit too agressive but certainly stop processing ANSI escape co
     because opt/slots.fr can't cope with the s->l casts for abi copies.
 - offsets on storage buffers (they added it in Resource View Update)
 - https://github.com/floooh/sokol/commit/50bbbe4521af356c3b0879e1d46e30114feb4e6b
-- tests that reach discard() and create(Attachments)
-  - finish gfx-webgpu
-  - finish gfx-metal
 - example program that tries to use all features
 - finish gfx validation and enable that based on DebugAssetions
 - clean up defaults
