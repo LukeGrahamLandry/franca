@@ -34,6 +34,10 @@ in this mode there are many more builtin gates (ex. a 64 bit xor compiles to one
 
 it works well enough to run my overture/leg in the maze and a few things from the schematic hub (mandelbrot and tetris). 
 
+> Eventually I want to support the 2.x rewrite of the game 
+> (and I started to do so) but I want to wait until it stabilizes more.
+> rn it's hard to tell what's supposed to work and what's perpetually broken. 
+
 ## TODO
 
 - devices

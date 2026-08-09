@@ -92,10 +92,17 @@ fn DeriveJson($T: Type) void = {
                 out.push_all("{");
                 inline_for fields { $f | 
                     name :: f[].name.str();
-                    @fmt(out, "%\"%\": ", prefix, name);
-                    prefix = ",";
                     inner := T.get_field_ptr(self, f);
-                    inner.dump_json(out);
+                    @if(@run IsOption(f.ty), {
+                        @if_let(inner) fn Some(inner) => {
+                            @fmt(out, "%\"%\": ", prefix, name);
+                            inner.dump_json(out);
+                        };
+                    }, {
+                        @fmt(out, "%\"%\": ", prefix, name);
+                        inner.dump_json(out);
+                    });
+                    prefix = ",";
                 };
                 out.push_all("}");
             });
@@ -104,6 +111,22 @@ fn DeriveJson($T: Type) void = {
             };
         };
     }
+}
+
+#where(fn(T) => PointerTo(IsCollection(List))(T))
+fn dump_json(self: ~S, out: *List(u8)) void = {
+    s := self.items();
+    dump_json(s&, out);
+}
+
+#where(fn(T) => PointerTo(IsCollection(List))(T))
+fn parse_json(json: *JsonParser, self: ~S) bool = {
+    T :: Deref(S).Element;
+    s: []T = empty();
+    json.parse_json(s&) || return(false);
+    self[] = list(json.out);
+    self.push_all(s);
+    true
 }
 
 #where(fn(T) => PointerTo(IsCollection(Slice))(T) && (T != *Str))
@@ -131,7 +154,7 @@ fn parse_json(json: *JsonParser, self: ~S) bool = {
         if json.peek_c() == "]".ascii() {
             _ := json.next();
             json.skip_whitespace();
-            self[] = out.items();
+            self[] = out&.shrink_to_fit();
             return true;
         };
         self := out&.push_uninit();
@@ -160,6 +183,37 @@ fn dump_json(self: ~S, out: *List(u8)) void = {
     out.push_all("}");
 }
 
+
+#where(PointerTo(IsRawHashMap))
+fn parse_json(json: *JsonParser, self: ~S) bool = {
+    a := json.out;
+    token := json.next().or(fn(_: Str) => return(false));
+    if(!token&.is(.StartDict), => return(false));
+    
+    K :: Deref(S).Key; V :: Deref(S).Value;
+    out: HashMap(K, V) = init(a);
+    loop {
+        json.skip_whitespace();
+        if json.peek_c() == "}".ascii() {
+            _ := json.next();
+            json.skip_whitespace();
+            self[] = out.raw;
+            return true;
+        };
+        
+        token := json.next().or(fn(_: Str) => return(false));
+        if(!token&.is(.Key), => return(false));
+        key := token.Key;
+        
+        value := zeroed(V);
+        ok := parse_json(json, value&);
+        @if(!ok) return(false);
+        
+        out&.insert(key, value);
+    };
+}
+
+
 IsTuple :: fn(T: Type) bool = {
     info := T.get_type_info_ref();
     info.is(.Struct) && info.Struct.is_tuple
@@ -178,6 +232,30 @@ fn dump_json(self: ~S, out: *List(u8)) void = {
         inner.dump_json(out);
     };
     out.push_all("]");
+}
+
+
+#where(PointerTo(IsTuple))
+fn parse_json(json: *JsonParser, self: ~S) bool = {
+    token := json.next().or(fn(_: Str) => return(false));
+    if(!token&.is(.StartList), => return(false));
+    
+    T :: Deref(S);
+    fields :: T.get_fields();
+    i := 0;
+    inline_for fields { $f | 
+        inner := T.get_field_ptr(self, f);
+        success := json.parse_json(inner);
+        if !success {
+            json.error = @tfmt("%\n- field % of tuple", json.error, i);
+            return false;
+        };
+        i += 1;
+    };
+    
+    token := json.next().or(fn(_: Str) => return(false));
+    if(!token&.is(.End), => return(false));
+    true
 }
 
 fn parse_json(json: *JsonParser, i: *f64) bool = {
@@ -201,9 +279,10 @@ fn parse_json(json: *JsonParser, i: *Str) bool = {
     true
 }
 
-fn dump_json(i: *i64, out: *List(u8)) void = {
-    i.display(out);
-}
+fn dump_json(i: *i64, out: *List(u8)) void = i.display(out);
+fn dump_json(i: *bool, out: *List(u8)) void = i.display(out);
+// TODO: this is lossy because im bad at printing floats
+fn dump_json(i: *f64, out: *List(u8)) void = i.display(out);
 
 // TODO: deduplicate with backend/meta/dump.fr/safe_print
 fn dump_json(i: *Str, out: *List(u8)) void = {

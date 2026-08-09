@@ -1,0 +1,308 @@
+
+Project :: @struct {
+    sprites: RawList(*Sprite);
+};
+Sprite :: @struct {
+    name: Str;
+    blocks: RawList(*Node);
+};
+Node :: @rec @struct {
+    op: Str;
+    args: []*Node;
+    literal: f64 = 0;
+};
+
+fn new_project() *Project = ast_alloc().boxed(Project, (
+    sprites = empty(),
+));
+
+fn stage(p: *Project) *Sprite = p.sprite(name = "stage");
+fn sprite(p: *Project, args: @struct(name: Str)) *Sprite = {
+    s := ast_alloc().boxed(Sprite, (
+        blocks = empty(),
+        name = args.name,
+    ));
+    p.sprites&.push(s, ast_alloc());
+    s
+}
+
+fn costume(s: *Sprite, args: @struct(name: Str, img: Str)) void = {
+
+}
+
+fn define(s: *Sprite, warp: bool, $body: FuncId) *Node = {
+    func :: get_function_ast(body, false, false, false, false);
+    b := @if(@run func.arg.bindings[0].name&.is(.None), {
+        make("procedures_definition", @slice(block(body)))
+    }, {
+        @run {
+            if func.body.Normal.ty != void {
+                func.body.Normal = @{ (@slice(@[func.body.Normal])).shallow_copy(ast_alloc()) };
+            };
+            each func.arg.bindings { it |
+                it.ty = (Finished = *Node);
+            };
+        };
+        
+        t := s.variables(@run func.arg.bindings.len);
+        body := body(t);
+        make("procedures_definition", empty())
+    });
+    s.blocks&.push(b, ast_alloc());
+    b
+}
+
+fn whenflagclicked(s: *Sprite, $body: FuncId) *Node = {
+    b := make("event_whenflagclicked", @slice(block(body)));
+    s.blocks&.push(b, ast_alloc());
+    b
+}
+
+fn call(func: *Node, $args: FuncId) *Node #where = {
+    make("procedures_call", @slice(func, block(args)))
+}
+
+fn set(var: *Node, value: *Node) *Node = make("data_setvariableto", @slice(var, value));
+
+fn repeatuntil(cond: *Node, $body: FuncId) *Node = make("control_repeat_until", @slice(cond, block(body)));
+fn if(cond: *Node, $then: FuncId, $else: FuncId) *Node = make("control_if", @slice(cond, block(then), block(else)));
+
+fn peneraseall() *Node = make("pen_clear", empty());
+fn penup() *Node = make("pen_penUp", empty());
+fn pendown() *Node = make("pen_penDown", empty());
+fn setpencolor(a: *Node) = make("pen_setPenColorParamTo", @slice(a));
+fn gotoxy(x: *Node, y: *Node) *Node = make("motion_gotoxy", @slice(x, y));
+fn xposition() *Node = make("motion_xposition", empty());
+fn yposition() *Node = make("motion_yposition", empty());
+
+fn N(a: f64) *Node = { s := make("franca_literal", empty()); s.literal = a; s }
+fn add(a: *Node, b: *Node) *Node = make("operator_add", @slice(a, b));
+fn sub(a: *Node, b: *Node) *Node = make("operator_sub", @slice(a, b));
+fn mul(a: *Node, b: *Node) *Node = make("operator_mul", @slice(a, b));
+fn div(a: *Node, b: *Node) *Node = make("operator_div", @slice(a, b));
+fn lt(a: *Node, b: *Node) *Node = make("operator_lt", @slice(a, b));
+fn gt(a: *Node, b: *Node) *Node = make("operator_gt", @slice(a, b));
+fn eq(a: *Node, b: *Node) *Node = make("operator_eq", @slice(a, b));
+fn or(a: *Node, b: *Node) *Node = make("operator_or", @slice(a, b));
+fn and(a: *Node, b: *Node) *Node = make("operator_and", @slice(a, b));
+fn not(a: *Node) *Node = make("operator_not", @slice(a));
+
+fn make(op: Str, args: []*Node) *Node = 
+    ast_alloc().boxed(Node, (op = op, args = args.shallow_copy(ast_alloc())));
+
+fn block($fid: FuncId) *Node = {
+    @run {
+        func := get_function_ast(fid, true, false, false, false);
+        if func.body.Normal.ty != void {
+            func.body.Normal = @{ (@slice(@[func.body.Normal])).shallow_copy(ast_alloc()) };
+        };
+    };
+    args := fid(); 
+    @if(@run(void == @type args), make("franca_block", empty()), make("franca_block", args))
+}
+
+next_var_id :: @static_mut 0;
+fn variables(s: *Sprite, $Count: i64) TupleArray(*Node, Count) #generic = {
+    out := zeroed(Array(*Node, Count));
+    each out& { it |
+        it[] = ast_alloc().boxed(Node, (op = "franca_var", args = empty(), literal = next_var_id[].float()));
+        next_var_id[] += 1;
+    };
+    bit_cast_unchecked(@type out, TupleArray(*Node, Count), out)
+}
+
+fn TupleArray($T: Type, $N: i64) Type = Ty(ast_alloc().alloc_init(Type, N, fn(_) => T));
+
+//
+// above is the user api for building a project from franca code. 
+// below serializes it to a .sb3 file that the scratch editor can import. 
+//
+
+fn build(p: *Project, out: *List(u8)) void = {
+    a := temp();
+    p2: Raw.Project = (
+        targets = list(a),
+        monitors = list(a),
+        extensions = list(a),
+        meta = (semver = "3.0.0", vm = "foo", agent = "bar"),
+    );
+    
+    each p.sprites { s |
+        p2.targets&.push(
+            isStage = s.name == "stage",
+            name = s.name,
+            //variables: RawHashMap(Str, Ty(Str, Value));
+            //lists: RawHashMap(Str, Ty(Str, List(Value)));
+            broadcasts = init(),
+            blocks = init(),
+            currentCostume = 0,
+            costumes = list(a),
+            sounds = list(a),
+        );
+    };
+    
+    // temporary
+    each p.sprites { s |
+        emit :: fn(out: *List(u8), it: *Node, depth: i64) void = {
+            out.push_repeated(depth, " ".ascii());
+            @fmt(out, "- % %\n", it.op, it.literal);
+            for it.args { it |
+                emit(out, it, depth + 1);
+            };
+        };
+        for s.blocks { it |
+            emit(out, it, 0);
+        };
+    };
+    @fmt(out, "\n\n");
+
+    dump_json(p2&, out);
+    // TODO: need to write a zip file
+}
+
+
+// "Scratch > File > Save to your computer" gets you a zip (.sb3) file that contains a project.json
+Raw :: @struct {
+Project :: @struct {
+    targets: List(Sprite);
+    monitors: List(Monitor);
+    extensions: List(Str);
+    meta: Meta;
+};
+
+Sprite :: @struct {
+    isStage: bool;
+    name: Str;
+    //variables: RawHashMap(Str, Ty(Str, Value));
+    //lists: RawHashMap(Str, Ty(Str, List(Value)));
+    broadcasts: RawHashMap(Str, Str);
+    blocks: RawHashMap(Str, Block2);
+    currentCostume: i64;
+    costumes: List(Costume);
+    sounds: List(Sound);
+};
+
+Block2 :: @tagged(
+    Var: @struct(name: Str, id: Str, is_list: bool),
+    Op: Block,
+);
+
+Block :: @struct {
+    opcode: Str;
+    next: ?Str;
+    parent: ?Str;
+    //inputs: RawHashMap(Str, );
+    //fields: RawHashMap(Str, );
+    shadow: bool;
+    topLevel: bool;
+    x: ?i64;
+    y: ?i64;
+};
+
+Costume :: @struct {
+    name: Str;
+    //bitmapResolution: i64;
+    dataFormat: Str;
+    assetId: Str;
+    md5ext: Str;
+    rotationCenterX: f64;
+    rotationCenterY: f64;
+};
+
+Sound :: @struct {
+    name: Str;
+    assetId: Str;
+    dataFormat: Str;
+    format: Str;
+    rate: i64;
+    sampleCount: i64;
+    md5ext: Str;
+};
+
+Meta :: @struct {
+    semver: Str;
+    vm: Str;
+    agent: Str;
+};
+
+Monitor :: @struct {
+    id: Str;
+    mode: Str;
+    opcode: Str;
+    params: RawHashMap(Str, Str);
+    spriteName: ?Str;
+    //value: [],
+    width: i64;
+    height: i64;
+    x: i64;
+    y: i64;
+    visible: bool;
+};
+
+Value :: Str;
+
+fn parse_json(json: *JsonParser, self: *Block2) bool = {
+    mark := json.mark();
+    token := json.next().or(fn(_: Str) => return(false));
+    json.reset(mark);
+    
+    if token&.is(.StartList) {
+        it := zeroed Ty(i64, Str, Str, i64, i64);
+        parse_json(json, it&) || return(false);
+        self[] = (Var = (name = it._1, id = it._2, is_list = it._0 == 13);
+    } else {
+        it := zeroed Block;
+        parse_json(json, it&) || return(false);
+        self[] = (Op = it);
+    };
+    true
+}
+
+
+fn dump_json(self: *Block2, out: *List(u8)) void = {
+    @match(self) {
+        fn Op(self) => dump_json(self, out);
+        fn Var(it) => {
+            s := (@if(it.is_list, 13, 12), it.name, it.id, 0, 0);
+            dump_json(s&, out);
+        }
+    };
+}
+
+};
+
+::DeriveJson(Raw.Sprite);
+::DeriveJson(Raw.Costume);
+::DeriveJson(Raw.Block);
+::DeriveJson(Raw.Sound);
+::DeriveJson(Raw.Project);
+::DeriveJson(Raw.Meta);
+::DeriveJson(Raw.Monitor);
+#use("@/lib/encoding/json.fr");
+#use("@/lib/encoding/json_reflect.fr");
+#use("@/lib/collections/map.fr");
+
+/*
+// this extracts all the block opcode strings from a scratch project. 
+// https://scratch.mit.edu/projects/1367472418 (private; has all the blocks)
+main :: fn() void = {
+    #use("@/lib/sys/fs.fr");
+    #use(Raw);
+    #use("@/lib/encoding/json.fr");
+    path := "/Users/luke/Downloads/all_blocks_placed/project.json";
+    src := read_entire_file_or_crash(temp(), path);
+    json: JsonParser = new_json(src, temp());
+    it := zeroed Project;
+    ok := parse_json(json&, it&);
+    if !ok {
+        line, col := find_line_col_for_error_message(json&);
+        @panic("failed to parse %:%:%: %", path, line, col, json.error);
+    };
+    
+    each it.targets[1].blocks& { _, it |
+        @if_let(it) fn Op(it) => {
+            @println("%", it.opcode);
+        }; 
+    };
+}
+*/

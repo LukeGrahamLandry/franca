@@ -1,4 +1,21 @@
 
+## (Aug 8) sb3
+
+revisiting a project I attempted a few years ago and gave up on was a big success 
+(tc circuit simulator) so I'm going to do another one: scratch aot compiler. 
+this time i should be able to make a better interactive demo because i have my own compiler 
+(last time i was generating rust). also last time i had analysis paralysis problem 
+with all the different rust rendering libraries but now i have an obvious way to go. 
+
+- made a project with all the blocks to extract the names from
+  - add parse_json for List,RawHashMap,Tuple
+  - annoyingly in the project.json most of the blocks are uniform but getting a variable is an array suddenly
+
+i've learned that writing producer+consumer for a format at the same time is the best strategy. 
+so going to start with outputting a .sb3 this time. for circuit defs language 
+i did it by reflecting on the ast, here i want to try setting it up as normal code that 
+constructs symbolic things, see which one i like more. 
+
 ## (Aug 7)
 
 - the projects i've enjoyed most seem to have been the emulator-ish ones so maybe should lean into that more.
