@@ -7,7 +7,7 @@ Sprite :: @struct {
     blocks: RawList(*Node);
 };
 Node :: @rec @struct {
-    op: Str;
+    op: Raw.Opcode;
     args: []*Node;
     literal: f64 = 0;
 };
@@ -46,7 +46,8 @@ fn define(s: *Sprite, warp: bool, $body: FuncId) *Node = {
         
         t := s.variables(@run func.arg.bindings.len);
         body := body(t);
-        make("procedures_definition", empty())
+        body := make("franca_block", body);
+        make("procedures_definition", @slice(body))
     });
     s.blocks&.push(b, ast_alloc());
     b
@@ -70,25 +71,27 @@ fn if(cond: *Node, $then: FuncId, $else: FuncId) *Node = make("control_if", @sli
 fn peneraseall() *Node = make("pen_clear", empty());
 fn penup() *Node = make("pen_penUp", empty());
 fn pendown() *Node = make("pen_penDown", empty());
-fn setpencolor(a: *Node) = make("pen_setPenColorParamTo", @slice(a));
+fn setpencolor(a: *Node) = make("pen_setPenColorToColor", @slice(a));
 fn gotoxy(x: *Node, y: *Node) *Node = make("motion_gotoxy", @slice(x, y));
 fn xposition() *Node = make("motion_xposition", empty());
 fn yposition() *Node = make("motion_yposition", empty());
 
 fn N(a: f64) *Node = { s := make("franca_literal", empty()); s.literal = a; s }
 fn add(a: *Node, b: *Node) *Node = make("operator_add", @slice(a, b));
-fn sub(a: *Node, b: *Node) *Node = make("operator_sub", @slice(a, b));
-fn mul(a: *Node, b: *Node) *Node = make("operator_mul", @slice(a, b));
-fn div(a: *Node, b: *Node) *Node = make("operator_div", @slice(a, b));
+fn sub(a: *Node, b: *Node) *Node = make("operator_subtract", @slice(a, b));
+fn mul(a: *Node, b: *Node) *Node = make("operator_multiply", @slice(a, b));
+fn div(a: *Node, b: *Node) *Node = make("operator_divide", @slice(a, b));
 fn lt(a: *Node, b: *Node) *Node = make("operator_lt", @slice(a, b));
 fn gt(a: *Node, b: *Node) *Node = make("operator_gt", @slice(a, b));
-fn eq(a: *Node, b: *Node) *Node = make("operator_eq", @slice(a, b));
+fn eq(a: *Node, b: *Node) *Node = make("operator_equals", @slice(a, b));
 fn or(a: *Node, b: *Node) *Node = make("operator_or", @slice(a, b));
 fn and(a: *Node, b: *Node) *Node = make("operator_and", @slice(a, b));
 fn not(a: *Node) *Node = make("operator_not", @slice(a));
 
-fn make(op: Str, args: []*Node) *Node = 
-    ast_alloc().boxed(Node, (op = op, args = args.shallow_copy(ast_alloc())));
+fn make(op: Str, args: []*Node) *Node = {
+    op := Raw.Opcode.from_name(op) || @panic("invalid op %", op);
+    ast_alloc().boxed(Node, (op = op, args = args.shallow_copy(ast_alloc())))
+}
 
 fn block($fid: FuncId) *Node = {
     @run {
@@ -105,7 +108,7 @@ next_var_id :: @static_mut 0;
 fn variables(s: *Sprite, $Count: i64) TupleArray(*Node, Count) #generic = {
     out := zeroed(Array(*Node, Count));
     each out& { it |
-        it[] = ast_alloc().boxed(Node, (op = "franca_var", args = empty(), literal = next_var_id[].float()));
+        it[] = ast_alloc().boxed(Node, (op = .franca_var, args = empty(), literal = next_var_id[].float()));
         next_var_id[] += 1;
     };
     bit_cast_unchecked(@type out, TupleArray(*Node, Count), out)
@@ -139,27 +142,111 @@ fn build(p: *Project, out: *List(u8)) void = {
             costumes = list(a),
             sounds = list(a),
         );
-    };
-    
-    // temporary
-    each p.sprites { s |
-        emit :: fn(out: *List(u8), it: *Node, depth: i64) void = {
-            out.push_repeated(depth, " ".ascii());
-            @fmt(out, "- % %\n", it.op, it.literal);
-            for it.args { it |
-                emit(out, it, depth + 1);
-            };
-        };
+        target := p2.targets[p2.targets.len - 1]&;
         for s.blocks { it |
-            emit(out, it, 0);
+            key := emit_block(it, target.blocks&);
+            target.blocks&.get_ptr(key).unwrap()[].Block.topLevel = true;
         };
     };
-    @fmt(out, "\n\n");
 
     dump_json(p2&, out);
     // TODO: need to write a zip file
 }
 
+fn emit_block(it: *Node, parent: Str, blocks: *RawHashMap(Str, Raw.Block2)) Str = {
+    child := emit_block(it, blocks);
+    blocks.get_ptr(parent).unwrap()[].Block.next = (Some = child);
+    blocks.get_ptr(child).unwrap()[].Block.parent = (Some = parent);
+    child
+}
+
+fn emit_block(it: *Node, blocks: *RawHashMap(Str, Raw.Block2)) Str = {
+    if it.op == .franca_block {
+        // TODO: what about empty blocks?
+        first := emit_block(it.args[0], blocks);
+        parent := first;
+        for it.args.rest(1) { it |
+            child := emit_block(it, parent, blocks);
+            parent = child;
+        };
+        return first;
+    };
+    
+    key := @tfmt("s%", blocks.len_including_tombstones);
+    if it.op == .franca_var {
+        key = @tfmt("var_%", it.args[0].literal);
+    };
+    blocks.insert(key, zeroed(Raw.Block2), temp());
+    
+    b: Raw.Block = (opcode = it.op); 
+    @match(it.op) {
+        fn procedures_definition() => {
+            b.inputs&.insert("custom_block", (BlockStack = emit_block(it.args[0], key, blocks)), temp());
+            
+            child := @tfmt("s%", blocks.len_including_tombstones);
+            blocks.insert(key, zeroed(Raw.Block2), temp());
+            c: Raw.Block = (
+                opcode = .procedures_prototype, 
+                parent = (Some = key),
+                // TODO
+                mutation = (Some = (
+                    proccode = key,
+                    argumentids = "[]",
+                    argumentnames = "[]",
+                    argumentdefaults = (Some = "[]"),
+                    warp = "true",
+                )),
+            );
+            blocks.insert(child, (Block = c), temp());
+            b.next = (Some = child);
+        }
+        fn data_setvariableto() => {
+            b.inputs&.insert("VALUE", emit_value(it.args[1], key, blocks), temp());
+            name := @tfmt("var_%", it.args[0].literal);
+            b.fields&.insert("VARIABLE", (name, (Some = name)), temp());
+        }
+        fn control_repeat_until() => {
+            b.inputs&.insert("CONDITION", emit_value(it.args[0], key, blocks), temp());
+            b.inputs&.insert("SUBSTACK", (BlockStack = emit_block(it.args[1], key, blocks)), temp());
+        }
+        fn control_if() => {
+            b.inputs&.insert("CONDITION", emit_value(it.args[0], key, blocks), temp());
+            b.inputs&.insert("SUBSTACK", (BlockStack = emit_block(it.args[1], key, blocks)), temp());
+            b.inputs&.insert("SUBSTACK2", (BlockStack = emit_block(it.args[2], key, blocks)), temp());
+        }
+        fn motion_gotoxy() => {
+            b.inputs&.insert("X", emit_value(it.args[0], key, blocks), temp());
+            b.inputs&.insert("Y", emit_value(it.args[1], key, blocks), temp());
+        }
+        fn event_whenflagclicked() => {
+            b.next = (Some = emit_block(it.args[0], key, blocks));
+        }
+        fn pen_setPenColorToColor() => {
+            b.inputs&.insert("COLOR", emit_value(it.args[0], key, blocks), temp());
+        }
+        @default => {
+            if @is(it.op, .operator_multiply, .operator_add, .operator_subtract, .operator_divide) {
+                b.inputs&.insert("NUM1", emit_value(it.args[0], key, blocks), temp());
+                b.inputs&.insert("NUM2", emit_value(it.args[1], key, blocks), temp());
+            };
+        };
+    };
+    blocks.insert(key, (Block = b), temp());
+    key
+}
+
+emit_value :: fn(it: *Node, parent: Str, blocks: *RawHashMap(Str, Raw.Block2)) Raw.ValueRef = {
+    @match(it.op) {
+        fn franca_var() => (Var = @tfmt("var_%", it.literal));
+        // TODO: lossy because im bad at printing floats
+        fn franca_literal() => (String = @tfmt("%", it.literal));
+        @default => {
+            key := emit_block(it, blocks);
+            blocks.get_ptr(key).unwrap()[].Block.parent = (Some = parent);
+            (BlockValue = key)
+        };
+    }
+}
 
 // "Scratch > File > Save to your computer" gets you a zip (.sb3) file that contains a project.json
 Raw :: @struct {
@@ -184,19 +271,33 @@ Sprite :: @struct {
 
 Block2 :: @tagged(
     Var: @struct(name: Str, id: Str, is_list: bool),
-    Op: Block,
+    Block: Block,
 );
 
 Block :: @struct {
-    opcode: Str;
-    next: ?Str;
-    parent: ?Str;
-    //inputs: RawHashMap(Str, );
-    //fields: RawHashMap(Str, );
-    shadow: bool;
-    topLevel: bool;
-    x: ?i64;
-    y: ?i64;
+    opcode: Opcode;
+    next: ?Str = .None;
+    parent: ?Str = .None;
+    inputs: RawHashMap(Str, ValueRef) = init();
+    fields: RawHashMap(Str, Ty(Str, ?Str)) = init();
+    shadow := false;
+    topLevel := false;
+    x: ?i64 = .None;
+    y: ?i64 = .None;
+    mutation: ?Mutation = .None;
+};
+
+Mutation :: @struct {
+    tagName := "mutation";
+    children: []Str = empty();
+    // this is like a printf looking thing of the signeture
+    proccode: Str;
+    // ... "true" or "false" ...
+    warp: Str; 
+    // these are each a nested json array of strings
+    argumentids: Str;
+    argumentnames: Str;  
+    argumentdefaults: ?Str;
 };
 
 Costume :: @struct {
@@ -249,25 +350,120 @@ fn parse_json(json: *JsonParser, self: *Block2) bool = {
     if token&.is(.StartList) {
         it := zeroed Ty(i64, Str, Str, i64, i64);
         parse_json(json, it&) || return(false);
-        self[] = (Var = (name = it._1, id = it._2, is_list = it._0 == 13);
+        self[] = (Var = (name = it._1, id = it._2, is_list = it._0 == 13));
     } else {
         it := zeroed Block;
         parse_json(json, it&) || return(false);
-        self[] = (Op = it);
+        self[] = (Block = it);
     };
     true
 }
 
-
 fn dump_json(self: *Block2, out: *List(u8)) void = {
     @match(self) {
-        fn Op(self) => dump_json(self, out);
+        fn Block(self) => dump_json(self, out);
         fn Var(it) => {
             s := (@if(it.is_list, 13, 12), it.name, it.id, 0, 0);
             dump_json(s&, out);
         }
     };
 }
+
+ValueRef :: @tagged(
+    String: Str,
+    BlockStack: Str,
+    Var: Str,
+    BlockValue: Str,
+);
+
+fn parse_json(json: *JsonParser, self: *ValueRef) bool = {
+    mark := json.mark();
+    token := json.next().or(fn(_: Str) => return(false));
+    @if(!token&.is(.StartList)) return(false);
+    tag := 0;
+    parse_json(json, tag&) || return(false);
+    second_is_array := false;
+    if tag == 3 {
+        token := json.next().or(fn(_: Str) => return(false));
+        second_is_array = token&.is(.StartList);
+    };
+    json.reset(mark);
+    
+    @switch(tag) {
+        @case(1) => {
+            it := zeroed Ty(i64, Ty(i64, Str));
+            parse_json(json, it&) || return(false);
+            self[] = (String = it._1._1);
+        };
+        @case(2) => {  // block stack
+            it := zeroed Ty(i64, Str);
+            parse_json(json, it&) || return(false);
+            self[] = (BlockStack = it._1);
+        };
+        @case(3) => {
+            if second_is_array {  // variable
+                it := zeroed Ty(i64, Ty(i64, Str, Str), Ty(i64, Str));
+                parse_json(json, it&) || return(false);
+                self[] = (Var = it._1._2);
+            } else {  // block
+                it := zeroed Ty(i64, Str, Ty(i64, Str));
+                parse_json(json, it&) || return(false);
+                self[] = (BlockValue = it._1);
+            
+            };
+        };
+        @default => {
+            json.error = @tfmt("invalid scratch valueref tag: %", tag);
+            return false;
+        };
+    };
+    true
+}
+
+fn dump_json(self: *ValueRef, out: *List(u8)) void = {
+    @match(self) {
+        fn String(it) => @fmt(out, "[1, [10, \"%\"]]", it);
+        fn BlockStack(it) => @fmt(out, "[2, \"%\"]", it);
+        fn BlockValue(it) => @fmt(out, "[3, \"%\", [10, \"\"]]", it);
+        fn Var(it) => @fmt(out, "[3, [12, \"%\", \"%\"], [10, \"\"]]", it, it);
+    };
+}
+
+Opcode :: @enum(
+    looks_say, pen_clear, pen_penUp, pen_stamp, control_if, 
+    looks_hide, looks_show, looks_size, sensing_of, sound_play, 
+    looks_think, motion_goto, motion_setx, motion_sety, operator_gt, 
+    operator_lt, operator_or, pen_penDown, control_stop, control_wait, 
+    operator_add, operator_and, operator_mod, operator_not, sound_volume, 
+    data_hidelist, data_showlist, looks_costume, motion_gotoxy, operator_join, 
+    sensing_timer, control_repeat, data_addtolist, motion_glideto, operator_round, 
+    sensing_answer, sensing_mousex, sensing_mousey, sensing_online, control_forever, 
+    control_if_else, data_itemoflist, event_broadcast, looks_backdrops, looks_setsizeto, 
+    motion_turnleft, operator_divide, operator_equals, operator_length, operator_mathop, 
+    operator_random, procedures_call, sensing_current, looks_sayforsecs, motion_changexby, 
+    motion_changeyby, motion_direction, motion_goto_menu, motion_movesteps, motion_turnright, 
+    motion_xposition, motion_yposition, pen_setPenSizeTo, sensing_loudness, sensing_username, 
+    data_deleteoflist, data_hidevariable, data_insertatlist, data_lengthoflist, data_showvariable, 
+    looks_nextcostume, looks_seteffectto, operator_contains, operator_multiply, operator_subtract, 
+    sensing_mousedown, sound_seteffectto, sound_setvolumeto, sound_sounds_menu, 
+    control_wait_until, data_itemnumoflist, data_setvariableto, looks_changesizeby, looks_nextbackdrop, 
+    looks_thinkforsecs, operator_letter_of, sensing_askandwait, sensing_distanceto, sensing_keyoptions, 
+    sensing_keypressed, sensing_resettimer, sound_cleareffects, looks_gotofrontback, motion_glideto_menu, 
+    motion_pointtowards, pen_changePenSizeBy, pen_menu_colorParam, sensing_setdragmode, 
+    sound_playuntildone, sound_stopallsounds, control_repeat_until, data_deletealloflist, event_whenkeypressed, 
+    looks_changeeffectby, motion_glidesecstoxy, procedures_prototype, sound_changeeffectby, sound_changevolumeby, 
+    data_changevariableby, data_listcontainsitem, event_whenflagclicked, event_whengreaterthan, looks_switchcostumeto, 
+    motion_ifonedgebounce, procedures_definition, sensing_dayssince2000, sensing_touchingcolor, control_start_as_clone, 
+    data_replaceitemoflist, event_broadcastandwait, looks_switchbackdropto, pen_setPenColorParamTo, pen_setPenColorToColor, 
+    sensing_distancetomenu, sensing_of_object_menu, sensing_touchingobject, control_create_clone_of, looks_costumenumbername, 
+    motion_pointindirection, motion_setrotationstyle, looks_backdropnumbername, motion_pointtowards_menu, argument_reporter_boolean, 
+    control_delete_this_clone, looks_cleargraphiceffects, pen_changePenColorParamBy, sensing_touchingobjectmenu, event_whenbroadcastreceived, 
+    event_whenthisspriteclicked, control_create_clone_of_menu, event_whenbackdropswitchesto, sensing_coloristouchingcolor, looks_goforwardbackwardlayers, 
+    argument_reporter_string_number, 
+    
+    // these aren't real
+    franca_block, franca_literal, franca_var, 
+);
 
 };
 
@@ -278,12 +474,16 @@ fn dump_json(self: *Block2, out: *List(u8)) void = {
 ::DeriveJson(Raw.Project);
 ::DeriveJson(Raw.Meta);
 ::DeriveJson(Raw.Monitor);
+::DeriveJson(Raw.Opcode);
+::DeriveJson(Raw.Mutation);
+
 #use("@/lib/encoding/json.fr");
 #use("@/lib/encoding/json_reflect.fr");
 #use("@/lib/collections/map.fr");
 
 /*
 // this extracts all the block opcode strings from a scratch project. 
+// to make it work need to change Block.opcode to a Str.
 // https://scratch.mit.edu/projects/1367472418 (private; has all the blocks)
 main :: fn() void = {
     #use("@/lib/sys/fs.fr");
@@ -299,10 +499,14 @@ main :: fn() void = {
         @panic("failed to parse %:%:%: %", path, line, col, json.error);
     };
     
+    out := @ref Str.list(temp());
     each it.targets[1].blocks& { _, it |
-        @if_let(it) fn Op(it) => {
-            @println("%", it.opcode);
-        }; 
+        @if_let(it) fn Block(it) => out.push(it.opcode);
     };
+    Sort'default(Str, out.items(), Sort'order_strings);
+    enumerate out { i, it |
+        @print("%, ", it);
+        @if(i.mod(5) == 4) println("");
+    };    
 }
 */

@@ -15,4 +15,4 @@
 - nan tagging
 - compile to franca
 - infer types
-
+- textbox edit as franca
