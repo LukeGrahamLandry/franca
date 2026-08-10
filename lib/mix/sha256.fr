@@ -1,11 +1,17 @@
 // https://en.wikipedia.org/wiki/SHA-2
 
-hex :: fn(message: []u8) []u8 = {
+hex :: hex_g(hash);
+
+hex_g :: fn($hash: FuncId) FuncId = 
+(fn(message: []u8) []u8 = {
     digest := hash(message);
-    s := u8.list(temp());
-    @fmt(s&, "%", digest&);
+    s := u8.list(size_of(@type digest) * 2, temp());
+    digest := digest&.items().interpret_as_bytes();
+    for digest { b | 
+        push_hex_byte(s&, b, false);
+    };
     s.items()
-};
+});
 
 // TODO: if we're doing this then it should be a unique type
 fn display(digest: *Digest, out: *List(u8)) void = {
@@ -17,13 +23,15 @@ fn display(digest: *Digest, out: *List(u8)) void = {
 }
 
 Digest :: Array(u32, 8);
+h: Digest : u32.map_in_place(eratosthenes(20), 
+    fn(x) => x.float().sqrt().fraction32())
+    .init();
 
-// TODO: there's special instructions for the round loop in both amd64 and arm64
-hash :: fn(message: []u8) Digest = {
-    h: Array(u32, 8) = :: u32.map_in_place(eratosthenes(20), 
-        fn(x) => x.float().sqrt().fraction32())
-        .init();
-    
+hash :: hash_g(Digest, update, finalize, h);
+
+hash_g :: fn($Digest: Type, $update: FuncId, $finalize: FuncId, $initial: Digest) FuncId #generic = 
+(fn(message: []u8) Digest = {
+    h := initial;
     length_in_bits := message.len * 8;
     chunk_count := message.len / 64;
     range(0, chunk_count) { _ | 
@@ -33,9 +41,12 @@ hash :: fn(message: []u8) Digest = {
     };
     message.len -= chunk_count * 64;
     finalize(message, h, length_in_bits)
-};
+});
 
-finalize :: fn(incomplete_chunk: []u8, h: Digest, length_in_bits: i64) Digest = {
+finalize :: finalize_g(Digest, update, true);
+
+finalize_g :: fn($Digest: Type, $update: FuncId, $big_endian: bool) FuncId = 
+(fn(incomplete_chunk: []u8, h: Digest, length_in_bits: i64) Digest = {
     message := incomplete_chunk;
     chunk := @uninitialized Array(u8, 64); 
     extra := chunk&.items();
@@ -50,14 +61,16 @@ finalize :: fn(incomplete_chunk: []u8, h: Digest, length_in_bits: i64) Digest = 
         message.len = 0;
     };
     extra.rest(message.len).set_zeroed();
+    end := @if(big_endian, byte_swap(length_in_bits), length_in_bits);
     // TODO: is alignment real?
-    ptr_cast_unchecked(u8, i64, extra.ptr.offset(64-8))[] = byte_swap(length_in_bits);
+    ptr_cast_unchecked(u8, i64, extra.ptr.offset(64-8))[] = end;
     update(h&, chunk&);
     
-    u32.map_in_place(h&.items(), fn(x) => byte_swap(x));
+    @if(big_endian) u32.map_in_place(h&.items(), fn(x) => byte_swap(x));
     h
-};
+});
 
+// TODO: there's special instructions for the round loop in both amd64 and arm64
 update :: fn(h: *Array(u32, 8), chunk: *Array(u8, 64)) void = {
     round_constants :: u32.map_in_place(eratosthenes(312), 
         fn(x) => x.float().cbrt().fraction32());

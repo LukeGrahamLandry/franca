@@ -1,0 +1,37 @@
+// this shouldn't be used for anything new but sometimes old formats need it. 
+// https://en.wikipedia.org/wiki/MD5 https://www.rfc-editor.org/rfc/rfc1321.txt
+
+Digest :: Array(u32, 4);
+hash :: Sha256'hash_g(Digest, update, finalize, 
+    @as(Digest) (byte_swap(0x01234567), byte_swap(0x89abcdef), byte_swap(0xfedcba98), byte_swap(0x76543210)));
+
+update :: fn(h: *Array(u32, 4), chunk: *Array(u8, 64)) void = {
+    K :: ast_alloc().alloc_init(u32, 64, fn(i) => 
+        floor(1.shift_left(32).float() * abs(sin(i.float() + 1))).int().trunc());
+
+    // TODO: is alignment real? 
+    M := ptr_cast_unchecked(@type chunk[], Array(u32, 16), chunk);
+    A, B, C, D := (h[0], h[1], h[2], h[3]);
+    
+    quad :: fn(i: i64, s: Array(i64, 4), $body: @Fn(i: i64) Ty(u32, i64)) => {
+        range(0, 16) { j |
+            i := i*16 + j;
+            F, g := body(i);
+            F += A + K[i] + M[g];
+            A = D;
+            D = C;
+            C = B;
+            B += rotate_left(F, s&[j.umod(4)]);
+        };
+    };
+    
+    quad(0, (7, 12, 17, 22), fn(i) => (B.bit_and(C).bit_or(B.bit_not().bit_and(D)), i));
+    quad(1, (5,  9, 14, 20), fn(i) => (D.bit_and(B).bit_or(D.bit_not().bit_and(C)), mod(5*i + 1, 16)));
+    quad(2, (4, 11, 16, 23), fn(i) => (B.bit_xor(C).bit_xor(D), mod(3*i + 5, 16)));
+    quad(3, (6, 10, 15, 21), fn(i) => (C.bit_xor(B.bit_or(D.bit_not())), mod(7*i, 16)));
+    
+    h[0] += A; h[1] += B; h[2] += C; h[3] += D;
+}
+
+finalize :: Sha256'finalize_g(Digest, update, false);
+hex :: Sha256'hex_g(hash);

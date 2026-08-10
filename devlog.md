@@ -1,3 +1,6 @@
+## (Aug 10) sb3
+
+- the website doesn't actually check that the asset's md5 name is correct but its so easy that i might as well do it right
 
 ## (Aug 9) sb3
 
