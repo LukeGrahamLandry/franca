@@ -1,6 +1,6 @@
 
-main :: fn() void = @run {
-    p := import("@/examples/gpu/hctarcs/tests/mandelbrot.fr")'build();
+main :: fn() void = {
+    p := @run import("@/examples/gpu/hctarcs/tests/mandelbrot.fr")'build();
     out := u8.list(temp());
     out_zip := u8.list(temp());
     p.build(out&, out_zip&);
@@ -14,4 +14,40 @@ main :: fn() void = @run {
     
     it := parse_json(T.Raw.Project, out.items(), temp())
         .or(fn(msg) => @panic("%%", path, msg));
+    
+    #use("@/examples/gpu/hctarcs/runtime.fr");
+    
+    it := p.sprites[1].blocks[3];
+    @debug_assert_eq(it.op, .event_whenflagclicked);
+    s: Script = (
+        sprite = @ref @as(SpriteBase) (
+            pos = vec2(0),
+            pen = (down = false, colour = 0),
+            vars = temp().alloc_zeroed(f64, 15),
+        ),
+        canvas = @ref @as(Canvas) (
+            pen_pixels = temp().alloc_zeroed(u32, 480*360),
+        ),
+    );
+    eval(s&, it.args[0]);
+    
+    out := @ref u8.list(temp());
+    @fmt(out, "P6 % % 255\n", 480, 360);
+    for s.canvas.pen_pixels { c |
+        out.push(c.shift_right_logical(16).trunc());
+        out.push(c.shift_right_logical(8).trunc());
+        out.push(c.trunc());
+    };
+    dest := "target/a.ppm";
+    write_entire_file_or_crash(dest, out.items());
+    
+    if cli_args().contains(fn(it) => it[] == "-show") {
+        #use("@/lib/sys/subprocess.fr");
+        #use("@/lib/sys/process.fr");
+        franca := get_executable_path(temp());
+        a := make_args_for_exec(franca, @slice("examples/gpu/viewer.fr", "-jit", dest), temp());
+        become(a[0], a);
+    };
 }
+
+#use("@/graphics/vec.fr");

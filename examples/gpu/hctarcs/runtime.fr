@@ -1,0 +1,79 @@
+// the end state of this code is going to be nothing like this
+// but it's good for morale to get a picture on the screen. 
+
+Value :: f64;
+
+Canvas :: @struct {
+    size: Vec2 = vec2(480, 360);
+    pen_pixels: []u32;
+};
+
+Script :: @struct {
+    sprite: *SpriteBase;
+    canvas: *Canvas;
+};
+
+SpriteBase :: @struct {
+    pos: Vec2;
+    pen: @struct(down: bool, colour: u32);
+    vars: []Value;
+};
+
+to_bool :: fn(a: Value) bool = a == 1;
+from_bool :: fn(a: bool) Value = @if(a, 1, 0);
+
+fn eval(s: *Script, it: *Node) f64 = {
+    @match(it.op) {
+        fn operator_add() => s.eval(it.args[0]) + s.eval(it.args[1]);
+        fn operator_subtract() => s.eval(it.args[0]) - s.eval(it.args[1]);
+        fn operator_multiply() => s.eval(it.args[0]) * s.eval(it.args[1]);
+        fn operator_divide() => s.eval(it.args[0]) / s.eval(it.args[1]);
+        fn operator_or() => from_bool(s.eval(it.args[0]).to_bool() || s.eval(it.args[1]).to_bool());
+        fn operator_and() => from_bool(s.eval(it.args[0]).to_bool() && s.eval(it.args[1]).to_bool());
+        fn operator_lt() => from_bool(s.eval(it.args[0]) < s.eval(it.args[1]));
+        fn operator_gt() => from_bool(s.eval(it.args[0]) > s.eval(it.args[1]));
+        fn operator_equals() => from_bool(s.eval(it.args[0]) == s.eval(it.args[1]));
+        fn control_if() => { if s.eval(it.args[0]).to_bool() {| s.eval(it.args[1]); }; NaN }
+        fn control_if_else() => { if s.eval(it.args[0]).to_bool() {| s.eval(it.args[1]); } else {| s.eval(it.args[2]); }; NaN }
+        fn control_repeat_until() => { while {| !s.eval(it.args[0]).to_bool() } do {| s.eval(it.args[1]); }; NaN }
+        fn data_setvariableto() => { s.sprite.vars[it.args[1].literal.int()] = s.eval(it.args[0]); NaN }
+        // TODO: no transparency
+        fn pen_setPenColorToColor() => { s.sprite.pen.colour = s.eval(it.args[0]).int().trunc(); NaN }
+        fn motion_gotoxy() => {
+            new := vec2(s.eval(it.args[0]).cast(), s.eval(it.args[1]).cast());
+            stage_size := s.canvas.size;
+            new := new.clamp(-stage_size/2, stage_size/2);
+            old := s.sprite.pos;
+            s.sprite.pos = new;
+            if s.sprite.pen.down {
+                new := new + stage_size/2;
+                i := int(cast(new.y * stage_size.x + new.x));
+                s.canvas.pen_pixels[i] = s.sprite.pen.colour;
+            };
+            NaN
+        };
+        fn operator_not() => s.eval(it.args[0]).to_bool().not().from_bool();
+        fn procedures_call() => {
+            params := it.args[0].args[1].args;
+            args := it.args[1].args;
+            range(0, params.len) { i |
+                s.sprite.vars[params[i].literal.int()] = s.eval(args[i]);
+            };
+            s.eval(it.args[0].args[0]);
+            NaN
+        }
+        fn argument_reporter_string_number() => s.sprite.vars[it.literal.int()];
+        fn motion_xposition() => s.sprite.pos.x.cast();
+        fn motion_yposition() => s.sprite.pos.y.cast();
+        fn pen_penUp() => { s.sprite.pen.down = false; NaN };
+        fn pen_penDown() => { s.sprite.pen.down = true; NaN };
+        fn pen_clear() => { s.canvas.pen_pixels.set_zeroed(); NaN }
+        fn franca_block() => { for it.args { it | s.eval(it); }; NaN };
+        fn franca_literal() => it.literal;
+        fn franca_var() => s.sprite.vars[it.literal.int()];
+        @default => @panic("TODO: %", it.op);
+    }
+}
+
+Node :: import("@/examples/gpu/hctarcs/builder.fr").Node;
+
