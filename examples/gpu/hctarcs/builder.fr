@@ -10,8 +10,11 @@ Sprite :: @struct {
 };
 Node :: @rec @struct {
     op: Raw.Opcode;
+    // order here is based on order in block_defs's inputs/fields. 
+    // franca_block <-> linked list in "next" field. 
+    // franca_signature: ...
     args: []*Node;
-    literal: f64 = 0;
+    literal: f64 = 0;  // float for franca_literal. index for franca_var. 
 };
 Costume :: @struct {
     name: Str;
@@ -134,12 +137,13 @@ fn variables(s: *Sprite, $Count: i64) TupleArray(*Node, Count) #generic = {
 
 fn TupleArray($T: Type, $N: i64) Type = Ty(ast_alloc().alloc_init(Type, N, fn(_) => T));
 
-//
+// //
 // above is the user api for building a project from franca code. 
 // below serializes it to a .sb3 file that the scratch editor can import. 
 //
 
 // TODO: set block positions so they're not all overlapping in the ui
+// TODO: readable var names
 fn build(p: *Project, out_json: *List(u8), out_zip: *List(u8)) void = {
     a := temp();
     p2: Raw.Project = (
@@ -148,6 +152,7 @@ fn build(p: *Project, out_json: *List(u8), out_zip: *List(u8)) void = {
         extensions = list(a),
         meta = (semver = "3.0.0", vm = "15.0.1", agent = ""),
     );
+    // TODO: "extensions": ["pen"],
     
     files := @ref Zip.File.list(temp());
     each p.sprites { s |
@@ -188,10 +193,10 @@ fn build(p: *Project, out_json: *List(u8), out_zip: *List(u8)) void = {
     };
 
     dump_json(p2&, out_json);
-    Zip :: import("@/lib/encoding/pkzip.fr");
     files.push(name = "project.json", data = out_json.items());
     Zip'write(out_zip, files.items());
 }
+Zip :: import("@/lib/encoding/pkzip.fr");
 
 fn emit_block(it: *Node, parent: Str, blocks: *RawHashMap(Str, Raw.Block2)) Str = {
     child := emit_block(it, blocks);
@@ -305,6 +310,190 @@ emit_value :: fn(it: *Node, parent: Str, blocks: *RawHashMap(Str, Raw.Block2)) R
     }
 }
 
+// //
+// below is deserializing sb3 back into Node ast. 
+
+// result is in temp()
+fn unbuild(sb3: []u8) Result(*Project, Str) = {
+    ecd := Zip'find(sb3) || return(Err = "expected zip file");
+    files: HashMap(Str, []u8) = init(temp());
+    Zip'iter(sb3, ecd) { it |
+        files&.insert(it.name, it&.data(temp()));
+    };
+    project := files&.get("project.json") || return(Err = "missing project.json");
+    p := @try(parse_json(Raw.Project, project, temp())) return;
+    project := zeroed(Project);
+    
+    next_var_id := 1.0;
+    each p.targets { s |
+        // TODO: im assuming block,var,param will all be unique which isn't true
+        blocks: HashMap(Str, *Node) = init(temp());
+        sprite := zeroed(Sprite);
+        sprite.name = s.name;
+        each s.variables& { key, _ |
+            it := temp().boxed(Node, (op = .franca_var, args = empty(), literal = next_var_id));
+            next_var_id += 1;
+            prev := blocks&.insert(key, it);
+            @if(prev.is_some()) return(Err = @tfmt("duplicate block id (%)", key));
+            sprite.variables&.push(it, temp());
+        };
+        each s.blocks& { key, it |
+            continue :: local_return;
+            @if(!it.is(.Block)) continue();
+            b := it.Block&;
+            
+            it := temp().boxed(Node, (op = b.opcode, args = empty()));
+            prev := blocks&.insert(key, it);
+            @if(prev.is_some()) return(Err = @tfmt("duplicate block id (%)", key));
+            if b.topLevel {
+                sprite.blocks&.push(it, temp());
+            };
+            
+            if b.opcode == .procedures_call {
+                _ := b.mutation 
+                    || return(Err = @tfmt("(%): % missing mutation", key, b.opcode));
+            };
+            
+            if b.opcode == .procedures_definition {
+                prototype := b.inputs&.get("custom_block") 
+                    || return(Err = @tfmt("(%): %.custom_block is missing", key, b.opcode));
+                @if_let(prototype) fn BlockStack(id) => {
+                    b := s.blocks&.get_ptr(id)
+                            || return(Err = @tfmt("(%): missing (%)", key, id));
+                    @if_let(b) fn Block(b) => {
+                        mutation := b.mutation 
+                            || return(Err = @tfmt("(%): % missing mutation", key, b.opcode));
+                        prev := blocks&.insert(mutation.proccode, it);
+                        @if(prev.is_some()) return(Err = @tfmt("duplicate block id (%)", key));
+                        a := list(*Node, temp());
+                        for mutation.argumentids { name |
+                            it := temp().boxed(Node, (op = .argument_reporter_string_number, args = empty(), literal = next_var_id));
+                            next_var_id += 1;
+                            prev := blocks&.insert(name, it);
+                            @if(prev.is_some()) return(Err = @tfmt("duplicate block id (%)", name));
+                            a&.push(it);
+                        };
+                        it.args = a.items();                            
+                    };
+                };
+            };
+        };
+        
+        each s.blocks& { key, it |
+            @if_let(it) fn Block(b) => {
+                shape := block_defs.shapes.get(b.opcode).unwrap();
+                it := blocks&.get(key).unwrap();
+                
+                args := list(*Node, temp());
+                for shape.inputs { field |
+                    value := b.inputs&.get_ptr(field) 
+                        || return(Err = @tfmt("(%): %.% is missing", key, b.opcode, field));
+                    
+                    a := @try(decode_value(value, s, blocks&, (key, it.op, field))) return;
+                    args&.push(a);
+                };
+                for shape.fields { field |
+                    var := b.fields&.get(field) 
+                        || return(Err = @tfmt("% (%) missing %", b.opcode, key, field));
+                    a := blocks&.get(var._0)
+                        || return(Err = @tfmt("(%): %.% missing (%)", key, it.op, field, var._0));
+                    args&.push(a);
+                };
+                if b.opcode == .argument_reporter_string_number {
+                    var := b.fields&.get("VALUE") 
+                            || return(Err = @tfmt("(%): %.VALUE is missing", key, b.opcode));
+                    a := blocks&.get(var._0)
+                        || return(Err = @tfmt("(%): %.% missing (%)", key, it.op, "VALUE", var._0));
+                    it.literal = a.literal;
+                };
+                if @is(b.opcode, .event_whenflagclicked, .procedures_definition) {
+                    @if_let(s.blocks&.get_ptr(key)) fn Some(b) => @if_let(b) fn Block(b) => {
+                        n := @try(collect_block(s, blocks&, b.next)) return;
+                        args&.push(n);
+                    };
+                };
+                
+                if @is(b.opcode, .procedures_definition) {
+                    a := temp().boxed(Node, (op = .franca_signature, args = it.args));
+                    args&.ordered_remove(0);  // TODO: i should just use the procedures_prototype instead of doing it this way
+                    args&.push(a);
+                };
+                
+                if b.opcode == .procedures_call {
+                    mutation := b.mutation&.unwrap();
+                    def := blocks&.get(mutation.proccode) 
+                        || return(Err = @tfmt("(%): % undefined proccode (%)", key, b.opcode, mutation.proccode));
+                    a := list(*Node, temp());
+                    for mutation.argumentids { field |
+                        value := b.inputs&.get_ptr(field) 
+                            || return(Err = @tfmt("(%): %.% is missing", key, b.opcode, field));
+                        value := @try(decode_value(value, s, blocks&, (key, b.opcode, field))) return;
+                        a&.push(value); 
+                    };
+                    @debug_assert_eq(args.len, 0);
+                    args&.push(def);
+                    args&.push(temp().boxed(Node, (op = .franca_block, args = a.items())));
+                };
+                
+                it.args = args.items();
+            };
+            
+            each s.costumes { it |
+                sprite.costumes&.push((
+                    name = it.assetId,
+                    fmt = it.dataFormat,
+                    data = files&.get(it.md5ext)
+                        || return(Err = @tfmt("missing costume (%)", it.md5ext)),
+                ), temp());
+            };
+            
+            project.sprites&.push(temp().boxed(Sprite, sprite), temp());
+        };
+    };
+
+    (Ok = temp().boxed(Project, project))
+}
+
+fn decode_value(value: *Raw.ValueRef, s: *Raw.Sprite, blocks: *HashMap(Str, *Node), error: Ty(Str, Raw.Opcode, Str)) Result(*Node, Str) = {
+    key, op, field := error;
+    a := @match(value[]) {
+        fn String(s) => {
+            n, s2 := parse_float(s);
+            @if(s2.len != 0) return(Err = @tfmt("(%): %.% TODO: non-float '%'", key, op, field, s));
+            temp().boxed(Node, (op = .franca_literal, args = empty(), literal = n))
+        }
+        fn BlockStack(id) => {
+            _ := blocks.get(id)
+                || return(Err = @tfmt("(%): %.% missing (%)", key, op, field, id));
+            @try(collect_block(s, blocks, (Some = id))) return
+        }
+        fn Var(id) => blocks.get(id)
+            || return(Err = @tfmt("(%): %.% missing (%)", key, op, field, id));
+        fn BlockValue(id) => blocks.get(id)
+            || return(Err = @tfmt("(%): %.% missing (%)", key, op, field, id));
+    };
+    (Ok = a)
+}
+
+// follows the .next chain
+fn collect_block(s: *Raw.Sprite, blocks: *HashMap(Str, *Node), parent: ?Str) Result(*Node, Str) = {
+    head: ?Str = parent;
+    parent := parent || "";
+    args := list(*Node, temp());
+    while => head { id |
+        n := blocks.get(id)
+            || return(Err = @tfmt("[%]: %.next missing (%)", args.len, parent, id));
+        args&.push(n);
+        head = .None;
+        @if_let(s.blocks&.get_ptr(id)) fn Some(b) => @if_let(b) fn Block(b) => {
+            head = b.next;
+        };
+        parent = id;
+    };
+    (Ok = temp().boxed(Node, (op = .franca_block, args = args.items())))
+}
+
+// //
 // "Scratch > File > Save to your computer" gets you a zip (.sb3) file that contains a project.json
 Raw :: @struct {
 Project :: @struct {
@@ -327,6 +516,7 @@ Sprite :: @struct {
 };
 
 Block2 :: @tagged(
+    // i think Var is only when a variable reporter is at top level (not in a slot) so i never need to care about it?
     Var: @struct(name: Str, id: Str, is_list: bool),
     Block: Block,
 );
@@ -605,4 +795,11 @@ parse_block_defs2 :: fn($Opcode: Type, e: FatExpr) FatExpr = {
     @{ @static @anon_literal(_ = Opcode, shapes = @static @[@literal out.raw]) }
 }
 
-empty_svg :: """<svg version="1.1" width="2" height="2" viewBox="-1 -1 2 2" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"></svg>""";
+empty_png :: {  
+    // todo: stb_image_write it myself
+    x := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAC4jAAAuIwF4pT92AAAAC0lEQVQI12NgAAIAAAUAAeImBZsAAAAASUVORK5CYII=";
+    out := u8.list(ast_alloc());
+    decode :: import("@/lib/encoding/base64.fr").base64_decode;
+    decode(out&, x);
+    out.items()
+};

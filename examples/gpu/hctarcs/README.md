@@ -1,3 +1,8 @@
+THIS IS UNFINISHED  
+
+current state is i can compile tests/mandelbrot.fr into a .sb3 file 
+that scratch can load. then i can load that file and interpret 
+it and draw a ppm of mandelbrot set. most other blocks are not implemented yet. 
 
 ## resources
 

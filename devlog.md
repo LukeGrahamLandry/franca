@@ -1,6 +1,8 @@
 ## (Aug 10) sb3
 
 - the website doesn't actually check that the asset's md5 name is correct but its so easy that i might as well do it right
+- start with sync interpreter for the builder's ast (that only does 1 pixel pen) so i have something to look at 
+  and then i "just" need to convert the other direction (sb3->ast). 
 
 ## (Aug 9) sb3
 
