@@ -260,20 +260,27 @@ fn lex_str(self: *JsonParser) Result(Str, Str) = {
             if self.is_skipping {
                 self.current += 1;  // it might be a quote
             } else {
+                escape_start := self.current - 1;
                 c := self.pop();
-                @if(c != "u".ascii()) return(Err = self.error("TODO: non-hex json string escapes are not supported"));
-                s := self.input.rest(self.current);
-                @if(s.len < 4) return(Err = self.error("invalid hex"));
-                n, ss := convert_number(s.slice(0, 4), 16, hex_digit);
-                @if(ss.len != 0) return(Err = self.error("invalid hex"));
-                @if(n > 127) return(Err = self.error("TODO: non-ascii hex escape"));
-                self.current += 4;
+                char: u8 = @switch(c) {
+                    @case("u".ascii()) => {
+                        s := self.input.rest(self.current);
+                        @if(s.len < 4) return(Err = self.error("invalid hex"));
+                        n, ss := convert_number(s.slice(0, 4), 16, hex_digit);
+                        @if(ss.len != 0) return(Err = self.error("invalid hex"));
+                        @if(n > 127) return(Err = self.error("TODO: non-ascii hex escape"));
+                        self.current += 4;
+                        n.trunc()
+                    };
+                    @case("\"".ascii()) => "\"".ascii();
+                    @default => return(Err = "TODO: unsupported json string escape");
+                };
                 if buf.is_none() {
                     buf = (Some = list(self.out));  // TODO: this makes it impossible to free
                 };
                 buf := buf&.unwrap();
-                buf.push_all(self.input.slice(start, self.current - 6));
-                buf.push(n.trunc());
+                buf.push_all(self.input.slice(start, escape_start));
+                buf.push(char);
                 start = self.current;
             };
         };

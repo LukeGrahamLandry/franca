@@ -3,6 +3,19 @@
 - the website doesn't actually check that the asset's md5 name is correct but its so easy that i might as well do it right
 - start with sync interpreter for the builder's ast (that only does 1 pixel pen) so i have something to look at 
   and then i "just" need to convert the other direction (sb3->ast). 
+- Johan-Mi/linrays 726052645 by the person who made scratch-compiler that i used last time. i know it only uses the pen. 
+  - blocks: random,stop,mathop,pensize,repeat,changexby,setx,changevariableby
+  - mutation.warp isn't always a stupid string, website allows bool too. 
+  - stage variables are accessable from any sprite
+  - argument_reporter references by argumentname instead of argumentid. 
+  - the fields aren't always a variable. ex. mathop,stop
+  - literals: "true", "-Infinity"
+  - now it runs but im just getting blank blue screen and not reaching all the code clearly because i haven't done the trig functions yet
+  - put var names in the Node so i can read the output better
+  - BlockValue vs BlockStack doesn't work the way i expected. 
+    if.CONDITION can be a BlockStack with one item and i wasn't using its value. 
+    i can reproduce that with the scratch
+TODO: all those fixes ^ i only did for reading not writing so far. 
 
 ## (Aug 9) sb3
 

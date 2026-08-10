@@ -12,9 +12,10 @@ Node :: @rec @struct {
     op: Raw.Opcode;
     // order here is based on order in block_defs's inputs/fields. 
     // franca_block <-> linked list in "next" field. 
-    // franca_signature: ...
+    // procedures_prototype <-> mutation.argumentids
     args: []*Node;
     literal: f64 = 0;  // float for franca_literal. index for franca_var. 
+    string: Str = "";  // franca_string. TODO: nan tag this too? sad to make all the nodes bigger. but then need to write a new bake_relocatable_value
 };
 Costume :: @struct {
     name: Str;
@@ -45,7 +46,7 @@ fn costume(s: *Sprite, args: Costume) void = {
 fn define(s: *Sprite, warp: bool, $body: FuncId) *Node = {
     func :: get_function_ast(body, false, false, false, false);
     b := @if(@run func.arg.bindings[0].name&.is(.None), {
-        make("procedures_definition", @slice(block(body), make("franca_signature", empty())))
+        make("procedures_definition", @slice(block(body), make("procedures_prototype", empty())))
     }, {
         @run {
             if func.body.Normal.ty != void {
@@ -65,7 +66,7 @@ fn define(s: *Sprite, warp: bool, $body: FuncId) *Node = {
         };
         body := body(t);
         body := make("franca_block", body);
-        make("procedures_definition", @slice(body, make("franca_signature", vars)))
+        make("procedures_definition", @slice(body, make("procedures_prototype", vars)))
     });
     b.literal = next_var_id[].float();
     next_var_id[] += 1;
@@ -170,7 +171,7 @@ fn build(p: *Project, out_json: *List(u8), out_zip: *List(u8)) void = {
         target := p2.targets[p2.targets.len - 1]&;
         for s.variables { it |
             name := @tfmt("var_%", it.literal);
-            target.variables&.insert(name, (name, 0), temp());
+            target.variables&.insert(name, (name, (Float = 0)), temp());
         };
         for s.blocks { it |
             key := emit_block(it, target.blocks&);
@@ -278,7 +279,7 @@ fn emit_block(it: *Node, blocks: *RawHashMap(Str, Raw.Block2)) Str = {
 
 make_mutation :: fn(it: *Node) Raw.Mutation = {
     @debug_assert_eq(it.op, .procedures_definition);
-    @debug_assert_eq(it.args[1].op, .franca_signature);
+    @debug_assert_eq(it.args[1].op, .procedures_prototype);
     ids, names, proccode := (Str.list(temp()), Str.list(temp()), u8.list(temp()));
     @fmt(proccode&, "var_%", it.literal);
     for it.args[1].args { it |
@@ -324,14 +325,28 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
     p := @try(parse_json(Raw.Project, project, temp())) return;
     project := zeroed(Project);
     
-    next_var_id := 1.0;
+    stage := p.targets&.find(fn(it) => it.isStage)
+        || return(Err = "missing Stage");
+    
     each p.targets { s |
         // TODO: im assuming block,var,param will all be unique which isn't true
         blocks: HashMap(Str, *Node) = init(temp());
         sprite := zeroed(Sprite);
         sprite.name = s.name;
-        each s.variables& { key, _ |
-            it := temp().boxed(Node, (op = .franca_var, args = empty(), literal = next_var_id));
+        
+        // TODO: support making these from builder api
+        next_var_id := 1.0;
+        @if(!s.isStage)
+        each stage.variables& { key, it |
+            it := temp().boxed(Node, (op = .franca_var_stage, args = empty(), literal = next_var_id, string = it._0));
+            next_var_id += 1;
+            prev := blocks&.insert(key, it);
+            @if(prev.is_some()) return(Err = @tfmt("duplicate block id (%)", key));
+        };
+        @if(s.isStage && !identical(s, stage)) return(Err = "multiple stages");
+        
+        each s.variables& { key, it |
+            it := temp().boxed(Node, (op = .franca_var, args = empty(), literal = next_var_id, string = it._0));
             next_var_id += 1;
             prev := blocks&.insert(key, it);
             @if(prev.is_some()) return(Err = @tfmt("duplicate block id (%)", key));
@@ -373,7 +388,8 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                             @if(prev.is_some()) return(Err = @tfmt("duplicate block id (%)", name));
                             a&.push(it);
                         };
-                        it.args = a.items();                            
+                        it.args = a.items();
+                        it.string = mutation.proccode;
                     };
                 };
             };
@@ -395,16 +411,32 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                 for shape.fields { field |
                     var := b.fields&.get(field) 
                         || return(Err = @tfmt("% (%) missing %", b.opcode, key, field));
-                    a := blocks&.get(var._0)
-                        || return(Err = @tfmt("(%): %.% missing (%)", key, it.op, field, var._0));
-                    args&.push(a);
+                    name := var._1 || var._0;
+                    if field == "OPERATOR" || field == "STOP_OPTION" {
+                        a := temp().boxed(Node, (op = .franca_string, args = empty(), string = name));
+                        args&.push(a);
+                    } else {
+                        a := blocks&.get(name)
+                            || return(Err = @tfmt("(%): %.% missing (%)", key, it.op, field, name));
+                        args&.push(a);
+                    };
                 };
                 if b.opcode == .argument_reporter_string_number {
                     var := b.fields&.get("VALUE") 
                             || return(Err = @tfmt("(%): %.VALUE is missing", key, b.opcode));
-                    a := blocks&.get(var._0)
-                        || return(Err = @tfmt("(%): %.% missing (%)", key, it.op, "VALUE", var._0));
+                    // these are referenced by name but i want the id. 
+                    name := var._0;
+                    mutation := @try(find_parent_prototype(s, blocks&, key)) return;
+                    argumentnames := mutation.argumentnames || return(Err = "missing argumentnames");
+                    i := argumentnames.items().index_of(name)
+                        || return(Err = @tfmt("(%): invalid argument name (%)", key, name));
+                    @if(argumentnames.len != mutation.argumentids.len) return(Err = "mutation names/ids arity mismatch");
+                    id := mutation.argumentids[i];
+                    a := blocks&.get(id)
+                        || return(Err = @tfmt("(%): %.% missing (%)", key, it.op, "VALUE", id));
                     it.literal = a.literal;
+                    it.string = name;
+                    a.string = name;  // TODO: this should go in the other place
                 };
                 if @is(b.opcode, .event_whenflagclicked, .procedures_definition) {
                     @if_let(s.blocks&.get_ptr(key)) fn Some(b) => @if_let(b) fn Block(b) => {
@@ -414,13 +446,14 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                 };
                 
                 if @is(b.opcode, .procedures_definition) {
-                    a := temp().boxed(Node, (op = .franca_signature, args = it.args));
-                    args&.ordered_remove(0);  // TODO: i should just use the procedures_prototype instead of doing it this way
-                    args&.push(a);
+                    @if(args[0].op != .franca_block || args[0].args[0].op != .procedures_prototype) return(Err = @tfmt("(%): missing prototype", key));
+                    args[0] = temp().boxed(Node, (op = .procedures_prototype, args = it.args));
+                    args&.items().swap(0, 1);
                 };
                 
                 if b.opcode == .procedures_call {
                     mutation := b.mutation&.unwrap();
+                    it.string = mutation.proccode;
                     def := blocks&.get(mutation.proccode) 
                         || return(Err = @tfmt("(%): % undefined proccode (%)", key, b.opcode, mutation.proccode));
                     a := list(*Node, temp());
@@ -449,6 +482,24 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
             
             project.sprites&.push(temp().boxed(Sprite, sprite), temp());
         };
+        if false {
+            out := u8.list(temp());
+            for sprite.blocks { it |
+                emit :: fn(out: *List(u8), it: *Node, depth: i64) void = {
+                    out.push_repeated(depth, " ".ascii());
+                    @fmt(out, "- % % %\n", it.op, it.literal, it.string);
+                    a := it.args;
+                    if it.op == .procedures_call {  // don't spam print the body again
+                        a = a.rest(1);
+                    };
+                    for a { it |
+                        emit(out, it, depth + 1);
+                    };
+                };
+                emit(out&, it, 0);
+            };
+            print(out.items());
+        };
     };
 
     (Ok = temp().boxed(Project, project))
@@ -458,8 +509,19 @@ fn decode_value(value: *Raw.ValueRef, s: *Raw.Sprite, blocks: *HashMap(Str, *Nod
     key, op, field := error;
     a := @match(value[]) {
         fn String(s) => {
-            n, s2 := parse_float(s);
-            @if(s2.len != 0) return(Err = @tfmt("(%): %.% TODO: non-float '%'", key, op, field, s));
+            // TODO: this is wrong but i don't need strings yet
+            n := @switch(s) {
+                @case("") => 0.0;
+                @case("true") => 1.0;
+                @case("false") => 0.0;
+                @case("-Infinity") => -1.0/0.0;
+                @case("Infinity") => 1.0/0.0;
+                @default => {
+                    n, s2 := parse_float(s);
+                    @if(s2.len != 0) return(Err = @tfmt("(%): %.% TODO: non-float '%'", key, op, field, s));
+                    n
+                };
+            };
             temp().boxed(Node, (op = .franca_literal, args = empty(), literal = n))
         }
         fn BlockStack(id) => {
@@ -493,6 +555,45 @@ fn collect_block(s: *Raw.Sprite, blocks: *HashMap(Str, *Node), parent: ?Str) Res
     (Ok = temp().boxed(Node, (op = .franca_block, args = args.items())))
 }
 
+// the ones i generate have the parent chain go up to the definition,
+// scratch has expressions go up to the prototype even tho it doesn't have a next field which seems confusing. 
+// but the website accepts both it seems but TODO: i should match them tho
+fn find_parent_prototype(s: *Raw.Sprite, blocks: *HashMap(Str, *Node), parent: Str) Result(*Raw.Mutation, Str) = {
+    tail: ?Str = (Some = parent);
+    child := parent;
+    first := child;
+    args := list(*Node, temp());
+    while => tail { id |
+        n := blocks.get(id)
+            || return(Err = @tfmt("[%]: %.parent missing (%) (while looking for prototype for (%))", args.len, child, id, first));
+        tail = .None;
+        @if_let(s.blocks&.get_ptr(id)) fn Some(b) => @if_let(b) fn Block(b) => {
+            tail = b.parent;
+            
+            if b.opcode == .procedures_prototype {
+                @if(b.mutation.is_none()) return(Err = @tfmt("(%): missing mutation", id));
+                return(Ok = b.mutation&.unwrap());
+            };
+            if b.opcode == .procedures_definition {  // TODO: paste from the loop at the beginnig
+                key := id;
+                prototype := b.inputs&.get("custom_block") 
+                    || return(Err = @tfmt("(%): %.custom_block is missing", key, b.opcode));
+                @if_let(prototype) fn BlockStack(id) => {
+                    b := s.blocks&.get_ptr(id)
+                            || return(Err = @tfmt("(%): missing (%)", key, id));
+                    @if_let(b) fn Block(b) => {
+                            @if(b.mutation.is_none()) return(Err = @tfmt("(%): missing mutation", id));
+                            return(Ok = b.mutation&.unwrap());                       
+                    };
+                };
+            };
+        };
+        child = id;
+    };
+    (Err = @tfmt("(%): didn't find prototype", first))
+}
+
+
 // //
 // "Scratch > File > Save to your computer" gets you a zip (.sb3) file that contains a project.json
 Raw :: @struct {
@@ -506,7 +607,7 @@ Project :: @struct {
 Sprite :: @struct {
     isStage: bool;
     name: Str;
-    variables: RawHashMap(Str, Ty(Str, i64));
+    variables: RawHashMap(Str, Ty(Str, FloatOrString));
     //lists: RawHashMap(Str, Ty(Str, List(Value)));
     broadcasts: RawHashMap(Str, Str);
     blocks: RawHashMap(Str, Block2);
@@ -547,7 +648,7 @@ MutationRepr :: @struct {
     tagName := "mutation";
     children: []Str = empty();
     proccode: Str;
-    warp: Str; 
+    warp: bool; 
     argumentids: Str;
     argumentnames: ?Str;  
     argumentdefaults: ?Str;
@@ -595,6 +696,23 @@ Monitor :: @struct {
 
 Value :: Str;
 
+FloatOrString :: @tagged(Float: f64, String: Str);
+fn parse_json(json: *JsonParser, self: *FloatOrString) bool = {
+    token := json.next().or(fn(_: Str) => return(false));
+    self[] = @match(token) {
+        fn Float(n) => (Float = n);
+        fn StringValue(s) => (String = s);
+        @default => return(false);
+    };
+    true
+}
+fn dump_json(self: *FloatOrString, out: *List(u8)) void = {
+    @match(self) {
+        fn Float(it) => dump_json(it, out);
+        fn String(it) => dump_json(it, out);
+    };
+}
+
 fn parse_json(json: *JsonParser, self: *Block2) bool = {
     mark := json.mark();
     token := json.next().or(fn(_: Str) => return(false));
@@ -622,6 +740,7 @@ fn dump_json(self: *Block2, out: *List(u8)) void = {
     };
 }
 
+// TODO: idk how it chooses between BlockStack(2) and BlockValue(3) but if.CONDITION can be BlockStack so its not just stmt vs expr like i assumed. 
 ValueRef :: @tagged(
     String: Str,
     BlockStack: Str,
@@ -686,7 +805,7 @@ fn parse_json(json: *JsonParser, self: *Mutation) bool = {
     s := zeroed(MutationRepr);
     parse_json(json, s&) || return(false);
     self.proccode = s.proccode;
-    self.warp = s.warp == "true";
+    self.warp = s.warp;
     X :: fn(it) => {
         r := List(Str).parse_json(it, json.out);
         r.or(fn(msg) => {
@@ -708,7 +827,7 @@ fn dump_json(self: *Mutation, out: *List(u8)) void = {
     X :: fn(it) => { x := @ref u8.list(temp()); dump_json(it, x); x.items() };
     s: MutationRepr = (
         proccode = self.proccode,
-        warp = @if(self.warp, "true", "false"),
+        warp = self.warp,
         argumentids = X(self.argumentids&),
         argumentnames = .None,
         argumentdefaults = .None,
@@ -743,17 +862,26 @@ block_defs :: @parse_block_defs(
 (control_if, (CONDITION, SUBSTACK)),
 (control_if_else, (CONDITION, SUBSTACK, SUBSTACK2)),
 (control_repeat_until, (CONDITION, SUBSTACK)),
-(data_setvariableto, (VALUE), (VARIABLE)),
+((data_setvariableto, data_changevariableby), (VALUE), (VARIABLE)),
 (pen_setPenColorToColor, (COLOR)),
 (motion_gotoxy, (X, Y)),
 (operator_not, (OPERAND)),
+(operator_random, (FROM, TO)),
+(control_stop, (), (STOP_OPTION)),
+(operator_mathop, (NUM), (OPERATOR)),
+(pen_setPenSizeTo, (SIZE)),
+(control_repeat, (TIMES, SUBSTACK)),
+(motion_changeyby, (DY)),
+(motion_changexby, (DX)),
+(motion_setx, (X)),
+(motion_sety, (Y)),
 (procedures_definition, (custom_block)),
 (procedures_call, ()),
 (argument_reporter_string_number, (), /*(VALUE)*/),
 // ...
 ((event_whenflagclicked, procedures_prototype, motion_xposition, motion_yposition, pen_penUp, pen_penDown, pen_clear), ()),
 // these aren't real
-((franca_block, franca_literal, franca_var, franca_signature), ()),
+((franca_block, franca_literal, franca_var, franca_var_stage, franca_string), ()),
 );
 
 // (opcode, inputs, fields)

@@ -20,5 +20,6 @@ it and draw a ppm of mandelbrot set. most other blocks are not implemented yet.
 - nan tagging
 - compile to franca
 - infer types
+- dump Node ast back to builder franca code
 - textbox edit as franca
 - hell, they're gonna have SVGs in there

@@ -6,16 +6,20 @@ Value :: f64;
 Canvas :: @struct {
     size: Vec2 = vec2(480, 360);
     pen_pixels: []u32;
+    rng: Random.Rng;
+    stage_vars: []Value;
 };
 
 Script :: @struct {
     sprite: *SpriteBase;
     canvas: *Canvas;
+    returning := false;
+    saved_args: RawList(Ty(i64, f64)) = empty();
 };
 
 SpriteBase :: @struct {
     pos: Vec2;
-    pen: @struct(down: bool, colour: u32);
+    pen: @struct(down: bool, colour: u32, size: f64);
     vars: []Value;
 };
 
@@ -23,6 +27,23 @@ to_bool :: fn(a: Value) bool = a == 1;
 from_bool :: fn(a: bool) Value = @if(a, 1, 0);
 
 fn eval(s: *Script, it: *Node) f64 = {
+    @if(s.returning) return(NaN);  // i think values can't have side effects so this is good enough
+    //@println("%[%] lit=% %", it.op, it.args.len, it.literal, it.string);
+    
+    update_pos :: fn($body: @Fn(old: Vec2) Vec2) f64 => {
+        old := s.sprite.pos;
+        new := body(old);
+        stage_size := s.canvas.size;
+        new := new.clamp(-stage_size/2, stage_size/2);
+        s.sprite.pos = new;
+        if s.sprite.pen.down {
+            new := new + stage_size/2;
+            i := int(cast((stage_size.y - new.y) * stage_size.x + new.x));
+            i := i.min(s.canvas.pen_pixels.len - 1);
+            s.canvas.pen_pixels[i] = s.sprite.pen.colour;
+        };
+        NaN
+    };
     @match(it.op) {
         fn operator_add() => s.eval(it.args[0]) + s.eval(it.args[1]);
         fn operator_subtract() => s.eval(it.args[0]) - s.eval(it.args[1]);
@@ -35,42 +56,89 @@ fn eval(s: *Script, it: *Node) f64 = {
         fn operator_equals() => from_bool(s.eval(it.args[0]) == s.eval(it.args[1]));
         fn control_if() => { if s.eval(it.args[0]).to_bool() {| s.eval(it.args[1]); }; NaN }
         fn control_if_else() => { if s.eval(it.args[0]).to_bool() {| s.eval(it.args[1]); } else {| s.eval(it.args[2]); }; NaN }
-        fn control_repeat_until() => { while {| !s.eval(it.args[0]).to_bool() } do {| s.eval(it.args[1]); }; NaN }
-        fn data_setvariableto() => { s.sprite.vars[it.args[1].literal.int()] = s.eval(it.args[0]); NaN }
-        fn pen_setPenColorToColor() => { s.sprite.pen.colour = s.eval(it.args[0]).int().trunc(); NaN }
-        fn motion_gotoxy() => {
-            new := vec2(s.eval(it.args[0]).cast(), s.eval(it.args[1]).cast());
-            stage_size := s.canvas.size;
-            new := new.clamp(-stage_size/2, stage_size/2);
-            old := s.sprite.pos;
-            s.sprite.pos = new;
-            if s.sprite.pen.down {
-                new := new + stage_size/2;
-                i := int(cast(new.y * stage_size.x + new.x));
-                s.canvas.pen_pixels[i] = s.sprite.pen.colour;
-            };
+        fn control_repeat_until() => { while {| !s.eval(it.args[0]).to_bool() && !s.returning } do {| s.eval(it.args[1]); }; NaN }
+        fn control_repeat() => { range(0, s.eval(it.args[0]).int()) { _ | s.eval(it.args[1]); }; NaN }
+        fn data_setvariableto() => { 
+            i := it.args[1].literal.int(); 
+            @debug_assert(@is(it.args[1].op, .franca_var, .franca_var_stage));
+            vars := @if(it.args[1].op == .franca_var, s.sprite.vars, s.canvas.stage_vars);
+            @debug_assert_ult(i, vars.len, "too many vars"); 
+            vars[i] = s.eval(it.args[0]); 
+            NaN 
+        }
+        fn data_changevariableby() => {  // TODO: desugar this
+            i := it.args[1].literal.int(); 
+            @debug_assert(@is(it.args[1].op, .franca_var, .franca_var_stage));
+            vars := @if(it.args[1].op == .franca_var, s.sprite.vars, s.canvas.stage_vars);
+            @debug_assert_ult(i, vars.len, "too many vars"); 
+            vars[i] += s.eval(it.args[0]); 
             NaN
-        };
+        }
+        fn pen_setPenColorToColor() => { s.sprite.pen.colour = s.eval(it.args[0]).int().trunc(); NaN }
+        fn pen_setPenSizeTo() => { s.sprite.pen.size = s.eval(it.args[0]); NaN }
         fn operator_not() => s.eval(it.args[0]).to_bool().not().from_bool();
         fn procedures_call() => {
             params := it.args[0].args[1].args;
             args := it.args[1].args;
             @debug_assert_eq(args.len, params.len);
             range(0, params.len) { i |
-                s.sprite.vars[params[i].literal.int()] = s.eval(args[i]);
+                @debug_assert_eq(params[i].op, .argument_reporter_string_number);
+                j := params[i].literal.int();
+                push(s.saved_args&, (j, s.sprite.vars[j]), temp());
+                s.sprite.vars[j] = s.eval(args[i]);
             };
+            @debug_assert_eq(it.args[0].args[0].op, .franca_block);
             s.eval(it.args[0].args[0]);
+            s.returning = false;
+            range(0, params.len) { _ |
+                j, value := s.saved_args&.pop().unwrap();
+                s.sprite.vars[j] = value;
+            };
+            
             NaN
         }
         fn argument_reporter_string_number() => s.sprite.vars[it.literal.int()];
         fn motion_xposition() => s.sprite.pos.x.cast();
         fn motion_yposition() => s.sprite.pos.y.cast();
+        fn motion_gotoxy() => update_pos(fn(_) => vec2(s.eval(it.args[0]).cast(), s.eval(it.args[1]).cast()));
+        fn motion_changexby() => update_pos(fn(old) => { old.x += s.eval(it.args[0]).cast(); old });
+        fn motion_changeyby() => update_pos(fn(old) => { old.y += s.eval(it.args[0]).cast(); old });
+        fn motion_setx() => update_pos(fn(old) => { old.x = s.eval(it.args[0]).cast(); old });
+        fn motion_sety() => update_pos(fn(old) => { old.y = s.eval(it.args[0]).cast(); old });
         fn pen_penUp() => { s.sprite.pen.down = false; NaN };
         fn pen_penDown() => { s.sprite.pen.down = true; NaN };
         fn pen_clear() => { s.canvas.pen_pixels.set_zeroed(); NaN }
-        fn franca_block() => { for it.args { it | s.eval(it); }; NaN };
+        fn franca_block() => { /*TODO*/ @if(it.args.len == 1) return(s.eval(it.args[0]));  for it.args { it | s.eval(it); @if(s.returning) return(NaN); }; NaN };
         fn franca_literal() => it.literal;
         fn franca_var() => s.sprite.vars[it.literal.int()];
+        fn franca_var_stage() => s.canvas.stage_vars[it.literal.int()];
+        fn operator_random() => {
+            lo, hi := (s.eval(it.args[0]), s.eval(it.args[1]));
+            d := s.canvas.rng&.rand_float();
+            (hi - lo)*d + lo
+        }
+        fn operator_mathop() => {
+            // TODO: web
+            exp :: fn(a: f64) f64 #libc;
+            log :: fn(a: f64) f64 #libc;
+            floor :: fn(a: f64) f64 #libc;
+            acos :: fn(a: f64) f64 #libc;
+            
+            op := it.args[it.args.len - 1].string;
+            arg := s.eval(it.args[0]);
+            @switch(op) {
+                @case("sqrt") => sqrt(arg);
+                @case("e ^") => exp(arg);
+                @case("ln") => log(arg);
+                @case("floor") => floor(arg);
+                @case("abs") => abs(arg);
+                @case("acos") => acos(arg).rad_to_deg();
+                @case("sin") => sin(arg.deg_to_rad());
+                @case("cos") => cos(arg.deg_to_rad());
+                @default => @panic("TODO: % (op=%, arg=%)", it.op, op, arg);
+            }
+        }
+        fn control_stop() => { s.returning = true; NaN }
         @default => @panic("TODO: %", it.op);
     }
 }
