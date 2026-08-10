@@ -16,3 +16,4 @@
 - compile to franca
 - infer types
 - textbox edit as franca
+- hell, they're gonna have SVGs in there

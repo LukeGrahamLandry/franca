@@ -107,3 +107,55 @@ fn data(it: *Node, a: Alloc) []u8 = {
         @default => @panic("unknown compression for %", it.name);
     }
 }
+
+File :: @struct(name: Str, data: []u8);
+write :: fn(out: *List(u8), files: []File) void = {
+    local_header_offset := u32.list(temp());
+    each files { it |
+        @assert(it.name.len.ult(MAX_u16) && it.data.len.ult(MAX_u32) && out.len.ult(MAX_u32), "'%' too big for zip", it.name);
+        local_header_offset&.push(out.len.trunc());
+        h := out.reserve_type(LocalHeader);
+        h[] = (
+            magic = LocalHeader.MAGIC,
+            _ = zeroed(Array(u8, 4)),
+            compression = 0,  // none
+            __ = zeroed(Array(u8, 8)),
+            compressed_size = it.data.len.trunc(),
+            uncompressed_size = it.data.len.trunc(),
+            name_len = it.name.len.trunc(),
+            extra_len = 0,
+        );
+        out.push_all(it.name);
+        out.push_all(it.data);
+    };
+    
+    cd_start := out.len;
+    enumerate files { i, it |
+        h := out.reserve_type(EcdHeader);
+        h[] = (
+            magic = EcdHeader.MAGIC,
+            _ = zeroed(Array(u8, 16)),
+            compressed_size = it.data.len.trunc(),
+            uncompressed_size = it.data.len.trunc(),
+            name_len = it.name.len.trunc(),
+            extra_len = 0,
+            comment_len = 0,
+            __ = zeroed(Array(u8, 8)),
+            local_header_offset = local_header_offset[i],
+        );
+        out.push_all(it.name);
+    };
+    cd_end := out.len;
+    @assert(cd_start.ult(MAX_u32) && (cd_end - cd_start).ult(MAX_u32.zext()), "cd too big for zip");
+    
+    h := out.reserve_type(EndCentralDir);
+    h[] = (
+        magic = EndCentralDir.MAGIC,
+        _ = zeroed(Array(u8, 4)),
+        disk_entries = files.len.trunc(),
+        total_entries = files.len.trunc(),
+        cd_size = trunc(cd_end - cd_start),
+        cd_offset = cd_start.trunc(),
+        comment_len = 0,
+    );
+}

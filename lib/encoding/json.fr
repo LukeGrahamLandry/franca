@@ -253,17 +253,38 @@ fn lex_int(self: *JsonParser) i64 = {
 }
 fn lex_str(self: *JsonParser) Result(Str, Str) = {
     start := self.current;
+    buf: ?List(u8) = .None;
     dowhile {
         c := self.pop();
         if c == "\\".ascii() {
             if self.is_skipping {
                 self.current += 1;  // it might be a quote
             } else {
-                return(Err = self.error("TODO: json string escapes are not supported"));
+                c := self.pop();
+                @if(c != "u".ascii()) return(Err = self.error("TODO: non-hex json string escapes are not supported"));
+                s := self.input.rest(self.current);
+                @if(s.len < 4) return(Err = self.error("invalid hex"));
+                n, ss := convert_number(s.slice(0, 4), 16, hex_digit);
+                @if(ss.len != 0) return(Err = self.error("invalid hex"));
+                @if(n > 127) return(Err = self.error("TODO: non-ascii hex escape"));
+                self.current += 4;
+                if buf.is_none() {
+                    buf = (Some = list(self.out));  // TODO: this makes it impossible to free
+                };
+                buf := buf&.unwrap();
+                buf.push_all(self.input.slice(start, self.current - 6));
+                buf.push(n.trunc());
+                start = self.current;
             };
         };
         c != "\"".ascii()
     };
+    
+    if buf& { buf |
+        buf.push_all(self.input.slice(start, self.current - 1));
+        return(Ok = buf.items());
+    };
+    
     (Ok = self.input.slice(start, self.current - 1))
 }
 // END: copy-paste from lox

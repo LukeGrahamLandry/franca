@@ -1,4 +1,13 @@
 
+## (Aug 9) sb3
+
+- i was doing waste of time hour with the inputs/fields, better to have it as data 
+  because then maybe i can generate something useful for going the other direction too. 
+- i need to write zip file but don't actually have to compress the contents
+- scratch website has really nice error messages in the console when you feed it an invalid project. 
+  - ex. no costumes, assetid not hex, wrong input name for opcode. 
+- custom block `mutation` was tedious (why is it an array in a string?) but seems to work now
+
 ## (Aug 8) sb3
 
 revisiting a project I attempted a few years ago and gave up on was a big success 
