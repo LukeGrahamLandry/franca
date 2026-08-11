@@ -272,8 +272,12 @@ In the bootstrap compiler this was used to simplify type inference but it is cur
 ### avoid_shim
 
 This is for functions where you have to lie about parameter types like objc_msgSend.  
+also if called at comptime from a thread that wasn't created by franca (ex. CVDisplayLinkSetOutputCallback). 
 TODO: explain why
 This is implied by CVariadic
+
+see also the big comment on [@/lib/meta.fr](./lib/meta.fr)/jit_barrier (which explicitly asks for a jit-shim, 
+#avoid_shim is the opposite of that. 
 
 ### no_trace
 

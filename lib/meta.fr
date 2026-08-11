@@ -569,6 +569,46 @@ fn import_module(path: Str) ScopeId = {
     exports1
 }
 
+// 
+// this is the shape of code where jit_barrier is useful: 
+//     out := @run (read(cache) || {
+//         out := jit_barrier(expensive)();
+//         write(cache, out);
+//         out
+//     });
+// or more generally:
+//     @run (if unlikely {
+//         jit_barrier(expensive)();
+//     });
+// where `expensive` is some function that slow both to compile and run. 
+// 
+// for example, import_c's ffi'include() caches the library's compiled ir in a file 
+// so the next compilation doesn't need to recompile the c code if it hasn't changed. 
+// it uses a jit_barrier so a cache hit doesn't have to compile the c compiler itself either. 
+// (despite that, using a jit_barrier around a function imported from c can still be 
+// useful because it will save loading the cached ir at all if it isn't called).  
+// 
+// THIS IS ONLY USEFUL WHEN RUNNING AT COMPTIME (ex. in an @run, #macro, etc.), 
+// anything reachable from runtime code is always fully compiled into the executable. 
+// so doing this in runtime code is harmless but won't make it compile faster. 
+// because of an accident (of the compiler being conservative about breaking dependency cycles), 
+// all that's needed (to delay sema of a callee until it's actually called) 
+// is to turn the direct call (through a Fn) into an indirect call (through a FnPtr). 
+// this function exists just to make it explicit when you're asking the compiler 
+// for a jit-shim because you think it will improve compilation speed so i don't have to write this comment every time. 
+// this is also a nop if `f` is #avoid_shim. 
+// 
+// there's another type of laziness when sema can see a codepath is completely unreachable. 
+// @run {
+//     ct :: false;  // ::
+//     @if(ct) a();  // statically unreachable so `a` won't be compiled at all
+//     rt := false;  // :=
+//     @if(rt) b();  // won't execute but sema doesn't know that so `b` will be compiled
+//     @if(rt) jit_barrier(c)();  // `c` won't be compiled (if running in comptime jit)
+// };
+// 
+fn jit_barrier($f: FuncId) AsFnPtr(f) #fold #generic = f; 
+
 fn cache_baked(vbytes: []u8, v: BakedVarId) void = {
         cache_baked_vbytes(vbytes, v);
 }
