@@ -11,6 +11,8 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
+- factor out the full screen frame buffer from doom,chip8
+- get_https_unsafe should hoist with_mbedtls out of the redirects loop but need to deal with the @try
 - pzkip.fr/write: scratch website accepts it but apple's archive utility doesn't ("Error 94: Bad message."... so true bestie!)
 - web: include examples for stackie and life
 - epicycles: don't hang if they draw slow so too many points

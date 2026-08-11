@@ -23,3 +23,6 @@ it and draw a ppm of mandelbrot set. most other blocks are not implemented yet.
 - dump Node ast back to builder franca code
 - textbox edit as franca
 - hell, they're gonna have SVGs in there
+- when i have compiler so it isn't slow try things from 
+  turbowarp featured projects https://scratch.mit.edu/studios/27205657
+  (graphing calculator: 973800483; life: 1143869507; mandelbrot: 396320314; scratch in scratch: 290745095; riscvi32 linux: 1201938491; minecraft: 869264071;)

@@ -1,3 +1,9 @@
+
+## (Aug 11) sb3
+
+- the project.json i get for linrays from the api is different from what i get from "save to my computer" on the website. 
+- factor out jit_barrier so i can write a big comment in one place instead of explaining it every time
+
 ## (Aug 10) sb3
 
 - the website doesn't actually check that the asset's md5 name is correct but its so easy that i might as well do it right
@@ -16,6 +22,7 @@
     if.CONDITION can be a BlockStack with one item and i wasn't using its value. 
     i can reproduce that with the scratch
 TODO: all those fixes ^ i only did for reading not writing so far. 
+- fetch scratch projects
 
 ## (Aug 9) sb3
 

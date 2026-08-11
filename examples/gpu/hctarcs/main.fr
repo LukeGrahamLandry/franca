@@ -10,11 +10,10 @@ main :: fn() void = {
     write("target/_project.sb3", out_zip.items());
     
     #use("@/lib/encoding/json.fr");
-    T :: import("@/examples/gpu/hctarcs/builder.fr");
-    r := T'unbuild(out_zip.items());
+    r := unbuild(out_zip.items());
     r := r.or(panic);
     
-evaluate :: fn(p: *T.Project) []u8 = {
+evaluate :: fn(p: *Sb3.Project) []u8 = {
     #use("@/examples/gpu/hctarcs/runtime.fr");
     it := p.sprites[1];
     @assert_ne(it.name, "Stage");
@@ -31,7 +30,9 @@ evaluate :: fn(p: *T.Project) []u8 = {
             stage_vars = temp().alloc_zeroed(f64, 200),
         ),
     );
+    start := timestamp();
     eval(s&, it.args[0]);
+    @println("eval took %ms", timestamp() - start);
     
     out := @ref u8.list(temp());
     @fmt(out, "P6 % % 255\n", 480, 360);
@@ -49,15 +50,9 @@ evaluate :: fn(p: *T.Project) []u8 = {
     
     dest := "target/a.ppm";
     write_entire_file_or_crash(dest, before);
-    if true {
-        // https://scratch.mit.edu/projects/726052645
-        path := "/Users/luke/Downloads/Linrays/project.json";
-        r := read_entire_file_or_crash(temp(), path);
-        r := parse_json(T.Raw.Project, r, temp());
-        r.or(fn(msg) => @panic("%%", path, msg));
-        
-        r := read_entire_file_or_crash(temp(), "/Users/luke/Downloads/Linrays.sb3");
-        r := T'unbuild(r);
+    @if(false) {
+        r := fetch_sb3_const(/*linrays*/ 726052645);
+        r := unbuild(r);
         r := r.or(panic);
         
         out := evaluate(r);
@@ -74,3 +69,92 @@ evaluate :: fn(p: *T.Project) []u8 = {
 }
 
 #use("@/graphics/vec.fr");
+
+// if you call this in an @run, it can shim http_get and compile faster on cache hit. 
+fetch_sb3_const :: fn(project_id: i64) []u8 #fold = {
+    @match(fetch_sb3(project_id)) {
+        fn Ok(it) => it.shallow_copy(ast_alloc());  // comptime only TODO: better error location if you forget
+        fn Err(msg) => compile_error(msg, @source_location);
+    }
+};
+
+fetch_sb3 :: fn(project_id: i64) Result([]u8, Str) = {
+    // TODO: maybe don't cache the zip file cause its a waste of disk space because can reconstruct from the parts every time but its faster to not do a billion reads presumably. 
+    it := with_cache(@tfmt("%.sb3", project_id)) {
+        Zip :: import("@/lib/encoding/pkzip.fr");
+        files := @ref Zip.File.list(temp());
+        project := @try(fetch_project_json(project_id)) return;
+        files.push(name = "project.json", data = project);
+        // TODO: sad that i have to parse this twice
+        it := @try(parse_json(Sb3.Raw.Project, project, temp())) return;
+        each it.targets { it |
+            each it.costumes { it |
+                escapes :: import("@/examples/fetch.fr").has_path_escapes;
+                @if(escapes(it.md5ext)) return(Err = @tfmt("(%): sketchy md5ext: %", project_id, it.md5ext));
+                // cache each asset seperately, ex. there's a lot of projects that use the scratchcat
+                data := with_cache(it.md5ext) {
+                    // TODO: sad to do this in a syncronous loop but that's the type of language i am so here we are
+                    url := @tfmt("https://assets.scratch.mit.edu/internalapi/asset/%/get/", it.md5ext);
+                    data := @try(jit_barrier(http_get)(url)) return;
+                    md5 := import("@/lib/mix/md5.fr")'hex(data);
+                    @if(it.assetId != md5) return(Err = @tfmt("(%): wrong asset hash (% vs %)", it.name, it.assetId, md5));
+                    data
+                };
+                files.push(name = it.md5ext, data = data);
+            };
+        };
+        out := u8.list(temp());
+        Zip'write(out&, files.items());
+        out.items()
+    };
+    (Ok = it)
+}
+
+// for now just cache forever TODO: the first url has history.modified time so could check that everytime to see if it changed
+fetch_project_json :: fn(project_id: i64) Result([]u8, Str) = {
+    r := (fn(project_id: i64) Result([]u8, Str) = {
+        it := with_cache(@tfmt("%.json", project_id)) {
+            http_get := jit_barrier(http_get);
+            url := @tfmt("https://trampoline.turbowarp.org/api/projects/%", project_id);
+            it := @try(http_get(url)) return;
+            if true {
+                // i want the cache to have the (description,credit,etc.) for archeology
+                path := @tfmt("%/%.meta.json", scratch_cache_dir, project_id);
+                _ := write_entire_file(path, it);
+            };
+            S :: @struct(project_token: Str); ::DeriveJson(S);
+            it := @try(parse_json(S, it, temp())) return;
+            url := @tfmt("https://projects.scratch.mit.edu/%?token=%", project_id, it.project_token);
+            @try(http_get(url)) return
+        };
+        (Ok = it)
+    })(project_id);
+    @if_let(r&) fn Err(msg) => { msg[] = @tfmt("[while fetching scratch(%)]: %", project_id, msg); };
+    r
+}
+
+http_get :: fn(url: Str) Result(Str, Str) = {
+    #use("@/examples/web/get.fr");
+    url := @try(parse_url(url)) return;
+    // this doesn't check the tls certificate but like... whatever... 
+    r := @try(get_https_unsafe(url, 10)) return;
+    @if(r.status != 200) return(Err = @tfmt("status=%", r.status));
+    (Ok = r.data)
+};
+
+with_cache :: fn(file_name: Str, $miss: @Fn() []u8) []u8 = {
+    #use("@/lib/sys/fs.fr");
+    cache_file := @tfmt("%/%", scratch_cache_dir, file_name);
+    if read_entire_file(temp(), cache_file) { it |
+        return(it);
+    };
+    _ := make_dirs(scratch_cache_dir);
+    it := miss();
+    _ := write_entire_file(cache_file, it);
+    it
+};
+
+scratch_cache_dir :: @afmt(ast_alloc(), "%/scratch", import("@/examples/fetch.fr").FRANCA_PATH_FETCH);
+
+#use("@/lib/encoding/json_reflect.fr");
+Sb3 :: import("@/examples/gpu/hctarcs/builder.fr");

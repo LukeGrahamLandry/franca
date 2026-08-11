@@ -34,6 +34,7 @@ a closer empty local overload set declaration (`fn foo();` without a body) for t
 Local overload sets like that are constant values in their scope (can be accessed with dot syntax or #use like any other). 
 
 TODO: talk about other ways of making scopes (Type.scope_of and FuncId.scope_of) and other ways of using scopes (get_constants, get_constant). 
+TODO: talk about build_for_graphics2 as an example of something weird with scopes
 
 ## Linking Extern Symbols
 
@@ -83,6 +84,20 @@ Style Guide:
 - provide franca code that describes how to build the external code 
   and run it every time you compile so it can't rot. 
   (tests/external has some examples of using import_c to do this for c libraries). 
+
+Everything fetch.fr gets from the internet is saved in `./target/franca/fetch/<sha256>.out` 
+so you can compile offline after the first build (or if you manually populate that folder). 
+The hash is checked on the first download but not when loading from the cache 
+(if you don't trust your ssd you have bigger problems than i can help you with). 
+Archives are unpacked into `./target/franca/deps/<sha256>/*` so you can edit 
+the source files to add debugging code. When you're done, just delete the unpacked 
+version (in `deps`) and it will be regenerated from the cached archive (in `fetch`) on the next build. 
+This does mean everything is stored twice which seems a bit disrespectful of your disk space. 
+
+Currently fetch.fr does the downloading by exec-ing `curl` (from the `PATH` env var). 
+Depending on having a random binary installed makes me sad but more thought is required for a sane solution. 
+You can use examples/web/get.fr instead if you compile that and name it curl and add it to PATH when running the compiler. 
+However get.fr depends on mbedtls so to build it without curl you'd need to fill out the cache folder manually. 
 
 ## Alternative Frontends
 

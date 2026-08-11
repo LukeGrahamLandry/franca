@@ -352,9 +352,9 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
             @if(prev.is_some()) return(Err = @tfmt("duplicate block id (%)", key));
             sprite.variables&.push(it, temp());
         };
+        
+        retain(s.blocks&, fn(_, b) => b.is(.Block));
         each s.blocks& { key, it |
-            continue :: local_return;
-            @if(!it.is(.Block)) continue();
             b := it.Block&;
             
             it := temp().boxed(Node, (op = b.opcode, args = empty()));
@@ -364,7 +364,10 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                 sprite.blocks&.push(it, temp());
             };
             
-            if b.opcode == .procedures_call {
+            // error early so later code doesn't have to bother with nice message
+            if b.parent { id | _ := s.get_block(id) || return(Err = @tfmt("(%): parent missing (%)", key, id)); };
+            if b.next { id | _ := s.get_block(id) || return(Err = @tfmt("(%): next missing (%)", key, id)); };
+            if @is(b.opcode, .procedures_call, .procedures_prototype) {
                 _ := b.mutation 
                     || return(Err = @tfmt("(%): % missing mutation", key, b.opcode));
             };
@@ -372,14 +375,14 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
             if b.opcode == .procedures_definition {
                 prototype := b.inputs&.get("custom_block") 
                     || return(Err = @tfmt("(%): %.custom_block is missing", key, b.opcode));
-                @if_let(prototype) fn BlockStack(id) => {
-                    b := s.blocks&.get_ptr(id)
+                id := prototype&.block_id() 
+                    || return(Err = @tfmt("(%): %.custom_block is not a block", key, b.opcode));
+                    b := s.get_block(id)
                             || return(Err = @tfmt("(%): missing (%)", key, id));
-                    @if_let(b) fn Block(b) => {
                         mutation := b.mutation 
                             || return(Err = @tfmt("(%): % missing mutation", key, b.opcode));
                         prev := blocks&.insert(mutation.proccode, it);
-                        @if(prev.is_some()) return(Err = @tfmt("duplicate block id (%)", key));
+                        @if(prev.is_some()) return(Err = @tfmt("duplicate block id (%)", mutation.proccode));
                         a := list(*Node, temp());
                         for mutation.argumentids { name |
                             it := temp().boxed(Node, (op = .argument_reporter_string_number, args = empty(), literal = next_var_id));
@@ -390,13 +393,11 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                         };
                         it.args = a.items();
                         it.string = mutation.proccode;
-                    };
-                };
             };
         };
         
         each s.blocks& { key, it |
-            @if_let(it) fn Block(b) => {
+            b := it.Block&;
                 shape := block_defs.shapes.get(b.opcode).unwrap();
                 it := blocks&.get(key).unwrap();
                 
@@ -439,14 +440,17 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                     a.string = name;  // TODO: this should go in the other place
                 };
                 if @is(b.opcode, .event_whenflagclicked, .procedures_definition) {
-                    @if_let(s.blocks&.get_ptr(key)) fn Some(b) => @if_let(b) fn Block(b) => {
+                    if s.get_block(key) { b |
                         n := @try(collect_block(s, blocks&, b.next)) return;
                         args&.push(n);
                     };
                 };
                 
                 if @is(b.opcode, .procedures_definition) {
-                    @if(args[0].op != .franca_block || args[0].args[0].op != .procedures_prototype) return(Err = @tfmt("(%): missing prototype", key));
+                    if args[0].op == .franca_block && args[0].args[0].op == .procedures_prototype {
+                        args[0] = args[0].args[0];  // TODO: get rid of BlockStack cause this is stupid
+                    };
+                    @if(args[0].op != .procedures_prototype) return(Err = @tfmt("(%): missing prototype !!", key));
                     args[0] = temp().boxed(Node, (op = .procedures_prototype, args = it.args));
                     args&.items().swap(0, 1);
                 };
@@ -469,7 +473,7 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                 };
                 
                 it.args = args.items();
-            };
+        };
             
             each s.costumes { it |
                 sprite.costumes&.push((
@@ -481,7 +485,6 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
             };
             
             project.sprites&.push(temp().boxed(Sprite, sprite), temp());
-        };
         if false {
             out := u8.list(temp());
             for sprite.blocks { it |
@@ -527,6 +530,7 @@ fn decode_value(value: *Raw.ValueRef, s: *Raw.Sprite, blocks: *HashMap(Str, *Nod
         fn BlockStack(id) => {
             _ := blocks.get(id)
                 || return(Err = @tfmt("(%): %.% missing (%)", key, op, field, id));
+            // TODO: this should go in the top instead and not care about BlockStack vs BlockValue
             @try(collect_block(s, blocks, (Some = id))) return
         }
         fn Var(id) => blocks.get(id)
@@ -535,6 +539,14 @@ fn decode_value(value: *Raw.ValueRef, s: *Raw.Sprite, blocks: *HashMap(Str, *Nod
             || return(Err = @tfmt("(%): %.% missing (%)", key, op, field, id));
     };
     (Ok = a)
+}
+
+fn block_id(it: *Raw.ValueRef) ?Str = {
+    (Some = @match(it) {
+        fn BlockStack(id) => id[];
+        fn BlockValue(id) => id[];
+        @default => return(.None);
+    })
 }
 
 // follows the .next chain
@@ -547,7 +559,7 @@ fn collect_block(s: *Raw.Sprite, blocks: *HashMap(Str, *Node), parent: ?Str) Res
             || return(Err = @tfmt("[%]: %.next missing (%)", args.len, parent, id));
         args&.push(n);
         head = .None;
-        @if_let(s.blocks&.get_ptr(id)) fn Some(b) => @if_let(b) fn Block(b) => {
+        if s.get_block(id) { b | 
             head = b.next;
         };
         parent = id;
@@ -558,39 +570,32 @@ fn collect_block(s: *Raw.Sprite, blocks: *HashMap(Str, *Node), parent: ?Str) Res
 // the ones i generate have the parent chain go up to the definition,
 // scratch has expressions go up to the prototype even tho it doesn't have a next field which seems confusing. 
 // but the website accepts both it seems but TODO: i should match them tho
-fn find_parent_prototype(s: *Raw.Sprite, blocks: *HashMap(Str, *Node), parent: Str) Result(*Raw.Mutation, Str) = {
-    tail: ?Str = (Some = parent);
-    child := parent;
-    first := child;
-    args := list(*Node, temp());
-    while => tail { id |
-        n := blocks.get(id)
-            || return(Err = @tfmt("[%]: %.parent missing (%) (while looking for prototype for (%))", args.len, child, id, first));
-        tail = .None;
-        @if_let(s.blocks&.get_ptr(id)) fn Some(b) => @if_let(b) fn Block(b) => {
-            tail = b.parent;
-            
-            if b.opcode == .procedures_prototype {
-                @if(b.mutation.is_none()) return(Err = @tfmt("(%): missing mutation", id));
-                return(Ok = b.mutation&.unwrap());
+fn find_parent_prototype(s: *Raw.Sprite, blocks: *HashMap(Str, *Node), first: Str) Result(*Raw.Mutation, Str) = {
+    id := first;
+    loop {
+        // can unwrap because initial loop would have errored.
+        b := s.get_block(id).unwrap();
+        @match(b.opcode) {
+            fn procedures_prototype() => return(Ok = b.mutation&.unwrap());
+            fn procedures_definition() => {  
+                it := b.inputs&.get_ptr("custom_block").unwrap();
+                it := it.block_id().unwrap();
+                it := s.get_block(it).unwrap();
+                return(Ok = it.mutation&.unwrap());                       
             };
-            if b.opcode == .procedures_definition {  // TODO: paste from the loop at the beginnig
-                key := id;
-                prototype := b.inputs&.get("custom_block") 
-                    || return(Err = @tfmt("(%): %.custom_block is missing", key, b.opcode));
-                @if_let(prototype) fn BlockStack(id) => {
-                    b := s.blocks&.get_ptr(id)
-                            || return(Err = @tfmt("(%): missing (%)", key, id));
-                    @if_let(b) fn Block(b) => {
-                            @if(b.mutation.is_none()) return(Err = @tfmt("(%): missing mutation", id));
-                            return(Ok = b.mutation&.unwrap());                       
-                    };
-                };
-            };
+            @default => ();
         };
-        child = id;
+        
+        id = b.parent 
+            || return(Err = @tfmt("(%): didn't find prototype", first));
     };
-    (Err = @tfmt("(%): didn't find prototype", first))
+    
+}
+
+fn get_block(s: *Raw.Sprite, id: Str) ?*Raw.Block = {    
+    b := s.blocks&.get_ptr(id) || return(.None);
+    @debug_assert(b.is(.Block));
+    (Some = b.Block&)
 }
 
 
@@ -755,7 +760,7 @@ fn parse_json(json: *JsonParser, self: *ValueRef) bool = {
     tag := 0;
     parse_json(json, tag&) || return(false);
     second_is_array := false;
-    if tag == 3 {
+    if tag == 3 || tag == 1 {
         token := json.next().or(fn(_: Str) => return(false));
         second_is_array = token&.is(.StartList);
     };
@@ -763,9 +768,15 @@ fn parse_json(json: *JsonParser, self: *ValueRef) bool = {
     
     @switch(tag) {
         @case(1) => {
-            it := zeroed Ty(i64, Ty(i64, Str));
-            parse_json(json, it&) || return(false);
-            self[] = (String = it._1._1);
+            if second_is_array {
+                it := zeroed Ty(i64, Ty(i64, Str));
+                parse_json(json, it&) || return(false);
+                self[] = (String = it._1._1);
+            } else {
+                it := zeroed Ty(i64, Str);
+                parse_json(json, it&) || return(false);
+                self[] = (BlockValue = it._1);
+            };
         };
         @case(2) => {  // block stack
             it := zeroed Ty(i64, Str);
