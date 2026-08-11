@@ -1,0 +1,185 @@
+// this is going to get much worse when i want the async blocks
+
+// TODO: safe idents (ie. no quotes, \n, etc. in strings used for proc names, etc.)
+compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
+    c: Compile = (out = out);
+    @fmt(out, "Rt :: import(\"@/examples/gpu/hctarcs/runtime.fr\"); #use(\"@/examples/gpu/hctarcs/runtime.fr\");\n");
+    @fmt(out, "main :: fn() void = Rt'temporary_main(event_whenflagclicked);\n");
+    each p.sprites { it |
+        each it.blocks { it |
+            @match(it.op) {
+                fn procedures_definition() => @fmt(out, "@\"proc_% %\"", it.literal, it.string);
+                // TODO: allow multiple
+                fn event_whenflagclicked() => @fmt(out, "event_whenflagclicked");
+                @default => @panic("TODO: compile toplevel %", it.op);
+            };
+            @fmt(out, " :: fn(s: *Rt.Script) void #use(Rt.impl) = {::Rt.THISISSTUPID;\n");
+            c&.compile(it.args[0]);
+            @fmt(out, "}\n\n");
+        };
+    };
+}
+
+Compile :: @struct {
+    out: *List(u8);
+    depth := 0;
+};
+
+compile :: fn(self: *Compile, it: *Node) void = {
+    out := self.out;
+    @if(out.items().ends_with("\n")) out.push_repeated(self.depth*4, " ".ascii());
+    
+    if simple_ops.get(it.op) { data |
+        @println("%", it.op);
+        @if(data.need_self) @fmt(out, "s.");
+        @fmt(out, "%(", it.op);
+        for it.args { it |
+            compile(self, it);
+            @fmt(out, ", ");
+        };
+        @fmt(out, ")");
+        @if(!data.has_result) @fmt(out, ";\n");
+        return();
+    };
+    
+    @match(it.op) {
+        fn franca_literal() => @fmt(out, "(@as(f64) bitcast(%))", fmt_hex(it.literal));
+        fn franca_block() => {
+            if it.args.len == 1 {
+                compile(self, it.args[0]);
+            } else {
+                out.push_repeated(4, " ".ascii());
+                self.depth += 1;
+                for it.args { it |
+                    compile(self, it);
+                    @if(!out.items().ends_with(";\n")) @fmt(out, ";\n");
+                };
+                self.depth -= 1;
+            };
+        }
+        fn franca_var() => @fmt(out, "s.sprite.vars[%]", it.literal.int());
+        fn franca_var_stage() => @fmt(out, "s.canvas.stage_vars[%]", it.literal.int());
+        fn argument_reporter_string_number() => @fmt(out, "s.sprite.vars[%]", it.literal.int());
+        fn data_setvariableto() => {
+            compile(self, it.args[1]);
+            @fmt(out, " = ");
+            compile(self, it.args[0]);
+            @fmt(out, ";\n");
+        }
+        fn data_changevariableby() => {
+            compile(self, it.args[1]);
+            @fmt(out, " += ");
+            compile(self, it.args[0]);
+            @fmt(out, ";\n");
+        }
+        fn operator_or() => {
+            @fmt(out, "from_bool(");
+            compile(self, it.args[0]);
+            @fmt(out, ".to_bool() || ");
+            compile(self, it.args[1]);
+            @fmt(out, ".to_bool())");
+        }
+        fn operator_and() => {
+            @fmt(out, "from_bool(");
+            compile(self, it.args[0]);
+            @fmt(out, ".to_bool() && ");
+            compile(self, it.args[1]);
+            @fmt(out, ".to_bool())");
+        }
+        fn operator_mathop() => {
+            @fmt(out, "@\"%_%\"(", it.op, it.args[1].string);
+            compile(self, it.args[0]);
+            @fmt(out, ")");
+        }
+        fn procedures_call() => {
+            def := it.args[0];
+            params := def.args[1].args;
+            args := it.args[1].args;
+            @debug_assert_eq(args.len, params.len);
+            @fmt(out, "procedures_call(s, @\"proc_% %\", ", def.literal, def.string);
+            if params.len == 0 {
+                // HACK: @slice() is *void which is stupid
+                @fmt(out, "empty(), empty(), empty());\n");
+                return();
+            };
+            
+            @fmt(out, "@slice(");
+            for params { it |
+                @debug_assert_eq(it.op, .argument_reporter_string_number);
+                @fmt(out, "%,", it.literal.int());
+            };
+            @fmt(out, "), @slice(@as(Rt.Value) ");
+            for args { it | 
+                compile(self, it);
+                @fmt(out, ",");
+            };
+            @fmt(out, "), Rt'saved_args(%));\n", params.len());
+        }
+        fn control_stop() => @fmt(out, "s.returning = true; return();\n");
+        fn control_repeat_until() => {
+            @fmt(out, "while => !");
+            compile(self, it.args[0]);
+            @fmt(out, ".to_bool() {\n");
+            compile(self, it.args[1]);
+            @fmt(out, "};\n");
+        }
+        fn control_repeat() => {
+            @fmt(out, "range(0, ");
+            compile(self, it.args[0]);
+            @fmt(out, ".int()) { _ |\n");
+            compile(self, it.args[1]);
+            @fmt(out, "};\n");
+        }
+        fn control_if_else() => {
+            @fmt(out, "if ");
+            compile(self, it.args[0]);
+            @fmt(out, ".to_bool() {\n");
+            compile(self, it.args[1]);
+            @fmt(out, "} else {\n");
+            compile(self, it.args[2]);
+            @fmt(out, "};\n");
+        }
+        fn control_if() => {
+            @fmt(out, "if ");
+            compile(self, it.args[0]);
+            @fmt(out, ".to_bool() {\n");
+            compile(self, it.args[1]);
+            @fmt(out, "};\n");
+        }
+        @default => @panic("TODO: compile %", it.op);
+    };
+    
+}
+
+simple_ops :: @static {
+    Data :: @struct(need_self: bool, has_result: bool);
+    out: OptionalEnumMap(S.Raw.Opcode, Data) = empty();
+    I :: Type.scope_of(Rt.impl);
+    for get_constants(I) { n | 
+        name := n.str();
+        fid := FuncId.get_constant(I, n).unwrap();
+        func := get_function_ast(fid, false, false, false, false);
+        s := func.arg.bindings[0].name.Ident == sym("s");
+        if s {
+            func.arg.bindings[0].ty = (Finished = *Rt.Script);
+        };
+        each func.arg.bindings.items().rest(int(s)) { it |
+            it.ty = (Finished = Rt.Value);
+        };
+        v := func.ret&.is(.Infer);
+        if v {
+            func.ret = (Finished = Rt.Value);
+        };
+        
+        if S.Raw.Opcode.from_name(name) { op |
+            out&.insert(op, (need_self = s, has_result = v));
+        };  // else: operator_mathop_foo
+    };
+    out
+};
+
+
+S :: import("@/examples/gpu/hctarcs/builder.fr");
+Node :: S.Node;
+Rt :: import("@/examples/gpu/hctarcs/runtime.fr");
+#use("@/lib/collections/enum_map.fr");

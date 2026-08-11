@@ -3,6 +3,10 @@
 
 - the project.json i get for linrays from the api is different from what i get from "save to my computer" on the website. 
 - factor out jit_barrier so i can write a big comment in one place instead of explaining it every time
+- naive compiler that does the same as the interpreter, just unrolls the dispatch.
+  - (mandel: 500ms -> 43ms = 11x; linrays: 11086ms -> 1807ms = 6x)
+  - save old call args on stack instead of rawlist. (linrays: 10138ms -> 1026ms).
+  - `-unsafe` saves another 200ms. would probably get some of that when i turn vars into fields of a struct instead of an array. 
 
 ## (Aug 10) sb3
 

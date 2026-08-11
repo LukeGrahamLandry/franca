@@ -14,7 +14,6 @@ Script :: @struct {
     sprite: *SpriteBase;
     canvas: *Canvas;
     returning := false;
-    saved_args: RawList(Ty(i64, f64)) = empty();
 };
 
 SpriteBase :: @struct {
@@ -24,24 +23,15 @@ SpriteBase :: @struct {
 };
 
 to_bool :: fn(a: Value) bool = a == 1;
-from_bool :: fn(a: bool) Value = @if(a, 1, 0);
+from_bool :: fn(a: bool) Value = a.int().float();
 
+update_pos_xx :: update_pos;
 fn eval(s: *Script, it: *Node) f64 = {
     @if(s.returning) return(NaN);  // i think values can't have side effects so this is good enough
     //@println("%[%] lit=% %", it.op, it.args.len, it.literal, it.string);
     
     update_pos :: fn($body: @Fn(old: Vec2) Vec2) f64 => {
-        old := s.sprite.pos;
-        new := body(old);
-        stage_size := s.canvas.size;
-        new := new.clamp(-stage_size/2, stage_size/2);
-        s.sprite.pos = new;
-        if s.sprite.pen.down {
-            new := new + stage_size/2;
-            i := int(cast((stage_size.y - new.y) * stage_size.x + new.x));
-            i := i.min(s.canvas.pen_pixels.len - 1);
-            s.canvas.pen_pixels[i] = s.sprite.pen.colour;
-        };
+        update_pos_xx(s, body);
         NaN
     };
     @match(it.op) {
@@ -81,18 +71,21 @@ fn eval(s: *Script, it: *Node) f64 = {
             params := it.args[0].args[1].args;
             args := it.args[1].args;
             @debug_assert_eq(args.len, params.len);
+            saved_args := @uninitialized Array(Value, 64);
             range(0, params.len) { i |
                 @debug_assert_eq(params[i].op, .argument_reporter_string_number);
                 j := params[i].literal.int();
-                push(s.saved_args&, (j, s.sprite.vars[j]), temp());
-                s.sprite.vars[j] = s.eval(args[i]);
+                slot := s.sprite.vars[j]&;
+                saved_args&[i] = slot[];
+                slot[] = s.eval(args[i]);
             };
             @debug_assert_eq(it.args[0].args[0].op, .franca_block);
             s.eval(it.args[0].args[0]);
             s.returning = false;
-            range(0, params.len) { _ |
-                j, value := s.saved_args&.pop().unwrap();
-                s.sprite.vars[j] = value;
+            range(0, params.len) { i |
+                j := params[i].literal.int();
+                slot := s.sprite.vars[j]&;
+                slot[] = saved_args&[i];
             };
             
             NaN
@@ -143,5 +136,121 @@ fn eval(s: *Script, it: *Node) f64 = {
     }
 }
 
-Node :: import("@/examples/gpu/hctarcs/builder.fr").Node;
+impl :: @struct {
 
+operator_add :: fn(a, b) = a + b;
+operator_subtract :: fn(a, b) = a - b;
+operator_multiply :: fn(a, b) = a * b;
+operator_divide :: fn(a, b) = a / b;
+operator_lt :: fn(a, b) = from_bool(a < b);
+operator_gt :: fn(a, b) = from_bool(a > b);
+operator_equals :: fn(a, b) = from_bool(a == b);
+operator_not :: fn(a) = from_bool(!a.to_bool());
+operator_random :: fn(s, lo, hi) = (hi - lo)*s.canvas.rng&.rand_float() + lo;
+operator_mathop_sqrt :: fn(a) = sqrt(a);
+@"operator_mathop_e ^" :: fn(a) = exp(a);
+operator_mathop_ln :: fn(a) = log(a);
+operator_mathop_floor :: fn(a) = floor(a);
+operator_mathop_abs :: fn(a) = abs(a);
+operator_mathop_acos :: fn(a) = acos(a).rad_to_deg();
+operator_mathop_sin :: fn(a) = sin(a.deg_to_rad());
+operator_mathop_cos :: fn(a) = cos(a.deg_to_rad());
+
+motion_xposition :: fn(s) = s.sprite.pos.x.cast();
+motion_yposition :: fn(s) = s.sprite.pos.y.cast();
+motion_gotoxy :: fn(s, x, y) void = s.update_pos(fn(_) => vec2(x.cast(), y.cast()));
+motion_changexby :: fn(s, dx) void = s.update_pos(fn(old) => { old.x += dx.cast(); old });
+motion_changeyby :: fn(s, dy) void = s.update_pos(fn(old) => { old.y += dy.cast(); old });
+motion_setx :: fn(s, x) void = s.update_pos(fn(old) => { old.x = x.cast(); old });
+motion_sety :: fn(s, y) void = s.update_pos(fn(old) => { old.y = sy.cast(); old });
+
+pen_setPenColorToColor :: fn(s, a) void = { s.sprite.pen.colour = a.int().trunc(); };
+pen_setPenSizeTo :: fn(s, a) void = { s.sprite.pen.size = a; };
+pen_penUp :: fn(s) void = { s.sprite.pen.down = false; };
+pen_penDown :: fn(s) void = { s.sprite.pen.down = true; };
+pen_clear :: fn(s) void = { s.canvas.pen_pixels.set_zeroed(); }
+
+};
+
+// TODO: web
+exp :: fn(a: f64) f64 #libc;
+log :: fn(a: f64) f64 #libc;
+floor :: fn(a: f64) f64 #libc;
+acos :: fn(a: f64) f64 #libc;
+
+fn update_pos(s: *Script, $body: @Fn(old: Vec2) Vec2) void = {
+    old := s.sprite.pos;
+    new := body(old);
+    stage_size := s.canvas.size;
+    new := new.clamp(-stage_size/2, stage_size/2);
+    s.sprite.pos = new;
+    if s.sprite.pen.down {
+        new := new + stage_size/2;
+        i := int(cast((stage_size.y - new.y) * stage_size.x + new.x));
+        i := i.min(s.canvas.pen_pixels.len - 1);
+        s.canvas.pen_pixels[i] = s.sprite.pen.colour;
+    };
+}
+
+saved_args :: fn($n: i64) []Value #inline/*semantic*/ = {
+    it := @ref(@uninitialized(Array(Value, n)));
+    it.items()
+}
+
+fn procedures_call(s: *Script, callee: @FnPtr(s: *Script) void, params: []i64, args: []Value, saved_args: []Value) void = {
+    range(0, params.len) { i |
+        slot := s.sprite.vars[params[i]]&;
+        saved_args[i] = slot[];
+        slot[] = args[i];
+    };
+    callee(s);
+    s.returning = false;
+    range(0, params.len) { i |
+        s.sprite.vars[params[i]] = saved_args[i];
+    };
+}
+
+Node :: import("@/examples/gpu/hctarcs/builder.fr").Node;
+#use("@/graphics/vec.fr");
+
+THISISSTUPID :: { import("@/examples/gpu/hctarcs/compile.fr").simple_ops; };
+
+temporary_main :: fn(event_whenflagclicked: @FnPtr(s: *Script) void) void = {
+    S :: Type.scope_of(impl);
+    #use("@/graphics/vec.fr");
+    #use("@/lib/sys/fs.fr");
+    #use("@/lib/sys/process.fr");
+    s: Script = (
+        sprite = @ref @as(SpriteBase) (
+            pos = vec2(0),
+            pen = (down = false, colour = 0, size = 1),
+            vars = temp().alloc_zeroed(f64, 200),
+        ),
+        canvas = @ref @as(Canvas) (
+            pen_pixels = temp().alloc_zeroed(u32, 480*360),
+            rng = Random.xoshiro256SS.new_seeded(),
+            stage_vars = temp().alloc_zeroed(f64, 200),
+        ),
+    );
+    start := timestamp();
+    event_whenflagclicked(s&);
+    @println("eval took %ms", timestamp() - start);
+    
+    out := @ref u8.list(temp());
+    @fmt(out, "P6 % % 255\n", 480, 360);
+    for s.canvas.pen_pixels { c |
+        out.push(c.shift_right_logical(16).trunc());
+        out.push(c.shift_right_logical(8).trunc());
+        out.push(c.trunc());
+    };
+    
+    dest := "target/a.ppm";
+    write_entire_file_or_crash(dest, out.items());
+    if cli_args().contains(fn(it) => it[] == "-show") {
+        #use("@/lib/sys/subprocess.fr");
+        #use("@/lib/sys/process.fr");
+        franca := get_executable_path(temp());
+        a := make_args_for_exec(franca, @slice("examples/gpu/viewer.fr", "-jit", dest), temp());
+        become(a[0], a);
+    };
+}
