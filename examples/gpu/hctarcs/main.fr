@@ -1,79 +1,85 @@
 
+projects :: @const_slice(
+    945435432,  // mini mandelbrot
+    726052645,  // linrays
+);
+
+P :: import("@/examples/gpu/hctarcs/tests.fr");
+local :: @const_slice(
+    P'mandelbrot(),
+    P'stamp_pos(),
+);
+
+// TODO: somehow putting an @run changes linrays time 820->760
 main :: fn() void = {
-    p := @run import("@/examples/gpu/hctarcs/tests/mandelbrot.fr")'build();
-    out := u8.list(temp());
-    out_zip := u8.list(temp());
-    p.build(out&, out_zip&);
-    write :: import("@/lib/sys/fs.fr").write_entire_file_or_crash;
-    path := "target/a.json";
-    write(path, out.items());
-    write("target/_project.sb3", out_zip.items());
-    
-    #use("@/lib/encoding/json.fr");
-    r := unbuild(out_zip.items());
-    r := r.or(panic);
-    
-evaluate :: fn(p: *Sb3.Project) []u8 = {
-    #use("@/examples/gpu/hctarcs/runtime.fr");
-    #use("@/examples/gpu/hctarcs/compile.fr");
-    it := p.sprites[1];
-    @assert_ne(it.name, "Stage");
-    it := it.blocks.find(fn(it) => it.op == .event_whenflagclicked).unwrap();
-    s: Script = (
-        sprite = @ref @as(SpriteBase) (
-            pos = vec2(0),
-            pen = (down = false, colour = 0, size = 1),
-            vars = temp().alloc_zeroed(f64, 200),
-        ),
-        canvas = @ref @as(Canvas) (
-            pen_pixels = temp().alloc_zeroed(u32, 480*360),
-            rng = Random.xoshiro256SS.new_seeded(),
-            stage_vars = temp().alloc_zeroed(f64, 200),
-        ),
-    );
-    
-    out := list(u8, temp());
-    compile_to_franca(p, out&);
-    print(out.items());
-    write_entire_file_or_crash("target/a.fr", out.items());
-    
-    start := timestamp();
-    eval(s&, it.args[0]);
-    @println("eval took %ms", timestamp() - start);
-    
-    out := @ref u8.list(temp());
-    @fmt(out, "P6 % % 255\n", 480, 360);
-    for s.canvas.pen_pixels { c |
-        out.push(c.shift_right_logical(16).trunc());
-        out.push(c.shift_right_logical(8).trunc());
-        out.push(c.trunc());
-    };
-    out.items()
-};
-    
-    before := evaluate(p);
-    after := evaluate(r);
-    @assert_eq(before, after);
-    
-    dest := "target/a.ppm";
-    write_entire_file_or_crash(dest, before);
-    @if(false) {
-        r := fetch_sb3_const(/*linrays*/ 726052645);
-        r := unbuild(r);
-        r := r.or(panic);
-        
-        out := evaluate(r);
-        write_entire_file_or_crash(dest, out);
+    i :: @static_mut 0;
+    args := Str.list(2 + src.len(), temp());
+    args&.push_all(@slice("examples/gpu/viewer.fr", "-jit"));
+    mark := temp().mark();
+    inline_for src { $src |
+        //X :: 123; // TODO: "Cannot shadow constant in the same scope: X"
+        #use("@/examples/gpu/hctarcs/runtime.fr");
+        // TODO: annoying that doing it through a file instead of import("{};") 
+        //       gets you a nicer error message (so you can click to see context)
+        //       the compiler should just write it out for you. :compiler
+        frame := temporary_main((@run {
+            path := @tfmt("target/a%.fr", @run i[]);
+            write_entire_file_or_crash(path, src[]);
+            import(@afmt(ast_alloc(), "@/%", path))
+        }).initialize, false);
+        path := @run @afmt(ast_alloc(), "target/a%.ppm", @run i[]);
+        write_entire_file_or_crash(path, frame);
+        args&.push(path);
+        temp().reset(mark);
+        @run { i[] += 1; };
     };
     
     if cli_args().contains(fn(it) => it[] == "-show") {
         #use("@/lib/sys/subprocess.fr");
         #use("@/lib/sys/process.fr");
+        // only works if running jitted
         franca := get_executable_path(temp());
-        a := make_args_for_exec(franca, @slice("examples/gpu/viewer.fr", "-jit", dest), temp());
+        a := make_args_for_exec(franca, args.items(), temp());
         become(a[0], a);
     };
-}
+};
+
+ci :: Foreign.ENV.GITHUB_REPOSITORY.get_environment_variable().is_some() 
+    || "BUILD_SUBMITTER".get_environment_variable().is_some();
+src :: {
+    start := timestamp();
+    
+    sources := Str.list(ast_alloc());
+    
+    for local { p |
+        out := u8.list(temp());
+        out_zip := u8.list(temp());
+        p.build(out&, out_zip&);
+        // "_" so it shows first in finder's alphabetical list when opening in website
+        write_entire_file_or_crash("target/_project.sb3", out_zip.items());
+        r := out_zip.items();
+        
+        build_sb3(r);
+    };
+    
+    @if(!ci)  // for now i don't want to bother spam fetching these
+    for projects { id |
+        build_sb3(fetch_sb3_const(id));
+    };
+    build_sb3 :: fn(r: []u8) => {
+        ::S.X;  // TODO: why isn't this being in unbuild() enough
+        mark := temp().mark();
+        r := unbuild(r);
+        r := r.or(panic);
+        
+        out := list(u8, ast_alloc());
+        compile_to_franca(r, out&);
+        sources&.push(out.items());
+        temp().reset(mark);
+    };
+    @println("built in %ms", timestamp() - start);
+    sources.items()
+};
 
 #use("@/graphics/vec.fr");
 
@@ -93,6 +99,7 @@ fetch_sb3 :: fn(project_id: i64) Result([]u8, Str) = {
         project := @try(fetch_project_json(project_id)) return;
         files.push(name = "project.json", data = project);
         // TODO: sad that i have to parse this twice
+        //       can have partial version of the structs that just have the costumes. 
         it := @try(parse_json(Sb3.Raw.Project, project, temp())) return;
         each it.targets { it |
             each it.costumes { it |
@@ -165,3 +172,6 @@ scratch_cache_dir :: @afmt(ast_alloc(), "%/scratch", import("@/examples/fetch.fr
 
 #use("@/lib/encoding/json_reflect.fr");
 Sb3 :: import("@/examples/gpu/hctarcs/builder.fr");
+#use("@/examples/gpu/hctarcs/compile.fr");
+#use("@/lib/sys/fs.fr");
+#use("@/lib/sys/process.fr");

@@ -1,6 +1,17 @@
 
 ## (Aug 12) sb3
 
+- port my old stamp_pos test. pleased by generating the triangle images instead of committing them. 
+- confusingly the size shown in scratch's costume editor is half of the size of the png you give it, but it still looks right.
+- that needs strings (for passing costume names as function arg) so starting to think about 
+  how im going to do memory. old rust one did raii owned vars so any Poly assignments would have to check in drop. 
+  this time maybe try gc. 
+- progress on not hardcoding the one flag entry point. now the generated source has all the different sprite types. 
+- flatten the vars storage into the same allocation as the common sprite data. 
+  compact the indices used (before i was wasting stage.vars.len every time). bounds check in the compiler. 
+
+TODO: actually render the stamps
+
 ---
 
 - terminal: somehow decays and eventually just says "libc::pipe() failed" for everything.

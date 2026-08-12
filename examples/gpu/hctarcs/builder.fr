@@ -1,3 +1,4 @@
+// [api for building ast, ast -> sb3, sb3 -> ast]
 
 Project :: @struct {
     sprites: RawList(*Sprite);
@@ -7,6 +8,7 @@ Sprite :: @struct {
     blocks: RawList(*Node);
     variables: RawList(*Node);
     costumes: RawList(Costume);
+    var_plus_param_count := 0;
 };
 Node :: @rec @struct {
     op: Raw.Opcode;
@@ -21,13 +23,23 @@ Costume :: @struct {
     name: Str;
     fmt: Str;
     data: []u8;
+    md5 := "";
 };
 
-fn new_project() *Project = ast_alloc().boxed(Project, (
-    sprites = empty(),
-));
+// //
+// tests.fr has examples. 
+// these builder functions all use ast_alloc (so can only run at comptime). 
+// the idea is just using franca as a text language for writing scratch projects. 
+// not for writing programs that work with the asts. 
 
-fn stage(p: *Project) *Sprite = p.sprite(name = "Stage");
+fn new_project() Ty(*Project, *Sprite) = {
+    p := ast_alloc().boxed(Project, (
+        sprites = empty(),
+    ));
+    s := p.sprite(name = "Stage");
+    (p, s)
+}
+
 fn sprite(p: *Project, args: @struct(name: Str)) *Sprite = {
     s := ast_alloc().boxed(Sprite, (
         blocks = empty(),
@@ -39,8 +51,9 @@ fn sprite(p: *Project, args: @struct(name: Str)) *Sprite = {
     s
 }
 
-fn costume(s: *Sprite, args: Costume) void = {
-    s.costumes&.push(args, ast_alloc())
+fn costume(s: *Sprite, args: Costume) *Node = {
+    s.costumes&.push(args, ast_alloc());
+    N(args.name)
 }
 
 fn define(s: *Sprite, warp: bool, $body: FuncId) *Node = {
@@ -87,17 +100,29 @@ fn call(func: *Node, $args: FuncId) *Node #where = {
 fn set(var: *Node, value: *Node) *Node = make("data_setvariableto", @slice(value, var));
 
 fn repeatuntil(cond: *Node, $body: FuncId) *Node = make("control_repeat_until", @slice(cond, block(body)));
+fn repeat(count: *Node, $body: FuncId) *Node = make("control_repeat", @slice(count, block(body)));
 fn if(cond: *Node, $then: FuncId, $else: FuncId) *Node = make("control_if_else", @slice(cond, block(then), block(else)));
 
 fn peneraseall() *Node = make("pen_clear", empty());
 fn penup() *Node = make("pen_penUp", empty());
 fn pendown() *Node = make("pen_penDown", empty());
 fn setpencolor(a: *Node) = make("pen_setPenColorToColor", @slice(a));
+fn pen_stamp() *Node = make("pen_stamp", empty());
+fn set_costume(a: *Node) *Node = {
+    // TODO: do i ever need this? a := make("looks_costume", @slice(a));
+    make("looks_switchcostumeto", @slice(a))
+}
+fn set_size(percent: *Node) *Node = make("looks_setsizeto", @slice(percent));
+
 fn gotoxy(x: *Node, y: *Node) *Node = make("motion_gotoxy", @slice(x, y));
 fn xposition() *Node = make("motion_xposition", empty());
 fn yposition() *Node = make("motion_yposition", empty());
+fn change_x(d: *Node) *Node = make("motion_changexby", @slice(d));
+fn change_y(d: *Node) *Node = make("motion_changeyby", @slice(d));
 
+fn N(a: i64) *Node = N(a.float());
 fn N(a: f64) *Node = { s := make("franca_literal", empty()); s.literal = a; s }
+fn N(a: Str) *Node = { s := make("franca_string", empty()); s.string = a; s }
 fn add(a: *Node, b: *Node) *Node = make("operator_add", @slice(a, b));
 fn sub(a: *Node, b: *Node) *Node = make("operator_subtract", @slice(a, b));
 fn mul(a: *Node, b: *Node) *Node = make("operator_multiply", @slice(a, b));
@@ -125,8 +150,9 @@ fn block($fid: FuncId) *Node = {
     @if(@run(void == @type args), make("franca_block", empty()), make("franca_block", args))
 }
 
-next_var_id :: @static_mut 1;
+next_var_id :: @static_mut 1;  // not the same as the one used when loading sb3 (there it resets per sprite)
 fn variables(s: *Sprite, $Count: i64) TupleArray(*Node, Count) #generic = {
+    s.var_plus_param_count += Count;
     out := zeroed(Array(*Node, Count));
     each out& { it |
         it[] = ast_alloc().boxed(Node, (op = .franca_var, args = empty(), literal = next_var_id[].float()));
@@ -146,6 +172,8 @@ fn TupleArray($T: Type, $N: i64) Type = Ty(ast_alloc().alloc_init(Type, N, fn(_)
 // TODO: set block positions so they're not all overlapping in the ui
 // TODO: readable var names
 fn build(p: *Project, out_json: *List(u8), out_zip: *List(u8)) void = {
+    @debug_assert_eq(p.sprites[0].name, "Stage", "first sprite");
+    ::X;
     a := temp();
     p2: Raw.Project = (
         targets = list(a),
@@ -177,8 +205,14 @@ fn build(p: *Project, out_json: *List(u8), out_zip: *List(u8)) void = {
             key := emit_block(it, target.blocks&);
             target.blocks&.get_ptr(key).unwrap()[].Block.topLevel = true;
         };
+        each target.blocks& { key, it |
+            @if_let(it) fn Block(it) => @debug_assert(!it.opcode.name_str().starts_with("franca_"), "unlowered % %", it.opcode, key);
+        };
         each s.costumes { it |
-            md5 := import("@/lib/mix/md5.fr")'hex(it.data);
+            if it.md5 == "" {
+                it.md5 = import("@/lib/mix/md5.fr")'hex(it.data);
+            };
+            md5 := it.md5;
             path := @tfmt("%.%", md5, it.fmt);
             if !files.contains(fn(it) => it.name == path) {
                 files.push(name = path, data = it.data);
@@ -303,6 +337,7 @@ emit_value :: fn(it: *Node, parent: Str, blocks: *RawHashMap(Str, Raw.Block2)) R
         fn franca_var() => (Var = @tfmt("var_%", it.literal));
         // TODO: lossy because im bad at printing floats
         fn franca_literal() => (String = @tfmt("%", it.literal));
+        fn franca_string() => (String = it.string);
         @default => {
             key := emit_block(it, blocks);
             blocks.get_ptr(key).unwrap()[].Block.parent = (Some = parent);
@@ -314,7 +349,7 @@ emit_value :: fn(it: *Node, parent: Str, blocks: *RawHashMap(Str, Raw.Block2)) R
 // //
 // below is deserializing sb3 back into Node ast. 
 
-// result is in temp()
+// result is in temp(), its fine for it to point into the original sb3 bytes. 
 fn unbuild(sb3: []u8) Result(*Project, Str) = {
     ecd := Zip'find(sb3) || return(Err = "expected zip file");
     files: HashMap(Str, []u8) = init(temp());
@@ -322,6 +357,7 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
         files&.insert(it.name, it&.data(temp()));
     };
     project := files&.get("project.json") || return(Err = "missing project.json");
+    ::X;
     p := @try(parse_json(Raw.Project, project, temp())) return;
     project := zeroed(Project);
     
@@ -334,7 +370,6 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
         sprite := zeroed(Sprite);
         sprite.name = s.name;
         
-        // TODO: support making these from builder api
         next_var_id := 1.0;
         @if(!s.isStage)
         each stage.variables& { key, it |
@@ -344,7 +379,9 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
             @if(prev.is_some()) return(Err = @tfmt("duplicate block id (%)", key));
         };
         @if(s.isStage && !identical(s, stage)) return(Err = "multiple stages");
+        // TODO: make sure sprite names are unique too
         
+        next_var_id := 1.0;   // reset
         each s.variables& { key, it |
             it := temp().boxed(Node, (op = .franca_var, args = empty(), literal = next_var_id, string = it._0));
             next_var_id += 1;
@@ -395,6 +432,7 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                         it.string = mutation.proccode;
             };
         };
+        sprite.var_plus_param_count = int(next_var_id - 1);
         
         each s.blocks& { key, it |
             b := it.Block&;
@@ -419,6 +457,9 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                     } else {
                         a := blocks&.get(name)
                             || return(Err = @tfmt("(%): %.% missing (%)", key, it.op, field, name));
+                        if field == "VARIABLE" {
+                            @if(!@is(a.op, .franca_var, .franca_var_stage)) return(Err = @tfmt("(%): %.VARIABLE (%) found %", key, it.op, name, a.op));
+                        };
                         args&.push(a);
                     };
                 };
@@ -477,10 +518,11 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
             
             each s.costumes { it |
                 sprite.costumes&.push((
-                    name = it.assetId,
+                    name = it.name,
                     fmt = it.dataFormat,
                     data = files&.get(it.md5ext)
                         || return(Err = @tfmt("missing costume (%)", it.md5ext)),
+                    md5 = it.assetId,
                 ), temp());
             };
             
@@ -504,6 +546,10 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
             print(out.items());
         };
     };
+    if project.sprites[0].name != "Stage" {
+        i := project.sprites.index_of(fn(it) => it.name == "Stage").unwrap();
+        project.sprites.items().swap(0, i);
+    };
 
     (Ok = temp().boxed(Project, project))
 }
@@ -521,7 +567,7 @@ fn decode_value(value: *Raw.ValueRef, s: *Raw.Sprite, blocks: *HashMap(Str, *Nod
                 @case("Infinity") => 1.0/0.0;
                 @default => {
                     n, s2 := parse_float(s);
-                    @if(s2.len != 0) return(Err = @tfmt("(%): %.% TODO: non-float '%'", key, op, field, s));
+                    @if(s2.len != 0) return(Ok = temp().boxed(Node, (op = .franca_string, args = empty(), string = s)));
                     n
                 };
             };
@@ -665,8 +711,8 @@ Costume :: @struct {
     dataFormat: Str;
     assetId: Str;
     md5ext: Str;
-    rotationCenterX: f64 = 0.5;
-    rotationCenterY: f64 = 0.5;
+    //rotationCenterX: f64 = 0.5;
+    //rotationCenterY: f64 = 0.5;
 };
 
 Sound :: @struct {
@@ -853,6 +899,11 @@ fn dump_json(self: *Mutation, out: *List(u8)) void = {
 }
 };
 
+
+// TODO
+// :compilerbug this being at toplevel gets "overload resolve must be call" (which used to be a debug assert but clearly is reachable)
+// something weird and order dependent cause it worked before i rearranged main.fr :FUCKED 
+X :: {
 ::DeriveJson(Raw.Sprite);
 ::DeriveJson(Raw.Costume);
 ::DeriveJson(Raw.Block);
@@ -862,6 +913,7 @@ fn dump_json(self: *Mutation, out: *List(u8)) void = {
 ::DeriveJson(Raw.Monitor);
 ::DeriveJson(Raw.Opcode);
 ::DeriveJson(Raw.MutationRepr);
+};
 
 #use("@/lib/encoding/json.fr");
 #use("@/lib/encoding/json_reflect.fr");
@@ -880,7 +932,7 @@ block_defs :: @parse_block_defs(
 (operator_random, (FROM, TO)),
 (control_stop, (), (STOP_OPTION)),
 (operator_mathop, (NUM), (OPERATOR)),
-(pen_setPenSizeTo, (SIZE)),
+((pen_setPenSizeTo, looks_setsizeto), (SIZE)),
 (control_repeat, (TIMES, SUBSTACK)),
 (motion_changeyby, (DY)),
 (motion_changexby, (DX)),
@@ -888,11 +940,16 @@ block_defs :: @parse_block_defs(
 (motion_sety, (Y)),
 (procedures_definition, (custom_block)),
 (procedures_call, ()),
+(looks_switchcostumeto, (COSTUME)),
+// TODO: it's not clear to me when scratch requires this.
+(looks_costume, (), (COSTUME)),
 (argument_reporter_string_number, (), /*(VALUE)*/),
 // ...
-((event_whenflagclicked, procedures_prototype, motion_xposition, motion_yposition, pen_penUp, pen_penDown, pen_clear), ()),
+((event_whenflagclicked, procedures_prototype, motion_xposition, motion_yposition, pen_penUp, pen_penDown, pen_clear, pen_stamp), ()),
 // these aren't real
 ((franca_block, franca_literal, franca_var, franca_var_stage, franca_string), ()),
+// can't be placed in the gui but projects that use it still load (and my old mandelbrot is one of them). 
+(control_for_each, (VALUE, SUBSTACK), (VARIABLE)),
 );
 
 // (opcode, inputs, fields)
@@ -933,12 +990,3 @@ parse_block_defs2 :: fn($Opcode: Type, e: FatExpr) FatExpr = {
     };
     @{ @static @anon_literal(_ = Opcode, shapes = @static @[@literal out.raw]) }
 }
-
-empty_png :: {  
-    // todo: stb_image_write it myself
-    x := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAC4jAAAuIwF4pT92AAAAC0lEQVQI12NgAAIAAAUAAeImBZsAAAAASUVORK5CYII=";
-    out := u8.list(ast_alloc());
-    decode :: import("@/lib/encoding/base64.fr").base64_decode;
-    decode(out&, x);
-    out.items()
-};

@@ -1,0 +1,156 @@
+// https://github.com/LukeGrahamLandry/hctarcs/blob/b116b2418f949cda03e962c93a997e5ccba6dac1/tests/mandelbrot.scratch
+// https://scratch.mit.edu/projects/945435432
+#use("@/examples/gpu/hctarcs/builder.fr");
+mandelbrot :: fn() *Project = {
+p, stage := new_project();
+stage.costume(name = "blank", fmt = "png", data = empty_png);
+
+s := p.sprite(name = "main");
+s.costume(name = "blank", fmt = "png", data = empty_png);
+
+half_width, half_height, x, y, zSqX, zSqY, zX, zY, steps := s.variables(9);
+
+calc_steps := s.define(true, fn(cX, cY) => (
+    set(steps, N(0)),
+    set(zX, N(0)),
+    set(zY, N(0)),
+    set(zSqX, N(0)),
+    set(zSqY, N(0)),
+    repeatuntil(or(!(steps < N(40)), !(zSqX + zSqY < N(4))), => (
+        set(zY, zY * N(2) * zX),
+        set(zX, zSqX - zSqY),
+        set(zX, zX + cX),
+        set(zY, zY + cY),
+        set(zSqX, zX * zX),
+        set(zSqY, zY * zY),
+        set(steps, steps + N(1)),
+    )),
+));
+
+do_work := s.define(true, => ( 
+    gotoxy(N(10000), N(10000)),   // clamped so this calulates the stage size (half of 480x360, center is 0,0)
+    set(half_width, xposition()),
+    set(half_height, yposition()),
+    set(x, N(0)),
+    repeatuntil(!(x < N(2) * half_width), => (
+        penup(),
+        gotoxy(x - half_width, N(0) - half_height),
+        pendown(),
+        set(y, N(0)),
+        repeatuntil(!(y < N(2) * half_height), => (
+            call(calc_steps, => (
+                (x - half_width) / N(150),
+                (y - half_height) / N(150),
+            )),
+            if(steps == N(40), => (
+                setpencolor(N(65280)),
+            ), => (
+                setpencolor(N(255)),
+            )),
+            gotoxy(x - half_width, y - half_height),
+            set(y, y + N(1))
+        )),
+        set(x, x + N(1))
+    )), 
+));
+reset := s.define(true, => (
+    peneraseall(),
+    penup(),
+    gotoxy(N(0), N(0)),
+));
+
+s.whenflagclicked(=> (
+    call(reset, => ()),
+    call(do_work, => ()),
+));
+
+p
+};
+
+// https://github.com/LukeGrahamLandry/hctarcs/blob/b116b2418f949cda03e962c93a997e5ccba6dac1/tests/stamp_pos.scratch
+stamp_pos :: fn() *Project = {
+    p, stage := new_project();
+    stage.costume(name = "blank", fmt = "png", data = empty_png);
+    
+    s := p.sprite(name = "main");
+    red := s.costume(name = "red", fmt = "png", data = make_triangle(0xFF0000FF));
+    green := s.costume(name = "green", fmt = "png", data = make_triangle(0xFF00FF00));
+    blue := s.costume(name = "blue", fmt = "png", data = make_triangle(0xFFFF0000));
+    
+    once := s.define(true, fn(x, y, name) => (
+        set_costume(name),
+        gotoxy(x, y),
+        pen_stamp(),
+    ));
+    
+    line := s.define(true, fn(x, y, count) => (
+        repeat(count, => (
+            change_x(x),
+            change_y(y),
+            pen_stamp(),
+        )),
+    ));
+    
+    render := s.define(true, => (
+        set_size(N 200),
+        gotoxy(N 0, N 0),
+        peneraseall(),
+        set_costume(red),
+        call(line, => (N 10, N 10, N 10)),
+        call(once, => (N 240, N 180, blue)),
+        call(once, => (N(-240), N(-180), green)),
+        call(once, => (N(-240), N 180, red)),
+        call(once, => (N 240, N(-180), red)),
+        call(line, => (N 10, N 10, N 10)),
+        gotoxy(N 100, N 100),
+        set_costume(blue),
+        call(line, => (N 10, N 0, N 10)),
+        set_costume(green),
+        call(line, => (N 0, N(-10), N 10)),
+        set_costume(red),
+        call(line, => (N 10, N 0, N 3)),
+        set_costume(green),
+        gotoxy(N 0, N(-10)),
+    ));
+    
+    s.whenflagclicked(=> call(render, => ()));
+    p
+};
+
+empty_png :: write_png(@slice(@as(u32) 0), 1);
+
+make_triangle :: fn(colour: u32) []u8 = {
+    w := 20;
+    out := temp().alloc_zeroed(u32, w*w);
+    range(0, w) { y |
+        range(w/2-y/2, w/2+y/2) { x |
+            out[y*w + x] = colour;
+        };
+    };
+    write_png(out, w)
+}
+
+// AABBGGRR
+write_png :: fn(pixels: []u32, w: i64) []u8 = {
+    out := @ref u8.list(ast_alloc());
+    #use(Stb);
+    callback: stbi_write_func : fn(context, data, size) = {
+        data := u8.ptr_from_raw(data).slice(size.zext());
+        List(u8).ptr_from_raw(context).push_all(data);
+    };
+    w := intcast(w);
+    res := stbi_write_png_to_func(callback, List(u8).raw_from_ptr(out), w, intcast(pixels.len)/w, 4, u32.raw_from_ptr(pixels.ptr), w*4);
+    @assert(res != 0, "failed to write image");
+    out.items()
+}
+
+Stb :: {
+    root := Foreign'stb();
+    Ffi  :: import("@/examples/import_c/ffi.fr");
+    c_source := @tfmt("""
+        #define STB_IMAGE_WRITE_IMPLEMENTATION
+        #define STBI_WRITE_NO_STDIO
+        #include "%/stb_image_write.h"
+    """, root);
+    Ffi'include(current_compiler_context(), c_source)
+};
