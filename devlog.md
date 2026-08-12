@@ -1,4 +1,18 @@
 
+## (Aug 12) sb3
+
+---
+
+- terminal: somehow decays and eventually just says "libc::pipe() failed" for everything.
+  am i leaking fds? yes, `lsof -c terminal.out`, im up to 255. 
+  - thought i wasn't closing in pipe when no input but did it at the end. earlier is better anyway. 
+    also can't be that because not leaking every time, i certainly can run more than 255 things before it dies.
+  - fixed a few open calls without CLOEXEC, maybe that will help. 
+    also did some in the examples/os/libc which won't matter for this but is better. 
+    also no i can see in lsof its a pipe so that can't be it. 
+    cause spawning a process can't make the pipe CLOEXEC, the point is to inherit it? 
+    but what happens if another thread is doing that at the same time, is it just impossible?
+
 ## (Aug 11) sb3
 
 - the project.json i get for linrays from the api is different from what i get from "save to my computer" on the website. 
@@ -7,6 +21,7 @@
   - (mandel: 500ms -> 43ms = 11x; linrays: 11086ms -> 1807ms = 6x)
   - save old call args on stack instead of rawlist. (linrays: 10138ms -> 1026ms).
   - `-unsafe` saves another 200ms. would probably get some of that when i turn vars into fields of a struct instead of an array. 
+  - for reference, linrays_with_timer: (scratch: 154502ms; turbowarp: 1010ms)
 
 ## (Aug 10) sb3
 
@@ -25,7 +40,6 @@
   - BlockValue vs BlockStack doesn't work the way i expected. 
     if.CONDITION can be a BlockStack with one item and i wasn't using its value. 
     i can reproduce that with the scratch
-TODO: all those fixes ^ i only did for reading not writing so far. 
 - fetch scratch projects
 
 ## (Aug 9) sb3
