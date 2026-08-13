@@ -16,6 +16,8 @@ most other blocks are not implemented yet.
   https://github.com/scratchfoundation/scratch-editor/commit/7c3c5948459a66a9d146c0063712152a4f40fb66
   which is conveniently before they added an agents.md and before they switched to agpl
 - if i want to fetch projects can use trampoline.turbowarp.org
+- if i want to play with other people's projects as tests, use ones from before January 22, 2026 
+  (thats when they changed license of user projects from cc-by-sa-2 to only dear scratch ai slop license tm)
 
 ## todo
 

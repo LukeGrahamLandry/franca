@@ -36,14 +36,16 @@ const url = "https://franca.lukegrahamlandry.ca";
 if (cli_args.includes("-rootfs=fetch")) {
     rootfs_hash = await (await fetch(`${url}/rootfs_hash.txt`)).text();
     assert(rootfs_hash.length == 64, `this doesn't look like a hash: ${rootfs_hash}`);
-    const [rootfs, wasm] = await Promise.all([
+    const [rootfs, wasm, worker] = await Promise.all([
         fetch(`${url}/mirror/${rootfs_hash}`),
         fetch(`${url}/${rootfs_hash}/demo.wasm`),
+        fetch(`${url}/${rootfs_hash}/worker.js`),
     ].map((it) => it.then(async (it) => await it.arrayBuffer())));
     mkdirSync("target/franca/fetch", { recursive: true });
     mkdirSync(`target/web/${rootfs_hash}`, { recursive: true });
     writeFileSync(`target/franca/fetch/${rootfs_hash}.out`, Buffer.from(rootfs));
     writeFileSync(`target/web/${rootfs_hash}/demo.wasm`, Buffer.from(wasm));
+    writeFileSync(`target/web/${rootfs_hash}/worker.js`, Buffer.from(worker));
     writeFileSync(`target/web/rootfs_hash.txt`, rootfs_hash);
 } else if (cli_args.includes("-rootfs=local")) {
     rootfs_hash = readFileSync("target/web/rootfs_hash.txt").toString();

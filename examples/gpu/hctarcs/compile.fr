@@ -23,6 +23,7 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
             };
         };
     };
+    emitted_images: HashMap(Str, Ty([]u8, i32, i32)) = init(temp());
     each p.sprites { it |
         for it.blocks { it |
             @match(it.op) {
@@ -39,6 +40,26 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
         };
         self.current_sprite += 1;
         self.current_def = .None;
+        
+        each it.costumes { it |
+            continue :: local_return;
+            @if(emitted_images&.contains(it.md5)) continue();
+            @assert_eq(it.fmt, "png", "TODO: svg :(");
+            data, width, height := Viewer'stbi_load(it.data)
+                .or(fn(msg) => @panic("failed decode %: %", it.name, msg));
+            
+            solid := 0;
+            each u32.reinterpret_bytes(data) { c |
+                solid += int(c[].shift_right_logical(24) != 0);
+                // fix colour format to match pen_setPenColorToColor (AABBGGRR -> AARRGGBB)
+                c[] = c[].byte_swap().shift_right_logical(8).bit_or(c[].bit_and(0xff.shift_left(24)));
+            };
+            if solid == 0 {  // if all pixels are transparent, don't need to render anything. 
+                width = 0; height = 0;
+            };
+            
+            emitted_images&.insert(it.md5, (data, width, height));
+        };
     };
     
     // TODO: might want the strings here to be objects instead if i do the interning thing so they're fast to compare. thats why not putting this in a constant. 
@@ -47,7 +68,8 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
     enumerate p.sprites { i, it |
         @fmt(out, "c := a.alloc_uninit(Rt.SpriteClass.Costume, %);\n", it.costumes.len);
         enumerate it.costumes { i, it |
-            @fmt(out, "c[%] = (name = strings[%], data = img_%);\n", i, self.const_string(it.name), it.md5);
+            _, width, height := emitted_images&.get(it.md5).unwrap();
+            @fmt(out, "c[%] = (name = strings[%], data = img_%, width = %, height = %);\n", i, self.const_string(it.name), it.md5, width, height);
         };
         @fmt(out, "e := @ref Rt.SpriteClass.Handler.list(a);\n");
         each it.blocks { it |
@@ -61,16 +83,13 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
     @fmt(out, "(classes, strings)\n");
     @fmt(out, "};\n");
     
-    emitted_images: HashSet(Str) = init(temp());
-    each p.sprites { it |
-        each it.costumes { it |
-            continue :: local_return;
-            @if(emitted_images&.insert(it.md5)) continue();
-            // TODO: decode here so just embed pixel data, also need dimension
-            @fmt(out, "img_% :: Rt'embed_bytes(\"", it.md5);
-            import("@/lib/encoding/base64.fr")'encode(out, it.data);
-            @fmt(out, "\");\n");
-        };
+    // TODO: probably a smaller binary if include png+decode code and decompress at runtime instead
+    each emitted_images& { key, it |
+        @fmt(out, "img_% :: Rt'embed_bytes(\"", key);
+        import("@/lib/encoding/base64.fr")'encode(out, it._0);
+        @fmt(out, "\");\n");
+        Viewer'Stb'stbi_image_free(u8.raw_from_ptr(it._0.ptr));
+        it._0 = "";
     };
     
     @fmt(out, "strings :: @const_slice(\n");
@@ -300,3 +319,4 @@ S :: import("@/examples/gpu/hctarcs/builder.fr");
 Node :: S.Node;
 Rt :: import("@/examples/gpu/hctarcs/runtime.fr");
 #use("@/lib/collections/enum_map.fr");
+Viewer :: import("@/examples/gpu/viewer.fr");

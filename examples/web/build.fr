@@ -109,16 +109,38 @@ driver :: fn(vtable: *ImportVTable) void = {
         ok := run_cmd_blocking(franca, @slice("tests/run_tests.fr", "fetch"));
         @assert(ok, "failed to fetch deps");
         
-        walk_directory_unordered(cache_path.as_cstr()) { entry | 
+        mirror_index := u8.list(temp());
+        @if_let(collect_directory_ordered(cache_path, temp(), temp())) fn Ok(files) => 
+        each files { entry | 
             if entry.name.ends_with(".out") && entry.type == .File {
                 src := @tfmt("%/%", cache_path, entry.name);
-                dest := @tfmt("%/%", mirror_path, entry.name.slice(0, entry.name.len - 4));
+                name := entry.name.slice(0, entry.name.len - 4);
+                dest := @tfmt("%/%", mirror_path, name);
                 copy(dest, src);
+                @fmt(mirror_index&, "%\n", name);
             };
         };
+        
+        // TODO: maybe instead of the individual files, use the .sb3 from deps/ so can do one fetch per project. 
+        make_dirs_or_crash(@tfmt("%/scratch", mirror_path));
+        @if_let(collect_directory_ordered(@tfmt("%/scratch", cache_path), temp(), temp())) fn Ok(files) => 
+        each files { entry | 
+            if !entry.name.starts_with(".") && entry.type == .File {
+                src := @tfmt("%/scratch/%", cache_path, entry.name);
+                dest := @tfmt("%/scratch/%", mirror_path, entry.name);
+                copy(dest, src);
+                @fmt(mirror_index&, "scratch/%\n", entry.name);
+            };
+        };
+        
+        write_entire_file_or_crash(Target("mirror.txt"), mirror_index.items());
         // TODO: idk if it's more polite to generate an index file so you can see where  
         //       each file comes from without unpacking them or no index so undesirables  
         //       can't scrape and steal other people's bits without already knowing the hashes. 
+    };
+    if ci {
+        // i don't want to see github's logo on my website. 
+        write_entire_file_or_crash("target/web/404.html", "404<br><a href='/'>index</a>")
     };
 }
 

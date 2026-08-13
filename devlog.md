@@ -9,8 +9,8 @@
 - progress on not hardcoding the one flag entry point. now the generated source has all the different sprite types. 
 - flatten the vars storage into the same allocation as the common sprite data. 
   compact the indices used (before i was wasting stage.vars.len every time). bounds check in the compiler. 
-
-TODO: actually render the stamps
+- render stamps from costume png. the way only the center clamps to the stage is error prone. this is gonna be so slow. 
+- im paranoid about my tests disappearing so add them to the mirror chain
 
 ---
 

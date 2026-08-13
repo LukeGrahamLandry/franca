@@ -523,10 +523,17 @@ maybe_deploy_srht_site :: fn() void = {
     token := get_environment_variable("OAUTH2_TOKEN") || return(println("missing oauth"));
     commit := git_rev_parse();
     
+    copy("target/release/test.js", "tests/test.js");
+    rootfs_hash := temp().read_entire_file_or_crash("target/web/rootfs_hash.txt");
+    copy(@tfmt("target/release/%", rootfs_hash), @tfmt("target/web/mirror/%", rootfs_hash));
+    copy(@tfmt("target/release/demo.wasm"), @tfmt("target/web/%/demo.wasm", rootfs_hash));
+    copy(@tfmt("target/release/worker.js"), "examples/web/worker.js");
+    
     out := u8.list(temp());
     @fmt(out&, "<a href='https://franca.lukegrahamlandry.ca'>https://franca.lukegrahamlandry.ca</a><hr>\n");
     files := collect_directory_ordered("target/release", temp(), temp()).unwrap();
     each files { it |
+        @if(!it.name.starts_with(".") && it.type == .File)
         @fmt(out&, "<a href='./%'> % </a><br>\n", it.name, it.name);
     };
     @fmt(out&, "<hr><a href='https://git.sr.ht/~lukegrahamlandry/franca/commit/%'>%</a>", commit, commit);
@@ -578,7 +585,10 @@ ci_end :: fn() void = {
     check("repro-macos-15-intel.txt/repro-macos-15-intel.txt");
     check("repro-ubuntu-latest.txt/repro-ubuntu-latest.txt");
     check("repro-ubuntu-24.04-arm.txt/repro-ubuntu-24.04-arm.txt");
-    sh(@slice(get_executable_path(temp()), "examples/web/build.fr"));
+    
+    rootfs_hash := build_web_and_get_hash(get_executable_path(temp()));
+    copy :: fn(dest, src) => write_entire_file_or_crash(dest, read_entire_file_or_crash(temp(), src));
+    copy(@tfmt("target/web/%/repro.txt", rootfs_hash), path);
     
     srht_path := "repro-srht.txt";
     url := @tfmt("https://fr.lukegrahamlandry.ca/%/repro.txt", commit);

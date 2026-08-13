@@ -37,7 +37,7 @@ SpriteClass :: @rec @struct {
     events: []Handler;
     Handler :: @struct(trigger: Trigger, callee: @FnPtr(s: *Script) void);
     costumes: []Costume;
-    Costume :: @struct(data: []u8, name: Str);
+    Costume :: @struct(data: []u8, name: Str, width: i64, height: i64);
     //initial_vars: []Value;
     var_count: i64;
 };
@@ -158,13 +158,35 @@ motion_changeyby :: fn(s, dy) void = s.update_pos(fn(old) => { old.y += dy.cast(
 motion_setx :: fn(s, x) void = s.update_pos(fn(old) => { old.x = x.cast(); old });
 motion_sety :: fn(s, y) void = s.update_pos(fn(old) => { old.y = sy.cast(); old });
 
+// AARRGGBB
 pen_setPenColorToColor :: fn(s, a) void = { s.sprite.pen.colour = a.int().trunc(); };
 pen_setPenSizeTo :: fn(s, a) void = { s.sprite.pen.size = a; };
 pen_penUp :: fn(s) void = { s.sprite.pen.down = false; };
 pen_penDown :: fn(s) void = { s.sprite.pen.down = true; };
 pen_clear :: fn(s) void = { s.canvas.pen_pixels.interpret_as_bytes().set_bytes(0xff); }
-pen_stamp :: fn(s) void = {
-    // TODO
+// pos is clamped to the canvas but it's the center of the image so it can still go half way off the screen.
+pen_stamp :: fn(s) void = {  // :SLOW
+    c := s.sprite.self.costumes[s.sprite.looks.costume]&;
+    stage_size := s.canvas.size;
+    pos := s.sprite.pos + stage_size/2;
+    pos.y = stage_size.y - pos.y;
+    pos := clamp(pos, vec2(0), stage_size - vec2(1));
+    pos -= vec2(c.width.float().cast()/2, c.height.float().cast()/2);
+    sx, sy := (pos.x.cast().int(), pos.y.cast().int());
+    cx, cy := (stage_size.x.cast().int(), stage_size.y.cast().int());
+    w := min(c.width, cx - sx).max(0);
+    h := min(c.height, cy - sy).max(0);
+    range(0, h) { y |
+        if sy+y >= 0 {
+            src := u32.reinterpret_bytes(c.data).subslice(y*c.width, w);
+            range(0, w) { x |
+                if sx+x >= 0 && src[x].shift_right_logical(24) != 0 {  // very shitty alpha
+                    dest := s.canvas.pen_pixels[(sy+y)*cx + sx + x]&;
+                    dest[] = src[x];
+                }
+            };
+        };
+    };
 }
 looks_setsizeto :: fn(s, percent) void = { s.sprite.looks.size = percent / 100; }
 // in scratch input is a name. here compiler inserts lookup_costume_index calls so they can (eventually) be folded. 
@@ -185,12 +207,11 @@ fn update_pos(s: *Script, $body: @Fn(old: Vec2) Vec2) void = {
     old := s.sprite.pos;
     new := body(old);
     stage_size := s.canvas.size;
-    new := new.clamp(-stage_size/2, stage_size/2);
+    new := new.clamp(-stage_size/2 + vec2(0, 1), stage_size/2 - vec2(1, 0));
     s.sprite.pos = new;
     if s.sprite.pen.down {
         new := new + stage_size/2;
         i := int(cast((stage_size.y - new.y) * stage_size.x + new.x));
-        i := i.min(s.canvas.pen_pixels.len - 1);
         s.canvas.pen_pixels[i] = s.sprite.pen.colour;
     };
 }
@@ -253,12 +274,14 @@ temporary_main :: fn(initialize: @FnPtr(a: Alloc) Ty([]SpriteClass, []Str), show
     c.stage = c.clones[0];
     @debug_assert_eq(c.stage.self.name, "Stage");
     for c.clones { s |
-        each s.self.events { it |
+        s: Script = (sprite = s, canvas = c);
+        each s.sprite.self.events { it |
             if it.trigger&.is(.Flag) {
-                s: Script = (sprite = s, canvas = c);
                 it'callee(s&);
             };
         };
+        // TODO: when i want multiple frames, need to make a copy before drawing the sprite itself on the peristant pen texture
+        impl'pen_stamp(s&);
     };
     @println("eval took %ms", timestamp() - start);
     
