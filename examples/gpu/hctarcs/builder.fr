@@ -387,10 +387,13 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
         
         next_var_id := 1.0;
         each s.variables& { key, it |
-            @try(push_var(blocks&, sprite&, next_var_id&, key, it._0, false)) return;
+            node := @try(push_var(blocks&, sprite&, next_var_id&, key, it._0, false)) return;
+            node.args = temp().alloc_init(*Node, 1, fn(_) => literal_node(it._1));
         };
         each s.lists& { key, it |
-            @try(push_var(blocks&, sprite&, next_var_id&, key, it._0, false)) return;
+            node := @try(push_var(blocks&, sprite&, next_var_id&, key, it._0, false)) return;
+            args := temp().alloc_init(*Node, it._1.len, fn(i) => literal_node(it._1[i]));
+            node.args = temp().alloc_init(*Node, 1, fn(_) => temp().boxed(Node, (op=.franca_block, args=args)));
         };
         
         retain(s.blocks&, fn(_, b) => b.is(.Block));
@@ -428,11 +431,13 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                         mutation := b.mutation 
                             || return(Err = @tfmt("(%): % missing mutation", key, b.opcode));
                         proccode := mutation.proccode || return(Err = @tfmt("(%): % missing proccode", key, b.opcode));
+                        // argumentids don't need to be unique between different functions
                         argumentids := mutation.argumentids || return(Err = @tfmt("(%): % missing argumentids", key, b.opcode));
                         prev := custom_blocks&.insert(proccode, it);
                         @if(prev.is_some()) return(Err = @tfmt("duplicate proccode (%)", proccode));
                         a := list(*Node, temp());
                         for argumentids { name |
+                            name := @tfmt("% (in %)", name, proccode);
                             // TODO: argument_reporter_boolean
                             it := temp().boxed(Node, (op = .argument_reporter_string_number, args = empty(), literal = next_var_id));
                             next_var_id += 1;
@@ -462,7 +467,7 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                         if field == "SUBSTACK" || field == "SUBSTACK1" || field == "SUBSTACK2" {
                             args&.push(temp().boxed(Node, (op = .franca_block, args = empty())));
                         } else {
-                            args&.push(temp().boxed(Node, (op = .franca_string, args = empty(), string = "")));
+                            args&.push(literal_node(String = ""));
                         };
                         continue();
                     };
@@ -475,8 +480,7 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                         || return(Err = @tfmt("% (%) missing %", b.opcode, key, field));
                     name := var._1 || var._0;
                     if field != "VARIABLE" && field != "LIST" {
-                        a := temp().boxed(Node, (op = .franca_string, args = empty(), string = name));
-                        args&.push(a);
+                        args&.push(literal_node(String = name));
                     } else {
                         a := blocks&.get(name)
                             || return(Err = @tfmt("(%): %.% missing (%)", key, it.op, field, name));
@@ -507,12 +511,19 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                     };
                     
                     mutation := @try(find_parent_prototype(s, blocks&, key, name)) return;
+                    proccode := mutation.proccode || return(Err = "missing proccode");
                     argumentnames := mutation.argumentnames || return(Err = "missing argumentnames");
                     argumentids := mutation.argumentids || return(Err = "missing argumentids");
-                    i := argumentnames.items().index_of(name)
-                        || return(Err = @tfmt("(%): invalid argument name (%)", key, name));
+                    i := argumentnames.items().index_of(name) || {
+                        // TODO: is this actually allowed or only on unreachable blocks? 
+                        it.op = .franca_string;
+                        it.string = "";
+                        @println("warning: (%): invalid argument name (%)", key, name);
+                        continue();
+                    };
                     @if(argumentnames.len != argumentids.len) return(Err = "mutation names/ids arity mismatch");
                     id := argumentids[i];
+                    id := @tfmt("% (in %)", id, proccode);
                     a := blocks&.get(id)
                         || return(Err = @tfmt("(%): %.% missing (%)", key, it.op, "VALUE", id));
                     it.literal = a.literal;
@@ -602,19 +613,8 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
     (Ok = temp().boxed(Project, project))
 }
 
-fn push_var(blocks: *HashMap(Str, *Node), sprite: *Sprite, next_var_id: *f64, key: Str, name: Str, stage: bool) Result(void, Str) = {
-    op: Raw.Opcode = @if(stage, .franca_var_stage, .franca_var);
-    it := temp().boxed(Node, (op = op, args = empty(), literal = next_var_id[], string = name));
-    next_var_id[] += 1;
-    prev := blocks.insert(key, it);
-    @if(prev.is_some()) return(Err = @tfmt("duplicate block id (%)", key));
-    @if(!stage) sprite.variables&.push(it, temp());
-    .Ok
-}
-
-fn decode_value(value: *Raw.ValueRef, s: *Raw.Sprite, blocks: *HashMap(Str, *Node), error: Ty(Str, Raw.Opcode, Str)) Result(*Node, Str) = {
-    key, op, field := error;
-    a := @match(value[]) {
+fn literal_node(value: Raw.FloatOrString) *Node = {
+    @match(value) {
         fn Float(n) => temp().boxed(Node, (op = .franca_literal, args = empty(), literal = n));
         fn String(s) => {
             // TODO: this is wrong but i don't need strings yet
@@ -626,12 +626,30 @@ fn decode_value(value: *Raw.ValueRef, s: *Raw.Sprite, blocks: *HashMap(Str, *Nod
                 @case("Infinity") => 1.0/0.0;
                 @default => {
                     n, s2 := parse_float(s);
-                    @if(s2.len != 0) return(Ok = temp().boxed(Node, (op = .franca_string, args = empty(), string = s)));
+                    @if(s2.len != 0) return(temp().boxed(Node, (op = .franca_string, args = empty(), string = s)));
                     n
                 };
             };
             temp().boxed(Node, (op = .franca_literal, args = empty(), literal = n))
         }
+    }
+}
+
+fn push_var(blocks: *HashMap(Str, *Node), sprite: *Sprite, next_var_id: *f64, key: Str, name: Str, stage: bool) Result(*Node, Str) = {
+    op: Raw.Opcode = @if(stage, .franca_var_stage, .franca_var);
+    it := temp().boxed(Node, (op = op, args = empty(), literal = next_var_id[], string = name));
+    next_var_id[] += 1;
+    prev := blocks.insert(key, it);
+    @if(prev.is_some()) return(Err = @tfmt("duplicate block id (%)", key));
+    @if(!stage) sprite.variables&.push(it, temp());
+    (Ok = it)
+}
+
+fn decode_value(value: *Raw.ValueRef, s: *Raw.Sprite, blocks: *HashMap(Str, *Node), error: Ty(Str, Raw.Opcode, Str)) Result(*Node, Str) = {
+    key, op, field := error;
+    a := @match(value[]) {
+        fn Float(n) => literal_node(Float = n);
+        fn String(s) => literal_node(String = s);
         fn BlockStack(id) => {
             _ := blocks.get(id)
                 || return(Err = @tfmt("(%): %.% missing (%)", key, op, field, id));
@@ -1093,7 +1111,7 @@ block_defs :: @parse_block_defs(
 // TODO: do this the normal way, just annoying because the name "VALUE" isn't unique and is sometimes used for blocks
 ((argument_reporter_string_number, argument_reporter_boolean), (), /*(VALUE)*/),
 // ...
-((event_whenflagclicked, event_whenthisspriteclicked, event_whenstageclicked, control_start_as_clone, control_delete_this_clone, procedures_prototype, motion_xposition, motion_yposition, pen_penUp, pen_penDown, pen_clear, pen_stamp, looks_cleargraphiceffects, looks_show, looks_hide, motion_ifonedgebounce, sensing_mousex, sensing_mousey, sensing_mousedown, sensing_answer, sensing_resettimer, sensing_timer), ()),
+((event_whenflagclicked, event_whenthisspriteclicked, event_whenstageclicked, control_start_as_clone, control_delete_this_clone, procedures_prototype, motion_xposition, motion_yposition, pen_penUp, pen_penDown, pen_clear, pen_stamp, looks_cleargraphiceffects, looks_show, looks_hide, motion_ifonedgebounce, sensing_mousex, sensing_mousey, sensing_mousedown, sensing_answer, sensing_resettimer, sensing_timer, sensing_dayssince2000), ()),
 // these aren't real
 ((franca_block, franca_literal, franca_var, franca_var_stage, franca_string), ()),
 // can't be placed in the gui but projects that use it still load (and my old mandelbrot is one of them). 

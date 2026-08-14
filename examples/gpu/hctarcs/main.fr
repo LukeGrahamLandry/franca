@@ -1,8 +1,12 @@
 
 // TODO: check metadata so only mirror ones from before slop license 
+// TODO: cope with being 429 rate limitted better, only matters the first time before mirrored. 
+//       maybe this is fragile enough that `run_tests.fr fetch` shouldn't crash if one fails
 projects :: @const_slice(
     945435432,  // mini mandelbrot
     726052645,  // linrays
+    310372816,  // Quicksort benchmark
+    
     // 1368541101,  // cat ball normalized; TODO: yielding, input; TODO: make public
     // 706852772,   // hex mycelium; TODO: yielding, lists, touchingcolour, keypressed. 
     // 973800483,   // graphing calculator; TODO: pen effects, mouse, strings, lists, yield, etc.   svg (but all are blank so doesn't matter)
@@ -10,7 +14,6 @@ projects :: @const_slice(
     // 1143869507,  // life;  TODO: parse
     // 290745095,   // scratch in scratch; TODO: parse
     // 869264071,   // voxels; TODO: parse
-    // 310372816,   // quicksort; TODO: duplicate param name
 );
 
 P :: import("@/examples/gpu/hctarcs/tests.fr");
@@ -73,8 +76,13 @@ src :: {
     
     // build_sb3(read_entire_file_or_crash(temp(), "/Users/luke/Downloads/Cat Ball Normalized.sb3"));
     
+    ci := Foreign.ENV.GITHUB_REPOSITORY.get_environment_variable().is_some()
+        || "BUILD_SUBMITTER".get_environment_variable().is_some();
     for projects { id |
-        build_sb3(fetch_sb3_const(id));
+        @match(fetch_sb3(id, ci)) {
+            fn Ok(it) => build_sb3(it);
+            fn Err(msg) => @eprintln("ERROR[project_id=%] %", id, msg);
+        };
     };
     build_sb3 :: fn(r: []u8) => {
         ::S.X;  // TODO: why isn't this being in unbuild() enough
@@ -95,20 +103,12 @@ src :: {
 
 // TODO: fetch index of what i have mirrored so don't have to do twice as many gets if its not
 
-// if you call this in an @run, it can shim http_get and compile faster on cache hit. 
-fetch_sb3_const :: fn(project_id: i64) []u8 #fold = {
-    @match(fetch_sb3(project_id)) {
-        fn Ok(it) => it.shallow_copy(ast_alloc());  // comptime only TODO: better error location if you forget
-        fn Err(msg) => compile_error(msg, @source_location);
-    }
-};
-
-fetch_sb3 :: fn(project_id: i64) Result([]u8, Str) = {
+fetch_sb3 :: fn(project_id: i64, mirror_only: bool) Result([]u8, Str) = {
     // TODO: maybe don't cache the zip file cause its a waste of disk space because can reconstruct from the parts every time but its faster to not do a billion reads presumably. 
     it := with_cache(scratch_deps_dir, @tfmt("%.sb3", project_id)) {
         Zip :: import("@/lib/encoding/pkzip.fr");
         files := @ref Zip.File.list(temp());
-        project := @try(fetch_project_json(project_id)) return;
+        project := @try(fetch_project_json(project_id, mirror_only)) return;
         files.push(name = "project.json", data = project);
         
         // TODO: good error message if it's a .sb2
@@ -125,7 +125,7 @@ fetch_sb3 :: fn(project_id: i64) Result([]u8, Str) = {
                 // cache each asset seperately so they can be shared between projects
                 data := with_cache(scratch_fetch_dir, it.md5ext) {
                     // TODO: sad to do this in a syncronous loop but that's the type of language i am so here we are
-                    data := @try(fetch_asset(it.md5ext)) return;
+                    data := @try(fetch_asset(it.md5ext, mirror_only)) return;
                     md5 := import("@/lib/mix/md5.fr")'hex(data);
                     @if(it.assetId != md5) return(Err = @tfmt("(%): wrong asset hash (% vs %)", it.name, it.assetId, md5));
                     data
@@ -144,16 +144,16 @@ fetch_sb3 :: fn(project_id: i64) Result([]u8, Str) = {
 }
 
 // TODO: flaw in the mirroring is do i trust all the assets to actually be cc-by-sa?
-fetch_asset :: fn(md5ext: Str) Result([]u8, Str) = {
+fetch_asset :: fn(md5ext: Str, mirror_only: bool) Result([]u8, Str) = {
     url := @tfmt("https://franca.lukegrahamlandry.ca/mirror/scratch/%", md5ext);
     @if_let(http_get(url)) fn Ok(it) => return(Ok = it);
+    @if(mirror_only) return(Err = @tfmt("not mirrored: %", md5ext));
     url := @tfmt("https://assets.scratch.mit.edu/internalapi/asset/%/get/", md5ext);
     http_get(url)
 };
 
 // for now just cache forever TODO: the first url has history.modified time so could check that everytime to see if it changed
-fetch_project_json :: fn(project_id: i64) Result([]u8, Str) = {
-    r := (fn(project_id: i64) Result([]u8, Str) = {
+fetch_project_json :: fn(project_id: i64, mirror_only: bool) Result([]u8, Str) = {
         // TODO: project.json-s compress super well so should probably do that when caching it
         //       (aka the format is stupid, ex. the quicksort one stores the same 200k floats twice because of monitors, i could just get rid of those)
         it := with_cache(scratch_fetch_dir, @tfmt("%.json", project_id)) {
@@ -171,6 +171,8 @@ fetch_project_json :: fn(project_id: i64) Result([]u8, Str) = {
                 yield(it);
             };
             
+            @if(mirror_only) return(Err = "not mirrored project.json");
+            
             url := @tfmt("https://trampoline.turbowarp.org/api/projects/%", project_id);
             it := @try(http_get(url)) return;
             save_meta(it);
@@ -180,9 +182,6 @@ fetch_project_json :: fn(project_id: i64) Result([]u8, Str) = {
             @try(http_get(url)) return
         };
         (Ok = it)
-    })(project_id);
-    @if_let(r&) fn Err(msg) => { msg[] = @tfmt("[while fetching scratch(%)]: %", project_id, msg); };
-    r
 }
 
 // TODO: unify with the fetch_or_crash that uses curl

@@ -28,12 +28,14 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
     };
     emitted_images: HashMap(Str, Ty([]u8, i32, i32, bool)) = init(temp());
     each p.sprites { it |
+        @fmt(out, "// START %\n", it.name);  // TODO: safe print
         for it.blocks { it |
             continue :: local_return;
             @if(!is_hat(it.op)) continue();
             
             if it.op == .procedures_definition {
                 self.current_def = (Some = it);
+                // TODO: safe print
                 @fmt(out, "@\"proc_% %\"", it.literal, it.string);
             } else {
                 @fmt(out, "%_%", it.op, it.literal);
@@ -71,15 +73,18 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
         };
     };
     
+    floats_blob := f64.list(temp());
+    
     // TODO: might want the strings here to be objects instead if i do the interning thing so they're fast to compare. thats why not putting this in a constant. 
-    @fmt(out, "initialize :: fn(a: Alloc) Ty([]Rt.SpriteClass, []Str) = {\n");
+    @fmt(out, "initialize :: fn(c: *Rt.Canvas) Ty([]Rt.SpriteClass, []Str) = {\n");
+    @fmt(out, "a := c.gpa;\nfloats_blob := f64.reinterpret_bytes(floats_blob);\n");
     @fmt(out, "classes := a.alloc_uninit(Rt.SpriteClass, %);\n", p.sprites.len);
     enumerate p.sprites { i, it |
-        @fmt(out, "c := a.alloc_uninit(Rt.SpriteClass.Costume, %);\n", it.costumes.len);
+        @fmt(out, "t := a.alloc_uninit(Rt.SpriteClass.Costume, %);\n", it.costumes.len);
         enumerate it.costumes { i, it |
             // TODO: declaring '_' twice probably shouldn't be allowed :compiler
             _, width, height, _ := emitted_images&.get(it.md5).unwrap();
-            @fmt(out, "c[%] = (name = strings[%], data = img_%, width = %, height = %);\n", i, self.const_string(it.name), it.md5, width, height);
+            @fmt(out, "t[%] = (name = strings[%], data = img_%, width = %, height = %);\n", i, self.const_string(it.name), it.md5, width, height);
         };
         @fmt(out, "e := @ref Rt.SpriteClass.Handler.list(a);\n");
         each it.blocks { it |
@@ -94,16 +99,63 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
                 @default => @debug_assert(!is_hat(it.op));  // there can be top level non-hat blocks, they just never run
             };
         };
-        @fmt(out, "classes[%] = (name = strings[%], costumes = c, events = e.items(), var_count = %);\n", i, self.const_string(it.name), it.var_plus_param_count);
+        @fmt(out, "v := a.alloc_zeroed(Rt.Value, %);\n", it.variables.len);
+        
+        // TODO: be a function even tho will only ever need to recurse once
+        // TODO: be less wasteful with floats_blob if all strings
+        start, n := (floats_blob.len, it.variables.len);
+        enumerate it.variables { i, var |
+            value := var.args[0];
+            @match(value.op) {
+                fn franca_literal() => floats_blob&.push(value.literal);
+                @default => floats_blob&.push(0);  // franca_string|franca_block
+            };
+        };
+        @fmt(out, "v.slice(0, %).copy_from(floats_blob.subslice(%, %));\n", n, start, n);
+        enumerate it.variables { i, var |
+            value := var.args[0];
+            @match(value.op) {
+                fn franca_literal() => ();
+                // TODO: use s.canvas.constants but that's init-ed after this code runs. need to lift it sooner. 
+                fn franca_string() => @fmt(out, "v[%] = c.new_string(strings[%]);\n", i, self.const_string(value.string));
+                fn franca_block() => {
+                    @fmt(out, "v[%] = c.new_list(floats_blob.subslice(%, %));\n", i, floats_blob.len, value.args.len);
+                    for value.args { value |
+                        @match(value.op) {
+                            fn franca_literal() => floats_blob&.push(value.literal);
+                            @default => floats_blob&.push(0);  // franca_string
+                        };
+                    };
+                    
+                    @fmt(out, "l := v[%].slice_list();\n", i);
+                    enumerate value.args { i, value |
+                        @match(value.op) {
+                            fn franca_string() => @fmt(out, "l[%] = c.new_string(strings[%]);\n", i, self.const_string(value.string));
+                            @default => ();
+                        };
+                    };
+                }
+                @default => @panic("invalid var init (%): %", var.string, value.op);
+            };
+        };
+        if it.variables.len == 0 {
+            @fmt(out, "names: []Str = empty();\n");
+        } else {
+            @fmt(out, "names := @const_slice(");
+            for it.variables { var |
+                @fmt(out, "strings[%],", self.const_string(var.string));
+            };
+            @fmt(out, ");\n");
+        };
+        
+        @fmt(out, "classes[%] = (name = strings[%], costumes = t, events = e.items(), var_count = %, initial_vars = v, var_names = names);\n", i, self.const_string(it.name), it.var_plus_param_count);
     };
     @fmt(out, "(classes, strings)\n");
     @fmt(out, "};\n");
     
     // TODO: probably a smaller binary if include png+decode code and decompress at runtime instead
     each emitted_images& { key, it |
-        @fmt(out, "img_% :: Rt'embed_bytes(\"", key);
-        import("@/lib/encoding/base64.fr")'encode(out, it._0);
-        @fmt(out, "\");\n");
+        embed_bytes(out, @tfmt("img_%", key), it._0);
         @if(it._3)
         Viewer'Stb'stbi_image_free(u8.raw_from_ptr(it._0.ptr));
         it._0 = "";
@@ -128,6 +180,8 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
         @fmt(out, "\",\n");
     };
     @fmt(out, ");\n");
+    
+    embed_bytes(out, "floats_blob", floats_blob&.items().interpret_as_bytes());
 }
 
 Compile :: @struct {
@@ -149,6 +203,10 @@ Compile :: @struct {
 compile :: fn(self: *Compile, it: *Node) void = {
     out := self.out;
     @if(out.items().ends_with("\n")) out.push_repeated(self.depth*4, " ".ascii());
+    
+    if @is(it.op, .data_hidevariable, .data_showvariable, .data_hidelist, .data_showlist) {
+        return @fmt(out, "%.%(%);\n", @if(it.args[0].op == .franca_var, "s.sprite", "s.canvas.stage"), it.op, self.var_index(it.args[0]));
+    };
     
     if simple_ops.get(it.op) { data |
         @if(data.need_self) @fmt(out, "s.");
@@ -319,6 +377,7 @@ compile :: fn(self: *Compile, it: *Node) void = {
     };
 }
 
+// TODO
 fn is_async(self: *Compile, it: *Node) bool = {
     is_loop := @is(it.op, .control_forever, .control_for_each, .control_repeat, .control_repeat_until);
     
@@ -354,6 +413,12 @@ fn var_index(self: *Compile, it: *Node) i64 = {
     i
 }
 
+fn embed_bytes(out: *List(u8), name: Str, data: Str) void = {
+    @fmt(out, "% :: Rt'embed_bytes(\"", name);
+    import("@/lib/encoding/base64.fr")'encode(out, data);
+    @fmt(out, "\");\n");
+}
+
 simple_ops :: @static {
     Data :: @struct(need_self: bool, has_result: bool);
     out: OptionalEnumMap(S.Raw.Opcode, Data) = empty();
@@ -366,8 +431,10 @@ simple_ops :: @static {
         if s {
             func.arg.bindings[0].ty = (Finished = *Rt.Script);
         };
-        each func.arg.bindings.items().rest(int(s)) { it |
-            it.ty = (Finished = Rt.Value);
+        each func.arg.bindings& { it |
+            if it.ty&.is(.Infer) {
+                it.ty = (Finished = Rt.Value);
+            };
         };
         v := func.ret&.is(.Infer);
         if v {

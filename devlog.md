@@ -3,6 +3,15 @@
 
 - make it work in web: wasm int(Infinity) is an error. math imports. fetch non-hash mirror path. 
 - fetch: os/bin/curl is cute but be less wasteful and just call the host directly. ex. (local) hctarcs 5113ms->4827ms
+- awkward that i can only add things to my mirror by a ci build working but if i try to add too many at once i'll hit the rate limit
+- running quicksort benchmark
+  - lists. avoiding my previous woes with the 200k array literal by just including the floats as bytes like i do for the images
+  - i gave myself a scare when making lt coerce strings by typing == instead of <= and then linrays looped forever (but i thought i somehow made it super slow)
+  - thank you past me "Thier [sic] validate function reads off the beginning of the list and relies on empty comparing less than everything"
+  - for timing against turbowarp, make sure to turn off "Warp Timer" in advanced settings to make it fair. also chrome is faster than firefox. 
+  - average=0.094. 0.105 if i don't assume things are numbers. not great, ~twice turbowarp.
+
+TODO: show monitors on the screen, get initial hide state from the json. 
 
 ## (Aug 13) sb3
 
