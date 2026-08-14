@@ -1,4 +1,8 @@
 // ast -> franca source. 
+//
+// - lists are a constant drop down so don't need to be typechecked. 
+// - hoist dynamic typechecking out of rt.impl so it can be elided
+// 
 
 // this is going to get much worse when i want the async blocks
 
@@ -15,28 +19,28 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
     @fmt(out, "Rt :: import(\"@/examples/gpu/hctarcs/runtime.fr\");\n");
     @fmt(out, "main :: fn() void = { Rt'temporary_main(initialize, cli_args().contains(fn(it) => it[] == \"-show\")); };\n");
     
+    event_index := 0.0;
     each p.sprites { it |
         each it.blocks { it |
-            self.event_index += 1;
-            if it.literal == 0 {
-                it.literal = self.event_index;
-            };
+            event_index += 1;
+            it.literal = event_index;
         };
     };
-    emitted_images: HashMap(Str, Ty([]u8, i32, i32)) = init(temp());
+    emitted_images: HashMap(Str, Ty([]u8, i32, i32, bool)) = init(temp());
     each p.sprites { it |
         for it.blocks { it |
-            @match(it.op) {
-                fn procedures_definition() => {
-                    self.current_def = (Some = it);
-                    @fmt(out, "@\"proc_% %\"", it.literal, it.string);
-                }
-                fn event_whenflagclicked() => @fmt(out, "event_whenflagclicked_%", it.literal);
-                @default => @panic("TODO: compile toplevel %", it.op);
+            continue :: local_return;
+            @if(!is_hat(it.op)) continue();
+            
+            if it.op == .procedures_definition {
+                self.current_def = (Some = it);
+                @fmt(out, "@\"proc_% %\"", it.literal, it.string);
+            } else {
+                @fmt(out, "%_%", it.op, it.literal);
             };
             @fmt(out, " :: fn(s: *Rt.Script) void #use(Rt.impl) = {\n");
             self.compile(it.args[0]);
-            @fmt(out, "}\n\n");
+            @fmt(out, ";}\n\n");
         };
         self.current_sprite += 1;
         self.current_def = .None;
@@ -44,6 +48,11 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
         each it.costumes { it |
             continue :: local_return;
             @if(emitted_images&.contains(it.md5)) continue();
+            if it.fmt != "png" {
+                @println("warning: i don't support svgs yet so (%) won't render", it.name);
+                emitted_images&.insert(it.md5, ("", 0, 0, false));
+                continue();
+            };
             @assert_eq(it.fmt, "png", "TODO: svg :(");
             data, width, height := Viewer'stbi_load(it.data)
                 .or(fn(msg) => @panic("failed decode %: %", it.name, msg));
@@ -58,7 +67,7 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
                 width = 0; height = 0;
             };
             
-            emitted_images&.insert(it.md5, (data, width, height));
+            emitted_images&.insert(it.md5, (data, width, height, true));
         };
     };
     
@@ -68,14 +77,21 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
     enumerate p.sprites { i, it |
         @fmt(out, "c := a.alloc_uninit(Rt.SpriteClass.Costume, %);\n", it.costumes.len);
         enumerate it.costumes { i, it |
-            _, width, height := emitted_images&.get(it.md5).unwrap();
+            // TODO: declaring '_' twice probably shouldn't be allowed :compiler
+            _, width, height, _ := emitted_images&.get(it.md5).unwrap();
             @fmt(out, "c[%] = (name = strings[%], data = img_%, width = %, height = %);\n", i, self.const_string(it.name), it.md5, width, height);
         };
         @fmt(out, "e := @ref Rt.SpriteClass.Handler.list(a);\n");
         each it.blocks { it |
             @match(it.op) {
-                fn event_whenflagclicked() => @fmt(out, "e.push(trigger = .Flag, callee = event_whenflagclicked_%);\n", it.literal);
-                @default => ();
+                fn event_whenflagclicked() => @fmt(out, "e.push(trigger = .Flag, callee = %_%);\n", it.op, it.literal);
+                fn event_whenbroadcastreceived() => @fmt(out, "e.push(trigger = (Broadcast = strings[%]), callee = %_%);\n", self.const_string(it.args[0].string), it.op, it.literal);
+                fn event_whenthisspriteclicked() => @fmt(out, "e.push(trigger = .SpriteClicked, callee = %_%);\n", it.op, it.literal);
+                fn control_start_as_clone() => @fmt(out, "e.push(trigger = .CloneStart, callee = %_%);\n", it.op, it.literal);
+                fn event_whenstageclicked() => @fmt(out, "e.push(trigger = .SpriteClicked, callee = %_%);\n", it.op, it.literal);
+                fn event_whenkeypressed() => @fmt(out, "e.push(trigger = (KeyPressed = strings[%]), callee = %_%);\n", self.const_string(it.args[0].string), it.op, it.literal);
+                fn procedures_definition() => ();
+                @default => @debug_assert(!is_hat(it.op));  // there can be top level non-hat blocks, they just never run
             };
         };
         @fmt(out, "classes[%] = (name = strings[%], costumes = c, events = e.items(), var_count = %);\n", i, self.const_string(it.name), it.var_plus_param_count);
@@ -88,6 +104,7 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
         @fmt(out, "img_% :: Rt'embed_bytes(\"", key);
         import("@/lib/encoding/base64.fr")'encode(out, it._0);
         @fmt(out, "\");\n");
+        @if(it._3)
         Viewer'Stb'stbi_image_free(u8.raw_from_ptr(it._0.ptr));
         it._0 = "";
     };
@@ -118,11 +135,15 @@ Compile :: @struct {
     depth := 0;
     string_lookup: HashMap(Str, i64);
     string_constants: List(Str);
-    event_index: f64 = 0;
     current_sprite := 0;
     var_counts: []i64;
     current_def: ?*Node = .None;
 };
+
+// TODO: in builder check that not using a !simple_ops.has_result where a value is needed and give error. 
+// TODO: generic way to insert string->index lookups for costumes,broadcast,clone_of,etc.
+//       similarly many of the ones with constant fields should be compiled to call different functions like mathop. 
+// TODO: check if mathop names are valid instead of outputting franca that won't compile
 
 // the sync parts can always be compiled this way. 
 compile :: fn(self: *Compile, it: *Node) void = {
@@ -141,6 +162,15 @@ compile :: fn(self: *Compile, it: *Node) void = {
         @fmt(out, ")");
         @if(!data.has_result) @fmt(out, ";\n");
         return();
+    };
+    
+    if @is(it.op, .sound_setvolumeto, .sound_playuntildone, .sound_play) {
+        // i don't do sound yet
+        return @fmt(out, "/* % */", it.op);
+    };
+    
+    if @is(it.op, .sound_sounds_menu, .looks_costume, .sensing_touchingobjectmenu, .looks_backdrops, .sensing_keyoptions, .control_create_clone_of_menu, .pen_menu_colorParam) {
+        return compile(self, it.args[0]);
     };
     
     @match(it.op) {
@@ -236,14 +266,19 @@ compile :: fn(self: *Compile, it: *Node) void = {
             compile(self, it.args[0]);
             @fmt(out, ".to_bool() {\n");
             compile(self, it.args[1]);
-            @fmt(out, "};\n");
+            @fmt(out, ";};\n");
+        }
+        fn control_while() => {
+            cond: Node = (op = .operator_not, args := @slice(it.args[0]));
+            loop: Node = (op = .control_repeat_until, args := @slice(cond&, it.args[1]));
+            compile(self, loop&);
         }
         fn control_repeat() => {
             @fmt(out, "range(0, ");
             compile(self, it.args[0]);
             @fmt(out, ".int()) { _ |\n");
             compile(self, it.args[1]);
-            @fmt(out, "};\n");
+            @fmt(out, ";};\n");
         }
         fn control_if_else() => {
             @fmt(out, "if ");
@@ -252,14 +287,14 @@ compile :: fn(self: *Compile, it: *Node) void = {
             compile(self, it.args[1]);
             @fmt(out, "} else {\n");
             compile(self, it.args[2]);
-            @fmt(out, "};\n");
+            @fmt(out, ";};\n");
         }
         fn control_if() => {
             @fmt(out, "if ");
             compile(self, it.args[0]);
             @fmt(out, ".to_bool() {\n");
             compile(self, it.args[1]);
-            @fmt(out, "};\n");
+            @fmt(out, ";};\n");
         }
         fn control_for_each() => {
             @fmt(out, "range(0, ");
@@ -268,10 +303,42 @@ compile :: fn(self: *Compile, it: *Node) void = {
             compile(self, it.args[2]);
             @fmt(out, " = i.float();\n");
             compile(self, it.args[1]);
-            @fmt(out, "};\n");
+            @fmt(out, ";};\n");
+        }
+        fn control_forever() => {
+            @fmt(out, "loop {\n");
+            compile(self, it.args[0]);
+            @fmt(out, ";};\n");
+        }
+        fn control_wait_until() => {  // TODO: this needs to always make it async even tho the condition won't be
+            @fmt(out, "dowhile(=> !\n");
+            compile(self, it.args[0]);
+            @fmt(out, ".to_bool());\n");
         }
         @default => @panic("TODO: compile %", it.op);
     };
+}
+
+fn is_async(self: *Compile, it: *Node) bool = {
+    is_loop := @is(it.op, .control_forever, .control_for_each, .control_repeat, .control_repeat_until);
+    
+    @match(it.op) {
+        fn procedures_call() => {
+            // TODO: if body is async or if not runwithoutscreenrefresh
+        }
+        fn control_wait_until() => true;  // the condition will never be async but it has to yield so that the state can change
+        @default => {
+            if is_loop {
+                if self.current_def { def |
+                    // TODO: if def.runwithoutscreenrefresh then return false if body is async
+                };
+                return true;
+            };
+            
+            // TODO: is thisevent_broadcast supposed to yield right away or just get queued until next yield?
+            @is(it.op, .motion_glidesecstoxy, .looks_sayforsecs, .event_broadcastandwait, .sensing_askandwait)
+        };
+    }
 }
 
 fn const_string(self: *Compile, it: Str) i64 = 

@@ -75,6 +75,7 @@ fn define(s: *Sprite, warp: bool, $body: FuncId) *Node = {
         vars := vars&.items().shallow_copy(ast_alloc());
         s.variables.len -= vars.len;
         each vars { it |
+            // TODO: argument_reporter_boolean
             it.op = .argument_reporter_string_number;
         };
         body := body(t);
@@ -189,7 +190,7 @@ fn build(p: *Project, out_json: *List(u8), out_zip: *List(u8)) void = {
             isStage = s.name == "Stage",  // this name is required by the real scratch
             name = s.name,
             variables = init(),
-            //lists: RawHashMap(Str, Ty(Str, List(Value)));
+            lists = init(),
             broadcasts = init(),
             blocks = init(),
             currentCostume = 0,
@@ -274,7 +275,7 @@ fn emit_block(it: *Node, blocks: *RawHashMap(Str, Raw.Block2)) Str = {
         b.fields&.insert(field, (name, (Some = name)), temp());
         arg_i += 1;
     };
-    if it.op == .argument_reporter_string_number {
+    if @is(it.op, .argument_reporter_string_number, .argument_reporter_boolean) {
         name := @tfmt("var_%", it.literal);
         b.fields&.insert("VALUE", (name, .None), temp());
     };
@@ -323,11 +324,12 @@ make_mutation :: fn(it: *Node) Raw.Mutation = {
     };
     
     (
-        proccode = proccode.items(),
-        argumentids = ids,
+        proccode = (Some = proccode.items()),
+        argumentids = (Some = ids),
         argumentnames = (Some = names),  // these matter! leaving it empty makes the reporters always be zero (and show "undefined")
         argumentdefaults = (Some = list(temp())),
-        warp = true,
+        warp = (Some = true),
+        hasnext = .None,
     )
 }
 
@@ -370,27 +372,31 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
         sprite := zeroed(Sprite);
         sprite.name = s.name;
         
-        next_var_id := 1.0;
-        @if(!s.isStage)
-        each stage.variables& { key, it |
-            it := temp().boxed(Node, (op = .franca_var_stage, args = empty(), literal = next_var_id, string = it._0));
-            next_var_id += 1;
-            prev := blocks&.insert(key, it);
-            @if(prev.is_some()) return(Err = @tfmt("duplicate block id (%)", key));
+        if !s.isStage {
+            next_var_id := 1.0;  // different index space from locals
+            each stage.variables& { key, it |
+                @try(push_var(blocks&, sprite&, next_var_id&, key, it._0, true)) return;
+            };
+            each stage.lists& { key, it |
+                @try(push_var(blocks&, sprite&, next_var_id&, key, it._0, true)) return;
+            };
+        } else {
+            @if(!identical(s, stage)) return(Err = "multiple stages");
         };
-        @if(s.isStage && !identical(s, stage)) return(Err = "multiple stages");
         // TODO: make sure sprite names are unique too
         
-        next_var_id := 1.0;   // reset
+        next_var_id := 1.0;
         each s.variables& { key, it |
-            it := temp().boxed(Node, (op = .franca_var, args = empty(), literal = next_var_id, string = it._0));
-            next_var_id += 1;
-            prev := blocks&.insert(key, it);
-            @if(prev.is_some()) return(Err = @tfmt("duplicate block id (%)", key));
-            sprite.variables&.push(it, temp());
+            @try(push_var(blocks&, sprite&, next_var_id&, key, it._0, false)) return;
+        };
+        each s.lists& { key, it |
+            @try(push_var(blocks&, sprite&, next_var_id&, key, it._0, false)) return;
         };
         
         retain(s.blocks&, fn(_, b) => b.is(.Block));
+        
+        proccodes_referenced := Str.list(temp());
+        custom_blocks: HashMap(Str, *Node) = init(temp());
         each s.blocks& { key, it |
             b := it.Block&;
             
@@ -405,8 +411,11 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
             if b.parent { id | _ := s.get_block(id) || return(Err = @tfmt("(%): parent missing (%)", key, id)); };
             if b.next { id | _ := s.get_block(id) || return(Err = @tfmt("(%): next missing (%)", key, id)); };
             if @is(b.opcode, .procedures_call, .procedures_prototype) {
-                _ := b.mutation 
+                m := b.mutation 
                     || return(Err = @tfmt("(%): % missing mutation", key, b.opcode));
+                proccode := m.proccode || return(Err = @tfmt("(%): % missing proccode", key, b.opcode));
+                _ := m.argumentids || return(Err = @tfmt("(%): % missing argumentids", key, b.opcode));
+                proccodes_referenced&.push(proccode);
             };
             
             if b.opcode == .procedures_definition {
@@ -418,10 +427,13 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                             || return(Err = @tfmt("(%): missing (%)", key, id));
                         mutation := b.mutation 
                             || return(Err = @tfmt("(%): % missing mutation", key, b.opcode));
-                        prev := blocks&.insert(mutation.proccode, it);
-                        @if(prev.is_some()) return(Err = @tfmt("duplicate block id (%)", mutation.proccode));
+                        proccode := mutation.proccode || return(Err = @tfmt("(%): % missing proccode", key, b.opcode));
+                        argumentids := mutation.argumentids || return(Err = @tfmt("(%): % missing argumentids", key, b.opcode));
+                        prev := custom_blocks&.insert(proccode, it);
+                        @if(prev.is_some()) return(Err = @tfmt("duplicate proccode (%)", proccode));
                         a := list(*Node, temp());
-                        for mutation.argumentids { name |
+                        for argumentids { name |
+                            // TODO: argument_reporter_boolean
                             it := temp().boxed(Node, (op = .argument_reporter_string_number, args = empty(), literal = next_var_id));
                             next_var_id += 1;
                             prev := blocks&.insert(name, it);
@@ -429,20 +441,31 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                             a&.push(it);
                         };
                         it.args = a.items();
-                        it.string = mutation.proccode;
+                        it.string = proccode;
             };
         };
         sprite.var_plus_param_count = int(next_var_id - 1);
         
         each s.blocks& { key, it |
+            continue :: local_return;
             b := it.Block&;
                 shape := block_defs.shapes.get(b.opcode).unwrap();
                 it := blocks&.get(key).unwrap();
                 
                 args := list(*Node, temp());
                 for shape.inputs { field |
-                    value := b.inputs&.get_ptr(field) 
-                        || return(Err = @tfmt("(%): %.% is missing", key, b.opcode, field));
+                    continue :: local_return;
+                    value := b.inputs&.get_ptr(field) || {
+                        // TODO: is this actually allowed or only on unreachable blocks? 
+                        //       i guess an empty substack is unrepresentable because it's a linked list?
+                        @println("warning: (%): %.% is missing", key, b.opcode, field);
+                        if field == "SUBSTACK" || field == "SUBSTACK1" || field == "SUBSTACK2" {
+                            args&.push(temp().boxed(Node, (op = .franca_block, args = empty())));
+                        } else {
+                            args&.push(temp().boxed(Node, (op = .franca_string, args = empty(), string = "")));
+                        };
+                        continue();
+                    };
                     
                     a := @try(decode_value(value, s, blocks&, (key, it.op, field))) return;
                     args&.push(a);
@@ -451,7 +474,7 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                     var := b.fields&.get(field) 
                         || return(Err = @tfmt("% (%) missing %", b.opcode, key, field));
                     name := var._1 || var._0;
-                    if field == "OPERATOR" || field == "STOP_OPTION" {
+                    if field != "VARIABLE" && field != "LIST" {
                         a := temp().boxed(Node, (op = .franca_string, args = empty(), string = name));
                         args&.push(a);
                     } else {
@@ -461,33 +484,51 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                             @if(!@is(a.op, .franca_var, .franca_var_stage)) return(Err = @tfmt("(%): %.VARIABLE (%) found %", key, it.op, name, a.op));
                         };
                         args&.push(a);
+                        
+                        if field == "LIST" {
+                            s.lists&.get(name) || stage.lists&.get(name) 
+                                || return(Err = @tfmt("(%): %.LIST=(%) is not a list", key, it.op, name));
+                        };
                     };
                 };
-                if b.opcode == .argument_reporter_string_number {
+                if @is(b.opcode, .argument_reporter_string_number, .argument_reporter_boolean) {
                     var := b.fields&.get("VALUE") 
                             || return(Err = @tfmt("(%): %.VALUE is missing", key, b.opcode));
                     // these are referenced by name but i want the id. 
                     name := var._0;
-                    mutation := @try(find_parent_prototype(s, blocks&, key)) return;
+                    
+                    if name == "is compiled?" {
+                        // this is a turbowarp extension. 
+                        // TODO: tho the fact that it works in scratch means undefined arguments should just be false instead of error? that's sad. 
+                        // TODO: only if doesn't exist in parent so you can still name a var this if you want to
+                        it.op = .franca_string;
+                        it.string = "true";
+                        continue();
+                    };
+                    
+                    mutation := @try(find_parent_prototype(s, blocks&, key, name)) return;
                     argumentnames := mutation.argumentnames || return(Err = "missing argumentnames");
+                    argumentids := mutation.argumentids || return(Err = "missing argumentids");
                     i := argumentnames.items().index_of(name)
                         || return(Err = @tfmt("(%): invalid argument name (%)", key, name));
-                    @if(argumentnames.len != mutation.argumentids.len) return(Err = "mutation names/ids arity mismatch");
-                    id := mutation.argumentids[i];
+                    @if(argumentnames.len != argumentids.len) return(Err = "mutation names/ids arity mismatch");
+                    id := argumentids[i];
                     a := blocks&.get(id)
                         || return(Err = @tfmt("(%): %.% missing (%)", key, it.op, "VALUE", id));
                     it.literal = a.literal;
                     it.string = name;
                     a.string = name;  // TODO: this should go in the other place
                 };
-                if @is(b.opcode, .event_whenflagclicked, .procedures_definition) {
+                
+                if is_hat(b.opcode) {
                     if s.get_block(key) { b |
                         n := @try(collect_block(s, blocks&, b.next)) return;
                         args&.push(n);
                     };
                 };
                 
-                if @is(b.opcode, .procedures_definition) {
+                @match(b.opcode) {
+                fn procedures_definition() => {
                     if args[0].op == .franca_block && args[0].args[0].op == .procedures_prototype {
                         args[0] = args[0].args[0];  // TODO: get rid of BlockStack cause this is stupid
                     };
@@ -495,14 +536,19 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                     args[0] = temp().boxed(Node, (op = .procedures_prototype, args = it.args));
                     args&.items().swap(0, 1);
                 };
-                
-                if b.opcode == .procedures_call {
+                fn event_whenbroadcastreceived() => args&.items().swap(0, 1);
+                fn procedures_call() =>  {
                     mutation := b.mutation&.unwrap();
-                    it.string = mutation.proccode;
-                    def := blocks&.get(mutation.proccode) 
-                        || return(Err = @tfmt("(%): % undefined proccode (%)", key, b.opcode, mutation.proccode));
+                    it.string = mutation.proccode.unwrap();
+                    def := custom_blocks&.get(it.string) || {
+                        // really? it's not even an error to try to call something that isn't defined.
+                        // is it possible to make this situation in the website? 973800483 has it. 
+                        @println("warning: (%): % undefined proccode (%)", key, b.opcode, it.string);
+                        it.op = .franca_block;
+                        continue();
+                    };
                     a := list(*Node, temp());
-                    for mutation.argumentids { field |
+                    for mutation.argumentids&.unwrap() { field |
                         value := b.inputs&.get_ptr(field) 
                             || return(Err = @tfmt("(%): %.% is missing", key, b.opcode, field));
                         value := @try(decode_value(value, s, blocks&, (key, b.opcode, field))) return;
@@ -511,6 +557,8 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                     @debug_assert_eq(args.len, 0);
                     args&.push(def);
                     args&.push(temp().boxed(Node, (op = .franca_block, args = a.items())));
+                };
+                @default => ();
                 };
                 
                 it.args = args.items();
@@ -554,9 +602,20 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
     (Ok = temp().boxed(Project, project))
 }
 
+fn push_var(blocks: *HashMap(Str, *Node), sprite: *Sprite, next_var_id: *f64, key: Str, name: Str, stage: bool) Result(void, Str) = {
+    op: Raw.Opcode = @if(stage, .franca_var_stage, .franca_var);
+    it := temp().boxed(Node, (op = op, args = empty(), literal = next_var_id[], string = name));
+    next_var_id[] += 1;
+    prev := blocks.insert(key, it);
+    @if(prev.is_some()) return(Err = @tfmt("duplicate block id (%)", key));
+    @if(!stage) sprite.variables&.push(it, temp());
+    .Ok
+}
+
 fn decode_value(value: *Raw.ValueRef, s: *Raw.Sprite, blocks: *HashMap(Str, *Node), error: Ty(Str, Raw.Opcode, Str)) Result(*Node, Str) = {
     key, op, field := error;
     a := @match(value[]) {
+        fn Float(n) => temp().boxed(Node, (op = .franca_literal, args = empty(), literal = n));
         fn String(s) => {
             // TODO: this is wrong but i don't need strings yet
             n := @switch(s) {
@@ -616,7 +675,7 @@ fn collect_block(s: *Raw.Sprite, blocks: *HashMap(Str, *Node), parent: ?Str) Res
 // the ones i generate have the parent chain go up to the definition,
 // scratch has expressions go up to the prototype even tho it doesn't have a next field which seems confusing. 
 // but the website accepts both it seems but TODO: i should match them tho
-fn find_parent_prototype(s: *Raw.Sprite, blocks: *HashMap(Str, *Node), first: Str) Result(*Raw.Mutation, Str) = {
+fn find_parent_prototype(s: *Raw.Sprite, blocks: *HashMap(Str, *Node), first: Str, arg_name: Str) Result(*Raw.Mutation, Str) = {
     id := first;
     loop {
         // can unwrap because initial loop would have errored.
@@ -633,7 +692,7 @@ fn find_parent_prototype(s: *Raw.Sprite, blocks: *HashMap(Str, *Node), first: St
         };
         
         id = b.parent 
-            || return(Err = @tfmt("(%): didn't find prototype", first));
+            || return(Err = @tfmt("(%): didn't find prototype while resolving (%)", first, arg_name));
     };
     
 }
@@ -659,7 +718,7 @@ Sprite :: @struct {
     isStage: bool;
     name: Str;
     variables: RawHashMap(Str, Ty(Str, FloatOrString));
-    //lists: RawHashMap(Str, Ty(Str, List(Value)));
+    lists: RawHashMap(Str, Ty(Str, List(FloatOrString)));
     broadcasts: RawHashMap(Str, Str);
     blocks: RawHashMap(Str, Block2);
     currentCostume: i64;
@@ -688,21 +747,28 @@ Block :: @struct {
 };
 
 Mutation :: @struct {
-    proccode: Str;  // this is like a printf looking thing of the signeture
-    warp: bool; 
-    argumentids: List(Str);
+    proccode: ?Str;  // this is like a printf looking thing of the signeture
+    warp: ?bool; 
+    argumentids: ?List(Str);
     argumentnames: ?List(Str);  
-    argumentdefaults: ?List(Str);
+    argumentdefaults: ?List(FloatOrString);
+    
+    hasnext: ?bool; // for control_stop
 };
 
 MutationRepr :: @struct {
     tagName := "mutation";
     children: []Str = empty();
-    proccode: Str;
-    warp: bool; 
-    argumentids: Str;
+    
+    // for custom blocks
+    proccode: ?Str;
+    warp: ?bool; 
+    argumentids: ?Str;
     argumentnames: ?Str;  
     argumentdefaults: ?Str;
+    
+    // for control_stop
+    hasnext: ?bool;
 };
 
 Costume :: @struct {
@@ -738,8 +804,8 @@ Monitor :: @struct {
     params: RawHashMap(Str, Str);
     spriteName: ?Str;
     //value: [],
-    width: i64;
-    height: i64;
+    width: ?i64;
+    height: ?i64;
     x: i64;
     y: i64;
     visible: bool;
@@ -753,6 +819,7 @@ fn parse_json(json: *JsonParser, self: *FloatOrString) bool = {
     self[] = @match(token) {
         fn Float(n) => (Float = n);
         fn StringValue(s) => (String = s);
+        fn BoolValue(s) => (String = @tfmt("%", s));
         @default => return(false);
     };
     true
@@ -797,31 +864,53 @@ ValueRef :: @tagged(
     BlockStack: Str,
     Var: Str,
     BlockValue: Str,
+    Float: f64,
 );
 
+// TODO: holy shit this is stuid
 fn parse_json(json: *JsonParser, self: *ValueRef) bool = {
     mark := json.mark();
     token := json.next().or(fn(_: Str) => return(false));
     @if(!token&.is(.StartList)) return(false);
     tag := 0;
     parse_json(json, tag&) || return(false);
-    second_is_array := false;
+    second_is_array, second_tag, third_is_array := (false, 0, false);
     if tag == 3 || tag == 1 {
         token := json.next().or(fn(_: Str) => return(false));
         second_is_array = token&.is(.StartList);
+        _ := parse_json(json, second_tag&);
+        json.skip_until_depth(json.depth - 1).or(fn(_: Str) => return(false));
+        token := json.next().or(fn(_: Str) => return(false));
+        third_is_array = token&.is(.StartList);
+        
     };
     json.reset(mark);
     
     @switch(tag) {
         @case(1) => {
+            // TODO: need to have the tag for writing it out again
             if second_is_array {
-                it := zeroed Ty(i64, Ty(i64, Str));
+                if second_tag == 11 {  // broadcast
+                    it := zeroed Ty(i64, Ty(i64, Str, Str));
+                    parse_json(json, it&) || return(false);
+                    self[] = (String = it._1._2);
+                } else {
+                
+                it := zeroed Ty(i64, Ty(i64, FloatOrString));
                 parse_json(json, it&) || return(false);
-                self[] = (String = it._1._1);
+                self[] = @match(it._1._1) {
+                    fn Float(it) => (Float = it);
+                    fn String(it) => (String = it);
+                };
+                };
             } else {
-                it := zeroed Ty(i64, Str);
+                it := zeroed Ty(i64, ?Str);
                 parse_json(json, it&) || return(false);
-                self[] = (BlockValue = it._1);
+                if it._1 { it |
+                    self[] = (BlockValue = it);
+                } else {
+                    self[] = (String = "");
+                };
             };
         };
         @case(2) => {  // block stack
@@ -831,11 +920,17 @@ fn parse_json(json: *JsonParser, self: *ValueRef) bool = {
         };
         @case(3) => {
             if second_is_array {  // variable
-                it := zeroed Ty(i64, Ty(i64, Str, Str), Ty(i64, Str));
+                if third_is_array {
+                it := zeroed Ty(i64, Ty(i64, Str, Str), Ty(i64, FloatOrString));
                 parse_json(json, it&) || return(false);
                 self[] = (Var = it._1._2);
+                } else {
+                    it := zeroed Ty(i64, Ty(i64, Str, Str), Str);
+                    parse_json(json, it&) || return(false);
+                    self[] = (Var = it._1._2);
+                };
             } else {  // block
-                it := zeroed Ty(i64, Str, Ty(i64, Str));
+                it := zeroed Ty(i64, Str, Ty(i64, FloatOrString));
                 parse_json(json, it&) || return(false);
                 self[] = (BlockValue = it._1);
             
@@ -851,6 +946,8 @@ fn parse_json(json: *JsonParser, self: *ValueRef) bool = {
 
 fn dump_json(self: *ValueRef, out: *List(u8)) void = {
     @match(self) {
+        // TODO: is 5 only for durations?
+        fn Float(it) => @fmt(out, "[1, [5, \"%\"]]", it);
         fn String(it) => @fmt(out, "[1, [10, \"%\"]]", it);
         fn BlockStack(it) => @fmt(out, "[2, \"%\"]", it);
         fn BlockValue(it) => @fmt(out, "[3, \"%\", [10, \"\"]]", it);
@@ -863,19 +960,21 @@ fn parse_json(json: *JsonParser, self: *Mutation) bool = {
     parse_json(json, s&) || return(false);
     self.proccode = s.proccode;
     self.warp = s.warp;
-    X :: fn(it) => {
-        r := List(Str).parse_json(it, json.out);
+    X :: fn(it, name, $T) => {
+        r := List(T).parse_json(it, json.out);
         r.or(fn(msg) => {
-            json.error = msg;
+            json.error = @tfmt("[%] in nested %", msg, name);
             return(false);
         })
     };
-    self.argumentids = X(s.argumentids);
+    if s.argumentids { it |
+        self.argumentids = (Some = X(it, "argumentids", Str));
+    };
     if s.argumentnames { it |
-        self.argumentnames = (Some = X(it));
+        self.argumentnames = (Some = X(it, "argumentnames", Str));
     };
     if s.argumentdefaults { it |
-        self.argumentdefaults = (Some = X(it));
+        self.argumentdefaults = (Some = X(it, "argumentdefaults", FloatOrString));
     };
     true
 }
@@ -885,10 +984,14 @@ fn dump_json(self: *Mutation, out: *List(u8)) void = {
     s: MutationRepr = (
         proccode = self.proccode,
         warp = self.warp,
-        argumentids = X(self.argumentids&),
+        argumentids = .None,
         argumentnames = .None,
         argumentdefaults = .None,
+        hasnext = self.hasnext,
     );
+    if self.argumentids& { it |
+        s.argumentids = (Some = X(it));
+    };
     if self.argumentnames& { it |
         s.argumentnames = (Some = X(it));
     };
@@ -919,10 +1022,13 @@ X :: {
 #use("@/lib/encoding/json_reflect.fr");
 #use("@/lib/collections/map.fr");
 
+fn is_hat(op: Raw.Opcode) bool = 
+    @is(op, .event_whenflagclicked, .procedures_definition, .event_whenbroadcastreceived, .event_whenthisspriteclicked, .control_start_as_clone, .event_whenstageclicked, .event_whenkeypressed);
+
 block_defs :: @parse_block_defs(
-((operator_multiply, operator_add, operator_subtract, operator_divide), (NUM1, NUM2)),
+((operator_multiply, operator_add, operator_subtract, operator_divide, operator_mod), (NUM1, NUM2)),
 (( operator_lt, operator_or, operator_and, operator_gt, operator_equals), (OPERAND1, OPERAND2)),
-(control_if, (CONDITION, SUBSTACK)),
+((control_if, control_while), (CONDITION, SUBSTACK)),
 (control_if_else, (CONDITION, SUBSTACK, SUBSTACK2)),
 (control_repeat_until, (CONDITION, SUBSTACK)),
 ((data_setvariableto, data_changevariableby), (VALUE), (VARIABLE)),
@@ -932,8 +1038,10 @@ block_defs :: @parse_block_defs(
 (operator_random, (FROM, TO)),
 (control_stop, (), (STOP_OPTION)),
 (operator_mathop, (NUM), (OPERATOR)),
+(operator_round, (NUM)),
 ((pen_setPenSizeTo, looks_setsizeto), (SIZE)),
 (control_repeat, (TIMES, SUBSTACK)),
+(control_forever, (SUBSTACK)),
 (motion_changeyby, (DY)),
 (motion_changexby, (DX)),
 (motion_setx, (X)),
@@ -941,11 +1049,51 @@ block_defs :: @parse_block_defs(
 (procedures_definition, (custom_block)),
 (procedures_call, ()),
 (looks_switchcostumeto, (COSTUME)),
-// TODO: it's not clear to me when scratch requires this.
+(looks_switchbackdropto, (BACKDROP)),
+(control_wait, (DURATION)),
+(looks_backdrops, (), (BACKDROP)),
+(event_whenbroadcastreceived, (), (BROADCAST_OPTION)),
+(looks_changeeffectby, (CHANGE), (EFFECT)),
+(sound_setvolumeto, (VOLUME)),
+((sound_playuntildone, sound_play), (SOUND_MENU)),
+(motion_pointindirection, (DIRECTION)),
+(sensing_keypressed, (KEY_OPTION)),
+(looks_sayforsecs, (MESSAGE, SECS)),
+((data_hidevariable, data_showvariable), (), (VARIABLE)),
+(sensing_touchingobject, (TOUCHINGOBJECTMENU)),
+((event_broadcast, event_broadcastandwait), (BROADCAST_INPUT)),
+(control_wait_until, (CONDITION)),
+(looks_gotofrontback, (), (FRONT_BACK)),
+(control_create_clone_of, (CLONE_OPTION)),
+(motion_glidesecstoxy, (SECS, X, Y)),
+(pen_setPenColorParamTo, (COLOR_PARAM, VALUE)),
+((data_deletealloflist, data_lengthoflist), (), (LIST)),
+((data_addtolist, data_itemnumoflist), (ITEM), (LIST)),
+(data_replaceitemoflist, (INDEX, ITEM), (LIST)),
+((data_itemoflist, data_deleteoflist), (INDEX), (LIST)),
+((operator_contains, operator_join), (STRING1, STRING2)),
+((operator_length), (STRING)),
+((operator_letter_of), (LETTER, STRING)),
+(sensing_touchingcolor, (COLOR)),
+(looks_costumenumbername, (), (NUMBER_NAME)),
+(sensing_askandwait, QUESTION),
+(event_whenkeypressed, (), (KEY_OPTION)),
+(looks_seteffectto, (VALUE), (EFFECT)),
+(sensing_of, (OBJECT), (PROPERTY)),
+((data_hidelist, data_showlist), (), (LIST)),
+// these are used when there's an oval drop down. 
+// the blocks that use these can also accept a computed string. 
 (looks_costume, (), (COSTUME)),
-(argument_reporter_string_number, (), /*(VALUE)*/),
+(sound_sounds_menu, (), (SOUND_MENU)),
+(sensing_keyoptions, (), (KEY_OPTION)),
+(sensing_touchingobjectmenu, (), (TOUCHINGOBJECTMENU)),
+(control_create_clone_of_menu, (), (CLONE_OPTION)),
+(pen_menu_colorParam, (), (colorParam)),
+(sensing_of_object_menu, (), (OBJECT)),
+// TODO: do this the normal way, just annoying because the name "VALUE" isn't unique and is sometimes used for blocks
+((argument_reporter_string_number, argument_reporter_boolean), (), /*(VALUE)*/),
 // ...
-((event_whenflagclicked, procedures_prototype, motion_xposition, motion_yposition, pen_penUp, pen_penDown, pen_clear, pen_stamp), ()),
+((event_whenflagclicked, event_whenthisspriteclicked, event_whenstageclicked, control_start_as_clone, control_delete_this_clone, procedures_prototype, motion_xposition, motion_yposition, pen_penUp, pen_penDown, pen_clear, pen_stamp, looks_cleargraphiceffects, looks_show, looks_hide, motion_ifonedgebounce, sensing_mousex, sensing_mousey, sensing_mousedown, sensing_answer, sensing_resettimer, sensing_timer), ()),
 // these aren't real
 ((franca_block, franca_literal, franca_var, franca_var_stage, franca_string), ()),
 // can't be placed in the gui but projects that use it still load (and my old mandelbrot is one of them). 

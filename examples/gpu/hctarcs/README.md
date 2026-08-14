@@ -28,7 +28,6 @@ most other blocks are not implemented yet.
 - hell, they're gonna have SVGs in there
 - when i have compiler so it isn't slow try things from 
   turbowarp featured projects https://scratch.mit.edu/studios/27205657
-  (graphing calculator: 973800483; life: 1143869507; mandelbrot: 396320314; scratch in scratch: 290745095; riscvi32 linux: 1201938491; minecraft: 869264071;)
 - implement more blocks
   - async
     - broadcast and wait
@@ -41,6 +40,17 @@ most other blocks are not implemented yet.
   - events
     - broadcast
     - scroll sends up/down arrow event but the is_pressed blocks say false
+  - sensing inputs
+  - is touching, if on edge bounce
   - clones
-  - costume, stamp
   - strings, lists
+  - drag
+
+## notes
+
+- there are two types of menus blocks can have. 
+  ovals (inputs) let you place an expression there instead so it can be a computed string (ex. broadcast,costumes). 
+  rectangles (fields) are forced to be chosen from a valid constant (ex. lists,variables,effect,mathop). 
+  when an oval is chosen from the menu, there's an inserted fake block that has a field as though it were a rectangle. 
+- there are some blocks that don't exist in the website's ui but still work if projects have them. 
+  (while, for_each).

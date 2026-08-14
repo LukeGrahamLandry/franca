@@ -13,9 +13,10 @@ JsonParser :: @struct(
     current: i64 = 0,
     last_thing_was_key: bool = false,
     is_skipping := false,
-    is_dict: import("@/lib/collections/bit_set.fr")'StaticBitSet(json_max_nesting_depth) = empty(),
+    is_dict: IsDict = empty(),
     error := "",
 );
+IsDict :: import("@/lib/collections/bit_set.fr")'StaticBitSet(json_max_nesting_depth);
 
 // TODO: if the first thing doesn't have a payload, you get an unwrap in export_ffi. -- Jul 4
 JsonPart :: @tagged(
@@ -191,6 +192,7 @@ JsonMark :: @struct {
     current: i64;
     last_thing_was_key: bool;
     error: Str;
+    is_dict: IsDict;  // chunky :(
 };
 
 fn mark(self: *JsonParser) JsonMark = (
@@ -198,14 +200,22 @@ fn mark(self: *JsonParser) JsonMark = (
     current = self.current,
     last_thing_was_key = self.last_thing_was_key,
     error = self.error,
+    is_dict = self.is_dict,
 );
 
 fn reset(self: *JsonParser, mark: JsonMark) void = {
-    @debug_assert_le(mark.depth, self.depth, "tried to rewind forwards");
     self.depth = mark.depth;
     self.current = mark.current;
     self.last_thing_was_key = mark.last_thing_was_key;
     self.error = mark.error;
+    self.is_dict = self.is_dict;
+}
+
+fn lex_num(self: *JsonParser) f64 = {
+    s := self.input.rest(self.current);
+    n, r := parse_float(s);
+    self.current += s.len - r.len;
+    n
 }
 
 // TODO: have a simple lexer library? this is the third one ive written. 
@@ -223,23 +233,6 @@ fn pop(self: *JsonParser) u8 = {
 fn peek_c(self: *JsonParser) u8 = self.peek_c(0);
 fn peek_c(self: *JsonParser, n: i64) u8 = 
     if(self.current + n < self.input.len, => self.input[self.current.add(n)], => 0);
-
-fn lex_num(self: *JsonParser) f64 = {
-    whole := self.lex_int();
-    ::if(f64);
-    if self.peek_c() == ".".ascii() && self.peek_c(1).is_ascii_digit() {
-        // Actually, that's a float.
-        self.current += 1;
-        start := self.current;
-        fraction := self.lex_int();
-        end := self.current;
-        digits := end.sub(start);
-        scale := 10.pow(digits);
-        whole.float().add(fraction.float().div(scale.float()))
-    } else {
-        whole.float()
-    }
-}
 
 fn lex_int(self: *JsonParser) i64 = {
     total := 0;
@@ -273,6 +266,7 @@ fn lex_str(self: *JsonParser) Result(Str, Str) = {
                         n.trunc()
                     };
                     @case("\"".ascii()) => "\"".ascii();
+                    @case("\\".ascii()) => "\\".ascii();
                     @default => return(Err = "TODO: unsupported json string escape");
                 };
                 if buf.is_none() {

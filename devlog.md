@@ -1,4 +1,13 @@
 
+## (Aug 13) sb3
+
+- my ancient cat ball is from scratch 2 it seems because the project.json is different in the api (save in the website normalizes). 
+  damn that's so sad, the old format was so readable, they even indented the lists to look like code,
+  the new thing looks so insane in comparison (and is 5x-10x bigger file depending if formatted). 
+- data entry for loading more blocks, not doing runtime for them yet. 
+- json_reflect: show context of error
+- terminal: finally fixed crash in get_selection. 
+
 ## (Aug 12) sb3
 
 - port my old stamp_pos test. pleased by generating the triangle images instead of committing them. 

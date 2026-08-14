@@ -65,7 +65,10 @@ fn DeriveJson($T: Type) void = {
                         if name == token.Key {
                             inner := T.get_field_ptr(self, f);
                             success := json.parse_json(inner);
-                            if(!success, => return(false));
+                            if !success {
+                                json.error = @tfmt("% < (%)", json.error, name);
+                                return false;
+                            };
                             found&.set(i);
                             continue();
                         };
@@ -173,7 +176,10 @@ fn parse_json(json: *JsonParser, self: ~S) bool = {
         };
         self := out&.push_uninit();
         ok := parse_json(json, self);
-        @if(!ok) return(false);
+        if !ok {
+            json.error = @tfmt("% < [%]", json.error, out.len - 1);
+            return(false);
+        };
     };
 }
 
@@ -221,8 +227,10 @@ fn parse_json(json: *JsonParser, self: ~S) bool = {
         
         value := zeroed(V);
         ok := parse_json(json, value&);
-        @if(!ok) return(false);
-        
+        if !ok {
+            json.error = @tfmt("% < (%)", json.error, key);
+            return(false);
+        };
         out&.insert(key, value);
     };
 }
@@ -259,9 +267,22 @@ fn parse_json(json: *JsonParser, self: ~S) bool = {
     i := 0;
     inline_for fields { $f | 
         inner := T.get_field_ptr(self, f);
+        
+        @if(@run (fields.len() > 0 && identical(f, fields[fields.len() - 1]&)))
+        @if(@run fields[fields.len() - 1].ty.IsOption()) {
+            // HACK: if last field is optional, don't even require "null"
+            json.skip_whitespace();
+            if json.input.rest(json.current).starts_with("]") {
+                inner[] = .None;
+                t := json.next().unwrap();
+                @debug_assert(t&.is(.End));
+                return true;
+            };
+        };
+    
         success := json.parse_json(inner);
         if !success {
-            json.error = @tfmt("%\n- field % of tuple", json.error, i);
+            json.error = @tfmt("% < [%]", json.error, i);
             return false;
         };
         i += 1;

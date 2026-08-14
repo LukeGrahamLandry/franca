@@ -11,6 +11,7 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
+- JsonParser.error should be a List instead of a Str so more efficient to append context
 - terminal: still leaking pipes
 - in ci generate preview images for the graphics examples readmes
 - reusable gallery ui because many of the graphics programs have lots of example inputs to choose from
