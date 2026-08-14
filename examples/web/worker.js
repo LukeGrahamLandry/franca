@@ -106,6 +106,10 @@ export const imports = {
         sin: (a) => Math.sin(a),
         floor: (a) => Math.floor(a),
         ceil: (a) => Math.ceil(a),
+        exp: (a) => Math.exp(a),
+        log: (a) => Math.log(a),
+        asin: (a) => Math.asin(a),
+        atan: (a) => Math.atan(a),
 
         js_worker_stop: (status, known_wasm_jit_event_) => {
             known_wasm_jit_event = known_wasm_jit_event_;

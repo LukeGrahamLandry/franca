@@ -11,6 +11,9 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
+- webgpu doesn't have point size so epicycles is hard to tell what you're drawing
+- web/backup.fr which downloads all the files from the website needed to setup a franca dev env
+- wasm has "RuntimeError: float unrepresentable in integer range" instead of ub for (idk).int()
 - JsonParser.error should be a List instead of a Str so more efficient to append context
 - terminal: still leaking pipes
 - in ci generate preview images for the graphics examples readmes
@@ -55,6 +58,9 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
     hard to decide exactly what i want tho, there's other notes here somewhere. 
     need to be able to use a multi-file franca library with fetch.fr
   - not being able to access a field on a const struct value
+  - the pattern where i use const declarations as a list of functions to export 
+    and one of the exported names shadows an overloadset an implementation wants to call. 
+    ex. (import_wasm/run.fr/Exports/env/log, compiler/comptime.fr/driver_vtable_exports/(_get_build_options, etc.))
 - see todo comments:
   - life/README.md
   - circuit/README.md

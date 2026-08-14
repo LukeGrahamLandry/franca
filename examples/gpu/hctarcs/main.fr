@@ -10,6 +10,7 @@ projects :: @const_slice(
     // 1143869507,  // life;  TODO: parse
     // 290745095,   // scratch in scratch; TODO: parse
     // 869264071,   // voxels; TODO: parse
+    // 310372816,   // quicksort; TODO: duplicate param name
 );
 
 P :: import("@/examples/gpu/hctarcs/tests.fr");
@@ -42,12 +43,14 @@ main :: fn() void = {
         @run { i[] += 1; };
     };
     
+    #use("@/lib/sys/process.fr");
+    #use("@/lib/sys/subprocess.fr");
+    franca := get_executable_path(temp());  // only works if running jitted
+    a := make_args_for_exec(franca, args.items(), temp());
+    
+    @if(IS_WASM_PLAYGROUND) push_as_tls(.cli_arguments, a) {| import("@/examples/gpu/viewer.fr")'main(); };
+    
     if cli_args().contains(fn(it) => it[] == "-show") {
-        #use("@/lib/sys/subprocess.fr");
-        #use("@/lib/sys/process.fr");
-        // only works if running jitted
-        franca := get_executable_path(temp());
-        a := make_args_for_exec(franca, args.items(), temp());
         become(a[0], a);
     };
 };
@@ -127,6 +130,7 @@ fetch_sb3 :: fn(project_id: i64) Result([]u8, Str) = {
                     @if(it.assetId != md5) return(Err = @tfmt("(%): wrong asset hash (% vs %)", it.name, it.assetId, md5));
                     data
                 };
+                @if(!it.md5ext.ends_with(it.dataFormat) || !it.md5ext.starts_with(it.assetId)) return(Err = "wrong md5ext");
                 if !files.contains(fn(jt) => jt.name == it.md5ext) {
                     files.push(name = it.md5ext, data = data);
                 };
@@ -151,6 +155,7 @@ fetch_asset :: fn(md5ext: Str) Result([]u8, Str) = {
 fetch_project_json :: fn(project_id: i64) Result([]u8, Str) = {
     r := (fn(project_id: i64) Result([]u8, Str) = {
         // TODO: project.json-s compress super well so should probably do that when caching it
+        //       (aka the format is stupid, ex. the quicksort one stores the same 200k floats twice because of monitors, i could just get rid of those)
         it := with_cache(scratch_fetch_dir, @tfmt("%.json", project_id)) {
             yield :: local_return;
             save_meta :: fn(it) => {
@@ -180,7 +185,15 @@ fetch_project_json :: fn(project_id: i64) Result([]u8, Str) = {
     r
 }
 
+// TODO: unify with the fetch_or_crash that uses curl
 http_get :: jit_barrier(fn(url: Str) Result(Str, Str) = {
+    @if(IS_WASM_PLAYGROUND) {
+        prefix := "https://franca.lukegrahamlandry.ca/mirror/";
+        @if(!url.starts_with(prefix)) return(Err = "failed fetch (cors)");
+        return(Ok = import("@/examples/os/bin/curl.fr")'fetch(url.rest(prefix.len))
+            || return(Err = "failed js fetch"));
+    };
+
     #use("@/examples/web/get.fr");
     url := @try(parse_url(url)) return;
     // this doesn't check the tls certificate but like... whatever... 
@@ -209,3 +222,8 @@ Sb3 :: import("@/examples/gpu/hctarcs/builder.fr");
 #use("@/examples/gpu/hctarcs/compile.fr");
 #use("@/lib/sys/fs.fr");
 #use("@/lib/sys/process.fr");
+
+IS_WASM_PLAYGROUND :: true   // HACK #use("@/graphics/lib.fr");
+    && query_current_arch() == .wasm32 
+    && (@(fn(target: FatExpr) FatExpr #macro = @literal @is(target.expr&, .GetVar))(GRAPHICS_TARGET_WEB)) 
+    && bool.const_eval(@{ GRAPHICS_TARGET_WEB });

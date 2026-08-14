@@ -149,13 +149,21 @@ fetch :: fn(url: Str, sha256_hash: Str) ?[]u8 = {
 
 // uncached!
 fetch_one :: fn(url: Str, sha256_hash: Str) Result([]u8, Str) = {
+    zip_bytes := @if(query_current_arch() == .wasm32, {
+        // HACK: abstraction break to call js_write directly. os/bin has a fake curl program 
+        //       so the playground would work without this special case,
+        //       but this way is less wasteful than spawning a thread for it. 
+        import("@/examples/os/bin/curl.fr")'fetch(sha256_hash)
+            || return(Err = "failed js fetch")
+    }, {
+        
         curl := Foreign.EXE.curl;
-        // @eprintln("(curl %)", url);
         ok, out, err := exec_and_catch(curl, @slice(url, "-s", "-L", "-f"), temp());
         if !ok {
             return(Err = @tfmt("failed curl %\n%", url, err.items()));
         };
-        zip_bytes := out.items();
+        out.items()
+    });
     
     // verifying here means if one returns wrong bytes we go to the next mirror
     // but it becomes more annoying when i start using content hash so its easier to compute that as part of the unpacking. 

@@ -1,4 +1,9 @@
 
+## (Aug 14) sb3
+
+- make it work in web: wasm int(Infinity) is an error. math imports. fetch non-hash mirror path. 
+- fetch: os/bin/curl is cute but be less wasteful and just call the host directly. ex. (local) hctarcs 5113ms->4827ms
+
 ## (Aug 13) sb3
 
 - my ancient cat ball is from scratch 2 it seems because the project.json is different in the api (save in the website normalizes). 
