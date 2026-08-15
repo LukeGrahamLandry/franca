@@ -5,9 +5,11 @@ Value :: f64;
 Canvas :: @rec @struct {
     size: Vec2 = vec2(480, 360);
     pen_pixels: []u32;
+    frame_pixels: []u32;
     rng: Random.Rng;
     // vars that are "For all sprites" are represented as locals in stage. 
     stage: *SpriteInstance;  
+    classes: []SpriteClass;
     scripts: RawList(*Script) = empty();
     clones: RawList(*SpriteInstance) = empty();
     gpa: Alloc;
@@ -25,11 +27,11 @@ Script :: @rec @struct {
 // TODO: maybe it would be better to generate MySprite :: @struct(base: SpriteInstance, vars: Array(Value, N)); 
 //       (which would be same layout) because then could name var fields so it would be readable. 
 SpriteInstance :: @rec @struct {  // !Sized
-    self: *SpriteClass;
+    class: *SpriteClass;
+    // TODO: since you can query your position, might need to store this as f64 in case you do hacky thing like using it as a variable. 
     pos: Vec2 = vec2(0);
     pen: (@struct(down := false, colour: u32 = 0, size: f64 = 1)) = ();
     looks: (@struct(costume := 0, size: f64 = 1, hide := false)) = ();
-    vars_shown: []bool;   // [vars,lists]; TODO: bit set. TODO: how does this interact with clones?
     // TODO: direction, say/think/ask, look effects, show/hide, layer, volume, drag mode
     // vars: Array(Value, self.var_count) #inline; // [vars,lists,args]; 
 };
@@ -42,7 +44,15 @@ SpriteClass :: @rec @struct {
     Costume :: @struct(data: []u8, name: Str, width: i64, height: i64);
     initial_vars: []Value;  // [vars,lists]
     var_count: i64;  // [vars,lists,arguments]
-    var_names: []Str;  // for displaying monitors; [vars,lists]
+    monitors: []Monitor;
+};
+
+Monitor :: @struct {
+    var: i64;
+    name: Str;
+    x: i64; y: i64;
+    hide: bool;
+    mode: Builder.Monitor.FieldType(.mode);
 };
 
 Trigger :: @tagged(
@@ -91,18 +101,14 @@ fn new_sprite(c: *Canvas, class: *SpriteClass) *SpriteInstance = {
     N := size_of(SpriteInstance) / size_of(Value);
     data := c.gpa.alloc_uninit(Value, N + class.var_count);
     instance := bit_cast_unchecked(*f64, *SpriteInstance, data.ptr);
-    instance[] = (
-        self = class,
-        // TODO: initial state has to come from project monitors i guess?
-        vars_shown = c.gpa.alloc_zeroed(bool, class.initial_vars.len),
-    );
+    instance[] = (class = class);
     instance.index(0).slice(class.initial_vars.len).copy_from(class.initial_vars);
     instance
 }
 
+// only indexed by var_index(Compiler, _) so always in bounds
 fn index(it: *SpriteInstance, i: i64) *Value = {
     N := size_of(SpriteInstance) / size_of(Value);
-    // @debug_assert_ult(i, it.self.var_count);  // :SLOW and checked by var_index(*Compile, _)
     bit_cast_unchecked(*SpriteInstance, *Value, it).offset(i + N)
 }
 
@@ -213,30 +219,11 @@ pen_setPenColorToColor :: fn(s, a) void = { s.sprite.pen.colour = a.int().trunc(
 pen_setPenSizeTo :: fn(s, a) void = { s.sprite.pen.size = a; };
 pen_penUp :: fn(s) void = { s.sprite.pen.down = false; };
 pen_penDown :: fn(s) void = { s.sprite.pen.down = true; };
-pen_clear :: fn(s) void = { s.canvas.pen_pixels.interpret_as_bytes().set_bytes(0xff); }
+pen_clear :: fn(s) void = Render'pen_clear(s.canvas);
 // pos is clamped to the canvas but it's the center of the image so it can still go half way off the screen.
-pen_stamp :: fn(s) void = {  // :SLOW
-    c := s.sprite.self.costumes[s.sprite.looks.costume]&;
-    stage_size := s.canvas.size;
-    pos := s.sprite.pos + stage_size/2;
-    pos.y = stage_size.y - pos.y;
-    pos := clamp(pos, vec2(0), stage_size - vec2(1));
-    pos -= vec2(c.width.float().cast()/2, c.height.float().cast()/2);
-    sx, sy := (pos.x.cast().int(), pos.y.cast().int());
-    cx, cy := (stage_size.x.cast().int(), stage_size.y.cast().int());
-    w := min(c.width, cx - sx).max(0);
-    h := min(c.height, cy - sy).max(0);
-    range(0, h) { y |
-        if sy+y >= 0 {
-            src := u32.reinterpret_bytes(c.data).subslice(y*c.width, w);
-            range(0, w) { x |
-                if sx+x >= 0 && src[x].shift_right_logical(24) != 0 {  // very shitty alpha
-                    dest := s.canvas.pen_pixels[(sy+y)*cx + sx + x]&;
-                    dest[] = src[x];
-                }
-            };
-        };
-    };
+pen_stamp :: fn(s) void = {
+    c := s.sprite.class.costumes[s.sprite.looks.costume]&;
+    Render'pen_stamp(s.canvas, c, s.sprite.pos);
 }
 // TODO: use this
 looks_setsizeto :: fn(s, percent) void = { s.sprite.looks.size = percent / 100; }
@@ -249,6 +236,7 @@ looks_show :: fn(s) void = { s.sprite.looks.hide = false; };
 
 looks_cleargraphiceffects :: fn(s) void = println("looks_cleargraphiceffects");
 looks_switchbackdropto :: fn(s, idx) void = @println("TODO: motion_ifonedgebounce %", idx);
+// TODO: lower this to looks_say(msg); control_wait(t); looks_say("");
 looks_sayforsecs :: fn(s, msg, t) void = @println("TODO: looks_sayforsecs % %", msg, t);
 event_broadcast :: fn(s, event) void = @println("TODO: broadcast %", event);
 sensing_touchingobject :: fn(_) = { println("sensing_touchingobject"); false.from_bool() };
@@ -258,10 +246,6 @@ motion_ifonedgebounce :: fn(s) void = println("TODO: motion_ifonedgebounce");
 looks_gotofrontback :: fn(s, _) void = println("TODO: looks_gotofrontback");
 looks_changeeffectby :: fn(s, d, e) void = println("TODO: looks_changeeffectby");
 motion_pointindirection :: fn(s, d) void = println("TODO: motion_pointindirection");
-data_hidevariable :: fn(sprite: *SpriteInstance, idx: i64) void = { sprite.vars_shown[idx] = false; };
-data_showvariable :: fn(sprite: *SpriteInstance, idx: i64) void = { sprite.vars_shown[idx] = true; };
-data_hidelist :: fn(sprite: *SpriteInstance, idx: i64) void = { sprite.vars_shown[idx] = false; };
-data_showlist :: fn(sprite: *SpriteInstance, idx: i64) void = { sprite.vars_shown[idx] = true; };
 control_delete_this_clone :: fn(s) void = println("TODO: control_delete_this_clone");  // TODO: also have to also return all the way up somehow?
 control_create_clone_of :: fn(s, _) void = println("TODO: control_create_clone_of");
 motion_glidesecstoxy :: fn(s, t, x, y) void = println("TODO: motion_glidesecstoxy");
@@ -323,7 +307,6 @@ asin :: fn(a: f64) f64 #libc;
 atan :: fn(a: f64) f64 #libc;
 fmod :: fn(a: f64, b: f64) f64 #libc;
 
-// TODO: my mandelbrot has a missing row at the top
 fn update_pos(s: *Script, $body: @Fn(old: Vec2) Vec2) void = {
     old := s.sprite.pos;
     new := body(old);
@@ -331,9 +314,7 @@ fn update_pos(s: *Script, $body: @Fn(old: Vec2) Vec2) void = {
     new := new.clamp(-stage_size/2 + vec2(0, 1), stage_size/2 - vec2(1, 0));
     s.sprite.pos = new;
     if s.sprite.pen.down {
-        new := new + stage_size/2;
-        i := int(cast((stage_size.y - new.y) * stage_size.x + new.x));
-        s.canvas.pen_pixels[i] = s.sprite.pen.colour;
+        Render'pen_line(s.canvas, s.sprite.pen&, old, new);
     };
 }
 
@@ -343,6 +324,7 @@ saved_args :: fn($n: i64) []Value #inline/*semantic*/ = {
 }
 
 // TODO: use real args when sync. async will need to allocate a stack on the *Script anyway 
+#inline
 fn procedures_call(s: *Script, callee: @FnPtr(s: *Script) void, params: []i64, args: []Value, saved_args: []Value) void = {
     range(0, params.len) { i |
         slot := s.sprite[params[i]]&;
@@ -357,7 +339,7 @@ fn procedures_call(s: *Script, callee: @FnPtr(s: *Script) void, params: []i64, a
 
 // TODO: test set_costume(add(get_costume(), 1)); cycles in a confusing way
 fn lookup_costume_index(name: Value, s: *Script) f64 = {
-    costumes := s.sprite.self.costumes;
+    costumes := s.sprite.class.costumes;
     if name.is_number() {
         // TODO: clamp is wrong. but its doin something
         return name.int().clamp(0, costumes.len - 1).float();
@@ -369,7 +351,23 @@ fn lookup_costume_index(name: Value, s: *Script) f64 = {
     0
 }
 
-Node :: import("@/examples/gpu/hctarcs/builder.fr").Node;
+// TODO: SpriteClicked needs to send to a specific one
+fn send_event(c: *Canvas, event: Trigger) void = {
+    ::AutoEq(Trigger);
+    for c.clones { s |
+        s: Script = (sprite = s, canvas = c);
+        // :SLOW should sort by class so don't have to recompare for each clone
+        each s.sprite.class.events { it |
+            if it.trigger& == event& {
+                it'callee(s&);
+            };
+        };
+    };
+}
+
+Render :: import("@/examples/gpu/hctarcs/soft.fr");
+Node :: Builder.Node;
+Builder :: import("@/examples/gpu/hctarcs/builder.fr");
 #use("@/graphics/vec.fr");
 
 temporary_main :: fn(initialize: @FnPtr(c: *Canvas) Ty([]SpriteClass, []Str), show: bool) []u8 = {
@@ -380,12 +378,15 @@ temporary_main :: fn(initialize: @FnPtr(c: *Canvas) Ty([]SpriteClass, []Str), sh
     #use("@/lib/sys/process.fr");
     c := @ref @as(Canvas) (
         pen_pixels = temp().alloc_init(u32, 480*360, fn(_) => MAX_u32),
+        frame_pixels = temp().alloc_zeroed(u32, 480*360),
         rng = Random.xoshiro256SS.new_seeded(),
         gpa = temp(),
         stage = zeroed(*SpriteInstance),
+        classes = empty(),
     );
     start := timestamp();
     classes, strings := initialize(c);
+    c.classes = classes;
     c.constants = c.gpa.alloc_init(Value, strings.len, fn(i) => {
         c.new_obj(string = (s = strings[i].shallow_copy(c.gpa)))
     });
@@ -394,36 +395,17 @@ temporary_main :: fn(initialize: @FnPtr(c: *Canvas) Ty([]SpriteClass, []Str), sh
         c.clones&.push(instance, c.gpa);
     };
     c.stage = c.clones[0];
-    @debug_assert_eq(c.stage.self.name, "Stage");
-    for c.clones { s |
-        s: Script = (sprite = s, canvas = c);
-        each s.sprite.self.events { it |
-            if it.trigger&.is(.Flag) {
-                it'callee(s&);
-            };
-        };
-        each s.sprite.self.events { it |
-            if it.trigger&.is(.SpriteClicked) {
-                it'callee(s&);
-            };
-        };
-        // TODO: when i want multiple frames, need to make a copy before drawing the sprite itself on the peristant pen texture
-        @if(!s.sprite.looks.hide)
-        impl'pen_stamp(s&);
-    };
-    for c.clones { sprite |
-        enumerate sprite.vars_shown { i, show |
-            if show[] || true { 
-                name := sprite.self.var_names[i];
-                @println("%[%; %] = %", sprite.self.name, i, name, sprite[i].coerce_string(c));
-            };
-        };
-    };
+    @debug_assert_eq(c.stage.class.name, "Stage");
+    
+    c.send_event(.Flag);
+    c.send_event(.SpriteClicked);  // TODO: remove; just to make quicksort benchmark work
+    Render'finish_frame(c);
+    
     @println("eval took %ms", timestamp() - start);
     
     out := @ref u8.list(temp());
     @fmt(out, "P6 % % 255\n", 480, 360);
-    for c.pen_pixels { c |
+    for c.frame_pixels { c |
         out.push(c.shift_right_logical(16).trunc());
         out.push(c.shift_right_logical(8).trunc());
         out.push(c.trunc());

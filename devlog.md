@@ -1,17 +1,25 @@
 
+## (Aug 15) sb3
+
+- draw text for variable monitors
+  - which var for hide/show blocks is constant so can create monitors for them in the compiler then runtime doesn't need to know unused names  
+  - shuttle positions to runtime from the json. pos aren't in the same coordinate system as sprites.  
+
 ## (Aug 14) sb3
 
 - make it work in web: wasm int(Infinity) is an error. math imports. fetch non-hash mirror path. 
 - fetch: os/bin/curl is cute but be less wasteful and just call the host directly. ex. (local) hctarcs 5113ms->4827ms
 - awkward that i can only add things to my mirror by a ci build working but if i try to add too many at once i'll hit the rate limit
+  - i don't understand why it seemed to work in 1eb9326 (before mirroring attempt was in the right place) and now doesn't
 - running quicksort benchmark
   - lists. avoiding my previous woes with the 200k array literal by just including the floats as bytes like i do for the images
   - i gave myself a scare when making lt coerce strings by typing == instead of <= and then linrays looped forever (but i thought i somehow made it super slow)
   - thank you past me "Thier [sic] validate function reads off the beginning of the list and relies on empty comparing less than everything"
   - for timing against turbowarp, make sure to turn off "Warp Timer" in advanced settings to make it fair. also chrome is faster than firefox. 
   - average=0.094. 0.105 if i don't assume things are numbers. not great, ~twice turbowarp.
-
-TODO: show monitors on the screen, get initial hide state from the json. 
+- i kinda have affection for the software rendering even tho im terrible at it. 
+  maybe i'll keep it even when i do gpu. at the very least, sensing_touchingcolor will be much easier this way. 
+  doing it this way first is extra incentive to make just putting pixels on the screen take less boilerplate. 
 
 ## (Aug 13) sb3
 

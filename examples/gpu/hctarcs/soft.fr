@@ -1,0 +1,120 @@
+
+pen_clear :: fn(canvas: *Rt.Canvas) void = {
+    canvas.pen_pixels.interpret_as_bytes().set_bytes(0xff);
+}
+
+// TODO: pen is missing some of the edges
+// TODO: line instead of point, use size of pen.  
+pen_line :: fn(canvas: *Rt.Canvas, pen: *FieldType(Rt.SpriteInstance, .pen), old: Vec2, new: Vec2) void = {
+    stage_size := canvas.size;
+    new := new + stage_size/2;
+    i := int(cast((stage_size.y - new.y) * stage_size.x + new.x));
+    canvas.pen_pixels[i] = pen.colour;
+}
+
+// TODO: does this use size of pen or size of sprite?
+pen_stamp :: fn(canvas: *Rt.Canvas, c: *Rt.SpriteClass.Costume, pos: Vec2) void = {
+    stage_size := canvas.size;
+    pos := pos + stage_size/2;
+    pos.y = stage_size.y - pos.y;
+    pos := clamp(pos, vec2(0), stage_size - vec2(1));
+    pos -= vec2(c.width.float().cast()/2, c.height.float().cast()/2);
+    sx, sy := (pos.x.cast().int(), pos.y.cast().int());
+    cx, cy := (stage_size.x.cast().int(), stage_size.y.cast().int());
+    w := min(c.width, cx - sx).max(0);
+    h := min(c.height, cy - sy).max(0);
+    range(0, h) { y |
+        if sy+y >= 0 {
+            src := u32.reinterpret_bytes(c.data).subslice(y*c.width, w);
+            range(0, w) { x |
+                if sx+x >= 0 && src[x].shift_right_logical(24) != 0 {  // very shitty alpha
+                    dest := canvas.pen_pixels[(sy+y)*cx + sx + x]&;
+                    dest[] = src[x];
+                }
+            };
+        };
+    };
+}
+
+draw_text :: fn(canvas: *Rt.Canvas, text: Str, pos: Vec2) void = {
+    // TODO: wrapping, position away from the sprite
+    i := 0;
+    for text { char |
+        draw_char(canvas, char, pos);
+        pos.x += 8;
+        i += 1;
+        if i == 22 {
+            pos.x -= 8*22;
+            pos.y -= 8;
+            i = 0;
+        };
+    };
+};
+
+draw_char :: fn(canvas: *Rt.Canvas, char: u8, pos: Vec2) void = {
+    if char < 32 || char >= 128 {
+        char = 32;
+    };
+    img := font_texture.subslice((char.int() - 32)*8*8, 8*8).interpret_as_bytes();
+    c: Rt.SpriteClass.Costume = (data = img, width = 8, height = 8, name = "");
+    pen_stamp(canvas, c&, pos);
+};
+
+finish_frame :: fn(c: *Rt.Canvas) void = {
+    // pen texture persists between frames so don't stomp it
+    c.frame_pixels.copy_from(c.pen_pixels);
+    saved_pen_pixels := c.pen_pixels;
+    c.pen_pixels = c.frame_pixels;
+    
+    for c.clones { sprite |
+        if !sprite.looks.hide {
+            costume := sprite.class.costumes[sprite.looks.costume]&;
+            pen_stamp(c, costume, sprite.pos);
+            // TODO: say
+        };
+    };
+    
+    // TODO: slider ui, show lists vertically. colour to distinguish name from value. auto layout when using show block on something that wasn't in the project file. which clone is it supposed to use?  
+    buf := @ref u8.list(temp());
+    each c.classes { class |
+        continue :: local_return;
+        sprite := c.clones.find(fn(it) => identical(it.class, class)) || continue();
+        each class.monitors { m |
+            if !m.hide {
+                buf.clear();
+                @fmt(buf, "%:%", m.name, sprite[][m.var].coerce_string(c));
+                pos := vec2(m.x.float().cast(), m.y.float().cast());
+                pos.y = c.size.y - pos.y;
+                pos -= c.size / 2;
+                draw_text(c, buf.items(), pos);
+            };
+        };
+    };
+    
+    c.pen_pixels = saved_pen_pixels;
+}
+
+font_texture :: {
+    packed := import("@/graphics/data/fonts.fr").cpc;
+    bits := temp().alloc_zeroed(u8, 8*8*256);
+    import("@/graphics/debugtext.fr")'unpack_font(packed, bits);
+    
+    n := 128-32;
+    out := ast_alloc().alloc_zeroed(u32, n * 8*8);
+    range(0, n) { i |
+        range(0, 8) { y |
+            range(0, 8) { x |
+                idx := ((y*256*8)+((i+32)*8+x));
+                if bits[idx] != 0 {
+                    out[i*64+y*8+x] = 0xFF000000;
+                } else {
+                    out[i*64+y*8+x] = 0xFFFFFFFF;
+                };
+            };
+        };
+    };
+    out
+}
+
+Rt :: import("@/examples/gpu/hctarcs/runtime.fr");
+#use("@/graphics/vec.fr");

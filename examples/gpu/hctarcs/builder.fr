@@ -5,9 +5,10 @@ Project :: @struct {
 };
 Sprite :: @struct {
     name: Str;
-    blocks: RawList(*Node);
-    variables: RawList(*Node);
-    costumes: RawList(Costume);
+    blocks: RawList(*Node) = empty();
+    variables: RawList(*Node) = empty();
+    costumes: RawList(Costume) = empty();
+    monitors: RawList(Monitor) = empty();
     var_plus_param_count := 0;
 };
 Node :: @rec @struct {
@@ -26,6 +27,16 @@ Costume :: @struct {
     md5 := "";
 };
 
+Monitor :: @struct {
+    var: *Node;
+    x: i64; y: i64; 
+    hide: bool;
+    mode: @tagged(
+        Slider: @struct(lo: f64, hi: f64, discrete: bool),
+        Value,
+    );
+};
+
 // //
 // tests.fr has examples. 
 // these builder functions all use ast_alloc (so can only run at comptime). 
@@ -41,12 +52,7 @@ fn new_project() Ty(*Project, *Sprite) = {
 }
 
 fn sprite(p: *Project, args: @struct(name: Str)) *Sprite = {
-    s := ast_alloc().boxed(Sprite, (
-        blocks = empty(),
-        variables = empty(),
-        costumes = empty(),
-        name = args.name,
-    ));
+    s := ast_alloc().boxed(Sprite, (name = args.name));
     p.sprites&.push(s, ast_alloc());
     s
 }
@@ -369,8 +375,8 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
     each p.targets { s |
         // TODO: im assuming block,var,param will all be unique which isn't true
         blocks: HashMap(Str, *Node) = init(temp());
-        sprite := zeroed(Sprite);
-        sprite.name = s.name;
+        sprite: Sprite = (name = s.name);
+        @if(project.sprites&.contains(fn(it) => it.name == s.name)) return(Err = @tfmt("duplicate sprite name (%)", s.name));
         
         if !s.isStage {
             next_var_id := 1.0;  // different index space from locals
@@ -383,7 +389,6 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
         } else {
             @if(!identical(s, stage)) return(Err = "multiple stages");
         };
-        // TODO: make sure sprite names are unique too
         
         next_var_id := 1.0;
         each s.variables& { key, it |
@@ -585,25 +590,29 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                 ), temp());
             };
             
-            project.sprites&.push(temp().boxed(Sprite, sprite), temp());
-        if false {
-            out := u8.list(temp());
-            for sprite.blocks { it |
-                emit :: fn(out: *List(u8), it: *Node, depth: i64) void = {
-                    out.push_repeated(depth, " ".ascii());
-                    @fmt(out, "- % % %\n", it.op, it.literal, it.string);
-                    a := it.args;
-                    if it.op == .procedures_call {  // don't spam print the body again
-                        a = a.rest(1);
-                    };
-                    for a { it |
-                        emit(out, it, depth + 1);
-                    };
+        each p.monitors { m |
+            name := m.spriteName || "Stage";
+            if name == sprite.name {
+                if blocks&.get(m.id) { var |
+                    // TODO: the project file also stores the initial display value but i don't understand why. isn't redundant with the value of the var itself? 
+                    sprite.monitors&.push((
+                        var = var,
+                        x = m.x, y = m.y,
+                        mode = @match(m.mode) {
+                            fn slider() => (Slider = (
+                                lo = m.sliderMin,
+                                hi = m.sliderMax,
+                                discrete = m.isDiscrete,
+                            ));
+                            fn default() => .Value;
+                            fn list() => .Value;
+                        },
+                        hide = !m.visible,
+                    ), temp());
                 };
-                emit(out&, it, 0);
-            };
-            print(out.items());
+            }
         };
+            project.sprites&.push(temp().boxed(Sprite, sprite), temp());
     };
     if project.sprites[0].name != "Stage" {
         i := project.sprites.index_of(fn(it) => it.name == "Stage").unwrap();
@@ -816,17 +825,20 @@ Meta :: @struct {
 };
 
 Monitor :: @struct {
-    id: Str;
-    mode: Str;
-    opcode: Str;
+    id: Str;  // key in sprite.(variables,list)
+    mode: @enum(default, slider, list);
+    opcode: @enum(data_variable, data_listcontents, sensing_loudness);
     params: RawHashMap(Str, Str);
     spriteName: ?Str;
-    //value: [],
     width: ?i64;
     height: ?i64;
     x: i64;
     y: i64;
     visible: bool;
+    // for mode.slider
+    sliderMin := 0.0;
+    sliderMax := 0.0;
+    isDiscrete := false;
 };
 
 Value :: Str;
@@ -1032,6 +1044,8 @@ X :: {
 ::DeriveJson(Raw.Project);
 ::DeriveJson(Raw.Meta);
 ::DeriveJson(Raw.Monitor);
+::DeriveJson(Raw.Monitor.FieldType(.mode));
+::DeriveJson(Raw.Monitor.FieldType(.opcode));
 ::DeriveJson(Raw.Opcode);
 ::DeriveJson(Raw.MutationRepr);
 };

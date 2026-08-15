@@ -99,6 +99,8 @@ Depending on having a random binary installed makes me sad but more thought is r
 You can use examples/web/get.fr instead if you compile that and name it curl and add it to PATH when running the compiler. 
 However get.fr depends on mbedtls so to build it without curl you'd need to fill out the cache folder manually. 
 
+TODO: talk about mirroring
+
 ## Alternative Frontends
 
 The metaprogramming stuff is powerful enough that you can often access code written in other languages 

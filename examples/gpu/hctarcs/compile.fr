@@ -1,4 +1,5 @@
 // ast -> franca source. 
+// note: this mutates the ast
 //
 // - lists are a constant drop down so don't need to be typechecked. 
 // - hoist dynamic typechecking out of rt.impl so it can be elided
@@ -12,6 +13,7 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
         out = out, 
         string_lookup = init(temp()), string_constants = list(temp()),
         var_counts = temp().alloc_init(i64, p.sprites.len, fn(i) => p.sprites[i].var_plus_param_count),
+        project = p,
     );
     self := self&;
     
@@ -80,6 +82,7 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
     @fmt(out, "a := c.gpa;\nfloats_blob := f64.reinterpret_bytes(floats_blob);\n");
     @fmt(out, "classes := a.alloc_uninit(Rt.SpriteClass, %);\n", p.sprites.len);
     enumerate p.sprites { i, it |
+        self.current_sprite = i;
         @fmt(out, "t := a.alloc_uninit(Rt.SpriteClass.Costume, %);\n", it.costumes.len);
         enumerate it.costumes { i, it |
             // TODO: declaring '_' twice probably shouldn't be allowed :compiler
@@ -99,8 +102,19 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
                 @default => @debug_assert(!is_hat(it.op));  // there can be top level non-hat blocks, they just never run
             };
         };
-        @fmt(out, "v := a.alloc_zeroed(Rt.Value, %);\n", it.variables.len);
         
+        @fmt(out, "m := a.alloc_zeroed(Rt.Monitor, %);\n", it.monitors.len);
+        enumerate it.monitors { i, m |
+            @fmt(out, "m[%] = (var=%,name=strings[%],x=%,y=%,hide=%,mode=", i, self.var_index(m.var), self.const_string(m.var.string), m.x, m.y, m.hide);
+            @match(m.mode) {
+                fn Value() => @fmt(out, ".Value");
+                // TODO: do the better float printing
+                fn Slider(it) => @fmt(out, "(Slider=(lo=%,hi=%,discrete=%))", it.lo, it.hi, it.discrete);
+            };
+            @fmt(out, ");\n");
+        };
+        
+        @fmt(out, "v := a.alloc_zeroed(Rt.Value, %);\n", it.variables.len);
         // TODO: be a function even tho will only ever need to recurse once
         // TODO: be less wasteful with floats_blob if all strings
         start, n := (floats_blob.len, it.variables.len);
@@ -148,7 +162,7 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
             @fmt(out, ");\n");
         };
         
-        @fmt(out, "classes[%] = (name = strings[%], costumes = t, events = e.items(), var_count = %, initial_vars = v, var_names = names);\n", i, self.const_string(it.name), it.var_plus_param_count);
+        @fmt(out, "classes[%] = (name = strings[%], costumes = t, events = e.items(), var_count = %, initial_vars = v, monitors = m);\n", i, self.const_string(it.name), it.var_plus_param_count);
     };
     @fmt(out, "(classes, strings)\n");
     @fmt(out, "};\n");
@@ -190,6 +204,7 @@ Compile :: @struct {
     string_lookup: HashMap(Str, i64);
     string_constants: List(Str);
     current_sprite := 0;
+    project: *S.Project;
     var_counts: []i64;
     current_def: ?*Node = .None;
 };
@@ -203,10 +218,6 @@ Compile :: @struct {
 compile :: fn(self: *Compile, it: *Node) void = {
     out := self.out;
     @if(out.items().ends_with("\n")) out.push_repeated(self.depth*4, " ".ascii());
-    
-    if @is(it.op, .data_hidevariable, .data_showvariable, .data_hidelist, .data_showlist) {
-        return @fmt(out, "%.%(%);\n", @if(it.args[0].op == .franca_var, "s.sprite", "s.canvas.stage"), it.op, self.var_index(it.args[0]));
-    };
     
     if simple_ops.get(it.op) { data |
         @if(data.need_self) @fmt(out, "s.");
@@ -305,7 +316,7 @@ compile :: fn(self: *Compile, it: *Node) void = {
                 return();
             };
             
-            @fmt(out, "@slice(");
+            @fmt(out, "@const_slice(");
             for params { it |
                 @debug_assert_eq(it.op, .argument_reporter_string_number);
                 @fmt(out, "%,", self.var_index(it));
@@ -373,7 +384,28 @@ compile :: fn(self: *Compile, it: *Node) void = {
             compile(self, it.args[0]);
             @fmt(out, ".to_bool());\n");
         }
-        @default => @panic("TODO: compile %", it.op);
+        @default => {
+            if @is(it.op, .data_hidevariable, .data_showvariable, .data_hidelist, .data_showlist) {
+                var := it.args[0];
+                i, s := @match(var.op) {
+                    fn franca_var() => (self.current_sprite, "s.sprite");
+                    fn franca_var_stage() => (0, "s.canvas.stage");
+                    @default => @panic("% invalid argument %", it.op, var.op);
+                };
+                sprite := self.project.sprites[i]&;
+                ::ptr_utils(Node);
+                m := sprite.monitors.items().index_of(fn(jt) => identical(jt.var, var)) || {
+                    // the project.json didn't contain a monitor entry for this. 
+                    // TODO: need to remember that it doesn't have a position so do auto-layout based on order the show blocks run. 
+                    push(sprite.monitors&, (x = 0, y = 0, hide = true, mode = .Value, var = var), temp());
+                    sprite.monitors.len - 1
+                }; 
+                h := @is(it.op, .data_hidevariable, .data_hidelist);
+                return @fmt(out, "%.class.monitors[%].hide = %;\n", s, m, h);
+            };
+            
+            @panic("TODO: compile %", it.op);
+        };
     };
 }
 
