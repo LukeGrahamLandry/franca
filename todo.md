@@ -11,6 +11,7 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
+- to make importing Viewer just for stb_image less confusing, reexport stbi_image_free (with a FEAT_PNG check)
 - just for good luck, map comptime jit memory as read only (not exec) after the compiler is done when jitting with ExecStyle.AOT. 
   ex. (before calling user code in run_franca_file), (at the end of load_circuit_index_worker in circuit example), (hctarcs once i allow runtime loading), etc.
 - webgpu doesn't have point size so epicycles is hard to tell what you're drawing
@@ -63,6 +64,9 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
   - the pattern where i use const declarations as a list of functions to export 
     and one of the exported names shadows an overloadset an implementation wants to call. 
     ex. (import_wasm/run.fr/Exports/env/log, compiler/comptime.fr/driver_vtable_exports/(_get_build_options, etc.))
+  - when generating code as strings it's annoying that @slice/@const_slice don't work for empty (because the macro sees the expression type as void).
+    could be solved by letting the macro impl see the inferred result type. 
+  - when giving compile error in an imported generated string, write it to a file in the target dir so you can click on the line number to see context. 
 - see todo comments:
   - life/README.md
   - circuit/README.md

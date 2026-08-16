@@ -36,9 +36,10 @@ pen_stamp :: fn(canvas: *Rt.Canvas, c: *Rt.SpriteClass.Costume, pos: Vec2) void 
     };
 }
 
-draw_text :: fn(canvas: *Rt.Canvas, text: Str, pos: Vec2) void = {
+draw_text :: fn(canvas: *Rt.Canvas, text: Str, pos: Vec2) i64 = {
     // TODO: wrapping, position away from the sprite
     i := 0;
+    lines := 1;
     for text { char |
         draw_char(canvas, char, pos);
         pos.x += 8;
@@ -47,8 +48,10 @@ draw_text :: fn(canvas: *Rt.Canvas, text: Str, pos: Vec2) void = {
             pos.x -= 8*22;
             pos.y -= 8;
             i = 0;
+            lines += 1;
         };
     };
+    lines
 };
 
 draw_char :: fn(canvas: *Rt.Canvas, char: u8, pos: Vec2) void = {
@@ -70,7 +73,9 @@ finish_frame :: fn(c: *Rt.Canvas) void = {
         if !sprite.looks.hide {
             costume := sprite.class.costumes[sprite.looks.costume]&;
             pen_stamp(c, costume, sprite.pos);
-            // TODO: say
+            
+            say := sprite.looks.say.coerce_string(c);
+            draw_text(c, say, sprite.pos);
         };
     };
     
@@ -79,14 +84,28 @@ finish_frame :: fn(c: *Rt.Canvas) void = {
     each c.classes { class |
         continue :: local_return;
         sprite := c.clones.find(fn(it) => identical(it.class, class)) || continue();
+        vars := sprite[].vars();
         each class.monitors { m |
             if !m.hide {
                 buf.clear();
-                @fmt(buf, "%:%", m.name, sprite[][m.var].coerce_string(c));
+                @fmt(buf, "%:", m.name);
                 pos := vec2(m.x.float().cast(), m.y.float().cast());
                 pos.y = c.size.y - pos.y;
                 pos -= c.size / 2;
-                draw_text(c, buf.items(), pos);
+                value := vars[m.var];
+                if value.is_list() {
+                    draw_text(c, buf.items(), pos);
+                    l := value.to_obj()[].list;
+                    pos.y -= 8;
+                    for l { value |
+                        buf.clear();
+                        coerce_string(value, c, buf);
+                        pos.y -= draw_text(c, buf.items(), pos).float().cast() * 8;
+                    };
+                } else {
+                    coerce_string(value, c, buf);
+                    draw_text(c, buf.items(), pos);
+                }
             };
         };
     };

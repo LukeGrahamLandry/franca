@@ -9,6 +9,7 @@ Sprite :: @struct {
     variables: RawList(*Node) = empty();
     costumes: RawList(Costume) = empty();
     monitors: RawList(Monitor) = empty();
+    list_var_indices: RawList(i64) = empty();
     var_plus_param_count := 0;
 };
 Node :: @rec @struct {
@@ -62,10 +63,25 @@ fn costume(s: *Sprite, args: Costume) *Node = {
     N(args.name)
 }
 
-fn define(s: *Sprite, warp: bool, $body: FuncId) *Node = {
+fn define(s: *Sprite, warp: bool, $body: FuncId) *Node = 
+    s.define(s.forward_declare(), warp, body);
+
+fn forward_declare(s: *Sprite) *Node = {
+    b := make("procedures_definition", @slice(
+        make("franca_block", empty()),
+        make("procedures_prototype", empty()),
+    ));
+    b.literal = next_var_id[].float();
+    next_var_id[] += 1;
+    s.blocks&.push(b, ast_alloc());
+    b
+}
+
+fn define(s: *Sprite, b: *Node, warp: bool, $body: FuncId) *Node = {
+    @assert_eq(b.op, .procedures_definition, "define(forward_declare)");
     func :: get_function_ast(body, false, false, false, false);
-    b := @if(@run func.arg.bindings[0].name&.is(.None), {
-        make("procedures_definition", @slice(block(body), make("procedures_prototype", empty())))
+    @if(@run func.arg.bindings[0].name&.is(.None), {
+        b.args[0] = block(body);
     }, {
         @run {
             if func.body.Normal.ty != void {
@@ -85,12 +101,9 @@ fn define(s: *Sprite, warp: bool, $body: FuncId) *Node = {
             it.op = .argument_reporter_string_number;
         };
         body := body(t);
-        body := make("franca_block", body);
-        make("procedures_definition", @slice(body, make("procedures_prototype", vars)))
+        b.args[0] = make("franca_block", body);
+        b.args[1].args = vars;
     });
-    b.literal = next_var_id[].float();
-    next_var_id[] += 1;
-    s.blocks&.push(b, ast_alloc());
     b
 }
 
@@ -109,6 +122,7 @@ fn set(var: *Node, value: *Node) *Node = make("data_setvariableto", @slice(value
 fn repeatuntil(cond: *Node, $body: FuncId) *Node = make("control_repeat_until", @slice(cond, block(body)));
 fn repeat(count: *Node, $body: FuncId) *Node = make("control_repeat", @slice(count, block(body)));
 fn if(cond: *Node, $then: FuncId, $else: FuncId) *Node = make("control_if_else", @slice(cond, block(then), block(else)));
+fn if(cond: *Node, $then: FuncId) *Node = make("control_if", @slice(cond, block(then)));
 
 fn peneraseall() *Node = make("pen_clear", empty());
 fn penup() *Node = make("pen_penUp", empty());
@@ -140,6 +154,20 @@ fn eq(a: *Node, b: *Node) *Node = make("operator_equals", @slice(a, b));
 fn or(a: *Node, b: *Node) *Node = make("operator_or", @slice(a, b));
 fn and(a: *Node, b: *Node) *Node = make("operator_and", @slice(a, b));
 fn not(a: *Node) *Node = make("operator_not", @slice(a));
+fn mod(a: *Node, b: *Node) *Node = make("operator_mod", @slice(a, b));
+fn mathop(name: Str, a: *Node) *Node = make("operator_mathop", @slice(a, N(name)));
+
+fn say(a: *Node) *Node = make("looks_say", @slice(a));
+fn show() *Node = make("looks_show", empty());
+fn show_list(l: *Node) *Node = make("data_showlist", @slice(l));
+fn append(l: *Node, val: *Node) *Node = make("data_addtolist", @slice(val, l));
+fn join(a: *Node, b: *Node) *Node = make("operator_join", @slice(a, b));
+fn get(l: *Node, idx: *Node) *Node = make("data_itemoflist", @slice(idx, l));
+fn length(l: *Node) *Node = make("data_lengthoflist", @slice(l));
+fn delete(l: *Node, idx: *Node) *Node = make("data_deleteoflist", @slice(idx, l));
+fn delete_all(l: *Node) *Node = make("data_deletealloflist", @slice(l));
+fn replace(l: *Node, idx: *Node, new: *Node) *Node = make("data_replaceitemoflist", @slice(idx, new, l));
+fn letter(s: *Node, idx: *Node) *Node = make("operator_letter_of", @slice(idx, s));
 
 fn make(op: Str, args: []*Node) *Node = {
     op := Raw.Opcode.from_name(op) || @panic("invalid op %", op);
@@ -167,6 +195,13 @@ fn variables(s: *Sprite, $Count: i64) TupleArray(*Node, Count) #generic = {
         s.variables&.push(it[], ast_alloc());
     };
     bit_cast_unchecked(@type out, TupleArray(*Node, Count), out)
+}
+
+fn lists(s: *Sprite, $Count: i64) TupleArray(*Node, Count) #generic = {
+    range(0, Count) { i |
+        s.list_var_indices&.push(s.variables.len + i, ast_alloc());
+    };
+    s.variables(Count)
 }
 
 fn TupleArray($T: Type, $N: i64) Type = Ty(ast_alloc().alloc_init(Type, N, fn(_) => T));
@@ -204,6 +239,11 @@ fn build(p: *Project, out_json: *List(u8), out_zip: *List(u8)) void = {
             sounds = list(a),
         );
         target := p2.targets[p2.targets.len - 1]&;
+        for_rev s.list_var_indices { idx |
+            it := s.variables&.unordered_remove(idx).unwrap();
+            name := @tfmt("var_%", it.literal);
+            target.lists&.insert(name, (name, list(temp())), temp());
+        };
         for s.variables { it |
             name := @tfmt("var_%", it.literal);
             target.variables&.insert(name, (name, (Float = 0)), temp());
@@ -277,8 +317,14 @@ fn emit_block(it: *Node, blocks: *RawHashMap(Str, Raw.Block2)) Str = {
         arg_i += 1;
     };
     for shape.fields { field |
-        name := @tfmt("var_%", it.args[arg_i].literal);
-        b.fields&.insert(field, (name, (Some = name)), temp());
+        if field != "VARIABLE" && field != "LIST" {
+            @assert_eq(it.args[arg_i].op, .franca_string, "%.% expected const string", it.op, field);
+            name := it.args[arg_i].string;
+            b.fields&.insert(field, (name, .None), temp());
+        } else {
+            name := @tfmt("var_%", it.args[arg_i].literal);
+            b.fields&.insert(field, (name, (Some = name)), temp());
+        };
         arg_i += 1;
     };
     if @is(it.op, .argument_reporter_string_number, .argument_reporter_boolean) {
@@ -399,6 +445,7 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
             node := @try(push_var(blocks&, sprite&, next_var_id&, key, it._0, false)) return;
             args := temp().alloc_init(*Node, it._1.len, fn(i) => literal_node(it._1[i]));
             node.args = temp().alloc_init(*Node, 1, fn(_) => temp().boxed(Node, (op=.franca_block, args=args)));
+            sprite.list_var_indices&.push(sprite.variables.len - 1, temp());
         };
         
         retain(s.blocks&, fn(_, b) => b.is(.Block));
@@ -1113,6 +1160,8 @@ block_defs :: @parse_block_defs(
 (looks_seteffectto, (VALUE), (EFFECT)),
 (sensing_of, (OBJECT), (PROPERTY)),
 ((data_hidelist, data_showlist), (), (LIST)),
+(looks_say, (MESSAGE)),
+
 // these are used when there's an oval drop down. 
 // the blocks that use these can also accept a computed string. 
 (looks_costume, (), (COSTUME)),

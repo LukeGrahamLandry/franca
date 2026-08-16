@@ -117,6 +117,129 @@ stamp_pos :: fn() *Project = {
     p
 };
 
+// https://github.com/LukeGrahamLandry/hctarcs/blob/b116b2418f949cda03e962c93a997e5ccba6dac1/tests/sanity.scratch
+// Run this in real Scratch when adding new tests to make sure they're correct. 
+sanity :: fn() *Project = {
+    p, s := new_project();
+    s.costume(name = "blank", fmt = "png", data = empty_png);
+    
+    a, test_count := s.variables(2);
+    lst, callstack, fail_msgs := s.lists(3);
+    
+    failed := s.define(true, fn(msg) => (
+        append(fail_msgs, msg),
+    ));
+    
+    EQ := s.define(true, fn(a, b, msg) => (
+        set(test_count, test_count + N(1)),
+        if(or(not(a == b), not(b == a)), => (
+            call(failed, => N("Failed ").join(msg).join(N": Expected (").join(a).join(N") == (").join(b).join(N")"))
+        )),
+    ));
+    
+    NE := s.define(true, fn(a, b, msg) => (
+        set(test_count, test_count + N(1)),
+        if(or(a == b, b == a), => (
+            call(failed, => N("Failed ").join(msg).join(N": Expected (").join(a).join(N") != (").join(b).join(N")"))
+        )),
+    ));
+    
+    fib := s.forward_declare();
+    s.define(fib, true, fn(n) => (
+        if(n < N(2), => (
+            append(callstack, n),
+        ), => (
+            call(fib, => (n - N(1))),
+            call(fib, => (n - N(2))),
+            append(callstack, get(callstack, length(callstack)) + get(callstack, length(callstack) - N(1))),
+            delete(callstack, length(callstack) - N(1)),
+            delete(callstack, length(callstack) - N(1)),
+        )),
+    ));
+    
+    test_fib := s.define(true, fn(n, expected) => (
+        call(EQ, => (length(callstack), N 0, N"empty start")),
+        call(fib, => (n)),
+        call(EQ, => (get(callstack, length(callstack)), expected, N"fib")),
+        delete(callstack, length(callstack)),
+        call(EQ, => (length(callstack), N 0, N"empty end")),
+    ));
+    
+    cases := s.define(true, => (
+        call(EQ, => (N 1, N 1, N"int comp")),
+        call(NE, => (N 1, N 2, N"not comp")),
+        // call(NE, => (N"", N 0, N"null comp indirect")),
+        call(EQ, => (N"a", N"a", N"str comp")),
+        call(NE, => (N"a", N"b", N"str comp")),
+        
+        set(a, N"1"),
+        call(EQ, => (a, N"1", N"var eq")),
+        call(EQ, => (a, N 1, N"var eq coerce")),
+        
+        set(a, N"a"),
+        call(EQ, => (a, N"a", N"var eq")),
+        
+        call(EQ, => (length(lst), N 0, N"start empty")),
+        append(lst, N"c"),
+        append(lst, N 5),
+        append(lst, N"true"),
+        call(EQ, => (length(lst), N 3, N"pushed poly")),
+        replace(lst, N 4, N"nope"),
+        call(EQ, => (length(lst), N 3, N"no replace grow")),
+        call(EQ, => (get(lst, N 1), N"c", N"1st")),
+        call(EQ, => (get(lst, N 2), N 5, N"2nd")),
+        call(EQ, => (get(lst, N 3), N"true", N"3rd")),
+        delete_all(lst),
+        call(EQ, => (length(lst), N 0, N"cleared")),
+        
+        append(lst, N"a"),
+        append(lst, N"b"),
+        append(lst, N"c"),
+        call(EQ, => (length(lst), N 3, N"push")),
+        call(EQ, => (get(lst, length(lst)), N"c", N"top")),
+        delete(lst, length(lst)),
+        call(EQ, => (length(lst), N 2, N"rm")),
+        call(EQ, => (get(lst, length(lst)), N"b", N"top")),
+        delete(lst, length(lst)),
+        call(EQ, => (length(lst), N 1, N"rm")),
+        call(EQ, => (get(lst, length(lst)), N"a", N"top")),
+        delete(lst, length(lst)),
+        call(EQ, => (length(lst), N 0, N"rm")),
+        
+        call(EQ, => (mathop("sin", N 90), N 1, N"sin degrees")),
+        call(EQ, => (mathop("asin", N 1), N 90, N"asin degrees")),
+        call(EQ, => (mod(N 5, N 3), N 2, N"basic mod")),
+        
+        //call(EQ, => (N(1) + (N(1) == N(1)), N(2), N"num bool")),
+        //call(EQ, => (N(1) + (N(1) == N(2)), N(1), N"num bool")),
+        
+        call(EQ, => (join(N"a", N"b"), N"ab", N"str concat")),
+        call(EQ, => (letter(N"ab", N 1), N"a", N"str letter")),
+        call(EQ, => (letter(join(N"a", N"b"), N 2), N"b", N"str letter")),
+        call(EQ, => (join(letter(N"ab", N 1), letter(N"ab", N 2)), N"ab", N"str letter concat")),
+        call(NE, => (letter(N"ab", N 1), letter(N"ab", N 2), N"not str letter")),
+        
+        call(test_fib, => (N 3, N 2)),
+        call(test_fib, => (N 5, N 5)),
+        call(test_fib, => (N 7, N 13)),
+    ));
+    
+    s.whenflagclicked(=> (
+        set(test_count, N 0),
+        delete_all(lst),
+        delete_all(fail_msgs),
+        call(cases, => ()),
+        if(not(length(fail_msgs) == N(0)), => (
+            say(N("failed ").join(length(fail_msgs)).join(N" of ").join(test_count)),
+            show_list(fail_msgs),
+        ), => (
+            say(N("all is fine! passed ").join(test_count)),
+        )),
+    ));
+    
+    p
+}
+
 empty_png :: write_png(@slice(@as(u32) 0), 1);
 
 make_triangle :: fn(colour: u32) []u8 = {

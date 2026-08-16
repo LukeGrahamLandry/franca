@@ -31,8 +31,8 @@ SpriteInstance :: @rec @struct {  // !Sized
     // TODO: since you can query your position, might need to store this as f64 in case you do hacky thing like using it as a variable. 
     pos: Vec2 = vec2(0);
     pen: (@struct(down := false, colour: u32 = 0, size: f64 = 1)) = ();
-    looks: (@struct(costume := 0, size: f64 = 1, hide := false)) = ();
-    // TODO: direction, say/think/ask, look effects, show/hide, layer, volume, drag mode
+    looks: (@struct(costume := 0, size: f64 = 1, hide := false, say: Value = 0)) = ();
+    // TODO: direction, say/think/ask, look effects, layer, volume, drag mode
     // vars: Array(Value, self.var_count) #inline; // [vars,lists,args]; 
 };
 
@@ -42,15 +42,14 @@ SpriteClass :: @rec @struct {
     Handler :: @struct(trigger: Trigger, callee: @FnPtr(s: *Script) void);
     costumes: []Costume;
     Costume :: @struct(data: []u8, name: Str, width: i64, height: i64);
-    initial_vars: []Value;  // [vars,lists]
     var_count: i64;  // [vars,lists,arguments]
     monitors: []Monitor;
 };
 
 Monitor :: @struct {
-    var: i64;
+    var: i64;  // index in vars(SpriteInstance)
     name: Str;
-    x: i64; y: i64;
+    x: i64; y: i64;  // different coordinate system than sprite.pos
     hide: bool;
     mode: Builder.Monitor.FieldType(.mode);
 };
@@ -87,9 +86,8 @@ fn new_string(c: *Canvas, s: []u8) Value = {
     c.new_obj(string = (s = s))
 }
 
-fn new_list(c: *Canvas, initial: []Value) Value = {
-    s := initial.shallow_copy(c.gpa).as_raw_list();
-    c.new_obj(list = s)
+fn new_list(c: *Canvas, initial: RawList(Value)) Value = {
+    c.new_obj(list = initial)
 }
 
 fn slice_list(it: Value) []Value = {
@@ -102,7 +100,6 @@ fn new_sprite(c: *Canvas, class: *SpriteClass) *SpriteInstance = {
     data := c.gpa.alloc_uninit(Value, N + class.var_count);
     instance := bit_cast_unchecked(*f64, *SpriteInstance, data.ptr);
     instance[] = (class = class);
-    instance.index(0).slice(class.initial_vars.len).copy_from(class.initial_vars);
     instance
 }
 
@@ -112,13 +109,22 @@ fn index(it: *SpriteInstance, i: i64) *Value = {
     bit_cast_unchecked(*SpriteInstance, *Value, it).offset(i + N)
 }
 
+fn vars(it: *SpriteInstance) []Value = it.index(0).slice(it.class.var_count);
+
+// nan tagging (nice explanation: https://craftinginterpreters.com/optimization.html#nan-boxing)
+qnan :: @as(i64) 0x7ffc000000000000;
+obj_mask :: qnan.bit_or(0x8000000000000000);  
+false_bits :: qnan.bit_or(2);
+true_bits :: qnan.bit_or(3);
+
+fn is_bool(it: Value) bool = bit_cast_unchecked(Value, i64, it).bit_and(false_bits) == false_bits; // obj pointers are 8 byte aligned so won't have bit 0b10 set
 fn is_string(it: *Obj) bool = it.data.string.tag < 0;
 fn is_string(it: Value) bool = it.is_object() && it.to_obj().is_string();
 fn is_list(it: *Obj) bool = it.data.string.tag >= 0;
 fn is_list(it: Value) bool = it.is_object() && it.to_obj().is_list();
 fn is_object(it: Value) bool = bit_cast_unchecked(Value, i64, it).bit_and(obj_mask) == obj_mask;
-fn is_number(it: Value) bool = bit_cast_unchecked(Value, i64, it).bit_and(obj_mask) != obj_mask;
-obj_mask :: @as(i64) bit_or(0x7ffc000000000000, 0x8000000000000000);  // nan tagging
+fn is_number(it: Value) bool = bit_cast_unchecked(Value, i64, it).bit_and(qnan) != qnan;
+
 fn to_obj(it: Value) *Obj = {
     @debug_assert(it.is_object(), "not an object");
     it := bit_cast_unchecked(Value, i64, it);
@@ -134,6 +140,7 @@ fn from_obj(it: *Obj) Value = {
 // TODO: comparison isn't this simple because "a">50 = true
 fn coerce_number(it: Value) f64 = {
     @if(it.is_number()) return(it);
+    @if(it.is_bool()) return(it.to_bool().int().float());
     if it.is_string() { 
         it := it.to_obj();
         n, s := parse_float(it.string.s);
@@ -143,34 +150,36 @@ fn coerce_number(it: Value) f64 = {
     0
 }
 
-fn coerce_string(it: Value, c: *Canvas) Str = {
-    @if(it.is_string()) return(it.to_obj()[].string.s);
-    
-    if it.is_number() {
-        return @tfmt("%", it);
+fn coerce_string(it: Value, c: *Canvas, out: *List(u8)) void = {
+    @if(it.is_string()) return(@fmt(out, "%", it.to_obj()[].string.s));
+    @if(it.is_number()) return(@fmt(out, "%", it));
+    @if(it.is_bool()) return(@fmt(out, "%", it.to_bool()));
+    @assert(it.is_list(), "TODO: coerce_string new object type");
+
+    it := it.to_obj()[].list;
+    for it { it |
+        coerce_string(it, c, out);
+        @fmt(out, " ");
     };
-    if it.is_list() {
-        out := u8.list(temp());
-        it := it.to_obj()[].list;
-        for it { it |  // :SLOW
-            @fmt(out&, "% ", it.coerce_string(c));  // :SLOW
-        };
-        out.len -= int(it.len > 0);
-        return out.items();
-    };
-    
-    panic("TODO: coerce string");
+    out.len -= int(it.len > 0);
 }
 
-// TODO: maybe i want to intern strings and use "true"/"false"
-//       ex. join("a", eq(1, 1)) == "atrue"
-// TODO: or better would be bool being its own nan tagged thing (like lox does)
+fn coerce_string(it: Value, c: *Canvas) Str = {
+    @if(it.is_string()) return(it.to_obj()[].string.s);
+    @if(it.is_bool()) return(@if(it.to_bool(), "true", "false"));
+    
+    out := u8.list(temp());
+    coerce_string(it, c, out&);
+    out&.items()
+}
+
 fn to_bool(a: Value) bool = {
-    @if(a.is_number()) return(a == 1);  // TODO: wrong but this is what im doing in from_bool
+    @if(a.is_bool()) return(bit_cast_unchecked(f64, i64, a) - false_bits == 1);
+    @if(a.is_number()) return(a == 1);
     @if(a.is_string()) return(a.to_obj()[].string.s == "true");
     false
 };
-fn from_bool(a: bool) Value = a.int().float();
+fn from_bool(a: bool) Value = bit_cast_unchecked(i64, f64, false_bits + a.int());
 
 impl :: @struct {
 
@@ -233,6 +242,7 @@ looks_switchcostumeto :: fn(s, idx) void = {
 }
 looks_hide :: fn(s) void = { s.sprite.looks.hide = true; };
 looks_show :: fn(s) void = { s.sprite.looks.hide = false; };
+looks_say :: fn(s, msg) void = { s.sprite.looks.say = msg; };
 
 looks_cleargraphiceffects :: fn(s) void = println("looks_cleargraphiceffects");
 looks_switchbackdropto :: fn(s, idx) void = @println("TODO: motion_ifonedgebounce %", idx);
@@ -268,18 +278,30 @@ data_replaceitemoflist :: fn(s, idx, item, list) void = {
     @if(i < 0 || i >= list.len) return();
     list[i] = item;
 }
+data_deleteoflist :: fn(s, idx, list) void = {
+    list := list.to_obj()[].list&;
+    i := idx.coerce_number().int() - 1;
+    @if(i < 0 || i >= list.len) return();
+    _ := list.ordered_remove(i);
+}
 data_itemnumoflist :: fn(s, item, list) = { println("TODO: data_itemnumoflist"); 0 }
 operator_contains :: fn(s, a, b) = { println("TODO: operator_contains"); false.from_bool() }
 operator_length :: fn(s, string) = { println("TODO: operator_length"); 0 }  // string
-operator_letter_of :: fn(s, letter, string) = { println("TODO: operator_letter_of"); 0 }
-operator_join :: fn(s, a, b) = {
-    // :SLOW
-    a := a.coerce_string(s.canvas);
-    b := b.coerce_string(s.canvas);
-    s.canvas.new_string(@tfmt("%%", a, b))
+operator_letter_of :: fn(s, i, string) = { 
+    string := string.coerce_string(s.canvas);
+    i := i.coerce_number().int() - 1;
+    r := @if(i.ult(string.len), string.subslice(i, 1), "");
+    s.canvas.new_string(r)
 }
-// idx can be "last"
-data_deleteoflist :: fn(s, idx, list) = { println("TODO: data_deleteoflist"); 0 }
+operator_join :: fn(s, a, b) = {
+    out := u8.list(s.canvas.gpa);
+    if a.is_string() && b.is_string() {
+        out&.reserve(a.to_obj()[].string.s.len + b.to_obj()[].string.s.len)
+    };
+    coerce_string(a, s.canvas, out&);
+    coerce_string(b, s.canvas, out&);
+    s.canvas.new_obj(string = (s = out&.shrink_to_fit()))
+}
 sensing_touchingcolor :: fn(s, colour) = {  println("TODO: sensing_touchingcolor"); false.from_bool() };
 sensing_mousex :: fn(s) = s.canvas.sensing_mouse.x;
 sensing_mousey :: fn(s) = s.canvas.sensing_mouse.y;
@@ -370,7 +392,7 @@ Node :: Builder.Node;
 Builder :: import("@/examples/gpu/hctarcs/builder.fr");
 #use("@/graphics/vec.fr");
 
-temporary_main :: fn(initialize: @FnPtr(c: *Canvas) Ty([]SpriteClass, []Str), show: bool) []u8 = {
+temporary_main :: fn(initialize: @FnPtr(c: *Canvas) void, show: bool) []u8 = {
     ::import("@/examples/gpu/hctarcs/compile.fr").simple_ops;  // infer the impl param types 
     S :: Type.scope_of(impl);
     #use("@/graphics/vec.fr");
@@ -385,17 +407,13 @@ temporary_main :: fn(initialize: @FnPtr(c: *Canvas) Ty([]SpriteClass, []Str), sh
         classes = empty(),
     );
     start := timestamp();
-    classes, strings := initialize(c);
-    c.classes = classes;
-    c.constants = c.gpa.alloc_init(Value, strings.len, fn(i) => {
-        c.new_obj(string = (s = strings[i].shallow_copy(c.gpa)))
-    });
-    each classes { class |
-        instance := c.new_sprite(class);
-        c.clones&.push(instance, c.gpa);
-    };
+    initialize(c);
     c.stage = c.clones[0];
     @debug_assert_eq(c.stage.class.name, "Stage");
+    empty_string := c.new_string("");
+    for c.clones { it |
+        it.looks.say = empty_string;
+    };
     
     c.send_event(.Flag);
     c.send_event(.SpriteClicked);  // TODO: remove; just to make quicksort benchmark work
@@ -429,3 +447,16 @@ embed_bytes :: fn(in: Str) []u8 = {
     import("@/lib/encoding/base64.fr")'base64_decode(out&, in);
     out.items()
 }
+
+fn init_strings(c: *Canvas, strings: []Str) void = {
+    c.constants = c.gpa.alloc_init(Value, strings.len, fn(i) => {
+        c.new_obj(string = (s = strings[i].shallow_copy(c.gpa)))
+    });
+}
+
+fn assign_strings(c: *Canvas, v: []Value, indices: []Ty(u32, u32)) void = {
+    for indices { d, s |
+        v[d.zext()] = c.constants[s.zext()];
+    };
+}
+

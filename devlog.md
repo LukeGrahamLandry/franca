@@ -1,9 +1,14 @@
 
+## (Aug 16) sb3
+
+- ported sanity.scratch from the old hctarcs. 
+
 ## (Aug 15) sb3
 
 - draw text for variable monitors
   - which var for hide/show blocks is constant so can create monitors for them in the compiler then runtime doesn't need to know unused names  
   - shuttle positions to runtime from the json. pos aren't in the same coordinate system as sprites.  
+- refactor: extract init_list_values. coerce_string to buffer. make bools unique values. 
 
 ## (Aug 14) sb3
 

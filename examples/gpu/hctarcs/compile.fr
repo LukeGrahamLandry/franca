@@ -57,7 +57,6 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
                 emitted_images&.insert(it.md5, ("", 0, 0, false));
                 continue();
             };
-            @assert_eq(it.fmt, "png", "TODO: svg :(");
             data, width, height := Viewer'stbi_load(it.data)
                 .or(fn(msg) => @panic("failed decode %: %", it.name, msg));
             
@@ -77,10 +76,10 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
     
     floats_blob := f64.list(temp());
     
-    // TODO: might want the strings here to be objects instead if i do the interning thing so they're fast to compare. thats why not putting this in a constant. 
-    @fmt(out, "initialize :: fn(c: *Rt.Canvas) Ty([]Rt.SpriteClass, []Str) = {\n");
+    @fmt(out, "initialize :: fn(c: *Rt.Canvas) void = {\n");
     @fmt(out, "a := c.gpa;\nfloats_blob := f64.reinterpret_bytes(floats_blob);\n");
-    @fmt(out, "classes := a.alloc_uninit(Rt.SpriteClass, %);\n", p.sprites.len);
+    @fmt(out, "c.classes = a.alloc_uninit(Rt.SpriteClass, %);\n", p.sprites.len);
+    @fmt(out, "c.init_strings(strings);\n");  // Obj for the const string so can use them in sprite vars below. 
     enumerate p.sprites { i, it |
         self.current_sprite = i;
         @fmt(out, "t := a.alloc_uninit(Rt.SpriteClass.Costume, %);\n", it.costumes.len);
@@ -114,63 +113,19 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
             @fmt(out, ");\n");
         };
         
-        @fmt(out, "v := a.alloc_zeroed(Rt.Value, %);\n", it.variables.len);
-        // TODO: be a function even tho will only ever need to recurse once
-        // TODO: be less wasteful with floats_blob if all strings
-        start, n := (floats_blob.len, it.variables.len);
-        enumerate it.variables { i, var |
-            value := var.args[0];
-            @match(value.op) {
-                fn franca_literal() => floats_blob&.push(value.literal);
-                @default => floats_blob&.push(0);  // franca_string|franca_block
-            };
-        };
-        @fmt(out, "v.slice(0, %).copy_from(floats_blob.subslice(%, %));\n", n, start, n);
-        enumerate it.variables { i, var |
-            value := var.args[0];
-            @match(value.op) {
-                fn franca_literal() => ();
-                // TODO: use s.canvas.constants but that's init-ed after this code runs. need to lift it sooner. 
-                fn franca_string() => @fmt(out, "v[%] = c.new_string(strings[%]);\n", i, self.const_string(value.string));
-                fn franca_block() => {
-                    @fmt(out, "v[%] = c.new_list(floats_blob.subslice(%, %));\n", i, floats_blob.len, value.args.len);
-                    for value.args { value |
-                        @match(value.op) {
-                            fn franca_literal() => floats_blob&.push(value.literal);
-                            @default => floats_blob&.push(0);  // franca_string
-                        };
-                    };
-                    
-                    @fmt(out, "l := v[%].slice_list();\n", i);
-                    enumerate value.args { i, value |
-                        @match(value.op) {
-                            fn franca_string() => @fmt(out, "l[%] = c.new_string(strings[%]);\n", i, self.const_string(value.string));
-                            @default => ();
-                        };
-                    };
-                }
-                @default => @panic("invalid var init (%): %", var.string, value.op);
-            };
-        };
-        if it.variables.len == 0 {
-            @fmt(out, "names: []Str = empty();\n");
-        } else {
-            @fmt(out, "names := @const_slice(");
-            for it.variables { var |
-                @fmt(out, "strings[%],", self.const_string(var.string));
-            };
-            @fmt(out, ");\n");
-        };
+        @fmt(out, "c.classes[%] = (name = strings[%], costumes = t, events = e.shrink_to_fit(), var_count = %, monitors = m);\n", i, self.const_string(it.name), it.var_plus_param_count);
+        @fmt(out, "sprite := c.new_sprite(c.classes[%]&);\nc.clones&.push(sprite, a);\n", i);
         
-        @fmt(out, "classes[%] = (name = strings[%], costumes = t, events = e.items(), var_count = %, initial_vars = v, monitors = m);\n", i, self.const_string(it.name), it.var_plus_param_count);
+        @fmt(out, "v := sprite.vars();\n");
+        @fmt(out, "v.rest(%).set_zeroed();\n", it.variables.len);  // for good luck: don't have uninit parameters; TODO: remove when i use a better calling convention
+        init_list_values(self, it.variables.items(), floats_blob&, true);
     };
-    @fmt(out, "(classes, strings)\n");
     @fmt(out, "};\n");
     
     // TODO: probably a smaller binary if include png+decode code and decompress at runtime instead
     each emitted_images& { key, it |
         embed_bytes(out, @tfmt("img_%", key), it._0);
-        @if(it._3)
+        @if(Viewer.FEAT_PNG) @if(it._3)
         Viewer'Stb'stbi_image_free(u8.raw_from_ptr(it._0.ptr));
         it._0 = "";
     };
@@ -397,7 +352,7 @@ compile :: fn(self: *Compile, it: *Node) void = {
                 m := sprite.monitors.items().index_of(fn(jt) => identical(jt.var, var)) || {
                     // the project.json didn't contain a monitor entry for this. 
                     // TODO: need to remember that it doesn't have a position so do auto-layout based on order the show blocks run. 
-                    push(sprite.monitors&, (x = 0, y = 0, hide = true, mode = .Value, var = var), temp());
+                    push(sprite.monitors&, (x = 10, y = 10, hide = true, mode = .Value, var = var), temp());
                     sprite.monitors.len - 1
                 }; 
                 h := @is(it.op, .data_hidevariable, .data_hidelist);
@@ -480,6 +435,66 @@ simple_ops :: @static {
     out
 };
 
+// `v` needs to be in scope as a slice to write into. 
+// im doing this in a convoluted way because:
+// - strings/lists need to be allocated in the gc at runtime, so can't do the whole thing as a copy from a @const_slice.
+// - im afraid of giant lists where the code generated for inlining a bunch of `v[_] = c.constants[_];` would be bigger than an array of indices to patch.
+// - doing floats_blob by decoding a string (like the asset files) avoids dealing with my shitty float printing. 
+fn init_list_values(self: *Compile, values: []*Node, floats_blob: *List(f64), is_var: bool) void = {
+    @if(values.len == 0) return();
+    out := self.out;
+    Get :: fn(var: *Node) *Node => @if(is_var, var.args[0], var);
+    
+    // don't be wasteful if it's all strings, etc.
+    first_float, last_float := (0, values.len - 1);
+    while => first_float < values.len && values[first_float].Get()[].op != .franca_literal {
+        first_float += 1;
+    };
+    while => last_float > first_float && values[last_float].Get()[].op != .franca_literal {
+        last_float -= 1;
+    };
+    last_float += 1;
+    @fmt(out, "v.slice(%, %).copy_from(floats_blob.subslice(%, %));\n", first_float, last_float, floats_blob.len, last_float - first_float);
+    
+    range(first_float, last_float) { i |
+        value := values[i].Get();
+        @match(value.op) {
+            fn franca_literal() => floats_blob.push(value.literal);
+            @default => floats_blob.push(0);  // franca_string|franca_block will be patched below
+        };
+    };
+    
+    if last_float - first_float != values.len {
+        mark, any_strings := (out.len, false);
+        @fmt(out, "indices := @const_slice(");
+        enumerate values { i, var |
+            value := var[].Get();
+            if value.op == .franca_string {
+                // TODO: this cast shouldn't be needed on each element (only once on first) :compiler
+                @fmt(out, "@as(Ty(u32, u32)) (%, %),", i, self.const_string(value.string));
+                any_strings = true;
+            };
+        };
+        @fmt(out, ");\nc.assign_strings(v, indices);\n");
+        if !any_strings {
+            out.len = mark;
+        };
+        
+        // TODO: all lists are at the end so could do this in the above loop
+        enumerate values { i, var |
+            value := var[].Get();
+            if value.op == .franca_block {
+                @fmt(out, "l := a.alloc_uninit(Rt.Value, %);\n", value.args.len);
+                @fmt(out, "v[%] = c.new_obj(list = l.as_raw_list());\n", i);
+                if value.args.len != 0 {
+                    @fmt(out, "{ v := l;\n");
+                    init_list_values(self, value.args, floats_blob, false);
+                    @fmt(out, "};\n");
+                };
+            };
+        };
+    };
+}
 
 S :: import("@/examples/gpu/hctarcs/builder.fr");
 Node :: S.Node;
