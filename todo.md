@@ -11,6 +11,8 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
+- libm (float/trig) functions without libc
+- mirror TuringCompleteSchematicArchive for web demo (but it doesn't work)
 - to make importing Viewer just for stb_image less confusing, reexport stbi_image_free (with a FEAT_PNG check)
 - just for good luck, map comptime jit memory as read only (not exec) after the compiler is done when jitting with ExecStyle.AOT. 
   ex. (before calling user code in run_franca_file), (at the end of load_circuit_index_worker in circuit example), (hctarcs once i allow runtime loading), etc.

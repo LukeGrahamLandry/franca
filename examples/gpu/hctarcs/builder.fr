@@ -6,11 +6,10 @@ Project :: @struct {
 Sprite :: @struct {
     name: Str;
     blocks: RawList(*Node) = empty();
-    variables: RawList(*Node) = empty();
+    variables: RawList(*Node) = empty();  // includes lists but not function parameters
     costumes: RawList(Costume) = empty();
     monitors: RawList(Monitor) = empty();
     list_var_indices: RawList(i64) = empty();
-    var_plus_param_count := 0;
 };
 Node :: @rec @struct {
     op: Raw.Opcode;
@@ -20,6 +19,12 @@ Node :: @rec @struct {
     args: []*Node;
     literal: f64 = 0;  // float for franca_literal. index for franca_var. 
     string: Str = "";  // franca_string. TODO: nan tag this too? sad to make all the nodes bigger. but then need to write a new bake_relocatable_value
+
+    flags: (@struct {
+        async: (@enum(u8) (unknown, yes, no)) = .unknown;
+        mark_rec := false;
+        run_without_screen_refresh := false;
+    }) = ();
 };
 Costume :: @struct {
     name: Str;
@@ -80,6 +85,7 @@ fn forward_declare(s: *Sprite) *Node = {
 fn define(s: *Sprite, b: *Node, warp: bool, $body: FuncId) *Node = {
     @assert_eq(b.op, .procedures_definition, "define(forward_declare)");
     func :: get_function_ast(body, false, false, false, false);
+    b.flags.run_without_screen_refresh = warp;
     @if(@run func.arg.bindings[0].name&.is(.None), {
         b.args[0] = block(body);
     }, {
@@ -140,6 +146,7 @@ fn xposition() *Node = make("motion_xposition", empty());
 fn yposition() *Node = make("motion_yposition", empty());
 fn change_x(d: *Node) *Node = make("motion_changexby", @slice(d));
 fn change_y(d: *Node) *Node = make("motion_changeyby", @slice(d));
+fn wait(sec: *Node) *Node = make("control_wait", @slice(sec));
 
 fn N(a: i64) *Node = N(a.float());
 fn N(a: f64) *Node = { s := make("franca_literal", empty()); s.literal = a; s }
@@ -187,7 +194,6 @@ fn block($fid: FuncId) *Node = {
 
 next_var_id :: @static_mut 1;  // not the same as the one used when loading sb3 (there it resets per sprite)
 fn variables(s: *Sprite, $Count: i64) TupleArray(*Node, Count) #generic = {
-    s.var_plus_param_count += Count;
     out := zeroed(Array(*Node, Count));
     each out& { it |
         it[] = ast_alloc().boxed(Node, (op = .franca_var, args = empty(), literal = next_var_id[].float()));
@@ -380,7 +386,7 @@ make_mutation :: fn(it: *Node) Raw.Mutation = {
         argumentids = (Some = ids),
         argumentnames = (Some = names),  // these matter! leaving it empty makes the reporters always be zero (and show "undefined")
         argumentdefaults = (Some = list(temp())),
-        warp = (Some = true),
+        warp = (Some = it.flags.run_without_screen_refresh),
         hasnext = .None,
     )
 }
@@ -499,9 +505,9 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                         };
                         it.args = a.items();
                         it.string = proccode;
+                        it.flags.run_without_screen_refresh = mutation.warp || false;
             };
         };
-        sprite.var_plus_param_count = int(next_var_id - 1);
         
         each s.blocks& { key, it |
             continue :: local_return;

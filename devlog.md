@@ -2,6 +2,19 @@
 ## (Aug 16) sb3
 
 - ported sanity.scratch from the old hctarcs. 
+- hell of trial and error with making the mirror thing happen just on the wnebsite job. 
+  - can't even compile that block always (even if give up on the heavy get.fr instead of curl) 
+    because the bootstrap on linux is static and md5 calls libm sin at comptime to generate the table.
+  - kinda works now so i feel much better about my thing not bit-rotting, 
+    as long as i never break the mirror code without failing the build because that would break the chain. 
+- the async part is kinda the interesting thing. in the rust one i did it with closures
+  but i don't have those so need to do it a different way. kinda need to do this all at once 
+  or nothing will work which is unfortunate. what i've ended up with is somehow 
+  much less complicated than the old version, maybe im just better at stuff now, idk. 
+  instead of (allocating for the state and returning actions for the main loop to do and then call back the same function) 
+  split into smaller functions and then the state is just the ip and you just need a little stack for locals. 
+  we'll see if it works out once i need broadcast_and_wait. 
+- sync params don't need to be allocated with sprite vars, just pass an array. linrays 788ms -> 477ms. 
 
 ## (Aug 15) sb3
 

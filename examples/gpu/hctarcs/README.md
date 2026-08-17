@@ -15,7 +15,6 @@ most other blocks are not implemented yet.
 - if i decide to look at the real scratch code, use 
   https://github.com/scratchfoundation/scratch-editor/commit/7c3c5948459a66a9d146c0063712152a4f40fb66
   which is conveniently before they added an agents.md and before they switched to agpl
-- if i want to fetch projects can use trampoline.turbowarp.org
 - if i want to play with other people's projects as tests, use ones from before January 22, 2026 
   (thats when they changed license of user projects from cc-by-sa-2 to only dear scratch ai slop license tm)
 
@@ -26,25 +25,21 @@ most other blocks are not implemented yet.
 - dump Node ast back to builder franca code
 - textbox edit as franca
 - hell, they're gonna have SVGs in there
-- when i have compiler so it isn't slow try things from 
-  turbowarp featured projects https://scratch.mit.edu/studios/27205657
 - implement more blocks
   - async
     - broadcast and wait
     - glide _ secs to _ (waits until the glide is done)
     - wait _ seconds
-    - wait until _
     - ask _ and wait
-    - yield after each loop iteration if not "run without screen refresh".  
-      turbo mode is like that but just run until out of time in the frame. 
+    - turbo mode: instead of yielding each loop iteration, run until out of time in the frame. 
   - events
     - broadcast
     - scroll sends up/down arrow event but the is_pressed blocks say false
   - sensing inputs
   - is touching, if on edge bounce
   - clones
-  - strings, lists
   - drag
+- strings should be utf16
 
 ## notes
 

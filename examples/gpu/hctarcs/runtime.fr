@@ -22,6 +22,9 @@ Script :: @rec @struct {
     // TODO: if continue accessing fields of sprite more, should have a current_script field that changes and pass the sprite around to save an indirection
     sprite: *SpriteInstance;
     canvas: *Canvas;
+    // async needs to reify (function arguments, loop counters, continuation function pointer). 
+    // to make progress the runtime pops the last thing from the stack and calls it as a function pointer. 
+    futures: RawList(Value) = empty();
 };
 
 // TODO: maybe it would be better to generate MySprite :: @struct(base: SpriteInstance, vars: Array(Value, N)); 
@@ -33,7 +36,7 @@ SpriteInstance :: @rec @struct {  // !Sized
     pen: (@struct(down := false, colour: u32 = 0, size: f64 = 1)) = ();
     looks: (@struct(costume := 0, size: f64 = 1, hide := false, say: Value = 0)) = ();
     // TODO: direction, say/think/ask, look effects, layer, volume, drag mode
-    // vars: Array(Value, self.var_count) #inline; // [vars,lists,args]; 
+    // vars: Array(Value, self.var_count) #inline; // [vars,lists]; 
 };
 
 SpriteClass :: @rec @struct {
@@ -42,7 +45,7 @@ SpriteClass :: @rec @struct {
     Handler :: @struct(trigger: Trigger, callee: @FnPtr(s: *Script) void);
     costumes: []Costume;
     Costume :: @struct(data: []u8, name: Str, width: i64, height: i64);
-    var_count: i64;  // [vars,lists,arguments]
+    var_count: i64;  // [vars,lists]
     monitors: []Monitor;
 };
 
@@ -181,6 +184,39 @@ fn to_bool(a: Value) bool = {
 };
 fn from_bool(a: bool) Value = bit_cast_unchecked(i64, f64, false_bits + a.int());
 
+// sync functions/expressions will use locals so this can't be called while inside one. 
+fn collect_garbage(c: *Canvas) void = {
+    visit :: fn(it: Value) void = if it.is_object() {
+        it := it.to_obj();
+        if !it.gc_mark {
+            it.gc_mark = true;
+            @if(it.is_list()) for(it.list, visit);
+        };
+    };
+    for c.clones { it |
+        visit(it.looks.say);
+        for(it.vars(), visit);
+    };
+    for c.scripts { it |
+        for(it.futures, visit);
+    };
+    for(c.constants, visit);  // TODO: this is wasteful, could just not put them in the gc_head list
+    
+    next := c.gc_head&;
+    while => next[].is_object() {
+        it := next[].to_obj();
+        if it.gc_mark {
+            it.gc_mark = false;
+            next = it.gc_next&;
+        } else {
+            next[] = it.gc_next;
+            @if(it.is_list()) it.list&.drop(c.gpa);
+            @if(it.is_string()) c.gpa.dealloc(u8, it.string.s);
+            c.gpa.dealloc_one(Obj, it);
+        };
+    };
+}
+
 impl :: @struct {
 
 operator_add :: fn(a, b) = a + b;
@@ -291,6 +327,7 @@ operator_letter_of :: fn(s, i, string) = {
     string := string.coerce_string(s.canvas);
     i := i.coerce_number().int() - 1;
     r := @if(i.ult(string.len), string.subslice(i, 1), "");
+    // TODO: could cache a string for each ascii character
     s.canvas.new_string(r)
 }
 operator_join :: fn(s, a, b) = {
@@ -340,25 +377,6 @@ fn update_pos(s: *Script, $body: @Fn(old: Vec2) Vec2) void = {
     };
 }
 
-saved_args :: fn($n: i64) []Value #inline/*semantic*/ = {
-    it := @ref(@uninitialized(Array(Value, n)));
-    it.items()
-}
-
-// TODO: use real args when sync. async will need to allocate a stack on the *Script anyway 
-#inline
-fn procedures_call(s: *Script, callee: @FnPtr(s: *Script) void, params: []i64, args: []Value, saved_args: []Value) void = {
-    range(0, params.len) { i |
-        slot := s.sprite[params[i]]&;
-        saved_args[i] = slot[];
-        slot[] = args[i];
-    };
-    callee(s);
-    range(0, params.len) { i |
-        s.sprite[params[i]] = saved_args[i];
-    };
-}
-
 // TODO: test set_costume(add(get_costume(), 1)); cycles in a confusing way
 fn lookup_costume_index(name: Value, s: *Script) f64 = {
     costumes := s.sprite.class.costumes;
@@ -373,17 +391,58 @@ fn lookup_costume_index(name: Value, s: *Script) f64 = {
     0
 }
 
+fn push_async(s: *Script, callee: @FnPtr(s: *Script) void) void = {
+    callee := bit_cast_unchecked(@type callee, Value, callee);
+    @debug_assert(callee.is_number(), "can't try to gc trace a function pointer");
+    s.push_val_async(callee);
+}
+
+fn push_val_async(s: *Script, val: Value) void = {
+    // compiler calls reserve once per function
+    s.futures&.push_assume_capacity(val);
+}
+
+fn pop_async(s: *Script, n: i64) void = {
+    @debug_assert_ule(n, s.futures.len);
+    s.futures.len -= n;
+}
+
 // TODO: SpriteClicked needs to send to a specific one
 fn send_event(c: *Canvas, event: Trigger) void = {
     ::AutoEq(Trigger);
     for c.clones { s |
-        s: Script = (sprite = s, canvas = c);
         // :SLOW should sort by class so don't have to recompare for each clone
-        each s.sprite.class.events { it |
+        each s.class.events { it |
             if it.trigger& == event& {
-                it'callee(s&);
+                // TODO: call it now it without the allocation if not async
+                s := c.gpa.boxed(Script, (sprite = s, canvas = c));
+                s.futures&.reserve(1, c.gpa);
+                s.push_async(it.callee);
+                c.scripts&.push(s, c.gpa);
             };
         };
+    };
+}
+
+fn poll_scripts(c: *Canvas) void = {
+    range(0, c.scripts.len) { i |
+        s := c.scripts[i];
+        if s.futures&.pop() { callee |
+            @debug_assert(callee.is_number(), "corrupt callee");
+            callee := bit_cast_unchecked(Value, @FnPtr(s: *Script) void, callee);
+            //@println("% %", fmt_hex(callee), s.futures.len);
+            callee(s);
+        };
+        i += 1;
+    };
+    
+    ordered_retain(c.scripts&) { s |
+        done := s.futures.len == 0;
+        if done {
+            s.futures&.drop(c.gpa);
+            c.gpa.dealloc_one(Script, s[]);
+        };
+        !done
     };
 }
 
@@ -416,7 +475,14 @@ temporary_main :: fn(initialize: @FnPtr(c: *Canvas) void, show: bool) []u8 = {
     };
     
     c.send_event(.Flag);
+    while => c.scripts.len > 0 && timestamp() - start < 1000 {
+        c.poll_scripts();
+    };
     c.send_event(.SpriteClicked);  // TODO: remove; just to make quicksort benchmark work
+    while => c.scripts.len > 0 && timestamp() - start < 2000 {
+        c.poll_scripts();
+    };
+    c.collect_garbage();
     Render'finish_frame(c);
     
     @println("eval took %ms", timestamp() - start);
