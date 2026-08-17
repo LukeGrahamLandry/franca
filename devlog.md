@@ -1,4 +1,20 @@
 
+## (Aug 17) sb3
+
+- now to test the async, looking at the last frame isn't enough, i need gui that shows the animation. 
+
+--- 
+
+- factor out the spam for just drawing one texture on the screen when you want to do software rendering. 
+- circuit: the wasm dying on more complex circuit with `jit_addr too early` doesnt 
+  make any sense because output_wasm_module is the aot one and shouldn't be called here. 
+  - wasm sets jit_via_dlopen which changes finish_module expecting make_exec not to call it,
+    but emit_qbe_included always calls finish_module (and throws it away) expecting it to be a nop for jit.  
+    just happened that this time it complained it didn't make sense as an aot module. 
+  - new problem: `RuntimeError: table index is out of bounds`. that's just that make_exec
+    is on the other thread and main doesn't do a JitEvent to sync. works now (in chrome, firefox says oom). 
+  - as usual im learning that wrong lesson that i ignored that for a month and then randomly thought of the solution next time i looked at it. 
+
 ## (Aug 16) sb3
 
 - ported sanity.scratch from the old hctarcs. 

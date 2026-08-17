@@ -80,8 +80,6 @@ it works well enough to run my overture/leg in the maze and a few things from th
 - fast mode that doesn't even save_wire_values once per frame
 - ui: allow copying the code to clipboard
 - `Main :: import().examples.circuit;` doesn't work in the web demo
-- pressing l to fetch archive doesn't work in web demo
-  `panic! Assertion Failed: jit_addr too early: perform_syscall__12311`
 - nice ui for web gallery from my archive of the old schematic hub
 - i don't really care about ui for visually editing the wires
   but i have a bunch of code for converting positions into graph 

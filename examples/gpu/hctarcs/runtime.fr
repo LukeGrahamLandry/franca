@@ -13,7 +13,9 @@ Canvas :: @rec @struct {
     scripts: RawList(*Script) = empty();
     clones: RawList(*SpriteInstance) = empty();
     gpa: Alloc;
-    gc_head: Value = 0;  // TODO: collect. going to start with just the basic thing that lox does, im sure there are better ways
+    gc_head: Value = NaN;
+    obj_count := 0;
+    next_collect_obj_count := 1000;
     constants: []Value = empty();
     sensing_mouse: (@struct(x := 0.0, y := 0.0, down := false)) = ();
 };
@@ -81,6 +83,7 @@ Obj :: @struct {
 fn new_obj(c: *Canvas, data: FieldType(Obj, .data)) Value = {
     it := c.gpa.boxed(Obj, (gc_next = c.gc_head, gc_mark = false, data = data)).from_obj();
     c.gc_head = it;
+    c.obj_count += 1;
     it
 }
 
@@ -104,6 +107,12 @@ fn new_sprite(c: *Canvas, class: *SpriteClass) *SpriteInstance = {
     instance := bit_cast_unchecked(*f64, *SpriteInstance, data.ptr);
     instance[] = (class = class);
     instance
+}
+
+fn drop(c: *Canvas, it: *SpriteInstance) void = {
+    N := size_of(SpriteInstance) / size_of(Value);
+    data := bit_cast_unchecked(*SpriteInstance, *Value, it).slice(N + it.class.var_count);
+    c.gpa.dealloc(Value, data);
 }
 
 // only indexed by var_index(Compiler, _) so always in bounds
@@ -158,6 +167,7 @@ fn coerce_string(it: Value, c: *Canvas, out: *List(u8)) void = {
     @if(it.is_number()) return(@fmt(out, "%", it));
     @if(it.is_bool()) return(@fmt(out, "%", it.to_bool()));
     @assert(it.is_list(), "TODO: coerce_string new object type");
+    // TODO: lists are only reachable for monitors so maybe don't have this in the normal coerce_string
 
     it := it.to_obj()[].list;
     for it { it |
@@ -184,7 +194,15 @@ fn to_bool(a: Value) bool = {
 };
 fn from_bool(a: bool) Value = bit_cast_unchecked(i64, f64, false_bits + a.int());
 
+fn maybe_collect_garbage(c: *Canvas) void = {
+    if c.obj_count > c.next_collect_obj_count {
+        c.collect_garbage();
+        c.next_collect_obj_count = c.obj_count * 2;
+    }
+}
+
 // sync functions/expressions will use locals so this can't be called while inside one. 
+// im sure there are faster ways to do gc but this one is nice and simple for now. 
 fn collect_garbage(c: *Canvas) void = {
     visit :: fn(it: Value) void = if it.is_object() {
         it := it.to_obj();
@@ -213,8 +231,31 @@ fn collect_garbage(c: *Canvas) void = {
             @if(it.is_list()) it.list&.drop(c.gpa);
             @if(it.is_string()) c.gpa.dealloc(u8, it.string.s);
             c.gpa.dealloc_one(Obj, it);
+            c.obj_count -= 1;
         };
     };
+}
+
+fn drop(c: *Canvas) void = {
+    for(c.scripts, fn(it) => it.futures&.clear());
+    c.poll_scripts();
+    @assert_eq(c.scripts.len, 0);
+    for c.clones { it |
+        drop(c, it);
+    };
+    drop(c.clones&, c.gpa);
+    c.gpa.dealloc(Value, c.constants);
+    c.constants = empty();
+    c.collect_garbage();
+    @assert(c.gc_head.is_number(), "leaked gc objects");
+    c.gpa.dealloc(u32, c.pen_pixels);
+    c.gpa.dealloc(u32, c.frame_pixels);
+    each c.classes { it |
+        c.gpa.dealloc(SpriteClass.Costume, it.costumes);
+        c.gpa.dealloc(SpriteClass.Handler, it.events);
+        c.gpa.dealloc(Monitor, it.monitors);
+    };
+    c.gpa.dealloc(SpriteClass, c.classes);
 }
 
 impl :: @struct {
@@ -257,7 +298,7 @@ motion_gotoxy :: fn(s, x, y) void = s.update_pos(fn(_) => vec2(x.cast(), y.cast(
 motion_changexby :: fn(s, dx) void = s.update_pos(fn(old) => { old.x += dx.cast(); old });
 motion_changeyby :: fn(s, dy) void = s.update_pos(fn(old) => { old.y += dy.cast(); old });
 motion_setx :: fn(s, x) void = s.update_pos(fn(old) => { old.x = x.cast(); old });
-motion_sety :: fn(s, y) void = s.update_pos(fn(old) => { old.y = sy.cast(); old });
+motion_sety :: fn(s, y) void = s.update_pos(fn(old) => { old.y = y.cast(); old });
 
 // AARRGGBB
 pen_setPenColorToColor :: fn(s, a) void = { s.sprite.pen.colour = a.int().trunc(); };
@@ -321,6 +362,8 @@ data_deleteoflist :: fn(s, idx, list) void = {
     _ := list.ordered_remove(i);
 }
 data_itemnumoflist :: fn(s, item, list) = { println("TODO: data_itemnumoflist"); 0 }
+data_insertatlist :: fn(s, item, idx, list) void = println("TODO: data_insertatlist");
+
 operator_contains :: fn(s, a, b) = { println("TODO: operator_contains"); false.from_bool() }
 operator_length :: fn(s, string) = { println("TODO: operator_length"); 0 }  // string
 operator_letter_of :: fn(s, i, string) = { 
@@ -428,9 +471,9 @@ fn poll_scripts(c: *Canvas) void = {
     range(0, c.scripts.len) { i |
         s := c.scripts[i];
         if s.futures&.pop() { callee |
+            // TODO: could keep min,max of all the addresses of the cont function pointers and assert these bits are in that range (in case of compiler bugs). 
             @debug_assert(callee.is_number(), "corrupt callee");
             callee := bit_cast_unchecked(Value, @FnPtr(s: *Script) void, callee);
-            //@println("% %", fmt_hex(callee), s.futures.len);
             callee(s);
         };
         i += 1;
@@ -444,6 +487,8 @@ fn poll_scripts(c: *Canvas) void = {
         };
         !done
     };
+    
+    c.maybe_collect_garbage();
 }
 
 Render :: import("@/examples/gpu/hctarcs/soft.fr");
@@ -451,21 +496,15 @@ Node :: Builder.Node;
 Builder :: import("@/examples/gpu/hctarcs/builder.fr");
 #use("@/graphics/vec.fr");
 
-temporary_main :: fn(initialize: @FnPtr(c: *Canvas) void, show: bool) []u8 = {
-    ::import("@/examples/gpu/hctarcs/compile.fr").simple_ops;  // infer the impl param types 
-    S :: Type.scope_of(impl);
-    #use("@/graphics/vec.fr");
-    #use("@/lib/sys/fs.fr");
-    #use("@/lib/sys/process.fr");
-    c := @ref @as(Canvas) (
-        pen_pixels = temp().alloc_init(u32, 480*360, fn(_) => MAX_u32),
-        frame_pixels = temp().alloc_zeroed(u32, 480*360),
+fn init_canvas(c: *Canvas, a: Alloc, initialize: @FnPtr(c: *Canvas) void) void = {
+    c[] = (
+        pen_pixels = a.alloc_init(u32, 480*360, fn(_) => MAX_u32),
+        frame_pixels = a.alloc_zeroed(u32, 480*360),
         rng = Random.xoshiro256SS.new_seeded(),
-        gpa = temp(),
+        gpa = a,
         stage = zeroed(*SpriteInstance),
         classes = empty(),
     );
-    start := timestamp();
     initialize(c);
     c.stage = c.clones[0];
     @debug_assert_eq(c.stage.class.name, "Stage");
@@ -473,6 +512,17 @@ temporary_main :: fn(initialize: @FnPtr(c: *Canvas) void, show: bool) []u8 = {
     for c.clones { it |
         it.looks.say = empty_string;
     };
+}
+
+temporary_main :: fn(initialize: @FnPtr(c: *Canvas) void, show: bool) []u8 = {
+    ::import("@/examples/gpu/hctarcs/compile.fr").simple_ops;  // infer the impl param types 
+    S :: Type.scope_of(impl);
+    #use("@/graphics/vec.fr");
+    #use("@/lib/sys/fs.fr");
+    #use("@/lib/sys/process.fr");
+    start := timestamp();
+    c := @ref zeroed(Canvas);
+    init_canvas(c, temp(), initialize);
     
     c.send_event(.Flag);
     while => c.scripts.len > 0 && timestamp() - start < 1000 {
@@ -482,7 +532,6 @@ temporary_main :: fn(initialize: @FnPtr(c: *Canvas) void, show: bool) []u8 = {
     while => c.scripts.len > 0 && timestamp() - start < 2000 {
         c.poll_scripts();
     };
-    c.collect_garbage();
     Render'finish_frame(c);
     
     @println("eval took %ms", timestamp() - start);
@@ -494,6 +543,7 @@ temporary_main :: fn(initialize: @FnPtr(c: *Canvas) void, show: bool) []u8 = {
         out.push(c.shift_right_logical(8).trunc());
         out.push(c.trunc());
     };
+    drop(c);
     
     dest := "target/a.ppm";
     write_entire_file_or_crash(dest, out.items());

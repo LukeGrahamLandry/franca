@@ -11,8 +11,14 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
+- run examples/circuit/tc/test.fr in ci
+- tc: console offset is unsafe if bounds checks are disabled
+- in ci without gpu, still build a.ppm for the things that do software rendering. (instead of writting empty a.ppm in run_tests)
+  - share code with the examples/gpu/viewer.fr gpu test (it needs ppms as input)
+  - scratch, prospero, ascii_table
+  - also easy to write a new main for wasm4,chip8 to show that the code is reusable
+  - ci_end: add the repro images 
 - libm (float/trig) functions without libc
-- mirror TuringCompleteSchematicArchive for web demo (but it doesn't work)
 - to make importing Viewer just for stb_image less confusing, reexport stbi_image_free (with a FEAT_PNG check)
 - just for good luck, map comptime jit memory as read only (not exec) after the compiler is done when jitting with ExecStyle.AOT. 
   ex. (before calling user code in run_franca_file), (at the end of load_circuit_index_worker in circuit example), (hctarcs once i allow runtime loading), etc.
@@ -23,7 +29,6 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 - terminal: still leaking pipes
 - in ci generate preview images for the graphics examples readmes
 - reusable gallery ui because many of the graphics programs have lots of example inputs to choose from
-- factor out the full screen frame buffer from doom,chip8
 - get_https_unsafe should hoist with_mbedtls out of the redirects loop but need to deal with the @try
 - pzkip.fr/write: scratch website accepts it but apple's archive utility doesn't ("Error 94: Bad message."... so true bestie!)
 - web: include examples for stackie and life

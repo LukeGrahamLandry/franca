@@ -1,0 +1,87 @@
+// TODO: cli/CLIPBOARD_PASTED/FILES_DROPPED to load .sb3 (needs to embed the compiler)
+// TODO: for external ones, put info from meta.json in the output and have button in ui to show it. 
+
+State :: @struct {
+    draw: Sgl.Self;
+    img: Sg.Image;
+    canvas: Rt.Canvas;
+    images: List(Img);
+    image_i: i64;
+};
+
+Img :: @struct(initialize: @FnPtr(c: *Rt.Canvas) void);
+
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    c := state.canvas&;
+    dirty := c.scripts.len != 0;
+    @if(Easy'should_skip_frame(sapp, dirty&)) return();
+    
+    // TODO: don't spam if all are in a wait block
+    start := timestamp();
+    while => c.scripts.len > 0 && timestamp() - start < 10 {
+        c.poll_scripts();
+    };
+    
+    Rt'Render'finish_frame(c);
+    
+    data := c.frame_pixels;
+    each data { it |
+        it[] = it[].rotate_left(8).byte_swap();  // TODO: slow
+    };
+    Easy'commit_screen_fit_image(sg, sapp, state.draw&, state.img, c.frame_pixels, c.size.x / c.size.y);
+};
+
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    state.draw&.setup(allocator = general_allocator(), sg = sg, max_commands = 2, max_vertices = 6);
+    state.img = sg.make(width = 480, height = 360, pixel_format = .RGBA8, data = zeroed(Sg.ImageData), usage = .DYNAMIC);
+    state.images = list(general_allocator());
+    
+    inline_for builtin_sources { $src |
+        state.images&.push(
+            initialize = @run import(@afmt(ast_alloc(), "{ % };", src[])).initialize,
+        );
+    };
+    next_example(state, 0);
+}
+
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    c := state.canvas&;
+    @match(event.type) {
+        fn RESIZED() => ();
+        fn KEY_DOWN() => @match(event.key_code) {
+            fn LEFT() => state.next_example(-1);
+            fn RIGHT() => state.next_example(1);
+            fn R() => {
+                c.send_event(.SpriteClicked);
+            }
+            @default => ();
+        };
+        fn KEY_UP() => ();
+        @default => return();
+    };
+}
+
+fn next_example(state: *State, delta: i64) void = {
+    @if(state.images.len == 0) return();
+    state.image_i = mod(state.image_i + delta + state.images.len, state.images.len);
+    
+    c := state.canvas&;
+    initialize := state.images[state.image_i].initialize;
+    @if(c.gc_head != 0  /* not first frame zero init */) drop(c);
+    init_canvas(c, general_allocator(), initialize);
+    c.send_event(.Flag);
+}
+
+driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
+main :: fn() void = Easy'start(State);
+#use("@/graphics/lib.fr");
+
+fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    @if(state.canvas.gc_head != 0) drop(state.canvas&);
+    drop(state.images&);
+    sg.destroy(state.frame);
+    state.draw&.destroy(sg, general_allocator());
+}
+
+Rt :: import("@/examples/gpu/hctarcs/runtime.fr");
+builtin_sources :: import("@/examples/gpu/hctarcs/main.fr").src;

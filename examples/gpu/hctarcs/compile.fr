@@ -96,7 +96,7 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
             each u32.reinterpret_bytes(data) { c |
                 solid += int(c[].shift_right_logical(24) != 0);
                 // fix colour format to match pen_setPenColorToColor (AABBGGRR -> AARRGGBB)
-                c[] = c[].byte_swap().shift_right_logical(8).bit_or(c[].bit_and(0xff.shift_left(24)));
+                c[] = c[].byte_swap().rotate_right(8);
             };
             if solid == 0 {  // if all pixels are transparent, don't need to render anything. 
                 width = 0; height = 0;
@@ -169,6 +169,7 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
         for it { c |
             @switch(c) {
                 @case("\"".ascii()) => @fmt(out, "\\\"");
+                @case("\\".ascii()) => @fmt(out, "\\\\");
                 @case("\n".ascii()) => @fmt(out, "\\n");
                 @default => (if c < 32 || c > 127 {
                     @fmt(out, "\\x");
@@ -432,6 +433,12 @@ fn compile_async(self: *Compile, continuation: []*Node) void = {
 
     // @fmt(out, "println(\"start async % %\");\n", cont_id, it.op);
     
+    if @is(it.op, .event_broadcastandwait, .sensing_askandwait, ) {
+        @fmt(out, "println(\"TODO: %\");\n", it.op);
+        compile_async(self, continuation);
+        return();
+    };
+    
     @match(it.op) {
         fn control_wait_until() => {
             // the condition will never be async but it has to yield so that the state can change
@@ -516,7 +523,7 @@ fn compile_async(self: *Compile, continuation: []*Node) void = {
                 declare_cont("body");
                 
                 @fmt(out, "i := s.futures[s.futures.len - 1]&; i[] -= 1;\n");
-                @fmt(out, "if i[] > 0 {\n");
+                @fmt(out, "if i[] >= 0 {\n");
                 push_async(false); // continue looping
                 self.compile_async(@slice body);
                 @fmt(out, ";return();};\n");
@@ -529,6 +536,22 @@ fn compile_async(self: *Compile, continuation: []*Node) void = {
             
             declare_cont("body");
             @fmt(out, "if ");
+            compile(self, cond);
+            @fmt(out, ".to_bool() {\n");
+            push_async(false);
+            inc_futures(self, 1) {
+                compile_async(self, @slice body);
+            };
+            
+            @fmt(out, "return()};\n// %.end\n", it.op);
+        }
+        // TODO: paste of the above
+        fn control_repeat_until() => {
+            cond, body := (it.args[0], it.args[1]);
+            push_async(true);
+            
+            declare_cont("body");
+            @fmt(out, "if !");
             compile(self, cond);
             @fmt(out, ".to_bool() {\n");
             push_async(false);

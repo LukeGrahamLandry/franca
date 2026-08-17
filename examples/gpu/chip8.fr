@@ -194,45 +194,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     data := temp().alloc_init(u32, 64*32, fn(i) => @if(state.cpu.display&[i] == 0, 
         pack_rgba(0,0,0,255), pack_rgba(255,255,255,255)));
-    data := data.interpret_as_bytes();
-    d := zeroed(Sg.ImageData);
-    d.subimage&[0]&[0] = data;
-    sg.destroy(state.img);  // TODO: should update the texture instead of recreating it every time
-    state.img = sg.make(
-        width = 64, height = 32,
-        pixel_format = .RGBA8,
-        data = d,
-    );
-    
-    sgl := state.draw&;
-    sgl.defaults();
-    sgl.viewport(0.intcast(), 0.intcast(), sapp.width().intcast(), sapp.height().intcast(), true);
-    
-    image_aspect := 2.0;
-    sgl.texturing_enabled = true;
-    sgl.texture(state.img, (id = Sg.INVALID_ID));
-    sgl.begin(.QUADS);
-    sgl.load_identity();
-    sgl.translate(-1, 1, 0.0);
-    sgl.scale(2, 2, 0.0);
-    sgl.rotate(PI, 1.0, 0.0, 0.0);
-
-    screen_aspect := sapp.width().float() / sapp.height().float();
-    aspect := cast(screen_aspect / image_aspect);
-    (x1: f32, x2: f32, y1: f32, y2: f32) := (0, @if(aspect > 1, 1/aspect, 1), 0, @if(aspect < 1, aspect, 1));
-    sgl.v2f_t2f(x1, y1, 0, 0);
-    sgl.v2f_t2f(x2, y1, 1, 0);
-    sgl.v2f_t2f(x2, y2, 1, 1);
-    sgl.v2f_t2f(x1, y2, 0, 1);
-    sgl.end();
-    
-    Easy'glue_begin_pass(sapp, sg, (colors = ((
-        load_action = .CLEAR,
-        clear_value = (r = 0.15, g = 0.15, b = 0.15, a = 1),
-    ), ..)));
-    sgl.draw_layer(sg, 0);
-    sg.end_pass();
-    sg.commit();
+    Easy'commit_screen_fit_image(sg, sapp, state.draw&, state.img, data, 2);
 };
 
 State :: @struct {
@@ -252,6 +214,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sapp.desc.enable_clipboard = true;
     sapp.desc.enable_dragndrop = true;
     state.draw&.setup(allocator = general_allocator(), sg = sg, max_commands = 2, max_vertices = 6);
+    state.img = sg.make(width = 64, height = 32, pixel_format = .RGBA8, data = zeroed(Sg.ImageData), usage = .DYNAMIC);
     state.images = list(general_allocator());
     state.dirty = true;
 

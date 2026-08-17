@@ -20,6 +20,8 @@ most other blocks are not implemented yet.
 
 ## todo
 
+- use the right value tags when outputting .sb3
+- coerce_number for all the math ops
 - gpu rendering
 - infer types
 - dump Node ast back to builder franca code
