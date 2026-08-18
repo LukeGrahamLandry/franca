@@ -10,7 +10,6 @@ Canvas :: @rec @struct {
     // vars that are "For all sprites" are represented as locals in stage. 
     stage: *SpriteInstance;  
     classes: []SpriteClass;
-    scripts: RawList(*Script) = empty();
     clones: RawList(*SpriteInstance) = empty();
     gpa: Alloc;
     gc_head: Value = NaN;
@@ -25,10 +24,15 @@ Canvas :: @rec @struct {
     broadcasts: RawHashMap(Str, i64) = init();
 };
 
+// this is the handle to a running script passed around in the compiled code. only need one at a time. 
 Script :: @rec @struct {
     // TODO: if continue accessing fields of sprite more, should have a current_script field that changes and pass the sprite around to save an indirection
     sprite: *SpriteInstance;
     canvas: *Canvas;
+    data: *ScriptSlot #use;   // TODO: maybe should just move it from the slots to here to save an indirection. but then have to be careful about not copying it back if cleared to re-call itself. 
+};
+
+ScriptSlot :: @struct {
     // async needs to reify (function arguments, loop counters, continuation function pointer). 
     // to make progress the runtime pops the last thing from the stack and calls it as a function pointer. 
     futures: RawList(Value) = empty();
@@ -42,6 +46,8 @@ SpriteInstance :: @rec @struct {  // !Sized
     pos: Vec2 = vec2(0);
     pen: (@struct(down := false, colour: u32 = 0, size: f64 = 1)) = ();
     looks: (@struct(costume := 0, size: f64 = 1, hide := false, say: Value = 0)) = ();
+    // each trigger can only have one running at a time so this is parallel to class.events 
+    scripts: []ScriptSlot;
     // TODO: direction, say/think/ask, look effects, layer, volume, drag mode
     // vars: Array(Value, self.var_count) #inline; // [vars,lists]; 
 };
@@ -110,11 +116,15 @@ fn new_sprite(c: *Canvas, class: *SpriteClass) *SpriteInstance = {
     N := size_of(SpriteInstance) / size_of(Value);
     data := c.gpa.alloc_uninit(Value, N + class.var_count);
     instance := bit_cast_unchecked(*f64, *SpriteInstance, data.ptr);
-    instance[] = (class = class);
+    instance[] = (class = class, scripts = c.gpa.alloc_zeroed(ScriptSlot, class.events.len));
     instance
 }
 
 fn drop(c: *Canvas, it: *SpriteInstance) void = {
+    each it.scripts { it |
+        it.futures&.drop(c.gpa);
+    };
+    c.gpa.dealloc(ScriptSlot, it.scripts);
     N := size_of(SpriteInstance) / size_of(Value);
     data := bit_cast_unchecked(*SpriteInstance, *Value, it).slice(N + it.class.var_count);
     c.gpa.dealloc(Value, data);
@@ -193,6 +203,7 @@ fn coerce_string(it: Value, c: *Canvas) Str = {
 
 fn to_bool(a: Value) bool = {
     @if(a.is_bool()) return(bit_cast_unchecked(f64, i64, a) - false_bits == 1);
+    // TODO: actually you can't put round blocks in bool inputs so maybe this isn't needed (the inverse is tho)
     @if(a.is_number()) return(a == 1);
     @if(a.is_string()) return(a.to_obj()[].string.s == "true");
     false
@@ -219,10 +230,11 @@ fn collect_garbage(c: *Canvas) void = {
     for c.clones { it |
         visit(it.looks.say);
         for(it.vars(), visit);
+        for it.scripts { it |
+            for(it.futures, visit);
+        };
     };
-    for c.scripts { it |
-        for(it.futures, visit);
-    };
+    
     for(c.constants, visit);  // TODO: this is wasteful, could just not put them in the gc_head list
     
     next := c.gc_head&;
@@ -242,9 +254,6 @@ fn collect_garbage(c: *Canvas) void = {
 }
 
 fn drop(c: *Canvas) void = {
-    for(c.scripts, fn(it) => it.futures&.clear());
-    c.poll_scripts();
-    @assert_eq(c.scripts.len, 0);
     for c.clones { it |
         drop(c, it);
     };
@@ -350,7 +359,6 @@ looks_say :: fn(s, msg) void = { s.sprite.looks.say = msg; };
 
 looks_cleargraphiceffects :: fn(s) void = println("looks_cleargraphiceffects");
 looks_switchbackdropto :: fn(s, idx) void = @println("TODO: looks_switchbackdropto %", idx);
-event_broadcast :: fn(s, idx: i64) void = s.canvas.send_event(Broadcast = idx);
 sensing_touchingobject :: fn(_) = { println("sensing_touchingobject"); false.from_bool() };
 sensing_keypressed :: fn(s, idx: i64) = s.canvas.sensing.pressed&.get(idx).from_bool();
 control_wait :: fn(s, t) void = @println("TODO: wait %", t);
@@ -528,40 +536,44 @@ fn send_event(c: *Canvas, event: Trigger) void = {
 
 fn send_event(c: *Canvas, s: *SpriteInstance, event: Trigger) void = {
     ::AutoEq(Trigger);
-        each s.class.events { it |
+        enumerate s.class.events { i, it |
             if it.trigger& == event& {
-                // TODO: call it now it without the allocation if not async
-                s := c.gpa.boxed(Script, (sprite = s, canvas = c));
+                continue :: local_return;
+                slot := s.scripts[i]&;
+                if event&.is(.KeyPress) && slot.futures.len != 0 {
+                    continue();  // keys are special for some reason
+                };
+                
+                slot.futures&.clear();
+                s: Script = (canvas = c, sprite = s, data = slot);
                 s.futures&.reserve(1, c.gpa);
-                s.push_async(it.callee);
-                c.scripts&.push(s, c.gpa);
+                s&.push_async(it.callee);
             };
         };
 }
 
 
-fn poll_scripts(c: *Canvas) void = {
-    range(0, c.scripts.len) { i |  // can be reallocated in callee (for broadcast)
-        s := c.scripts[i];
-        if s.futures&.pop() { callee |
-            // TODO: could keep min,max of all the addresses of the cont function pointers and assert these bits are in that range (in case of compiler bugs). 
-            @debug_assert(callee.is_number(), "corrupt callee");
-            callee := bit_cast_unchecked(Value, @FnPtr(s: *Script) void, callee);
-            callee(s);
+fn poll_scripts(c: *Canvas) i64 = {
+    // TODO: maybe still want to keep a list of active scripts on the canvas
+    
+    ran := 0;
+    range(0, c.clones.len) { i | // can be reallocated in callee (for clone)
+        sprite := c.clones[i];
+        each sprite.scripts { slot |
+            if slot.futures&.pop() { callee |
+                s: Script = (canvas = c, sprite = sprite, data = slot);
+                // TODO: could keep min,max of all the addresses of the cont function pointers and assert these bits are in that range (in case of compiler bugs). 
+                @debug_assert(callee.is_number(), "corrupt callee");
+                callee := bit_cast_unchecked(Value, @FnPtr(s: *Script) void, callee);
+                callee(s&);
+                ran += 1;
+            };
         };
         i += 1;
     };
     
-    ordered_retain(c.scripts&) { s |
-        done := s.futures.len == 0;
-        if done {
-            s.futures&.drop(c.gpa);
-            c.gpa.dealloc_one(Script, s[]);
-        };
-        !done
-    };
-    
     c.maybe_collect_garbage();
+    ran
 }
 
 Render :: import("@/examples/gpu/hctarcs/soft.fr");
@@ -599,12 +611,14 @@ temporary_main :: fn(initialize: @FnPtr(c: *Canvas) void, show: bool) []u8 = {
     init_canvas(c, temp(), initialize);
     
     c.send_event(.Flag);
-    while => c.scripts.len > 0 && timestamp() - start < 1000 {
-        c.poll_scripts();
+    ran := 1;
+    while => ran > 0 && timestamp() - start < 1000 {
+        ran = c.poll_scripts();
     };
     c.send_event(.SpriteClicked);  // TODO: remove; just to make quicksort benchmark work
-    while => c.scripts.len > 0 && timestamp() - start < 2000 {
-        c.poll_scripts();
+    ran := 1;
+    while => ran > 0 && timestamp() - start < 2000 {
+        ran = c.poll_scripts();
     };
     Render'finish_frame(c);
     

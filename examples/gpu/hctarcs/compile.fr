@@ -18,6 +18,7 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
     // TODO: not good enough
     each p.sprites { s |
         for s.blocks& { it |
+            self.current_def = it;
             @if(is_hat(it.op))
             if it.op == .procedures_definition {
                 _ := self.is_async(it);
@@ -50,15 +51,19 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
             @if(!is_hat(it.op)) continue();
             
             extra_param := "";
+            self.current_def = it;
             if it.op == .procedures_definition {
-                self.current_def = (Some = it);
                 self.emit_debug_block(it);
                 @fmt(out, "@\"proc_% %\"", it.literal, => self.safe_string_body(it.string));
                 if !self.is_async(it) {
                     extra_param = @tfmt(", params: *Array(Rt.Value, %)", it.args[1].args.len);
                 };
             } else {
-                @fmt(out, "%_%", it.op, it.literal);
+                if it.op == .event_whenbroadcastreceived {
+                    @fmt(out, "@\"broadcast_%_%\"", it.literal, => self.safe_string_body(it.args[1].string));
+                } else {
+                    @fmt(out, "%_%", it.op, it.literal);
+                };
             };
             @fmt(out, " :: fn(s: *Rt.Script%) void #use(Rt.impl) = {\n", extra_param);
             
@@ -82,7 +87,7 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
             @fmt(out, ";}\n\n");
         };
         self.current_sprite += 1;
-        self.current_def = .None;
+        self.current_def = zeroed(*Node);
         
         each it.costumes { it |
             continue :: local_return;
@@ -128,10 +133,9 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
             @match(it.op) {
                 fn event_whenflagclicked() => @fmt(out, "e.push(trigger = .Flag, callee = %_%);\n", it.op, it.literal);
                 fn event_whenbroadcastreceived() => {
-                    name := it.args[1].string;
-                    i := self.project.broadcasts.index_of(fn(it) => it.string == name) 
-                        || @panic("invalid broadcast (%)", name);
-                    @fmt(out, "e.push(trigger = (Broadcast = %), callee = %_%);  // %\n", i, it.op, it.literal, => self.safe_string_body(name));
+                    name, i := (it.args[1].string, it.args[1].literal.int());
+                    @assert_eq(self.project.broadcasts[i].string, name, "invalid broadcast (%)", name);
+                    @fmt(out, "e.push(trigger = (Broadcast = %), callee = @\"broadcast_%_%\");\n", i, it.literal, => self.safe_string_body(name));
                 }
                 fn event_whenthisspriteclicked() => @fmt(out, "e.push(trigger = .SpriteClicked, callee = %_%);\n", it.op, it.literal);
                 fn control_start_as_clone() => @fmt(out, "e.push(trigger = .CloneStart, callee = %_%);\n", it.op, it.literal);
@@ -224,7 +228,7 @@ Compile :: @struct {
     string_constants: List(Str);
     current_sprite := 0;
     project: *S.Project;
-    current_def: ?*Node = .None;
+    current_def := zeroed(*Node);
     next_cont_id := 0;
     futures_depth := 0;  // how far back on futures stack is first parameter of current_def
     max_futures := 0;    // to reserve at the start
@@ -250,7 +254,6 @@ compile :: fn(self: *Compile, it: *Node) void = {
             // TODO: factor out and store the lookup name in simple_ops
             @if(op == .looks_switchcostumeto) @fmt(out, ".lookup_costume_index(s)");
             @if(op == .sensing_keypressed) @fmt(out, ".lookup_key_index(s)");
-            @if(op == .event_broadcast) @fmt(out, ".lookup_broadcast_index(s)");
             
             @fmt(out, ", ");
         };
@@ -291,7 +294,8 @@ compile :: fn(self: *Compile, it: *Node) void = {
         fn franca_var() => @fmt(out, "s.sprite[%]", self.var_index(it));
         fn franca_var_stage() => @fmt(out, "s.canvas.stage[%]", self.var_index(it));
         fn argument_reporter_string_number() => {
-            def := self.current_def.unwrap();
+            def := self.current_def;
+            @assert_eq(def.op, .procedures_definition, "argument outside custom block");
             params := def.args[1].args;
             i := params.index_of(fn(check) => check.literal == it.literal) || {
                 // TODO: redundant because the loader does this too 
@@ -361,9 +365,24 @@ compile :: fn(self: *Compile, it: *Node) void = {
             };
             @fmt(out, ");\n@\"proc_% %\"(s, args&);\n ", def.literal, => self.safe_string_body(def.string));
         }
+        fn event_broadcast() => {
+            @fmt(out, "idx := ");
+            compile(self, it.args[0]);
+            @fmt(out, ".lookup_broadcast_index(s);\n");
+            @fmt(out, "s.canvas.send_event(Broadcast = idx);\n");
+            // TODO: this isn't good enough because might be inside a custom block and then need to return all the way up. 
+            //       so any custom blocks that might be called from an event_whenbroadcastreceived 
+            //       need to treat sending (computed or the parent) broadcast as being async so they can bail.
+            //       and then runtime needs to track the sprite's parent broadcast in case it has custom blocks that need to check it. 
+            //       should do the lookup_index folding first tho so its can be less pessimistic. 
+            if self.current_def.op == .event_whenbroadcastreceived {
+                @fmt(out, "@if(idx == %) return();\n", self.current_def.args[1].literal);
+            };
+        };
         fn control_stop() => {
             @switch(it.args[0].string) {
-                @case("this script") => ();
+                @case("this script") => ();  // if in a custom block, only needs to return up one level so it's more like "this hat block"
+                // TODO: these need to make everything be async i guess
                 @case("all") => @fmt(out, "println(\"TODO: control stop all\");\n");
                 @case("other scripts in sprite") => @fmt(out, "println(\"TODO: control stop other\");\n");
                 @case("other scripts in stage") => @fmt(out, "println(\"TODO: control stop other\");\n");
@@ -371,8 +390,9 @@ compile :: fn(self: *Compile, it: *Node) void = {
             };
             if self.futures_depth != 0 {
                 depth := self.futures_depth;
-                if self.current_def { def |
-                    params := def.args[1].args;
+                if self.current_def.op == .procedures_definition {
+                    // leave the params on the stack because the caller expects to pop them off. 
+                    params := self.current_def.args[1].args;
                     depth -= params.len + 1;
                 };
                 if depth != 0 {
@@ -412,11 +432,6 @@ compile :: fn(self: *Compile, it: *Node) void = {
             compile(self, var);
             @fmt(out, " = i.float();\n");
             compile(self, body);
-            @fmt(out, ";};\n");
-        }
-        fn control_forever() => {
-            @fmt(out, "loop {\n");
-            compile(self, it.args[0]);
             @fmt(out, ";};\n");
         }
         @default => {
@@ -597,18 +612,6 @@ fn compile_async(self: *Compile, continuation: []*Node) void = {
             };
             declare_cont("end");
         }
-        fn control_forever() => {
-            push_async(true);
-            inc_futures(self, 1) {
-                declare_cont("body");
-                push_async(false);
-                compile_async(self, @slice it.args[0]);
-                @fmt(out, ";return();};\n");
-            };
-            
-            @if(continuation.len != 0) println("warning: control_forever has an unreachable continuation");
-            return();
-        }
         @default => @panic("TODO: compile_async %", it.op);
     };
     
@@ -635,7 +638,7 @@ fn is_async_rec(self: *Compile, it: *Node) bool = {
         fn procedures_definition() => {
             it.flags.mark_rec = true;
             prev := self.current_def;
-            self.current_def = (Some = it);
+            self.current_def = it;
             async := self.is_async(it.args[0]);
             self.current_def = prev;
             return async;
@@ -659,9 +662,10 @@ fn is_async_rec(self: *Compile, it: *Node) bool = {
         }
         fn control_if_else() => self.is_async(it.args[1]) || self.is_async(it.args[2]);
         @default => {
-            is_loop := @is(it.op, .control_forever, .control_for_each, .control_repeat, .control_repeat_until);
+            is_loop := @is(it.op, .control_for_each, .control_repeat, .control_repeat_until);
             if is_loop {
-                if self.current_def { def |
+                def := self.current_def;
+                if def.op == .procedures_definition {
                     if def.flags.run_without_screen_refresh {
                         for it.args { it |
                             @if(self.is_async(it)) return(true);
@@ -706,6 +710,13 @@ fn lower(self: *Compile, it: **Node) void = {
             n := a.alloc_zeroed(Node, 2);
             n[0] = (op = .control_repeat_until, args = @slice(n[1]&, body) a);
             n[1] = (op = .operator_not, args = @slice(cond) a);
+            it[] = n[0]&;
+        }
+        fn control_forever() => {
+            body := it.args[0];
+            n := a.alloc_zeroed(Node, 2);
+            n[0] = (op = .control_repeat_until, args = @slice(n[1]&, body) a);
+            n[1] = (op = .franca_literal, args = empty(), literal = 0);
             it[] = n[0]&;
         }
         fn control_if() => {

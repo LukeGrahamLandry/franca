@@ -4,6 +4,10 @@
 - some of the blocks are too paste-y, rewrite them in terms of other blocks
 - trying to get another raytracer to work: more list ops, hex colour. still blank :(
 - start keyboard events and broadcasts. same seperation of name->index lookup so can hoist into the compiler later. 
+- wait you can only have one instance of a script running at a time? that's convenient. 
+  in looking for how often to send key repeats, it seems it just waits for the script to finish. 
+  everything else is different, they restart the script if sent again while its running but still can't have two at once. 
+  one wonders why but that's not my department. means i don't have to keep reallocating the futures stack. 
 
 ## (Aug 17) sb3
 

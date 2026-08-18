@@ -5,21 +5,22 @@ State :: @struct {
     canvas: Rt.Canvas;
     images: List(Img);
     image_i: i64;
+    dirty: bool;
 };
 
 Img :: @struct(initialize: @FnPtr(c: *Rt.Canvas) void);
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     c := state.canvas&;
-    // TODO: also dirty if resized
-    dirty := c.scripts.len != 0;
-    @if(Easy'should_skip_frame(sapp, dirty&)) return();
+    @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
     
     // TODO: don't spam if all are in a wait block
     start := timestamp();
-    while => c.scripts.len > 0 && timestamp() - start < 10 {
-        c.poll_scripts();
+    ran := 1;
+    while => ran != 0 && timestamp() - start < 10 {
+        ran = c.poll_scripts();
     };
+    state.dirty = ran != 0;
     
     Rt'Render'finish_frame(c);
     
@@ -41,6 +42,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         );
     };
     next_example(state, 0);
+    state.dirty = true;
 }
 
 key_to_index :: fn(key: Sapp.Keycode) i64 = {
@@ -114,6 +116,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         }
         @default => return();
     };
+    state.dirty = true;
 }
 
 fn mouse_to_canvas(c: *Rt.Canvas, event: *Sapp.Event, sapp: *Sapp.Self) Vec2 = {

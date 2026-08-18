@@ -66,6 +66,7 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
     each p.targets { s |
         each s.broadcasts& { key, name |
             it := literal_node(String = name[]);
+            it.literal = project.broadcasts.len.float();
             project.broadcasts&.push(it, temp());
             prev := broadcasts&.insert(key, it);
             @if(prev.is_some()) return(Err = @tfmt("duplicate broadcasts id (%)", key));
@@ -131,6 +132,10 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                 proccodes_referenced&.push(proccode);
             };
             
+            if b.opcode == .control_forever && b.next.is_some() {
+                return(Err = @tfmt("(%): % has next", key, b.opcode));
+            };
+            
             if b.opcode == .procedures_definition {
                 prototype := b.inputs&.get("custom_block") 
                     || return(Err = @tfmt("(%): %.custom_block is missing", key, b.opcode));
@@ -183,10 +188,10 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                     };
                     
                     a := @try(decode_value(value, s, blocks&, (key, it.op, field))) return;
-                    if a.op == .franca_string && field == "BROADCAST_INPUT" {  // HACK
+                    if a.op == .franca_string && field == "BROADCAST_INPUT" {  
+                        // HACK: sane thing would be to keep the tags on ValueRef and do this in decode_value
                         a = blocks&.get(a.string) 
                             || return(Err = @tfmt("(%): missing broadcast (%)", key, a.string));
-                        @println("BROADCAST_OPTION % %", "", a.string);
                     };
                     args&.push(a);
                 };
@@ -202,9 +207,6 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                         if field == "VARIABLE" {
                             @if(!@is(a.op, .franca_var, .franca_var_stage)) return(Err = @tfmt("(%): %.VARIABLE (%) found %", key, it.op, name, a.op));
                         };
-                        if field == "BROADCAST_OPTION" {
-                            @println("BROADCAST_OPTION % %", name, a.string);
-                        }
                         args&.push(a);
                         
                         if field == "LIST" {
