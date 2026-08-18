@@ -1,5 +1,3 @@
-// TODO: cli/CLIPBOARD_PASTED/FILES_DROPPED to load .sb3 (needs to embed the compiler)
-// TODO: for external ones, put info from meta.json in the output and have button in ui to show it. 
 
 State :: @struct {
     draw: Sgl.Self;
@@ -13,6 +11,7 @@ Img :: @struct(initialize: @FnPtr(c: *Rt.Canvas) void);
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     c := state.canvas&;
+    // TODO: also dirty if resized
     dirty := c.scripts.len != 0;
     @if(Easy'should_skip_frame(sapp, dirty&)) return();
     
@@ -51,14 +50,50 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         fn KEY_DOWN() => @match(event.key_code) {
             fn LEFT() => state.next_example(-1);
             fn RIGHT() => state.next_example(1);
-            fn R() => {
-                c.send_event(.SpriteClicked);
-            }
             @default => ();
         };
         fn KEY_UP() => ();
+        fn MOUSE_MOVE() => {
+            c.sensing_mouse.pos = mouse_to_canvas(c, event, sapp);
+        }
+        // the "mouse down?" block starts returning true when any button mouse is pressed 
+        // and starts returning false when any is released (even if some others are still pressed). 
+        // ex. [left down, middle down, middle up] results in false. 
+        fn MOUSE_UP() => { c.sensing_mouse.down = false; }
+        fn MOUSE_DOWN() => { 
+            c.sensing_mouse.down = true; 
+            
+            pos := mouse_to_canvas(c, event, sapp);
+            for c.clones { sprite |
+                continue :: local_return;
+                @if(sprite.looks.hide) continue();
+                // TODO: precompute per class
+                @if(!sprite.class.events.contains(fn(it) => it.trigger&.is(.SpriteClicked))) continue();
+
+                // TODO: how is this supposed to interact with transparency?
+                // TODO: check if clicked on the thing
+                // TODO: does it count if you're behind another sprite?
+                // TODO: factor out to share with "is touching (mouse-pointer)?"
+                c.send_event(sprite, .SpriteClicked);
+            };
+        }
         @default => return();
     };
+}
+
+fn mouse_to_canvas(c: *Rt.Canvas, event: *Sapp.Event, sapp: *Sapp.Self) Vec2 = {
+    size := {  // commit_screen_fit_image starts in top level and fits to the smaller dimension
+        screen := vec2(sapp.width().float().cast(), sapp.height().float().cast());
+        aspect := (screen.x / screen.y) / (c.size.x / c.size.y);
+        size := vec2(@if(aspect > 1, 1/aspect, 1), @if(aspect < 1, aspect, 1));
+        screen * size
+    };
+    pos := vec2(event.mouse_x, event.mouse_y);
+    pos := clamp(pos, vec2(0), size);
+    pos := floor(pos / size * c.size);
+    pos -= c.size / 2;
+    pos.y *= -1;
+    pos
 }
 
 fn next_example(state: *State, delta: i64) void = {

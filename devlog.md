@@ -2,7 +2,15 @@
 ## (Aug 17) sb3
 
 - now to test the async, looking at the last frame isn't enough, i need gui that shows the animation. 
-
+- mouse input. i started with tracking how many buttons you're pressing but they don't bother so i have to match that even tho it seems weird. 
+- in real scratch, my stamp_pos_async doesn't update the screen until you click stop? 
+  - console error that the parent field is missing instead of null. 
+    if i fix that, it won't load because my values are always tagged as strings 
+    instead of the more specific type the block wants. so i guess the first thing is 
+    erroring out of their validation too soon and then it coerces the strings mostly fine like i was hoping? 
+    ah! but that was fixing it by doing every Option json_dump that way. 
+    if just do it for the one parent field, it works fine... facinating.
+  
 --- 
 
 - factor out the spam for just drawing one texture on the screen when you want to do software rendering. 

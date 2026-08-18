@@ -16,7 +16,7 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 - in ci without gpu, still build a.ppm for the things that do software rendering. (instead of writting empty a.ppm in run_tests)
   - share code with the examples/gpu/viewer.fr gpu test (it needs ppms as input)
   - scratch, prospero, ascii_table
-  - also easy to write a new main for wasm4,chip8 to show that the code is reusable
+  - also easy to write a new main for wasm4,chip8,life,circuit/tc to show that the code is reusable
   - ci_end: add the repro images 
 - libm (float/trig) functions without libc
 - to make importing Viewer just for stb_image less confusing, reexport stbi_image_free (with a FEAT_PNG check)

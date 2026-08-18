@@ -82,7 +82,6 @@ const handle = (resolve) => async (msg) => {
     if (msg.epoch !== epoch) return;
     switch (msg.tag) {
         case "show": { out_innerText += msg.text; break;  }
-        case "log": break;
         case "err": { err_innerText += msg.text; break; }
         case "done": { resolve(); break; }
         case "ready": break;

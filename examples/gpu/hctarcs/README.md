@@ -20,12 +20,11 @@ most other blocks are not implemented yet.
 
 ## todo
 
+- images should be drawn at half size
 - use the right value tags when outputting .sb3
 - coerce_number for all the math ops
 - gpu rendering
 - infer types
-- dump Node ast back to builder franca code
-- textbox edit as franca
 - hell, they're gonna have SVGs in there
 - implement more blocks
   - async
@@ -41,7 +40,22 @@ most other blocks are not implemented yet.
   - is touching, if on edge bounce
   - clones
   - drag
+  - for broadcastandwait without allocating a tree of all the scripts being waited on,
+    i just need to have a broadcast accept a callback on its stack 
+    so when its done it can and decrement a counter on the old script's stack, 
+    and the send broadcast has to keep track of how many are started. 
 - strings should be utf16
+- ui
+  - cli/CLIPBOARD_PASTED/FILES_DROPPED to load .sb3 (needs to embed the compiler)
+  - show warnings if projects use unsupported features (sound, cloud variables, extensions)
+  - load project by id
+  - for external ones, put info from meta.json in the output and have button in ui to show it. 
+  - see generated code
+  - flag/pause/stop
+  - see the code as blocks
+  - keyboard, drag, click bounds, scroll, ask
+  - dump Node ast back to builder franca code and textbox edit as franca
+  - collect warnings when loading the project and show them at the end
 
 ## notes
 

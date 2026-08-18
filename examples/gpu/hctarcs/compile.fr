@@ -5,7 +5,6 @@
 // - hoist dynamic typechecking out of rt.impl so it can be elided
 // 
 
-// TODO: safe idents (ie. no quotes, \n, etc. in strings used for proc names, etc.)
 compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
     self: Compile = (
         out = out, 
@@ -40,8 +39,9 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
         };
     };
     emitted_images: HashMap(Str, Ty([]u8, i32, i32, bool)) = init(temp());
-    each p.sprites { it |
-        @fmt(out, "// START %\n", it.name);  // TODO: safe print
+    for p.sprites { it |
+        self.emit_debug_sprite(it);
+        
         for it.blocks { it |
             continue :: local_return;
             @if(!is_hat(it.op)) continue();
@@ -49,8 +49,8 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
             extra_param := "";
             if it.op == .procedures_definition {
                 self.current_def = (Some = it);
-                // TODO: safe print
-                @fmt(out, "@\"proc_% %\"", it.literal, it.string);
+                self.emit_debug_block(it);
+                @fmt(out, "@\"proc_% %\"", it.literal, => self.safe_string_body(it.string));
                 if !self.is_async(it) {
                     extra_param = @tfmt(", params: *Array(Rt.Value, %)", it.args[1].args.len);
                 };
@@ -84,7 +84,7 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
         each it.costumes { it |
             continue :: local_return;
             @if(emitted_images&.contains(it.md5)) continue();
-            if it.fmt != "png" {
+            if it.fmt != "png" || !Viewer.FEAT_PNG {
                 @println("warning: i don't support svgs yet so (%) won't render", it.name);
                 emitted_images&.insert(it.md5, ("", 0, 0, false));
                 continue();
@@ -112,8 +112,8 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
     @fmt(out, "a := c.gpa;\nfloats_blob := f64.reinterpret_bytes(floats_blob);\n");
     @fmt(out, "c.classes = a.alloc_uninit(Rt.SpriteClass, %);\n", p.sprites.len);
     @fmt(out, "c.init_strings(strings);\n");  // Obj for the const string so can use them in sprite vars below. 
-    enumerate p.sprites { i, it |
-        self.current_sprite = i;
+    enumerate p.sprites { sprite_i, it |
+        self.current_sprite = sprite_i;
         @fmt(out, "t := a.alloc_uninit(Rt.SpriteClass.Costume, %);\n", it.costumes.len);
         enumerate it.costumes { i, it |
             // TODO: declaring '_' twice probably shouldn't be allowed :compiler
@@ -136,6 +136,7 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
         
         @fmt(out, "m := a.alloc_zeroed(Rt.Monitor, %);\n", it.monitors.len);
         enumerate it.monitors { i, m |
+            @assert(m.var.op == .franca_var || sprite_i == 0, "sprite has stage monitior");
             @fmt(out, "m[%] = (var=%,name=strings[%],x=%,y=%,hide=%,mode=", i, self.var_index(m.var), self.const_string(m.var.string), m.x, m.y, m.hide);
             @match(m.mode) {
                 fn Value() => @fmt(out, ".Value");
@@ -145,8 +146,8 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
             @fmt(out, ");\n");
         };
         
-        @fmt(out, "c.classes[%] = (name = strings[%], costumes = t, events = e.shrink_to_fit(), var_count = %, monitors = m);\n", i, self.const_string(it.name), it.variables.len);
-        @fmt(out, "sprite := c.new_sprite(c.classes[%]&);\nc.clones&.push(sprite, a);\n", i);
+        @fmt(out, "c.classes[%] = (name = strings[%], costumes = t, events = e.shrink_to_fit(), var_count = %, monitors = m);\n", sprite_i, self.const_string(it.name), it.variables.len);
+        @fmt(out, "sprite := c.new_sprite(c.classes[%]&);\nc.clones&.push(sprite, a);\n", sprite_i);
         
         @fmt(out, "v := sprite.vars();\n");
         @fmt(out, "v.rest(%).set_zeroed();\n", it.variables.len);  // for good luck: don't have uninit parameters; TODO: remove when i use a better calling convention
@@ -164,26 +165,28 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
     
     @fmt(out, "strings :: @const_slice(\n");
     for self.string_constants { it |
-        @fmt(out, "    \"");
-        safe := true;
-        for it { c |
-            @switch(c) {
-                @case("\"".ascii()) => @fmt(out, "\\\"");
-                @case("\\".ascii()) => @fmt(out, "\\\\");
-                @case("\n".ascii()) => @fmt(out, "\\n");
-                @default => (if c < 32 || c > 127 {
-                    @fmt(out, "\\x");
-                    push_hex_byte(out, c, true);
-                } else {
-                    out.push(c);
-                });
-            };
-        };
-        @fmt(out, "\",\n");
+        @fmt(out, "    \"%\",\n", => self.safe_string_body(it));
     };
     @fmt(out, ");\n");
     
     embed_bytes(out, "floats_blob", floats_blob&.items().interpret_as_bytes());
+}
+
+fn safe_string_body(self: *Compile, it: Str) void = {
+    out := self.out;
+    for it { c |
+        @switch(c) {
+            @case("\"".ascii()) => @fmt(out, "\\\"");
+            @case("\\".ascii()) => @fmt(out, "\\\\");
+            @case("\n".ascii()) => @fmt(out, "\\n");
+            @default => (if c < 32 || c >= 127 {
+                @fmt(out, "\\x");
+                push_hex_byte(out, c, true);
+            } else {
+                out.push(c);
+            });
+        };
+    };
 }
 
 Compile :: @struct {
@@ -202,14 +205,13 @@ Compile :: @struct {
 // TODO: in builder check that not using a !simple_ops.has_result where a value is needed and give error. 
 // TODO: generic way to insert string->index lookups for costumes,broadcast,clone_of,etc.
 //       similarly many of the ones with constant fields should be compiled to call different functions like mathop. 
-// TODO: check if mathop names are valid instead of outputting franca that won't compile
 
 // the sync parts can always be compiled this way. 
 compile :: fn(self: *Compile, it: *Node) void = {
     out := self.out;
     @if(out.items().ends_with("\n")) out.push_repeated(self.depth*4, " ".ascii());
     
-    if simple_ops.get(it.op) { data |
+    if simple_ops.ops&.get(it.op) { data |
         @if(data.need_self) @fmt(out, "s.");
         @fmt(out, "%(", it.op);
         op := it.op;
@@ -258,6 +260,7 @@ compile :: fn(self: *Compile, it: *Node) void = {
             def := self.current_def.unwrap();
             params := def.args[1].args;
             i := params.index_of(fn(check) => check.literal == it.literal) || {
+                // TODO: redundant because the loader does this too 
                 // sadly not an error. ex. this is why turbowarp's "is compiled?" block works in normal scratch. 
                 @eprintln("warning: used argument % outside it's function", it.string); 
                 return @fmt(out, "0.0");
@@ -296,6 +299,7 @@ compile :: fn(self: *Compile, it: *Node) void = {
         fn operator_mathop() => {
             suffix := it.args[1].string;
             suffix := @if(suffix == "e ^", "e_pow", suffix);
+            @assert(simple_ops.mathop_names.contains(suffix), "TODO: %.%", it.op, suffix);
             @fmt(out, "%_%(", it.op, suffix);
             compile(self, it.args[0]);
             @fmt(out, ")");
@@ -321,9 +325,15 @@ compile :: fn(self: *Compile, it: *Node) void = {
                     };
                 };
             };
-            @fmt(out, ");\n@\"proc_% %\"(s, args&);\n ", def.literal, def.string);
+            @fmt(out, ");\n@\"proc_% %\"(s, args&);\n ", def.literal, => self.safe_string_body(def.string));
         }
         fn control_stop() => {
+            @switch(it.args[0].string) {
+                @case("this script") => ();
+                @case("all") => @fmt(out, "println(\"TODO: control stop all\");\n");
+                @case("other scripts in sprite") => @fmt(out, "println(\"TODO: control stop other\");\n");
+                @default => @panic("invalid control_stop: %", it.args[0].string);
+            };
             if self.futures_depth != 0 {
                 depth := self.futures_depth;
                 if self.current_def { def |
@@ -452,6 +462,7 @@ fn compile_async(self: *Compile, continuation: []*Node) void = {
             @fmt(out, "};\n// %.end\n", it.op);
         }
         fn procedures_call() => {
+            // TODO: is it supposed to run to the first await point before yielding?
             def := it.args[0];
             args := it.args[1].args;
             @debug_assert_eq(args.len, def.args[1].args.len);
@@ -465,7 +476,7 @@ fn compile_async(self: *Compile, continuation: []*Node) void = {
             self.max_futures = max(self.max_futures, self.futures_depth + 2);
             self.futures_depth -= args.len;
             push_async(false);
-            @fmt(out, "return s.push_async(@\"proc_% %\");\n", def.literal, def.string);
+            @fmt(out, "return s.push_async(@\"proc_% %\");\n", def.literal, => self.safe_string_body(def.string));
             
             declare_cont("ret");
             @fmt(out, "s.pop_async(%);  // %.end [..params]\n", args.len, it.op);
@@ -700,6 +711,7 @@ fn embed_bytes(out: *List(u8), name: Str, data: Str) void = {
 simple_ops :: @static {
     Data :: @struct(need_self: bool, has_result: bool);
     out: OptionalEnumMap(S.Raw.Opcode, Data) = empty();
+    mathop_names := Str.list(ast_alloc());
     I :: Type.scope_of(Rt.impl);
     for get_constants(I) { n | 
         name := n.str();
@@ -721,9 +733,16 @@ simple_ops :: @static {
         
         if S.Raw.Opcode.from_name(name) { op |
             out&.insert(op, (need_self = s, has_result = v));
-        };  // else: operator_mathop_foo
+        } else {
+            prefix := "operator_mathop_";
+            if name.starts_with(prefix) {
+                mathop_names&.push(name.rest(prefix.len));
+            } else {
+                @println("warning: unknown opcode in Rt.impl: %", name);
+            };
+        };
     };
-    out
+    @anon_literal(ops = out, mathop_names = mathop_names.items())
 };
 
 // `v` needs to be in scope as a slice to write into. 
@@ -792,3 +811,22 @@ Node :: S.Node;
 Rt :: import("@/examples/gpu/hctarcs/runtime.fr");
 #use("@/lib/collections/enum_map.fr");
 Viewer :: import("@/examples/gpu/viewer.fr");
+
+// these are pointless but i like the idea of not deleting information so if you end up with only the generated file somehow you could tecnically reconstruct the scratch project. 
+// TODO: include scratch comment blocks and block hat positions and credits. 
+fn emit_debug_sprite(self: *Compile, it: *S.Sprite) void = {
+    out := self.out;
+    @fmt(out, "// (sprite=(name=\"%\", vars=(", => self.safe_string_body(it.name));
+    for it.variables { it |
+        @fmt(out, "\"%\", ", => self.safe_string_body(it.string));
+    };
+    @fmt(out, ")));\n");
+};
+fn emit_debug_block(self: *Compile, it: *Node) void = {
+    out := self.out;
+    @fmt(out, "// (block=(proccode=\"%\", params=(", => self.safe_string_body(it.string));
+    for it.args[1].args { it |
+        @fmt(out, "\"%\", ", => self.safe_string_body(it.string));
+    };
+    @fmt(out, ")));\n");
+};

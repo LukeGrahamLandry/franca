@@ -17,7 +17,7 @@ Canvas :: @rec @struct {
     obj_count := 0;
     next_collect_obj_count := 1000;
     constants: []Value = empty();
-    sensing_mouse: (@struct(x := 0.0, y := 0.0, down := false)) = ();
+    sensing_mouse: (@struct(pos := vec2(0), down := false)) = ();
 };
 
 Script :: @rec @struct {
@@ -317,6 +317,9 @@ looks_setsizeto :: fn(s, percent) void = { s.sprite.looks.size = percent / 100; 
 looks_switchcostumeto :: fn(s, idx) void = {
     s.sprite.looks.costume = idx.int();
 }
+looks_nextcostume :: fn(s) void = {
+    s.sprite.looks.costume = mod(s.sprite.looks.costume + 1, s.sprite.class.costumes.len);
+}
 looks_hide :: fn(s) void = { s.sprite.looks.hide = true; };
 looks_show :: fn(s) void = { s.sprite.looks.hide = false; };
 looks_say :: fn(s, msg) void = { s.sprite.looks.say = msg; };
@@ -383,8 +386,8 @@ operator_join :: fn(s, a, b) = {
     s.canvas.new_obj(string = (s = out&.shrink_to_fit()))
 }
 sensing_touchingcolor :: fn(s, colour) = {  println("TODO: sensing_touchingcolor"); false.from_bool() };
-sensing_mousex :: fn(s) = s.canvas.sensing_mouse.x;
-sensing_mousey :: fn(s) = s.canvas.sensing_mouse.y;
+sensing_mousex :: fn(s) = s.canvas.sensing_mouse.pos.x.cast();
+sensing_mousey :: fn(s) = s.canvas.sensing_mouse.pos.y.cast();
 sensing_mousedown :: fn(s) = s.canvas.sensing_mouse.down.from_bool();
 operator_round :: fn(a) = { println("TODO: operator_round"); 0 };
 looks_costumenumbername :: fn(s, which) = { println("TODO: looks_costumenumbername"); 0 };
@@ -452,9 +455,14 @@ fn pop_async(s: *Script, n: i64) void = {
 
 // TODO: SpriteClicked needs to send to a specific one
 fn send_event(c: *Canvas, event: Trigger) void = {
-    ::AutoEq(Trigger);
+    // :SLOW should sort by class so don't have to recompare for each clone
     for c.clones { s |
-        // :SLOW should sort by class so don't have to recompare for each clone
+        c.send_event(s, event);
+    };
+}
+
+fn send_event(c: *Canvas, s: *SpriteInstance, event: Trigger) void = {
+    ::AutoEq(Trigger);
         each s.class.events { it |
             if it.trigger& == event& {
                 // TODO: call it now it without the allocation if not async
@@ -464,11 +472,11 @@ fn send_event(c: *Canvas, event: Trigger) void = {
                 c.scripts&.push(s, c.gpa);
             };
         };
-    };
 }
 
+
 fn poll_scripts(c: *Canvas) void = {
-    range(0, c.scripts.len) { i |
+    range(0, c.scripts.len) { i |  // can be reallocated in callee (for broadcast)
         s := c.scripts[i];
         if s.futures&.pop() { callee |
             // TODO: could keep min,max of all the addresses of the cont function pointers and assert these bits are in that range (in case of compiler bugs). 

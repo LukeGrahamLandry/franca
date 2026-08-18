@@ -104,17 +104,17 @@ fn DeriveJson($T: Type) void = {
                 prefix := "";
                 out.push_all("{");
                 inline_for fields { $f | 
+                    continue :: local_return;
                     name :: f[].name.str();
                     inner := T.get_field_ptr(self, f);
-                    @if(@run IsOption(f.ty), {
-                        @if_let(inner) fn Some(inner) => {
-                            @fmt(out, "%\"%\": ", prefix, name);
-                            inner.dump_json(out);
-                        };
-                    }, {
-                        @fmt(out, "%\"%\": ", prefix, name);
-                        inner.dump_json(out);
-                    });
+                    
+                    opt_null_value :: !f.nullable_tag.is_null() && f.nullable_tag.items().contains(fn(it) => it.name == @symbol("json_null_value"));
+                    @if(@run IsOption(f.ty)) @if(!opt_null_value) if inner.is_none() {
+                        continue();
+                    };
+                    
+                    @fmt(out, "%\"%\": ", prefix, name);
+                    inner.dump_json(out);
                     prefix = ",";
                 };
                 out.push_all("}");
@@ -363,6 +363,7 @@ IsOption :: fn(T: Type) bool #fold = {
     }
 }
 
+// Option.None is special cased elsewhere to allow missing struct fields and the last element of tuples. 
 #where(PointerTo(IsOption))
 fn parse_json(json: *JsonParser, self: ~S) bool #where = {
     mark := json.mark();
@@ -378,6 +379,8 @@ fn parse_json(json: *JsonParser, self: ~S) bool #where = {
     ok
 }
 
+// in struct fields, an Option.None will not include the field in the dump 
+// unless the field is tagged with #json_null_value (then it will emit a null explicitly). 
 #where(PointerTo(IsOption))
 fn dump_json(it: ~S, out: *List(u8)) void = {
     @match(it) {

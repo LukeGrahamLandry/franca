@@ -45,14 +45,19 @@ export async function handleWasmLoaded(wasm_instance, msg) {
     try {
         Franca.main(BigInt(args.length), p, 0n, 0n);
     } catch (e) {
-        if (e !== "called exit 0" && e !== ESCAPE_MAIN) {
+        if (e === ESCAPE_MAIN) {
+            // not quite true, this is how long it took to call francaRequestState so includes anything else you do in main before calling app.run, but close enough.
+            let time = Math.round(performance.now() - load_end);
+            postMessage({ tag: "done", ok: ok, text: " Compiled in " + time + "ms." });
+            return;
+        }
+        if (e !== "called exit 0") {
             show_error(e);
             ok = false;
         }
     }
-    let time = Math.round(performance.now() - load_end);
-    show_log(" Ran in " + time + "ms.");
-    postMessage({ tag: "done", ok: ok, });
+    
+    postMessage({ tag: "done", ok: ok, text: "host main returned?" });
 }
 
 // i this so much
@@ -119,7 +124,7 @@ export const imports = {
             let G = get_G();
             cancelAnimationFrame(G.animation_id);
             if (ok == 0) postMessage({ tag: "err", text: "shutdown(error)" });
-            postMessage({ tag: "done" });
+            postMessage({ tag: "done", text: "called exit." });
             throw "called exit 0";
         },
         jit_instantiate_module: (ptr, len, first_export, table_index) => {
@@ -368,7 +373,6 @@ const show_error = (s) => {
     }
     postMessage({ tag: "err", text: s });
 };
-const show_log = (s) => postMessage({ tag: "log", text: s });
 
 function get_wasm_string(ptr, len) {
     if (len == 0) return "";

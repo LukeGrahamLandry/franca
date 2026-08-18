@@ -16,10 +16,6 @@ const handle = (resolve, handle_app_request) => (_msg) => {
             show(msg.text);
             break;
         }
-        case "log": {
-            document.getElementById("time").innerText += msg.text;
-            break;
-        }
         case "err": {
             document.getElementById("err").innerText += msg.text;
             break;
@@ -30,7 +26,10 @@ const handle = (resolve, handle_app_request) => (_msg) => {
             document.getElementById("btn").innerText = start_message;
             running = false;
             let end = performance.now();
-            document.getElementById("time").innerText += " Wall: " + Math.round(end - real_start_time) + "ms.";
+            if (real_start_time !== undefined) {
+                document.getElementById("time").innerText = msg.text + " Wall: " + Math.round(end - real_start_time) + "ms.";
+            }
+            real_start_time = undefined;
             flush();
 
             // calling terminate has a viral slowness where it just makes random later operations slow. 
@@ -204,6 +203,7 @@ const toggle_worker = (resolve) => {
         show("");
         document.getElementById("err").innerText += "KILLED";
         document.getElementById("btn").innerText = start_message;
+        real_start_time = undefined;
     }
 };
 function new_memory() {
@@ -408,6 +408,10 @@ function flush() {
     if (line.length != 0) {
         document.getElementById("out").value += line;
         line = "";
+    }
+    if (real_start_time !== undefined) {
+        const ms = Math.floor(performance.now() - real_start_time);
+        document.getElementById("time").innerText = `Running for ${ms}ms`;
     }
 };
 window.setInterval(flush, 200);

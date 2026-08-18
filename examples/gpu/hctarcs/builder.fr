@@ -119,6 +119,12 @@ fn whenflagclicked(s: *Sprite, $body: FuncId) *Node = {
     b
 }
 
+fn whenspriteclicked(s: *Sprite, $body: FuncId) *Node = {
+    b := make("event_whenthisspriteclicked", @slice(block(body)));
+    s.blocks&.push(b, ast_alloc());
+    b
+}
+
 fn call(func: *Node, $args: FuncId) *Node #where = {
     make("procedures_call", @slice(func, block(args)))
 }
@@ -127,9 +133,14 @@ fn set(var: *Node, value: *Node) *Node = make("data_setvariableto", @slice(value
 
 fn repeatuntil(cond: *Node, $body: FuncId) *Node = make("control_repeat_until", @slice(cond, block(body)));
 fn repeat(count: *Node, $body: FuncId) *Node = make("control_repeat", @slice(count, block(body)));
+fn forever($body: FuncId) *Node = make("control_forever", @slice(block(body)));
 fn if(cond: *Node, $then: FuncId, $else: FuncId) *Node = make("control_if_else", @slice(cond, block(then), block(else)));
 fn if(cond: *Node, $then: FuncId) *Node = make("control_if", @slice(cond, block(then)));
+fn mouse_x() *Node = make("sensing_mousex", empty());
+fn mouse_y() *Node = make("sensing_mousey", empty());
+fn mouse_down() *Node = make("sensing_mousedown", empty());
 
+fn next_costume() *Node = make("looks_nextcostume", empty());
 fn peneraseall() *Node = make("pen_clear", empty());
 fn penup() *Node = make("pen_penUp", empty());
 fn pendown() *Node = make("pen_penDown", empty());
@@ -361,10 +372,11 @@ fn emit_block(it: *Node, blocks: *RawHashMap(Str, Raw.Block2)) Str = {
             b.inputs&.insert("custom_block", (BlockStack = child), temp());
             b.next = (Some = emit_block(it.args[0], key, blocks));
         }
-        fn event_whenflagclicked() => {
-            b.next = (Some = emit_block(it.args[0], key, blocks));
-        }
-        @default => ();
+        @default => {
+            if @is(it.op, .event_whenflagclicked, .event_whenthisspriteclicked) {
+                b.next = (Some = emit_block(it.args[0], key, blocks));
+            };
+        };
     };
     blocks.insert(key, (Block = b), temp());
     key
@@ -628,6 +640,7 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                         value := @try(decode_value(value, s, blocks&, (key, b.opcode, field))) return;
                         a&.push(value); 
                     };
+                    // TODO: err if a.len!=def.params.len, annoying because the prototype moves around depending if def was already processed
                     @debug_assert_eq(args.len, 0);
                     args&.push(def);
                     args&.push(temp().boxed(Node, (op = .franca_block, args = a.items())));
@@ -820,7 +833,7 @@ Opcode :: block_defs.Opcode;
 Block :: @struct {
     opcode: Opcode;
     next: ?Str = .None;
-    parent: ?Str = .None;
+    parent: ?Str #json_null_value = .None;
     inputs: RawHashMap(Str, ValueRef) = init();
     fields: RawHashMap(Str, Ty(Str, ?Str)) = init();
     shadow := false;
@@ -1186,7 +1199,7 @@ block_defs :: @parse_block_defs(
 // TODO: do this the normal way, just annoying because the name "VALUE" isn't unique and is sometimes used for blocks
 ((argument_reporter_string_number, argument_reporter_boolean), (), /*(VALUE)*/),
 // ...
-((event_whenflagclicked, event_whenthisspriteclicked, event_whenstageclicked, control_start_as_clone, control_delete_this_clone, procedures_prototype, motion_xposition, motion_yposition, pen_penUp, pen_penDown, pen_clear, pen_stamp, looks_cleargraphiceffects, looks_show, looks_hide, motion_ifonedgebounce, sensing_mousex, sensing_mousey, sensing_mousedown, sensing_answer, sensing_resettimer, sensing_timer, sensing_dayssince2000), ()),
+((event_whenflagclicked, event_whenthisspriteclicked, event_whenstageclicked, control_start_as_clone, control_delete_this_clone, procedures_prototype, motion_xposition, motion_yposition, pen_penUp, pen_penDown, pen_clear, pen_stamp, looks_cleargraphiceffects, looks_show, looks_hide, motion_ifonedgebounce, sensing_mousex, sensing_mousey, sensing_mousedown, sensing_answer, sensing_resettimer, sensing_timer, sensing_dayssince2000, looks_nextcostume), ()),
 // these aren't real
 ((franca_block, franca_literal, franca_var, franca_var_stage, franca_string), ()),
 // can't be placed in the gui but projects that use it still load (and my old mandelbrot is one of them). 
