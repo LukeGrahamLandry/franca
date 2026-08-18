@@ -17,7 +17,12 @@ Canvas :: @rec @struct {
     obj_count := 0;
     next_collect_obj_count := 1000;
     constants: []Value = empty();
-    sensing_mouse: (@struct(pos := vec2(0), down := false)) = ();
+    sensing: @struct {
+        mouse: (@struct(pos := vec2(0), down := false)) = ();
+        timer_start: Value;
+        pressed := zeroed(StaticBitSet(43));
+    };
+    broadcasts: RawHashMap(Str, i64) = init();
 };
 
 Script :: @rec @struct {
@@ -60,8 +65,8 @@ Monitor :: @struct {
 };
 
 Trigger :: @tagged(
-    Broadcast: Str,  // TODO: turn these into indexes in the compiler so fast to compare
-    KeyPressed: Str,
+    Broadcast: i64,
+    KeyPress: i64,
     SpriteClicked,
     CloneStart,
     Flag, 
@@ -253,9 +258,9 @@ fn drop(c: *Canvas) void = {
     each c.classes { it |
         c.gpa.dealloc(SpriteClass.Costume, it.costumes);
         c.gpa.dealloc(SpriteClass.Handler, it.events);
-        c.gpa.dealloc(Monitor, it.monitors);
     };
     c.gpa.dealloc(SpriteClass, c.classes);
+    c.broadcasts&.drop(c.gpa);
 }
 
 impl :: @struct {
@@ -272,7 +277,7 @@ operator_lt :: fn(a, b) #inline = {
 }
 operator_gt :: fn(a, b) = from_bool(a > b);
 operator_equals :: fn(s, a, b) = {
-    @if(a.is_number()) return(from_bool(a == b.coerce_number()));
+    @if(a.is_number() && b.is_number()) return(from_bool(a == b));
     from_bool(a.coerce_string(s.canvas) == b.coerce_string(s.canvas))
 }
 operator_not :: fn(a) = from_bool(!a.to_bool());
@@ -301,10 +306,29 @@ motion_setx :: fn(s, x) void = s.update_pos(fn(old) => { old.x = x.cast(); old }
 motion_sety :: fn(s, y) void = s.update_pos(fn(old) => { old.y = y.cast(); old });
 
 // AARRGGBB
-pen_setPenColorToColor :: fn(s, a) void = { s.sprite.pen.colour = a.int().trunc(); };
+pen_setPenColorToColor :: fn(s, a) void = { 
+    if a.is_string() {
+        string := a.to_obj()[].string.s;
+        if string.starts_with("#") {  // TODO: const fold
+            n, r := convert_number(string.rest(1), 16, hex_digit);
+            if r.len == 0 {
+                a = n.float();
+            };
+        };
+    };
+    s.sprite.pen.colour = a.coerce_number().int().trunc(); 
+};
+
+pen_changePenColorParamBy :: fn(s, name, value) void = {
+    @println("TODO: pen_changePenColorParamBy % %", name, value);
+}
+
 pen_setPenSizeTo :: fn(s, a) void = { s.sprite.pen.size = a; };
 pen_penUp :: fn(s) void = { s.sprite.pen.down = false; };
-pen_penDown :: fn(s) void = { s.sprite.pen.down = true; };
+pen_penDown :: fn(s) void = { 
+    s.sprite.pen.down = true; 
+    Render'pen_line(s.canvas, s.sprite.pen&, s.sprite.pos, s.sprite.pos);
+};
 pen_clear :: fn(s) void = Render'pen_clear(s.canvas);
 // pos is clamped to the canvas but it's the center of the image so it can still go half way off the screen.
 pen_stamp :: fn(s) void = {
@@ -314,8 +338,8 @@ pen_stamp :: fn(s) void = {
 // TODO: use this
 looks_setsizeto :: fn(s, percent) void = { s.sprite.looks.size = percent / 100; }
 // in scratch input is a name. here compiler inserts lookup_costume_index calls so they can (eventually) be folded. 
-looks_switchcostumeto :: fn(s, idx) void = {
-    s.sprite.looks.costume = idx.int();
+looks_switchcostumeto :: fn(s, idx: i64) void = {
+    s.sprite.looks.costume = idx;
 }
 looks_nextcostume :: fn(s) void = {
     s.sprite.looks.costume = mod(s.sprite.looks.costume + 1, s.sprite.class.costumes.len);
@@ -325,12 +349,10 @@ looks_show :: fn(s) void = { s.sprite.looks.hide = false; };
 looks_say :: fn(s, msg) void = { s.sprite.looks.say = msg; };
 
 looks_cleargraphiceffects :: fn(s) void = println("looks_cleargraphiceffects");
-looks_switchbackdropto :: fn(s, idx) void = @println("TODO: motion_ifonedgebounce %", idx);
-// TODO: lower this to looks_say(msg); control_wait(t); looks_say("");
-looks_sayforsecs :: fn(s, msg, t) void = @println("TODO: looks_sayforsecs % %", msg, t);
-event_broadcast :: fn(s, event) void = @println("TODO: broadcast %", event);
+looks_switchbackdropto :: fn(s, idx) void = @println("TODO: looks_switchbackdropto %", idx);
+event_broadcast :: fn(s, idx: i64) void = s.canvas.send_event(Broadcast = idx);
 sensing_touchingobject :: fn(_) = { println("sensing_touchingobject"); false.from_bool() };
-sensing_keypressed :: fn(_) = { println("sensing_keypressed"); false.from_bool() };
+sensing_keypressed :: fn(s, idx: i64) = s.canvas.sensing.pressed&.get(idx).from_bool();
 control_wait :: fn(s, t) void = @println("TODO: wait %", t);
 motion_ifonedgebounce :: fn(s) void = println("TODO: motion_ifonedgebounce");
 looks_gotofrontback :: fn(s, _) void = println("TODO: looks_gotofrontback");
@@ -345,30 +367,31 @@ data_lengthoflist :: fn(s, list) = list.to_obj()[].list.len.float();
 data_addtolist :: fn(s, item, list) void = {
     list.to_obj()[].list&.push(item, s.canvas.gpa);
 }
-// TODO: idx can be stupid shit like "last"
-data_itemoflist :: fn(s, idx, list) = {
-    list := list.to_obj()[].list;
-    i := idx.coerce_number().int() - 1;
-    @if(i < 0 || i >= list.len) return(-1.0/0.0);  // TODO: return(s.canvas.new_string(""));
+data_itemoflist :: fn(s, idx, lst) = {
+    list, i := s.coerce_list_index(lst, idx) 
+        || return(-1.0/0.0);  // TODO: return(s.canvas.new_string(""));
     list[i]
 }
-data_replaceitemoflist :: fn(s, idx, item, list) void = { 
-    list := list.to_obj()[].list;
-    i := idx.coerce_number().int() - 1;
-    @if(i < 0 || i >= list.len) return();
+data_replaceitemoflist :: fn(s, idx, item, lst) void = { 
+    list, i := s.coerce_list_index(lst, idx) || return();
     list[i] = item;
 }
-data_deleteoflist :: fn(s, idx, list) void = {
-    list := list.to_obj()[].list&;
-    i := idx.coerce_number().int() - 1;
-    @if(i < 0 || i >= list.len) return();
+data_deleteoflist :: fn(s, idx, lst) void = {
+    list, i := s.coerce_list_index(lst, idx) || return();
     _ := list.ordered_remove(i);
 }
-data_itemnumoflist :: fn(s, item, list) = { println("TODO: data_itemnumoflist"); 0 }
-data_insertatlist :: fn(s, item, idx, list) void = println("TODO: data_insertatlist");
+data_itemnumoflist :: fn(s, item, list) = {
+    list := list.to_obj()[].list&;
+    float(list.index_of(fn(check) => s.operator_equals(check[], item).to_bool()) || -1) + 1
+}
+// TODO: can you insert one past the end?
+data_insertatlist :: fn(s, item, idx, lst) void = {
+    list, i := s.coerce_list_index(lst, idx) || return();
+    list.insert(i, item, s.canvas.gpa);
+}
 
 operator_contains :: fn(s, a, b) = { println("TODO: operator_contains"); false.from_bool() }
-operator_length :: fn(s, string) = { println("TODO: operator_length"); 0 }  // string
+operator_length :: fn(s, string) = string.coerce_string(s.canvas).len().float();
 operator_letter_of :: fn(s, i, string) = { 
     string := string.coerce_string(s.canvas);
     i := i.coerce_number().int() - 1;
@@ -386,16 +409,16 @@ operator_join :: fn(s, a, b) = {
     s.canvas.new_obj(string = (s = out&.shrink_to_fit()))
 }
 sensing_touchingcolor :: fn(s, colour) = {  println("TODO: sensing_touchingcolor"); false.from_bool() };
-sensing_mousex :: fn(s) = s.canvas.sensing_mouse.pos.x.cast();
-sensing_mousey :: fn(s) = s.canvas.sensing_mouse.pos.y.cast();
-sensing_mousedown :: fn(s) = s.canvas.sensing_mouse.down.from_bool();
-operator_round :: fn(a) = { println("TODO: operator_round"); 0 };
+sensing_mousex :: fn(s) = s.canvas.sensing.mouse.pos.x.cast();
+sensing_mousey :: fn(s) = s.canvas.sensing.mouse.pos.y.cast();
+sensing_mousedown :: fn(s) = s.canvas.sensing.mouse.down.from_bool();
+operator_round :: fn(a) = round(a.coerce_number());
 looks_costumenumbername :: fn(s, which) = { println("TODO: looks_costumenumbername"); 0 };
 sensing_askandwait :: fn(s, q) void = println("TODO: sensing_askandwait");
 sensing_answer :: fn(s) = { println("TODO: sensing_answer"); 0 }
 event_broadcastandwait :: fn(s, event) void = println("TODO: event_broadcastandwait");
-sensing_resettimer :: fn(s) void = println("TODO: sensing_resettimer");
-sensing_timer :: fn(s) = { println("TODO: sensing_timer"); 0 }
+sensing_resettimer :: fn(s) void = { s.canvas.sensing.timer_start = timestamp_s(); }
+sensing_timer :: fn(s) = timestamp_s() - s.canvas.sensing.timer_start;
 looks_seteffectto :: fn(s, value, effect) void = println("TODO: looks_seteffectto");
 sensing_dayssince2000 :: fn(s) = { 
     // TODO: real time
@@ -411,6 +434,7 @@ acos :: fn(a: f64) f64 #libc;
 asin :: fn(a: f64) f64 #libc;
 atan :: fn(a: f64) f64 #libc;
 fmod :: fn(a: f64, b: f64) f64 #libc;
+round :: fn(round: f64) f64 #libc;
 
 fn update_pos(s: *Script, $body: @Fn(old: Vec2) Vec2) void = {
     old := s.sprite.pos;
@@ -423,18 +447,59 @@ fn update_pos(s: *Script, $body: @Fn(old: Vec2) Vec2) void = {
     };
 }
 
-// TODO: test set_costume(add(get_costume(), 1)); cycles in a confusing way
-fn lookup_costume_index(name: Value, s: *Script) f64 = {
+fn coerce_list_index(s: *Script, list: Value, idx: Value) ?Ty(*RawList(Value), i64) #inline = {
+    list := list.to_obj()[].list&;
+    @if(list.len == 0) return(.None);
+    if idx.is_string() {
+        idx := idx.to_obj()[].string.s;
+        @switch(idx) {
+            @case("last") => return(Some = (list, s.canvas.rng&.rand_int(list.len)));
+            @case("random") => return(Some = (list, list.len - 1));
+            @default => ();
+        };
+    };
+    i := idx.coerce_number().int() - 1;
+    @if(i < 0 || i >= list.len) return(.None);
+    (Some = (list, i))
+}
+
+fn lookup_costume_index(name: Value, s: *Script) i64 = {
     costumes := s.sprite.class.costumes;
     if name.is_number() {
-        // TODO: clamp is wrong. but its doin something
-        return name.int().clamp(0, costumes.len - 1).float();
+        return name.int().sub(1).mod(costumes.len);
     };
     name := name.coerce_string(s.canvas);
     enumerate costumes { i, it |
-        @if(it.name == name) return(i.float());
+        @if(it.name == name) return(i);
     };
     0
+}
+
+key_indices :: @static {
+    out: HashMap(Str, i64) = init(ast_alloc());
+    long_keys := @const_slice("space", "up arrow", "down arrow", "right arrow", "left arrow", "any");
+    short_keys := "abcdefghijklmnopqrstuvwxyz0123456789";
+    enumerate long_keys { i, it |
+        out&.insert(it[], i);
+    };
+    range(0, short_keys.len) { i |
+        out&.insert(short_keys.subslice(i, 1), i + long_keys.len);
+    };
+    out&.insert("_false_", long_keys.len + short_keys.len);
+    out.raw
+};
+
+fn lookup_key_index(name: Value, s: *Script) i64 = {
+    name := name.coerce_string(s.canvas);
+    key_indices.get(name) || 42
+}
+
+fn lookup_broadcast_index(name: Value, s: *Script) i64 = {
+    name := name.coerce_string(s.canvas);
+    s.canvas.broadcasts&.get(name) || { 
+        @println("warning: invalid broadcast name: (%)", name); 
+        -1
+    }
 }
 
 fn push_async(s: *Script, callee: @FnPtr(s: *Script) void) void = {
@@ -512,6 +577,7 @@ fn init_canvas(c: *Canvas, a: Alloc, initialize: @FnPtr(c: *Canvas) void) void =
         gpa = a,
         stage = zeroed(*SpriteInstance),
         classes = empty(),
+        sensing = (timer_start = timestamp_s()),
     );
     initialize(c);
     c.stage = c.clones[0];

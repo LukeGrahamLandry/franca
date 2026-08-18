@@ -2,6 +2,7 @@
 
 Project :: @struct {
     sprites: RawList(*Sprite);
+    broadcasts: RawList(*Node);  // TODO: why does scratch store these per sprite?
 };
 Sprite :: @struct {
     name: Str;
@@ -10,6 +11,7 @@ Sprite :: @struct {
     costumes: RawList(Costume) = empty();
     monitors: RawList(Monitor) = empty();
     list_var_indices: RawList(i64) = empty();
+    initial: (@struct(x := 0, y := 0, costume := 0, size := 100, direction := 90, hide := false)) = ();
 };
 Node :: @rec @struct {
     op: Raw.Opcode;
@@ -50,9 +52,7 @@ Monitor :: @struct {
 // not for writing programs that work with the asts. 
 
 fn new_project() Ty(*Project, *Sprite) = {
-    p := ast_alloc().boxed(Project, (
-        sprites = empty(),
-    ));
+    p := ast_alloc().box_zeroed(Project);
     s := p.sprite(name = "Stage");
     (p, s)
 }
@@ -251,9 +251,14 @@ fn build(p: *Project, out_json: *List(u8), out_zip: *List(u8)) void = {
             lists = init(),
             broadcasts = init(),
             blocks = init(),
-            currentCostume = 0,
             costumes = list(a),
             sounds = list(a),
+            x = s.initial.x,
+            y = s.initial.y,
+            currentCostume = s.initial.costume,
+            direction = s.initial.direction,
+            size = s.initial.size,
+            visible = !s.initial.hide,
         );
         target := p2.targets[p2.targets.len - 1]&;
         for_rev s.list_var_indices { idx |
@@ -334,7 +339,7 @@ fn emit_block(it: *Node, blocks: *RawHashMap(Str, Raw.Block2)) Str = {
         arg_i += 1;
     };
     for shape.fields { field |
-        if field != "VARIABLE" && field != "LIST" {
+        if field != "VARIABLE" && field != "LIST" && field != "BROADCAST_OPTION" {
             @assert_eq(it.args[arg_i].op, .franca_string, "%.% expected const string", it.op, field);
             name := it.args[arg_i].string;
             b.fields&.insert(field, (name, .None), temp());
@@ -436,6 +441,16 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
     stage := p.targets&.find(fn(it) => it.isStage)
         || return(Err = "missing Stage");
     
+    broadcasts: HashMap(Str, *Node) = init(temp());
+    each p.targets { s |
+        each s.broadcasts& { key, name |
+            it := literal_node(String = name[]);
+            project.broadcasts&.push(it, temp());
+            prev := broadcasts&.insert(key, it);
+            @if(prev.is_some()) return(Err = @tfmt("duplicate broadcasts id (%)", key));
+        };
+    };
+    
     each p.targets { s |
         // TODO: im assuming block,var,param will all be unique which isn't true
         blocks: HashMap(Str, *Node) = init(temp());
@@ -464,6 +479,10 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
             args := temp().alloc_init(*Node, it._1.len, fn(i) => literal_node(it._1[i]));
             node.args = temp().alloc_init(*Node, 1, fn(_) => temp().boxed(Node, (op=.franca_block, args=args)));
             sprite.list_var_indices&.push(sprite.variables.len - 1, temp());
+        };
+        each broadcasts& { key, it |
+            prev := blocks&.insert(key, it[]);
+            @if(prev.is_some()) return(Err = @tfmt("duplicate block id (%)", key));
         };
         
         retain(s.blocks&, fn(_, b) => b.is(.Block));
@@ -543,13 +562,18 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                     };
                     
                     a := @try(decode_value(value, s, blocks&, (key, it.op, field))) return;
+                    if a.op == .franca_string && field == "BROADCAST_INPUT" {  // HACK
+                        a = blocks&.get(a.string) 
+                            || return(Err = @tfmt("(%): missing broadcast (%)", key, a.string));
+                        @println("BROADCAST_OPTION % %", "", a.string);
+                    };
                     args&.push(a);
                 };
                 for shape.fields { field |
                     var := b.fields&.get(field) 
                         || return(Err = @tfmt("% (%) missing %", b.opcode, key, field));
                     name := var._1 || var._0;
-                    if field != "VARIABLE" && field != "LIST" {
+                    if field != "VARIABLE" && field != "LIST" && field != "BROADCAST_OPTION" {
                         args&.push(literal_node(String = name));
                     } else {
                         a := blocks&.get(name)
@@ -557,6 +581,9 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                         if field == "VARIABLE" {
                             @if(!@is(a.op, .franca_var, .franca_var_stage)) return(Err = @tfmt("(%): %.VARIABLE (%) found %", key, it.op, name, a.op));
                         };
+                        if field == "BROADCAST_OPTION" {
+                            @println("BROADCAST_OPTION % %", name, a.string);
+                        }
                         args&.push(a);
                         
                         if field == "LIST" {
@@ -623,6 +650,7 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                     args&.items().swap(0, 1);
                 };
                 fn event_whenbroadcastreceived() => args&.items().swap(0, 1);
+                fn event_whenkeypressed() => args&.items().swap(0, 1);
                 fn procedures_call() =>  {
                     mutation := b.mutation&.unwrap();
                     it.string = mutation.proccode.unwrap();
@@ -682,6 +710,9 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                 };
             }
         };
+        
+        sprite.initial = (x = s.x, y = s.y, costume = s.currentCostume, size = s.size, direction = s.direction, hide = !s.visible);
+        
             project.sprites&.push(temp().boxed(Sprite, sprite), temp());
     };
     if project.sprites[0].name != "Stage" {
@@ -818,9 +849,15 @@ Sprite :: @struct {
     lists: RawHashMap(Str, Ty(Str, List(FloatOrString)));
     broadcasts: RawHashMap(Str, Str);
     blocks: RawHashMap(Str, Block2);
-    currentCostume: i64;
     costumes: List(Costume);
     sounds: List(Sound);
+    
+    x := 0;
+    y := 0;
+    visible := true;
+    size := 100;
+    direction := 90;
+    currentCostume := 0;
 };
 
 Block2 :: @tagged(

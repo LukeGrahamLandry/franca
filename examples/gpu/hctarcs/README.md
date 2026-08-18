@@ -20,23 +20,23 @@ most other blocks are not implemented yet.
 
 ## todo
 
+- have the generated main() call gui instead of viewer
+- support+test outputting broadcasts/keys from the ast builder
 - images should be drawn at half size
 - use the right value tags when outputting .sb3
 - coerce_number for all the math ops
 - gpu rendering
 - infer types
 - hell, they're gonna have SVGs in there
+- they do nan in an insane way? 0 / 0 == NaN but (0 / 0) + 1 == 1 but (0 / 0) > 50 == true
 - implement more blocks
   - async
     - broadcast and wait
     - glide _ secs to _ (waits until the glide is done)
-    - wait _ seconds
     - ask _ and wait
     - turbo mode: instead of yielding each loop iteration, run until out of time in the frame. 
   - events
-    - broadcast
     - scroll sends up/down arrow event but the is_pressed blocks say false
-  - sensing inputs
   - is touching, if on edge bounce
   - clones
   - drag
@@ -56,6 +56,7 @@ most other blocks are not implemented yet.
   - keyboard, drag, click bounds, scroll, ask
   - dump Node ast back to builder franca code and textbox edit as franca
   - collect warnings when loading the project and show them at the end
+- add simple tests: looks_sayforsecs,motion_glidesecstoxy
 
 ## notes
 

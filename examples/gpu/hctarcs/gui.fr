@@ -43,25 +43,60 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     next_example(state, 0);
 }
 
+key_to_index :: fn(key: Sapp.Keycode) i64 = {
+    name := @match(key) {
+        fn SPACE() => "space";
+        fn LEFT() => "left arrow";
+        fn RIGHT() => "right arrow";
+        fn UP() => "up arrow";
+        fn DOWN() => "down arrow";
+        @default => {
+            name := key.name_str();
+            @if_else {
+                @if(name.len == 1 && name[0].is_ascii_alpha()) => @slice(name[0].ascii_to_lower());
+                @if(name.len == 2 && name[0] == "_".ascii() && name[1].is_ascii_digit()) => name.subslice(1, 1);
+                // TODO: unnamed keys (but not shift/command/etc.) should count for "any"
+                @else => return(-1);
+            }
+        };
+    };
+    Rt.key_indices.get(name).unwrap()
+}
+
+fn key_event(c: *Rt.Canvas, key: Sapp.Keycode, down: bool) void = {
+    idx := key_to_index(key);
+    @if(idx == -1) return();
+    any_index := 5;
+    pressed := c.sensing.pressed&;
+    pressed.set(idx, down);
+    pressed.set(any_index);
+    pressed.set(any_index, pressed.count_ones() > 1);
+}
+
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     c := state.canvas&;
     @match(event.type) {
         fn RESIZED() => ();
         fn KEY_DOWN() => @match(event.key_code) {
-            fn LEFT() => state.next_example(-1);
-            fn RIGHT() => state.next_example(1);
-            @default => ();
+            fn LEFT_BRACKET() => state.next_example(-1);
+            fn RIGHT_BRACKET() => state.next_example(1);
+            @default => {
+                key_event(state.canvas&, event.key_code, true);
+                
+                // TODO: what rate are repeats supposed to be sent?
+                c.send_event(KeyPress = key_to_index(event.key_code));
+            };
         };
-        fn KEY_UP() => ();
+        fn KEY_UP() => key_event(state.canvas&, event.key_code, false);
         fn MOUSE_MOVE() => {
-            c.sensing_mouse.pos = mouse_to_canvas(c, event, sapp);
+            c.sensing.mouse.pos = mouse_to_canvas(c, event, sapp);
         }
         // the "mouse down?" block starts returning true when any button mouse is pressed 
         // and starts returning false when any is released (even if some others are still pressed). 
         // ex. [left down, middle down, middle up] results in false. 
-        fn MOUSE_UP() => { c.sensing_mouse.down = false; }
+        fn MOUSE_UP() => { c.sensing.mouse.down = false; }
         fn MOUSE_DOWN() => { 
-            c.sensing_mouse.down = true; 
+            c.sensing.mouse.down = true; 
             
             pos := mouse_to_canvas(c, event, sapp);
             for c.clones { sprite |

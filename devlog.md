@@ -1,4 +1,10 @@
 
+## (Aug 18) sb3
+
+- some of the blocks are too paste-y, rewrite them in terms of other blocks
+- trying to get another raytracer to work: more list ops, hex colour. still blank :(
+- start keyboard events and broadcasts. same seperation of name->index lookup so can hoist into the compiler later. 
+
 ## (Aug 17) sb3
 
 - now to test the async, looking at the last frame isn't enough, i need gui that shows the animation. 

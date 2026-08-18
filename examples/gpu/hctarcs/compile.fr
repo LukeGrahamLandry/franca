@@ -13,9 +13,12 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
     );
     self := self&;
     
+    each(p.sprites, fn(it) => each(it.blocks&, fn(it) => self.lower(it)));
+    
     // TODO: not good enough
     each p.sprites { s |
         for s.blocks& { it |
+            @if(is_hat(it.op))
             if it.op == .procedures_definition {
                 _ := self.is_async(it);
             } else {
@@ -124,35 +127,59 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
         each it.blocks { it |
             @match(it.op) {
                 fn event_whenflagclicked() => @fmt(out, "e.push(trigger = .Flag, callee = %_%);\n", it.op, it.literal);
-                fn event_whenbroadcastreceived() => @fmt(out, "e.push(trigger = (Broadcast = strings[%]), callee = %_%);\n", self.const_string(it.args[0].string), it.op, it.literal);
+                fn event_whenbroadcastreceived() => {
+                    name := it.args[1].string;
+                    i := self.project.broadcasts.index_of(fn(it) => it.string == name) 
+                        || @panic("invalid broadcast (%)", name);
+                    @fmt(out, "e.push(trigger = (Broadcast = %), callee = %_%);  // %\n", i, it.op, it.literal, => self.safe_string_body(name));
+                }
                 fn event_whenthisspriteclicked() => @fmt(out, "e.push(trigger = .SpriteClicked, callee = %_%);\n", it.op, it.literal);
                 fn control_start_as_clone() => @fmt(out, "e.push(trigger = .CloneStart, callee = %_%);\n", it.op, it.literal);
                 fn event_whenstageclicked() => @fmt(out, "e.push(trigger = .SpriteClicked, callee = %_%);\n", it.op, it.literal);
-                fn event_whenkeypressed() => @fmt(out, "e.push(trigger = (KeyPressed = strings[%]), callee = %_%);\n", self.const_string(it.args[0].string), it.op, it.literal);
+                fn event_whenkeypressed() => {
+                    name := it.args[1].string;
+                    if it.args[1].op == .franca_literal {  // number key
+                        name = @tfmt("%", it.args[0].literal);  
+                    };
+                    i := Rt'key_indices.get(name) || @panic("invalid event_whenkeypressed: (%)", name);
+                    @fmt(out, "e.push(trigger = (KeyPress = %), callee = %_%);\n", i, it.op, it.literal);
+                }
                 fn procedures_definition() => ();
                 @default => @debug_assert(!is_hat(it.op));  // there can be top level non-hat blocks, they just never run
             };
         };
         
-        @fmt(out, "m := a.alloc_zeroed(Rt.Monitor, %);\n", it.monitors.len);
-        enumerate it.monitors { i, m |
+        if it.monitors.len > 0 {
+        @fmt(out, "m := @const_slice(@as(Rt.Monitor)\n");
+        each it.monitors { m |
             @assert(m.var.op == .franca_var || sprite_i == 0, "sprite has stage monitior");
-            @fmt(out, "m[%] = (var=%,name=strings[%],x=%,y=%,hide=%,mode=", i, self.var_index(m.var), self.const_string(m.var.string), m.x, m.y, m.hide);
+            @fmt(out, "(var=%,name=strings[%],x=%,y=%,hide=%,mode=", self.var_index(m.var), self.const_string(m.var.string), m.x, m.y, m.hide);
             @match(m.mode) {
                 fn Value() => @fmt(out, ".Value");
                 // TODO: do the better float printing
                 fn Slider(it) => @fmt(out, "(Slider=(lo=%,hi=%,discrete=%))", it.lo, it.hi, it.discrete);
             };
-            @fmt(out, ");\n");
+            @fmt(out, "),\n");
         };
-        
+        @fmt(out, ");\n");
+        } else {
+            @fmt(out, "m: []Rt.Monitor = empty();\n");
+        };
         @fmt(out, "c.classes[%] = (name = strings[%], costumes = t, events = e.shrink_to_fit(), var_count = %, monitors = m);\n", sprite_i, self.const_string(it.name), it.variables.len);
         @fmt(out, "sprite := c.new_sprite(c.classes[%]&);\nc.clones&.push(sprite, a);\n", sprite_i);
         
+        // TODO: direction
+        I := it.initial&;
+        @fmt(out, "sprite.pos.x = clamp(%, -c.size.x/2, c.size.x/2); sprite.pos.y = clamp(%, -c.size.y/2, c.size.y/2); sprite.looks.costume = %; sprite.looks.size = float(%) / 100.0; sprite.looks.hide = %;\n", 
+            I.x, I.y, I.costume.mod(it.costumes.len), I.size, I.hide);
+        
         @fmt(out, "v := sprite.vars();\n");
-        @fmt(out, "v.rest(%).set_zeroed();\n", it.variables.len);  // for good luck: don't have uninit parameters; TODO: remove when i use a better calling convention
         init_list_values(self, it.variables.items(), floats_blob&, true);
     };
+    enumerate p.broadcasts { i, it |
+        @fmt(out, "c.broadcasts&.insert(strings[%], %, a);\n", self.const_string(it.string), i);
+    };
+    
     @fmt(out, "};\n");
     
     // TODO: probably a smaller binary if include png+decode code and decompress at runtime instead
@@ -163,6 +190,7 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
         it._0 = "";
     };
     
+    // TODO: pack these and change `strings[%]` to `strings.subslice(off, len)` so don't need to do as many relocations
     @fmt(out, "strings :: @const_slice(\n");
     for self.string_constants { it |
         @fmt(out, "    \"%\",\n", => self.safe_string_body(it));
@@ -217,7 +245,13 @@ compile :: fn(self: *Compile, it: *Node) void = {
         op := it.op;
         for it.args { it |
             compile(self, it);
-            @if(op == .looks_switchcostumeto) @fmt(out, ".lookup_costume_index(s)");  // TODO: maybe this is what looks_costume is for; TODO: fold if its a constant string
+
+            // TODO: fold if it's a constant string
+            // TODO: factor out and store the lookup name in simple_ops
+            @if(op == .looks_switchcostumeto) @fmt(out, ".lookup_costume_index(s)");
+            @if(op == .sensing_keypressed) @fmt(out, ".lookup_key_index(s)");
+            @if(op == .event_broadcast) @fmt(out, ".lookup_broadcast_index(s)");
+            
             @fmt(out, ", ");
         };
         @fmt(out, ")");
@@ -332,6 +366,7 @@ compile :: fn(self: *Compile, it: *Node) void = {
                 @case("this script") => ();
                 @case("all") => @fmt(out, "println(\"TODO: control stop all\");\n");
                 @case("other scripts in sprite") => @fmt(out, "println(\"TODO: control stop other\");\n");
+                @case("other scripts in stage") => @fmt(out, "println(\"TODO: control stop other\");\n");
                 @default => @panic("invalid control_stop: %", it.args[0].string);
             };
             if self.futures_depth != 0 {
@@ -353,11 +388,6 @@ compile :: fn(self: *Compile, it: *Node) void = {
             compile(self, it.args[1]);
             @fmt(out, ";};\n");
         }
-        fn control_while() => {
-            cond: Node = (op = .operator_not, args := @slice(it.args[0]));
-            loop: Node = (op = .control_repeat_until, args := @slice(cond&, it.args[1]));
-            compile(self, loop&);
-        }
         fn control_repeat() => {
             @fmt(out, "range(0, ");
             compile(self, it.args[0]);
@@ -372,13 +402,6 @@ compile :: fn(self: *Compile, it: *Node) void = {
             compile(self, it.args[1]);
             @fmt(out, "} else {\n");
             compile(self, it.args[2]);
-            @fmt(out, ";};\n");
-        }
-        fn control_if() => {
-            @fmt(out, "if ");
-            compile(self, it.args[0]);
-            @fmt(out, ".to_bool() {\n");
-            compile(self, it.args[1]);
             @fmt(out, ";};\n");
         }
         fn control_for_each() => {
@@ -541,22 +564,6 @@ fn compile_async(self: *Compile, continuation: []*Node) void = {
                 @fmt(out, "s.pop_async(1);  // %.end [i]\n", it.op);
             };
         }
-        fn control_while() => {
-            cond, body := (it.args[0], it.args[1]);
-            push_async(true);
-            
-            declare_cont("body");
-            @fmt(out, "if ");
-            compile(self, cond);
-            @fmt(out, ".to_bool() {\n");
-            push_async(false);
-            inc_futures(self, 1) {
-                compile_async(self, @slice body);
-            };
-            
-            @fmt(out, "return()};\n// %.end\n", it.op);
-        }
-        // TODO: paste of the above
         fn control_repeat_until() => {
             cond, body := (it.args[0], it.args[1]);
             push_async(true);
@@ -587,17 +594,6 @@ fn compile_async(self: *Compile, continuation: []*Node) void = {
                 @fmt(out, "} else {\n");
                 compile_async(self, @slice it.args[2]);
                 @fmt(out, ";};\nreturn();\n");
-            };
-            declare_cont("end");
-        }
-        fn control_if() => {
-            push_async(false);
-            inc_futures(self, 1) {
-                @fmt(out, "if ");
-                compile(self, it.args[0]);
-                @fmt(out, ".to_bool() {\n");
-                compile_async(self, @slice it.args[1]);
-                @fmt(out, ";return();};\n");
             };
             declare_cont("end");
         }
@@ -661,8 +657,9 @@ fn is_async_rec(self: *Compile, it: *Node) bool = {
             };
             false
         }
+        fn control_if_else() => self.is_async(it.args[1]) || self.is_async(it.args[2]);
         @default => {
-            is_loop := @is(it.op, .control_forever, .control_for_each, .control_repeat, .control_repeat_until, .control_while);
+            is_loop := @is(it.op, .control_forever, .control_for_each, .control_repeat, .control_repeat_until);
             if is_loop {
                 if self.current_def { def |
                     if def.flags.run_without_screen_refresh {
@@ -675,18 +672,54 @@ fn is_async_rec(self: *Compile, it: *Node) bool = {
                 // outside a run_without_screen_refresh proc, loops yield after each iteration. 
                 return true;
             };
-            
-            if @is(it.op, .control_if, .control_if_else) {
-                for it.args { it |
-                    @if(self.is_async(it)) return(true);
-                };
-                return false;
-            };
-            
             // TODO: is thisevent_broadcast supposed to yield right away or just get queued until next yield?
-            @is(it.op, .motion_glidesecstoxy, .looks_sayforsecs, .event_broadcastandwait, .sensing_askandwait, .control_wait, .control_wait_until)
+            @is(it.op, .event_broadcastandwait, .sensing_askandwait, .control_wait, .control_wait_until)
         };
     }
+}
+
+fn lower(self: *Compile, it: **Node) void = {
+    a := temp();
+    @match(it.op) {
+        // TODO: this might be wrong. what happens if another script says something new while this one is waiting?
+        fn looks_sayforsecs() => {
+            msg, t := (it.args[0], it.args[1]);
+            n := a.alloc_zeroed(Node, 5);
+            n[0] = (op = .franca_block, args = @slice(n[1]&, n[2]&, n[3]&) a);
+            n[1] = (op = .looks_say, args = @slice(msg) a);
+            n[2] = (op = .control_wait, args = @slice(t) a);
+            n[3] = (op = .looks_say, args = @slice(n[4]&) a);
+            n[4] = (op = .franca_string, args = empty(), string = "");
+            it[] = n[0]&;
+        }
+        // TODO: loop to lerp there
+        fn motion_glidesecstoxy() => {
+            t, x, y := (it.args[0], it.args[1], it.args[2]);
+            n := a.alloc_zeroed(Node, 3);
+            n[0] = (op = .franca_block, args = @slice(n[1]&, n[2]&) a);
+            n[1] = (op = .control_wait, args = @slice(t) a);
+            n[2] = (op = .motion_gotoxy, args = @slice(x, y) a);
+            it[] = n[0]&;
+        }
+        fn control_while() => {
+            cond, body := (it.args[0], it.args[1]);
+            n := a.alloc_zeroed(Node, 2);
+            n[0] = (op = .control_repeat_until, args = @slice(n[1]&, body) a);
+            n[1] = (op = .operator_not, args = @slice(cond) a);
+            it[] = n[0]&;
+        }
+        fn control_if() => {
+            cond, then := (it.args[0], it.args[1]);
+            n := a.alloc_zeroed(Node, 2);
+            n[0] = (op = .control_if_else, args = @slice(cond, then, n[1]&) a);
+            n[1] = (op = .franca_block, args = empty());
+            it[] = n[0]&;
+        }
+        @default => ();
+    };
+    each it.args.rest(int(it.op == .procedures_call)) { it |
+        self.lower(it);
+    };
 }
 
 fn const_string(self: *Compile, it: Str) i64 = 

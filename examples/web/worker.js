@@ -115,6 +115,7 @@ export const imports = {
         log: (a) => Math.log(a),
         asin: (a) => Math.asin(a),
         atan: (a) => Math.atan(a),
+        round: (a) => Math.round(a),
 
         js_worker_stop: (status, known_wasm_jit_event_) => {
             known_wasm_jit_event = known_wasm_jit_event_;
