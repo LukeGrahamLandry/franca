@@ -30,7 +30,7 @@ LexErr :: @tagged(
     TooManyBits,
     UnterminatedComment,
     IdentifiersCannotUseUnicodeSorry,
-    TodoEscapesInRawIdent,
+    UnknownEscapeCharacterInRawIdent,
     // TODO: ThatsNotANormalQuoteDidYouCopyPasteFromAPdf,
 );
 
@@ -98,8 +98,14 @@ fn pop(self: *Lexer) *Token = {
                 if self.lex_string() {
                     s := self.token.type&;
                     if s.Quoted.escapes {
-                        // TODO: expand_string_escapes
-                        self.error(.TodoEscapesInRawIdent);
+                        raw := self.pool.get(s.Quoted.s);
+                        out := u8.list(raw.len, temp());
+                        i := expand_string_escapes(raw, out&);
+                        if i != -1 {
+                            self.error(.UnknownEscapeCharacterInRawIdent);
+                        } else {
+                            s[] = (Symbol = self.pool.insert_borrowed(out.items(), general_allocator() /* TODO: leak */));
+                        };
                     } else {
                         s[] = (Symbol = s.Quoted.s);
                     };

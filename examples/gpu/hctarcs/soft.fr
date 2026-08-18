@@ -6,10 +6,35 @@ pen_clear :: fn(canvas: *Rt.Canvas) void = {
 // TODO: pen is missing some of the edges
 // TODO: line instead of point, use size of pen.  
 pen_line :: fn(canvas: *Rt.Canvas, pen: *FieldType(Rt.SpriteInstance, .pen), old: Vec2, new: Vec2) void = {
+    // TODO: do this without the sqrt
+    dir := new - old;
+    if dir.norm_sq() > 1 {
+        n := dir.norm().cast().int();
+        dir := dir.normalize() * pen.size.cast() / 2;
+        range(0, n) { _ |
+            pen_line(canvas, pen, new, new);
+            new -= dir; 
+        };
+        return();
+    };
+    
     stage_size := canvas.size;
-    new := new + stage_size/2;
-    i := int(cast((stage_size.y - new.y) * stage_size.x + new.x));
-    canvas.pen_pixels[i] = pen.colour;
+    new := new.floor() + stage_size/2;
+    @if(new.x <= 0 || new.y <= 0 || new.x >= canvas.size.x || new.y >= canvas.size.y) return();  // TODO: only needed for the recusive call for big size, otherwise already clampped
+    
+    if pen.size == 1 {
+        i := int(cast((stage_size.y - new.y) * stage_size.x + new.x));
+        canvas.pen_pixels[i] = pen.colour;
+    } else {
+        new := new - stage_size/2 - vec2(pen.size.cast()/2);
+        prev := pen.size;
+        pen.size = 1;
+        range(0, prev.int()) { y |
+            y := y.float().cast();
+            pen_line(canvas, pen, new + vec2(0, y), new + vec2(prev.cast(), y));
+        };
+        pen.size = prev;
+    }
 }
 
 // TODO: does this use size of pen or size of sprite?
@@ -59,7 +84,7 @@ draw_char :: fn(canvas: *Rt.Canvas, char: u8, pos: Vec2) void = {
         char = 32;
     };
     img := font_texture.subslice((char.int() - 32)*8*8, 8*8).interpret_as_bytes();
-    c: Rt.SpriteClass.Costume = (data = img, width = 8, height = 8, name = "");
+    c: Rt.SpriteClass.Costume = (data = img, width = 8, height = 8, name = NaN);
     pen_stamp(canvas, c&, pos);
 };
 

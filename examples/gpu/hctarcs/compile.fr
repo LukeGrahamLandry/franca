@@ -126,7 +126,7 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
         enumerate it.costumes { i, it |
             // TODO: declaring '_' twice probably shouldn't be allowed :compiler
             _, width, height, _ := emitted_images&.get(it.md5).unwrap();
-            @fmt(out, "t[%] = (name = strings[%], data = img_%, width = %, height = %);\n", i, self.const_string(it.name), it.md5, width, height);
+            @fmt(out, "t[%] = (name = c.constants[%], data = img_%, width = %, height = %);\n", i, self.const_string(it.name), it.md5, width, height);
         };
         @fmt(out, "e := @ref Rt.SpriteClass.Handler.list(a);\n");
         each it.blocks { it |
@@ -262,18 +262,18 @@ compile :: fn(self: *Compile, it: *Node) void = {
         return();
     };
     
-    if @is(it.op, .sound_setvolumeto, .sound_playuntildone, .sound_play) {
+    if @is(it.op, .sound_setvolumeto, .sound_playuntildone, .sound_play, .sound_stopallsounds) {
         // i don't do sound yet
         return @fmt(out, "/* % */", it.op);
     };
     
-    if @is(it.op, .sound_sounds_menu, .looks_costume, .sensing_touchingobjectmenu, .looks_backdrops, .sensing_keyoptions, .control_create_clone_of_menu, .pen_menu_colorParam) {
+    if @is(it.op, .sound_sounds_menu, .looks_costume, .sensing_touchingobjectmenu, .looks_backdrops, .sensing_keyoptions, .control_create_clone_of_menu, .pen_menu_colorParam, .sensing_distancetomenu) {
         return compile(self, it.args[0]);
     };
     
     @match(it.op) {
         fn franca_literal() => if abs(it.literal) != 1.0/0.0 && it.literal.floor() == it.literal {
-            @fmt(out, "%", it.literal);
+            @fmt(out, "%.0", it.literal);
         } else {
             @fmt(out, "(@as(f64) bitcast(%))", fmt_hex(it.literal));
         };
@@ -337,6 +337,7 @@ compile :: fn(self: *Compile, it: *Node) void = {
         fn operator_mathop() => {
             suffix := it.args[1].string;
             suffix := @if(suffix == "e ^", "e_pow", suffix);
+            suffix := @if(suffix == "10 ^", "10_pow", suffix);
             @assert(simple_ops.mathop_names.contains(suffix), "TODO: %.%", it.op, suffix);
             @fmt(out, "%_%(", it.op, suffix);
             compile(self, it.args[0]);
@@ -725,6 +726,10 @@ fn lower(self: *Compile, it: **Node) void = {
             n[0] = (op = .control_if_else, args = @slice(cond, then, n[1]&) a);
             n[1] = (op = .franca_block, args = empty());
             it[] = n[0]&;
+        }
+        fn argument_reporter_boolean() => {
+            // TODO: use this information 
+            it.op = .argument_reporter_string_number;
         }
         @default => ();
     };

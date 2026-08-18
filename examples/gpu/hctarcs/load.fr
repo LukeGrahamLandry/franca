@@ -82,7 +82,7 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
         if !s.isStage {
             next_var_id := 1.0;  // different index space from locals
             each stage.variables& { key, it |
-                @try(push_var(blocks&, sprite&, next_var_id&, key, it._0, true)) return;
+                @try(push_var(blocks&, sprite&, next_var_id&, key, it.name, true)) return;
             };
             each stage.lists& { key, it |
                 @try(push_var(blocks&, sprite&, next_var_id&, key, it._0, true)) return;
@@ -93,8 +93,8 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
         
         next_var_id := 1.0;
         each s.variables& { key, it |
-            node := @try(push_var(blocks&, sprite&, next_var_id&, key, it._0, false)) return;
-            node.args = temp().alloc_init(*Node, 1, fn(_) => literal_node(it._1));
+            node := @try(push_var(blocks&, sprite&, next_var_id&, key, it.name, false)) return;
+            node.args = temp().alloc_init(*Node, 1, fn(_) => literal_node(it.init));
         };
         each s.lists& { key, it |
             node := @try(push_var(blocks&, sprite&, next_var_id&, key, it._0, false)) return;
@@ -353,8 +353,6 @@ fn literal_node(value: Raw.FloatOrString) *Node = {
             // TODO: this is wrong but i don't need strings yet
             n := @switch(s) {
                 @case("") => 0.0;
-                @case("true") => 1.0;
-                @case("false") => 0.0;
                 @case("-Infinity") => -1.0/0.0;
                 @case("Infinity") => 1.0/0.0;
                 @default => {
@@ -465,10 +463,22 @@ Project :: @struct {
     meta: Meta;
 };
 
+VariableRepr :: @struct(name: Str, init: FloatOrString);  // AAAAAAA my system is stupid because i can't put #json_null_value on a tuple
+fn parse_json(json: *JsonParser, self: *VariableRepr) bool = {
+    it := zeroed(Ty(Str, FloatOrString, ?bool /*cloud*/));
+    parse_json(json, it&) || return(false);
+    self[] = (name = it._0, init = it._1);
+    true
+}
+fn dump_json(self: *VariableRepr, out: *List(u8)) void = {
+    it := (self.name, self.init);
+    dump_json(it&, out);
+}
+
 Sprite :: @struct {
     isStage: bool;
     name: Str;
-    variables: RawHashMap(Str, Ty(Str, FloatOrString));
+    variables: RawHashMap(Str, VariableRepr);
     lists: RawHashMap(Str, Ty(Str, List(FloatOrString)));
     broadcasts: RawHashMap(Str, Str);
     blocks: RawHashMap(Str, Block2);
@@ -542,7 +552,7 @@ Sound :: @struct {
     name: Str;
     assetId: Str;
     dataFormat: Str;
-    format: Str;
+    format: ?Str;
     rate: i64;
     sampleCount: i64;
     md5ext: Str;
@@ -622,8 +632,10 @@ fn parse_json(json: *JsonParser, self: *ValueRef) bool = {
     if tag == 3 || tag == 1 {
         token := json.next().or(fn(_: Str) => return(false));
         second_is_array = token&.is(.StartList);
-        _ := parse_json(json, second_tag&);
-        json.skip_until_depth(json.depth - 1).or(fn(_: Str) => return(false));
+        if second_is_array {
+            _ := parse_json(json, second_tag&);
+            json.skip_until_depth(json.depth - 1).or(fn(_: Str) => return(false));
+        };
         token := json.next().or(fn(_: Str) => return(false));
         third_is_array = token&.is(.StartList);
         
@@ -674,10 +686,15 @@ fn parse_json(json: *JsonParser, self: *ValueRef) bool = {
                     self[] = (Var = it._1._2);
                 };
             } else {  // block
+                if third_is_array {
                 it := zeroed Ty(i64, Str, Ty(i64, FloatOrString));
                 parse_json(json, it&) || return(false);
                 self[] = (BlockValue = it._1);
-            
+                } else {
+                    it := zeroed Ty(i64, Str, FloatOrString);
+                    parse_json(json, it&) || return(false);
+                    self[] = (BlockValue = it._1);
+                };
             };
         };
         @default => {
@@ -782,7 +799,7 @@ block_defs :: @parse_block_defs(
 (motion_glidesecstoxy, (SECS, X, Y)),
 (pen_setPenColorParamTo, (COLOR_PARAM, VALUE)),
 ((data_deletealloflist, data_lengthoflist), (), (LIST)),
-((data_addtolist, data_itemnumoflist), (ITEM), (LIST)),
+((data_addtolist, data_itemnumoflist, data_listcontainsitem), (ITEM), (LIST)),
 (data_replaceitemoflist, (INDEX, ITEM), (LIST)),
 ((data_itemoflist, data_deleteoflist), (INDEX), (LIST)),
 ((operator_contains, operator_join), (STRING1, STRING2)),
@@ -798,6 +815,9 @@ block_defs :: @parse_block_defs(
 (looks_say, (MESSAGE)),
 (data_insertatlist, (ITEM, INDEX), (LIST)),
 (pen_changePenColorParamBy, (COLOR_PARAM, VALUE)),
+(pen_changePenSizeBy, (SIZE)),
+(sensing_distanceto, (DISTANCETOMENU)),
+(motion_movesteps, (STEPS)),
 
 // these are used when there's an oval drop down. 
 // the blocks that use these can also accept a computed string. 
@@ -808,10 +828,11 @@ block_defs :: @parse_block_defs(
 (control_create_clone_of_menu, (), (CLONE_OPTION)),
 (pen_menu_colorParam, (), (colorParam)),
 (sensing_of_object_menu, (), (OBJECT)),
+(sensing_distancetomenu, (), (DISTANCETOMENU)),
 // TODO: do this the normal way, just annoying because the name "VALUE" isn't unique and is sometimes used for blocks
 ((argument_reporter_string_number, argument_reporter_boolean), (), /*(VALUE)*/),
 // ...
-((event_whenflagclicked, event_whenthisspriteclicked, event_whenstageclicked, control_start_as_clone, control_delete_this_clone, procedures_prototype, motion_xposition, motion_yposition, pen_penUp, pen_penDown, pen_clear, pen_stamp, looks_cleargraphiceffects, looks_show, looks_hide, motion_ifonedgebounce, sensing_mousex, sensing_mousey, sensing_mousedown, sensing_answer, sensing_resettimer, sensing_timer, sensing_dayssince2000, looks_nextcostume), ()),
+((event_whenflagclicked, event_whenthisspriteclicked, event_whenstageclicked, control_start_as_clone, control_delete_this_clone, procedures_prototype, motion_xposition, motion_yposition, pen_penUp, pen_penDown, pen_clear, pen_stamp, looks_cleargraphiceffects, looks_show, looks_hide, motion_ifonedgebounce, sensing_mousex, sensing_mousey, sensing_mousedown, sensing_answer, sensing_resettimer, sensing_timer, sensing_dayssince2000, looks_nextcostume, sound_stopallsounds, sensing_username), ()),
 // these aren't real
 ((franca_block, franca_literal, franca_var, franca_var_stage, franca_string), ()),
 // can't be placed in the gui but projects that use it still load (and my old mandelbrot is one of them). 

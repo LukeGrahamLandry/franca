@@ -8,6 +8,10 @@
   in looking for how often to send key repeats, it seems it just waits for the script to finish. 
   everything else is different, they restart the script if sent again while its running but still can't have two at once. 
   one wonders why but that's not my department. means i don't have to keep reallocating the futures stack. 
+- fr: lol floats weren't in can_start_quick_expr. also did TodoEscapesInRawIdent. funny that those both lasted so long to be needed on the same day. 
+- trying to get 549996194 to work
+  - parse cloud var. ugh, can't have `Ty(Str, FloatOrString, ?bool)` because can't put a #json_null_value tag there. clearly that should be part of the type instead but i don't want to deal with that right now. 
+  - set pen hsv, pen line/size.
 
 ## (Aug 17) sb3
 

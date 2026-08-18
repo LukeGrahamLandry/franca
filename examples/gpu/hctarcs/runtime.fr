@@ -57,7 +57,7 @@ SpriteClass :: @rec @struct {
     events: []Handler;
     Handler :: @struct(trigger: Trigger, callee: @FnPtr(s: *Script) void);
     costumes: []Costume;
-    Costume :: @struct(data: []u8, name: Str, width: i64, height: i64);
+    Costume :: @struct(data: []u8, name: Value, width: i64, height: i64);
     var_count: i64;  // [vars,lists]
     monitors: []Monitor;
 };
@@ -293,6 +293,7 @@ operator_not :: fn(a) = from_bool(!a.to_bool());
 operator_random :: fn(s, lo, hi) = (hi - lo)*s.canvas.rng&.rand_float() + lo;
 operator_mathop_sqrt :: fn(a) = sqrt(a);
 operator_mathop_e_pow :: fn(a) = exp(a);
+operator_mathop_10_pow :: fn(a) = pow(10, a);
 operator_mathop_ln :: fn(a) = log(a);
 operator_mathop_floor :: fn(a) = floor(a);
 operator_mathop_tan :: fn(a) = { s, c := sin_cos(a.deg_to_rad()); s/c };
@@ -327,6 +328,23 @@ pen_setPenColorToColor :: fn(s, a) void = {
     };
     s.sprite.pen.colour = a.coerce_number().int().trunc(); 
 };
+
+pen_setPenColorParamTo :: fn(s, param, value) void = {
+    value := value.coerce_number().clamp(0, 100) / 100;
+    rgb := unpack_scratch_rgba(s.sprite.pen.colour);
+    H, S, V := rgb2hsv(rgb&[0], rgb&[1], rgb&[2]);
+    hsv: Array(f64, 4) = (H, S, V, rgb&[3]);
+    dest := @switch(param.coerce_string(s.canvas)) {
+        @case("color") => hsv&[0]&;
+        @case("saturation") => hsv&[1]&;
+        @case("brightness") => hsv&[2]&;
+        @case("transparency") => hsv&[3]&;  // TODO: wasteful to do all the conversion in this case
+        @default => return();
+    };
+    dest[] = value;
+    r, g, b := hsv2rgb(hsv&[0], hsv&[1], hsv&[2]); 
+    s.sprite.pen.colour = pack_scratch_rgba(r, g, b, hsv&[3]);
+}
 
 pen_changePenColorParamBy :: fn(s, name, value) void = {
     @println("TODO: pen_changePenColorParamBy % %", name, value);
@@ -365,11 +383,11 @@ control_wait :: fn(s, t) void = @println("TODO: wait %", t);
 motion_ifonedgebounce :: fn(s) void = println("TODO: motion_ifonedgebounce");
 looks_gotofrontback :: fn(s, _) void = println("TODO: looks_gotofrontback");
 looks_changeeffectby :: fn(s, d, e) void = println("TODO: looks_changeeffectby");
-motion_pointindirection :: fn(s, d) void = println("TODO: motion_pointindirection");
+motion_pointindirection :: fn(s, d) void = @println("TODO: motion_pointindirection %", d);
+motion_movesteps :: fn(s, steps) void = @println("TODO: motion_movesteps %", steps);
 control_delete_this_clone :: fn(s) void = println("TODO: control_delete_this_clone");  // TODO: also have to also return all the way up somehow?
 control_create_clone_of :: fn(s, _) void = println("TODO: control_create_clone_of");
 motion_glidesecstoxy :: fn(s, t, x, y) void = println("TODO: motion_glidesecstoxy");
-pen_setPenColorParamTo :: fn(s, param, value) void = println("TODO: pen_setPenColorParamTo");
 data_deletealloflist :: fn(s, list) void = list.to_obj()[].list&.clear();
 data_lengthoflist :: fn(s, list) = list.to_obj()[].list.len.float();
 data_addtolist :: fn(s, item, list) void = {
@@ -397,7 +415,7 @@ data_insertatlist :: fn(s, item, idx, lst) void = {
     list, i := s.coerce_list_index(lst, idx) || return();
     list.insert(i, item, s.canvas.gpa);
 }
-
+data_listcontainsitem :: fn(s, item, list) = data_itemnumoflist(s, item, list).ne(0).from_bool();
 operator_contains :: fn(s, a, b) = { println("TODO: operator_contains"); false.from_bool() }
 operator_length :: fn(s, string) = string.coerce_string(s.canvas).len().float();
 operator_letter_of :: fn(s, i, string) = { 
@@ -421,19 +439,29 @@ sensing_mousex :: fn(s) = s.canvas.sensing.mouse.pos.x.cast();
 sensing_mousey :: fn(s) = s.canvas.sensing.mouse.pos.y.cast();
 sensing_mousedown :: fn(s) = s.canvas.sensing.mouse.down.from_bool();
 operator_round :: fn(a) = round(a.coerce_number());
-looks_costumenumbername :: fn(s, which) = { println("TODO: looks_costumenumbername"); 0 };
+looks_costumenumbername :: fn(s, which) = { 
+    @switch(which.coerce_string(s.canvas)) {   // TODO: fold
+        @case("name") => s.sprite.class.costumes[s.sprite.looks.costume].name;
+        @case("number") => s.sprite.looks.costume.float() + 1;
+        @default => unreachable();
+    }
+};
 sensing_askandwait :: fn(s, q) void = println("TODO: sensing_askandwait");
 sensing_answer :: fn(s) = { println("TODO: sensing_answer"); 0 }
 event_broadcastandwait :: fn(s, event) void = println("TODO: event_broadcastandwait");
 sensing_resettimer :: fn(s) void = { s.canvas.sensing.timer_start = timestamp_s(); }
 sensing_timer :: fn(s) = timestamp_s() - s.canvas.sensing.timer_start;
-looks_seteffectto :: fn(s, value, effect) void = println("TODO: looks_seteffectto");
+looks_seteffectto :: fn(s, value, effect) void = @println("TODO: looks_seteffectto % %", effect.coerce_string(s.canvas), value);
+sensing_distanceto :: fn(s, name) = { println("TODO: sensing_distanceto"); 0 }
 sensing_dayssince2000 :: fn(s) = { 
     // TODO: real time
     (timestamp_s() / (60*60*24)) + 9660
 };
+// TODO: let you choose this
+sensing_username :: fn(s) = s.canvas.new_string("User1234");
 };
 
+pow :: fn(a: f64, b: f64) f64 #libc;
 exp :: fn(a: f64) f64 #libc;
 log :: fn(a: f64) f64 #libc;
 floor :: fn(a: f64) f64 #libc;
@@ -478,7 +506,7 @@ fn lookup_costume_index(name: Value, s: *Script) i64 = {
     };
     name := name.coerce_string(s.canvas);
     enumerate costumes { i, it |
-        @if(it.name == name) return(i);
+        @if(it.name.to_obj()[].string.s == name) return(i);
     };
     0
 }
@@ -664,3 +692,40 @@ fn assign_strings(c: *Canvas, v: []Value, indices: []Ty(u32, u32)) void = {
     };
 }
 
+// (r,g,b,a)
+pack_scratch_rgba :: fn(c: Array(f64, 4)) u32 = {
+    f :: fn(x, n) => c&[x].mul(255).int().bit_and(255).shift_left(n);
+    trunc(@or(f(0, 16), f(1, 8), f(2, 0), f(3, 24)))
+};
+unpack_scratch_rgba :: fn(x: u32) Array(f64, 4) = {
+    f :: fn(n) => x.shift_right_logical(n).bit_and(255).int().float().div(255);
+    (f(16), f(8), f(0), f(24))
+};
+// TODO: stop pasting this!
+// 0.0 to 1.0
+hsv2rgb :: fn(H: f64, S: f64, V: f64) Ty(f64, f64, f64) = {
+    H *= 360.0;
+    f :: fn(n) => {
+        k := fmod(n.float() + (H / 60.0), 6.0);
+        abs(V - V * S * max(0.0, min(min(k, 4 - k), 1.0)))
+    };
+    (f(5), f(3), f(1))
+};
+// https://en.wikipedia.org/wiki/HSL_and_HSV#From_RGB
+rgb2hsv :: fn(R: f64, G: f64, B: f64) Ty(f64, f64, f64) = {
+    Xmax := R.max(G).max(B);
+    Xmin := R.min(G).min(B);
+    C := Xmax - Xmin;
+    V := Xmax;
+    
+    H := (60.0 / 360.0) * @if_else {
+        @if(C == 0) => 0;
+        @if(V == R) => fmod((G - B) / C, 6);
+        @if(V == G) => (B - R) / C + 2;
+        @if(V == B) => (R - G) / C + 4;
+        @else => NaN;
+    };
+    
+    S := @if(V == 0, 0.0, C / V);
+    (H, S, V)
+};
