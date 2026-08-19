@@ -172,10 +172,9 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
         @fmt(out, "c.classes[%] = (name = strings[%], costumes = t, events = e.shrink_to_fit(), var_count = %, monitors = m);\n", sprite_i, self.const_string(it.name), it.variables.len);
         @fmt(out, "sprite := c.new_sprite(c.classes[%]&);\nc.clones&.push(sprite, a);\n", sprite_i);
         
-        // TODO: direction
         I := it.initial&;
-        @fmt(out, "sprite.pos.x = clamp(%, -c.size.x/2, c.size.x/2); sprite.pos.y = clamp(%, -c.size.y/2, c.size.y/2); sprite.looks.costume = %; sprite.looks.size = float(%) / 100.0; sprite.looks.hide = %;\n", 
-            I.x, I.y, I.costume.mod(it.costumes.len), I.size, I.hide);
+        @fmt(out, "sprite.pos.x = clamp(%, -c.size.x/2, c.size.x/2); sprite.pos.y = clamp(%, -c.size.y/2, c.size.y/2); sprite.looks.costume = %; sprite.looks.size = float(%) / 100.0; sprite.looks.hide = %; sprite.direction = %;\n", 
+            I.x, I.y, I.costume.mod(it.costumes.len), I.size, I.hide, I.direction);
         
         @fmt(out, "v := sprite.vars();\n");
         init_list_values(self, it.variables.items(), floats_blob&, true);
@@ -262,18 +261,25 @@ compile :: fn(self: *Compile, it: *Node) void = {
         return();
     };
     
-    if @is(it.op, .sound_setvolumeto, .sound_playuntildone, .sound_play, .sound_stopallsounds) {
+    if @is(it.op, 
+        .sound_setvolumeto, .sound_playuntildone, .sound_play, .sound_stopallsounds, .sound_changevolumeby,
+        .music_setTempo, .music_changeTempo, .music_restForBeats, .music_playNoteForBeats, .music_playDrumForBeats, .music_setInstrument, .music_menu_INSTRUMENT, .music_menu_DRUM,
+    ) {
         // i don't do sound yet
         return @fmt(out, "/* % */", it.op);
     };
     
-    if @is(it.op, .sound_sounds_menu, .looks_costume, .sensing_touchingobjectmenu, .looks_backdrops, .sensing_keyoptions, .control_create_clone_of_menu, .pen_menu_colorParam, .sensing_distancetomenu) {
+    if @is(it.op, .sound_sounds_menu, .looks_costume, .sensing_touchingobjectmenu, .looks_backdrops, .sensing_keyoptions, .control_create_clone_of_menu, .pen_menu_colorParam, .sensing_distancetomenu, .sensing_of_object_menu, .motion_pointtowards_menu) {
         return compile(self, it.args[0]);
     };
     
     @match(it.op) {
         fn franca_literal() => if abs(it.literal) != 1.0/0.0 && it.literal.floor() == it.literal {
-            @fmt(out, "%.0", it.literal);
+            if it.literal >= 0 {
+                @fmt(out, "%.0", it.literal);
+            } else {
+                @fmt(out, "(%.0)", it.literal);
+            };
         } else {
             @fmt(out, "(@as(f64) bitcast(%))", fmt_hex(it.literal));
         };
@@ -364,7 +370,10 @@ compile :: fn(self: *Compile, it: *Node) void = {
                     };
                 };
             };
-            @fmt(out, ");\n@\"proc_% %\"(s, args&);\n ", def.literal, => self.safe_string_body(def.string));
+            
+            @fmt(out, ");\n");
+            out.push_repeated(self.depth*4, " ".ascii());
+            @fmt(out, "@\"proc_% %\"(s, args&);\n ", def.literal, => self.safe_string_body(def.string));
         }
         fn event_broadcast() => {
             @fmt(out, "idx := ");
@@ -421,7 +430,7 @@ compile :: fn(self: *Compile, it: *Node) void = {
             compile(self, it.args[0]);
             @fmt(out, ".to_bool() {\n");
             compile(self, it.args[1]);
-            @fmt(out, "} else {\n");
+            @fmt(out, ";} else {\n");
             compile(self, it.args[2]);
             @fmt(out, ";};\n");
         }
@@ -649,9 +658,9 @@ fn is_async_rec(self: *Compile, it: *Node) bool = {
             def := it.args[0];
             if def.flags.mark_rec {
                 // TODO: overly conservative because might not have gotten to the proc yet. need to iterate to fixed point. 
-                //return def.flags.async != .no;
+                return def.flags.async != .no;
                 // TODO: wrong ^
-                return def.flags.async == .yes;
+                //return def.flags.async == .yes;
             };
             return self.is_async(def);
         }
@@ -730,6 +739,43 @@ fn lower(self: *Compile, it: **Node) void = {
         fn argument_reporter_boolean() => {
             // TODO: use this information 
             it.op = .argument_reporter_string_number;
+        }
+        fn motion_goto() => {
+            it.op = .motion_gotoxy;
+        }
+        fn pen_changePenHueBy() => {
+            value := it.args[0];
+            n := a.alloc_zeroed(Node, 4);
+            n[0] = (op = .pen_changePenColorParamBy, args = @slice(n[1]&, n[2]&) a);
+            n[1] = (op = .franca_string, args = empty(), string = "hue");
+            n[2] = (op = .operator_divide, args = @slice(value, n[3]&) a);
+            n[3] = (op = .franca_literal, args = empty(), literal = 2);
+            it[] = n[0]&;
+        }
+        fn pen_setPenHueToNumber() => {
+            value := it.args[0];
+            n := a.alloc_zeroed(Node, 4);
+            n[0] = (op = .pen_setPenColorParamTo, args = @slice(n[1]&, n[2]&) a);
+            n[1] = (op = .franca_string, args = empty(), string = "hue");
+            n[2] = (op = .operator_divide, args = @slice(value, n[3]&) a);
+            n[3] = (op = .franca_literal, args = empty(), literal = 2);
+            it[] = n[0]&;
+        }
+        fn motion_turnright() => {
+            value := it.args[0];
+            n := a.alloc_zeroed(Node, 3);
+            n[0] = (op = .motion_pointindirection, args = @slice(n[1]&) a);
+            n[1] = (op = .operator_add, args = @slice(n[2]&, value) a);
+            n[2] = (op = .motion_direction, args = empty());
+            it[] = n[0]&;
+        }
+        fn motion_turnleft() => {
+            value := it.args[0];
+            n := a.alloc_zeroed(Node, 3);
+            n[0] = (op = .motion_pointindirection, args = @slice(n[1]&) a);
+            n[1] = (op = .operator_subtract, args = @slice(n[2]&, value) a);
+            n[2] = (op = .motion_direction, args = empty());
+            it[] = n[0]&;
         }
         @default => ();
     };

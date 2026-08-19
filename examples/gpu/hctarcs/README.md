@@ -20,6 +20,7 @@ most other blocks are not implemented yet.
 
 ## todo
 
+- what does shadow:true mean?
 - have the generated main() call gui instead of viewer
 - support+test outputting broadcasts/keys from the ast builder
 - images should be drawn at half size
@@ -57,6 +58,8 @@ most other blocks are not implemented yet.
   - dump Node ast back to builder franca code and textbox edit as franca
   - collect warnings when loading the project and show them at the end
 - add simple tests: looks_sayforsecs,motion_glidesecstoxy
+- what happens if you broadcast the same message again while someone else is waiting on a broacast_and_wait
+- should look at the extensions array first to give nicer error message before dying on an unknown upcode
 
 ## notes
 

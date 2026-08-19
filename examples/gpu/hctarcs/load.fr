@@ -286,10 +286,14 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                     };
                     a := list(*Node, temp());
                     for mutation.argumentids&.unwrap() { field |
-                        value := b.inputs&.get_ptr(field) 
-                            || return(Err = @tfmt("(%): %.% is missing", key, b.opcode, field));
-                        value := @try(decode_value(value, s, blocks&, (key, b.opcode, field))) return;
-                        a&.push(value); 
+                        value := 
+                        if b.inputs&.get_ptr(field) { value |
+                            value := @try(decode_value(value, s, blocks&, (key, b.opcode, field))) return;
+                            a&.push(value); 
+                        } else {
+                            @println("warning: (%): %.% is missing", key, b.opcode, field);
+                            a&.push(literal_node(String = ""));
+                        };
                     };
                     // TODO: err if a.len!=def.params.len, annoying because the prototype moves around depending if def was already processed
                     @debug_assert_eq(args.len, 0);
@@ -529,13 +533,13 @@ MutationRepr :: @struct {
     
     // for custom blocks
     proccode: ?Str;
-    warp: ?bool; 
+    warp: ?BoolOrStringOrTheStringNull; 
     argumentids: ?Str;
     argumentnames: ?Str;  
     argumentdefaults: ?Str;
     
     // for control_stop
-    hasnext: ?bool;
+    hasnext: ?BoolOrStringOrTheStringNull;
 };
 
 Costume :: @struct {
@@ -567,7 +571,7 @@ Meta :: @struct {
 Monitor :: @struct {
     id: Str;  // key in sprite.(variables,list)
     mode: @enum(default, slider, list, large);
-    opcode: @enum(data_variable, data_listcontents, sensing_loudness, motion_yposition);
+    opcode: @enum(data_variable, data_listcontents, sensing_loudness, motion_yposition, sensing_timer, sensing_answer, music_getTempo);
     params: RawHashMap(Str, Str);
     spriteName: ?Str;
     width: ?i64;
@@ -594,6 +598,19 @@ fn parse_json(json: *JsonParser, self: *FloatOrString) bool = {
     };
     true
 }
+
+BoolOrStringOrTheStringNull :: @struct(value: bool);
+fn parse_json(json: *JsonParser, self: *BoolOrStringOrTheStringNull) bool = {
+    token := json.next().or(fn(_: Str) => return(false));
+    self[] = @match(token) {
+        fn StringValue(s) => (value = s == "true");
+        fn BoolValue(s) => (value = s);
+        @default => return(false);
+    };
+    true
+}
+fn dump_json(self: *BoolOrStringOrTheStringNull, out: *List(u8)) void = 
+    dump_json(self.value&, out);
 
 fn parse_json(json: *JsonParser, self: *Block2) bool = {
     mark := json.mark();
@@ -629,7 +646,7 @@ fn parse_json(json: *JsonParser, self: *ValueRef) bool = {
     tag := 0;
     parse_json(json, tag&) || return(false);
     second_is_array, second_tag, third_is_array := (false, 0, false);
-    if tag == 3 || tag == 1 {
+    if tag == 3 || tag == 1 || tag == 2 {
         token := json.next().or(fn(_: Str) => return(false));
         second_is_array = token&.is(.StartList);
         if second_is_array {
@@ -670,9 +687,15 @@ fn parse_json(json: *JsonParser, self: *ValueRef) bool = {
             };
         };
         @case(2) => {  // block stack
+            if second_is_array {
+                it := zeroed Ty(i64, Ty(i64, Str, Str));
+                parse_json(json, it&) || return(false);
+                self[] = (Var = it._1._2);
+            } else {
             it := zeroed Ty(i64, Str);
             parse_json(json, it&) || return(false);
             self[] = (BlockStack = it._1);
+            };
         };
         @case(3) => {
             if second_is_array {  // variable
@@ -687,9 +710,13 @@ fn parse_json(json: *JsonParser, self: *ValueRef) bool = {
                 };
             } else {  // block
                 if third_is_array {
-                it := zeroed Ty(i64, Str, Ty(i64, FloatOrString));
+                it := zeroed Ty(i64, ?Str, Ty(i64, FloatOrString));
                 parse_json(json, it&) || return(false);
-                self[] = (BlockValue = it._1);
+                if it._1 { s |
+                    self[] = (BlockValue = s);
+                } else {
+                    self[] = (String = "");
+                };
                 } else {
                     it := zeroed Ty(i64, Str, FloatOrString);
                     parse_json(json, it&) || return(false);
@@ -709,7 +736,7 @@ fn parse_json(json: *JsonParser, self: *Mutation) bool = {
     s := zeroed(MutationRepr);
     parse_json(json, s&) || return(false);
     self.proccode = s.proccode;
-    self.warp = s.warp;
+    self.warp = @if(s.warp.is_some(), (Some = s.warp.Some.value), .None);
     X :: fn(it, name, $T) => {
         r := List(T).parse_json(it, json.out);
         r.or(fn(msg) => {
@@ -764,7 +791,9 @@ block_defs :: @parse_block_defs(
 (control_repeat_until, (CONDITION, SUBSTACK)),
 ((data_setvariableto, data_changevariableby), (VALUE), (VARIABLE)),
 (pen_setPenColorToColor, (COLOR)),
-(motion_gotoxy, (X, Y)),
+((motion_gotoxy, motion_goto), (X, Y)),
+(motion_goto_menu, (), (TO)),
+(motion_pointtowards, (TOWARDS)),
 (operator_not, (OPERAND)),
 (operator_random, (FROM, TO)),
 (control_stop, (), (STOP_OPTION)),
@@ -785,6 +814,7 @@ block_defs :: @parse_block_defs(
 (looks_backdrops, (), (BACKDROP)),
 (event_whenbroadcastreceived, (), (BROADCAST_OPTION)),
 (looks_changeeffectby, (CHANGE), (EFFECT)),
+(looks_changesizeby, (CHANGE)),
 (sound_setvolumeto, (VOLUME)),
 ((sound_playuntildone, sound_play), (SOUND_MENU)),
 (motion_pointindirection, (DIRECTION)),
@@ -806,18 +836,31 @@ block_defs :: @parse_block_defs(
 ((operator_length), (STRING)),
 ((operator_letter_of), (LETTER, STRING)),
 (sensing_touchingcolor, (COLOR)),
+(sensing_coloristouchingcolor, (COLOR1, COLOR2)),
 (looks_costumenumbername, (), (NUMBER_NAME)),
 (sensing_askandwait, QUESTION),
 (event_whenkeypressed, (), (KEY_OPTION)),
 (looks_seteffectto, (VALUE), (EFFECT)),
 (sensing_of, (OBJECT), (PROPERTY)),
 ((data_hidelist, data_showlist), (), (LIST)),
-(looks_say, (MESSAGE)),
+((looks_say, looks_think), (MESSAGE)),
 (data_insertatlist, (ITEM, INDEX), (LIST)),
 (pen_changePenColorParamBy, (COLOR_PARAM, VALUE)),
 (pen_changePenSizeBy, (SIZE)),
 (sensing_distanceto, (DISTANCETOMENU)),
 (motion_movesteps, (STEPS)),
+(motion_setrotationstyle, (), (STYLE)),
+(sensing_current, (), (CURRENTMENU)),
+(sensing_setdragmode, (), (DRAG_MODE)),
+((motion_turnright, motion_turnleft), (DEGREES)),
+
+(sound_changevolumeby, (VOLUME)),
+((music_setTempo, music_changeTempo), (TEMPO)),
+((music_restForBeats, music_playNoteForBeats, music_playDrumForBeats, ), (BEATS)),
+(music_setInstrument, (INSTRUMENT)),
+(music_menu_INSTRUMENT, (), (INSTRUMENT)),
+(music_menu_DRUM, (), (DRUM)),
+(note, (), (NOTE)),
 
 // these are used when there's an oval drop down. 
 // the blocks that use these can also accept a computed string. 
@@ -829,14 +872,19 @@ block_defs :: @parse_block_defs(
 (pen_menu_colorParam, (), (colorParam)),
 (sensing_of_object_menu, (), (OBJECT)),
 (sensing_distancetomenu, (), (DISTANCETOMENU)),
+(motion_pointtowards_menu, (), (TOWARDS)),
+
 // TODO: do this the normal way, just annoying because the name "VALUE" isn't unique and is sometimes used for blocks
 ((argument_reporter_string_number, argument_reporter_boolean), (), /*(VALUE)*/),
 // ...
-((event_whenflagclicked, event_whenthisspriteclicked, event_whenstageclicked, control_start_as_clone, control_delete_this_clone, procedures_prototype, motion_xposition, motion_yposition, pen_penUp, pen_penDown, pen_clear, pen_stamp, looks_cleargraphiceffects, looks_show, looks_hide, motion_ifonedgebounce, sensing_mousex, sensing_mousey, sensing_mousedown, sensing_answer, sensing_resettimer, sensing_timer, sensing_dayssince2000, looks_nextcostume, sound_stopallsounds, sensing_username), ()),
+((event_whenflagclicked, event_whenthisspriteclicked, event_whenstageclicked, control_start_as_clone, control_delete_this_clone, procedures_prototype, motion_xposition, motion_yposition, pen_penUp, pen_penDown, pen_clear, pen_stamp, looks_cleargraphiceffects, looks_show, looks_hide, motion_ifonedgebounce, sensing_mousex, sensing_mousey, sensing_mousedown, sensing_answer, sensing_resettimer, sensing_timer, sensing_dayssince2000, looks_nextcostume, sound_stopallsounds, sensing_username, motion_direction, looks_size, sensing_loudness, sound_volume, music_getTempo), ()),
 // these aren't real
 ((franca_block, franca_literal, franca_var, franca_var_stage, franca_string), ()),
 // can't be placed in the gui but projects that use it still load (and my old mandelbrot is one of them). 
 (control_for_each, (VALUE, SUBSTACK), (VARIABLE)),
+((pen_setPenHueToNumber, pen_changePenHueBy), (HUE)),
+((pen_setPenShadeToNumber, pen_changePenShadeBy), (NUMBER)),
+
 );
 
 // (opcode, inputs, fields)

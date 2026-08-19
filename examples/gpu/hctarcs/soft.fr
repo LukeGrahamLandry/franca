@@ -4,36 +4,59 @@ pen_clear :: fn(canvas: *Rt.Canvas) void = {
 }
 
 // TODO: pen is missing some of the edges
-// TODO: line instead of point, use size of pen.  
 pen_line :: fn(canvas: *Rt.Canvas, pen: *FieldType(Rt.SpriteInstance, .pen), old: Vec2, new: Vec2) void = {
-    // TODO: do this without the sqrt
+    if pen.size >= canvas.size.x.cast() {
+        each canvas.pen_pixels { it |
+            it[] = pen.colour;
+        };
+        return();
+    };
+    if pen.size < 1 {
+        return();
+    };
+    
     dir := new - old;
     if dir.norm_sq() > 1 {
-        n := dir.norm().cast().int();
-        dir := dir.normalize() * pen.size.cast() / 2;
-        range(0, n) { _ |
-            pen_line(canvas, pen, new, new);
-            new -= dir; 
+        m := dir.y / dir.x;
+        s := pen.size.cast()/2;
+        if abs(dir.x/s) >= 1 {
+            s *= @if(dir.x > 0, @as(f32)1.0, -1.0);
+            range(0, floor(dir.x / s).cast().int()) { _ | 
+                old += vec2(1, m) * s;
+                pen_line(canvas, pen, old, old);
+            };
+        } else {
+            s *= @if(dir.y > 0, @as(f32)1.0, -1.0);
+            range(0, floor(dir.y / s).cast().int()) { _ | 
+                old += vec2(1/m, 1) * s;
+                pen_line(canvas, pen, old, old);
+            };
         };
         return();
     };
     
+    pixel :: fn(new) => {
+        new := floor(new);
+        if !(new.x < 0 || new.y < 0 || new.x >= canvas.size.x || new.y >= canvas.size.y) {
+            i := int(cast(new.y * stage_size.x + new.x));
+            canvas.pen_pixels[i] = pen.colour;
+        };
+    };
+    
     stage_size := canvas.size;
-    new := new.floor() + stage_size/2;
-    @if(new.x <= 0 || new.y <= 0 || new.x >= canvas.size.x || new.y >= canvas.size.y) return();  // TODO: only needed for the recusive call for big size, otherwise already clampped
+    new := new + stage_size/2;
+    new.y = stage_size.y - new.y;
     
     if pen.size == 1 {
-        i := int(cast((stage_size.y - new.y) * stage_size.x + new.x));
-        canvas.pen_pixels[i] = pen.colour;
+        pixel(new);
     } else {
-        new := new - stage_size/2 - vec2(pen.size.cast()/2);
-        prev := pen.size;
-        pen.size = 1;
-        range(0, prev.int()) { y |
-            y := y.float().cast();
-            pen_line(canvas, pen, new + vec2(0, y), new + vec2(prev.cast(), y));
+        new := new - vec2(pen.size.cast()/2);
+        s := pen.size.floor().int();
+        range(0, s) { y |
+            range(0, s) { x |
+                pixel(new + vec2(x.float().cast(), y.float().cast()));
+            };
         };
-        pen.size = prev;
     }
 }
 
@@ -99,7 +122,8 @@ finish_frame :: fn(c: *Rt.Canvas) void = {
             costume := sprite.class.costumes[sprite.looks.costume]&;
             pen_stamp(c, costume, sprite.pos);
             
-            say := sprite.looks.say.coerce_string(c);
+            // TODO: draw differently if sprite.looks.thinking
+            say := sprite.looks.say.coerce_string();
             draw_text(c, say, sprite.pos);
         };
     };
@@ -125,11 +149,11 @@ finish_frame :: fn(c: *Rt.Canvas) void = {
                     pos.y -= 8;
                     for l { value |
                         buf.clear();
-                        coerce_string(value, c, buf);
+                        coerce_string(value, buf);
                         pos.y -= draw_text(c, buf.items(), pos).float().cast() * 8;
                     };
                 } else {
-                    coerce_string(value, c, buf);
+                    coerce_string(value, buf);
                     draw_text(c, buf.items(), pos);
                 }
             };

@@ -44,8 +44,9 @@ SpriteInstance :: @rec @struct {  // !Sized
     class: *SpriteClass;
     // TODO: since you can query your position, might need to store this as f64 in case you do hacky thing like using it as a variable. 
     pos: Vec2 = vec2(0);
-    pen: (@struct(down := false, colour: u32 = 0, size: f64 = 1)) = ();
-    looks: (@struct(costume := 0, size: f64 = 1, hide := false, say: Value = 0)) = ();
+    direction: f64 = 90;  // deg. 0 is up, 90 is right. 
+    pen: (@struct(down := false, colour: u32 = 255, size: f64 = 1)) = ();
+    looks: (@struct(costume := 0, size: f64 = 1, hide := false, thinking := false, say: Value = 0)) = ();
     // each trigger can only have one running at a time so this is parallel to class.events 
     scripts: []ScriptSlot;
     // TODO: direction, say/think/ask, look effects, layer, volume, drag mode
@@ -177,7 +178,7 @@ fn coerce_number(it: Value) f64 = {
     0
 }
 
-fn coerce_string(it: Value, c: *Canvas, out: *List(u8)) void = {
+fn coerce_string(it: Value, out: *List(u8)) void = {
     @if(it.is_string()) return(@fmt(out, "%", it.to_obj()[].string.s));
     @if(it.is_number()) return(@fmt(out, "%", it));
     @if(it.is_bool()) return(@fmt(out, "%", it.to_bool()));
@@ -186,18 +187,18 @@ fn coerce_string(it: Value, c: *Canvas, out: *List(u8)) void = {
 
     it := it.to_obj()[].list;
     for it { it |
-        coerce_string(it, c, out);
+        coerce_string(it, out);
         @fmt(out, " ");
     };
     out.len -= int(it.len > 0);
 }
 
-fn coerce_string(it: Value, c: *Canvas) Str = {
+fn coerce_string(it: Value) Str = {
     @if(it.is_string()) return(it.to_obj()[].string.s);
     @if(it.is_bool()) return(@if(it.to_bool(), "true", "false"));
     
     out := u8.list(temp());
-    coerce_string(it, c, out&);
+    coerce_string(it, out&);
     out&.items()
 }
 
@@ -278,18 +279,14 @@ operator_add :: fn(a, b) = a + b;
 operator_subtract :: fn(a, b) = a - b;
 operator_multiply :: fn(a, b) = a * b;
 operator_divide :: fn(a, b) = a / b;
-operator_lt :: fn(a, b) #inline = {
-    from_bool(a < b)
-    //@if(a.is_number()) return(from_bool(a == b /* .coerce_number() */));
-    //@if(a.is_string() && a.to_obj()[].string.s == "") return(true.from_bool());
-    //false.from_bool()  // TODO
-}
+operator_lt :: fn(a, b) = from_bool(a < b);
 operator_gt :: fn(a, b) = from_bool(a > b);
 operator_equals :: fn(s, a, b) = {
     @if(a.is_number() && b.is_number()) return(from_bool(a == b));
-    from_bool(a.coerce_string(s.canvas) == b.coerce_string(s.canvas))
+    from_bool(a.coerce_string() == b.coerce_string())
 }
 operator_not :: fn(a) = from_bool(!a.to_bool());
+// TODO: i think i need to know if things were inputted as integers or floats. 
 operator_random :: fn(s, lo, hi) = (hi - lo)*s.canvas.rng&.rand_float() + lo;
 operator_mathop_sqrt :: fn(a) = sqrt(a);
 operator_mathop_e_pow :: fn(a) = exp(a);
@@ -309,11 +306,21 @@ operator_mod :: fn(a, b) = fmod(a, b);
 
 motion_xposition :: fn(s) = s.sprite.pos.x.cast();
 motion_yposition :: fn(s) = s.sprite.pos.y.cast();
+motion_direction :: fn(s) = s.sprite.direction;
 motion_gotoxy :: fn(s, x, y) void = s.update_pos(fn(_) => vec2(x.cast(), y.cast()));
 motion_changexby :: fn(s, dx) void = s.update_pos(fn(old) => { old.x += dx.cast(); old });
 motion_changeyby :: fn(s, dy) void = s.update_pos(fn(old) => { old.y += dy.cast(); old });
 motion_setx :: fn(s, x) void = s.update_pos(fn(old) => { old.x = x.cast(); old });
 motion_sety :: fn(s, y) void = s.update_pos(fn(old) => { old.y = y.cast(); old });
+motion_pointindirection :: fn(s, d) void = { s.sprite.direction = d.coerce_number(); };
+motion_movesteps :: fn(s, steps) void = {
+    steps := steps.coerce_number().cast();
+    angle := deg_to_rad(-s.sprite.direction.cast() + 90);
+    dy, dx := angle.sin_cos();
+    s.update_pos(fn(pos) => pos + vec2(dx, dy) * steps);
+};
+motion_setrotationstyle :: fn(s, which) void = @println("TODO: motion_setrotationstyle %", which.coerce_string());
+motion_pointtowards :: fn(s, which) void = @println("TODO: motion_pointtowards %", which.coerce_string());
 
 // AARRGGBB
 pen_setPenColorToColor :: fn(s, a) void = { 
@@ -326,31 +333,43 @@ pen_setPenColorToColor :: fn(s, a) void = {
             };
         };
     };
-    s.sprite.pen.colour = a.coerce_number().int().trunc(); 
+    s.sprite.pen.colour = a.coerce_number().floor().int().trunc(); 
 };
 
-pen_setPenColorParamTo :: fn(s, param, value) void = {
-    value := value.coerce_number().clamp(0, 100) / 100;
-    rgb := unpack_scratch_rgba(s.sprite.pen.colour);
+fn update_pen_field(pen_colour: *u32, param: Value, $update: @Fn(old: f64) f64) void = {
+    rgb := unpack_scratch_rgba(pen_colour[]);
     H, S, V := rgb2hsv(rgb&[0], rgb&[1], rgb&[2]);
     hsv: Array(f64, 4) = (H, S, V, rgb&[3]);
-    dest := @switch(param.coerce_string(s.canvas)) {
+    // TODO: lookup_index for param
+    dest := @switch(param.coerce_string()) {
         @case("color") => hsv&[0]&;
         @case("saturation") => hsv&[1]&;
         @case("brightness") => hsv&[2]&;
         @case("transparency") => hsv&[3]&;  // TODO: wasteful to do all the conversion in this case
         @default => return();
     };
-    dest[] = value;
+    dest[] = update(dest[]);
     r, g, b := hsv2rgb(hsv&[0], hsv&[1], hsv&[2]); 
-    s.sprite.pen.colour = pack_scratch_rgba(r, g, b, hsv&[3]);
+    pen_colour[] = pack_scratch_rgba(r, g, b, hsv&[3]);
 }
 
-pen_changePenColorParamBy :: fn(s, name, value) void = {
-    @println("TODO: pen_changePenColorParamBy % %", name, value);
+// TODO: probably mod instead of clamp
+pen_setPenColorParamTo :: fn(s, param, value) void = {
+    value := value.coerce_number().clamp(0, 100) / 100;
+    update_pen_field(s.sprite.pen.colour&, param, fn(_) => value);
 }
+pen_changePenColorParamBy :: fn(s, param, value) void = {
+    value := value.coerce_number().clamp(0, 100) / 100;
+    update_pen_field(s.sprite.pen.colour&, param, fn(old) => clamp(old + value, 0, 1));
+}
+
+// TODO: what is shade in hsv? https://en.scratch-wiki.info/wiki/Pen_Shade_(value) is it >50 is saturation and <50 is value?
+pen_changePenShadeBy :: fn(s, value) void = @println("TODO: pen_changePenShadeBy %", value);
+pen_setPenShadeToNumber :: fn(s, value) void = @println("TODO: pen_setPenShadeToNumber %", value);
 
 pen_setPenSizeTo :: fn(s, a) void = { s.sprite.pen.size = a; };
+pen_changePenSizeBy :: fn(s, a) void = { s.sprite.pen.size += a; };
+
 pen_penUp :: fn(s) void = { s.sprite.pen.down = false; };
 pen_penDown :: fn(s) void = { 
     s.sprite.pen.down = true; 
@@ -364,6 +383,8 @@ pen_stamp :: fn(s) void = {
 }
 // TODO: use this
 looks_setsizeto :: fn(s, percent) void = { s.sprite.looks.size = percent / 100; }
+looks_changesizeby :: fn(s, percent) void = { s.sprite.looks.size += percent / 100; }
+looks_size :: fn(s) = s.sprite.looks.size * 100;
 // in scratch input is a name. here compiler inserts lookup_costume_index calls so they can (eventually) be folded. 
 looks_switchcostumeto :: fn(s, idx: i64) void = {
     s.sprite.looks.costume = idx;
@@ -373,18 +394,18 @@ looks_nextcostume :: fn(s) void = {
 }
 looks_hide :: fn(s) void = { s.sprite.looks.hide = true; };
 looks_show :: fn(s) void = { s.sprite.looks.hide = false; };
-looks_say :: fn(s, msg) void = { s.sprite.looks.say = msg; };
+looks_say :: fn(s, msg) void = { s.sprite.looks.say = msg; s.sprite.looks.thinking = false; };
+looks_think :: fn(s, msg) void = { s.sprite.looks.say = msg; s.sprite.looks.thinking = true; };
 
 looks_cleargraphiceffects :: fn(s) void = println("looks_cleargraphiceffects");
 looks_switchbackdropto :: fn(s, idx) void = @println("TODO: looks_switchbackdropto %", idx);
 sensing_touchingobject :: fn(_) = { println("sensing_touchingobject"); false.from_bool() };
+sensing_coloristouchingcolor :: fn(a, b) = { println("sensing_coloristouchingcolor"); false.from_bool() };
 sensing_keypressed :: fn(s, idx: i64) = s.canvas.sensing.pressed&.get(idx).from_bool();
 control_wait :: fn(s, t) void = @println("TODO: wait %", t);
 motion_ifonedgebounce :: fn(s) void = println("TODO: motion_ifonedgebounce");
 looks_gotofrontback :: fn(s, _) void = println("TODO: looks_gotofrontback");
 looks_changeeffectby :: fn(s, d, e) void = println("TODO: looks_changeeffectby");
-motion_pointindirection :: fn(s, d) void = @println("TODO: motion_pointindirection %", d);
-motion_movesteps :: fn(s, steps) void = @println("TODO: motion_movesteps %", steps);
 control_delete_this_clone :: fn(s) void = println("TODO: control_delete_this_clone");  // TODO: also have to also return all the way up somehow?
 control_create_clone_of :: fn(s, _) void = println("TODO: control_create_clone_of");
 motion_glidesecstoxy :: fn(s, t, x, y) void = println("TODO: motion_glidesecstoxy");
@@ -410,17 +431,41 @@ data_itemnumoflist :: fn(s, item, list) = {
     list := list.to_obj()[].list&;
     float(list.index_of(fn(check) => s.operator_equals(check[], item).to_bool()) || -1) + 1
 }
-// TODO: can you insert one past the end?
 data_insertatlist :: fn(s, item, idx, lst) void = {
+    list := lst.to_obj()[].list&;
+    if idx.coerce_number() == float(list.len + 1) || (idx.is_string() && idx.to_obj()[].string.s == "last") {
+        s.data_addtolist(item, lst);
+    };
     list, i := s.coerce_list_index(lst, idx) || return();
     list.insert(i, item, s.canvas.gpa);
 }
 data_listcontainsitem :: fn(s, item, list) = data_itemnumoflist(s, item, list).ne(0).from_bool();
-operator_contains :: fn(s, a, b) = { println("TODO: operator_contains"); false.from_bool() }
-operator_length :: fn(s, string) = string.coerce_string(s.canvas).len().float();
+operator_contains :: fn(s, haystack, needle) = { 
+    haystack := haystack.coerce_string();
+    needle := needle.coerce_string();
+    haystack.contains(needle).from_bool()
+}
+operator_length :: fn(s, string) = string.coerce_string().len().float();
 operator_letter_of :: fn(s, i, string) = { 
-    string := string.coerce_string(s.canvas);
-    i := i.coerce_number().int() - 1;
+    string := string.coerce_string();
+    i := i.coerce_number().floor().int() - 1;
+    
+    if false {  // TODO: store as utf16?
+        next :: import("@/examples/import_c/unicode.fr")'decode_utf8;
+        p := string.ptr;
+        while => i > 0 && ptr_diff(string.ptr, p) < string.len {
+            _ := next(p&, p);
+            i -= 1;
+        };
+        if ptr_diff(string.ptr, p) < string.len {
+            start := p;
+            _ := next(p&, p);
+            r := string.subslice(ptr_diff(string.ptr, start), ptr_diff(start, p));
+            return s.canvas.new_string(r);
+        };
+        return s.canvas.new_string("");
+    };
+    
     r := @if(i.ult(string.len), string.subslice(i, 1), "");
     // TODO: could cache a string for each ascii character
     s.canvas.new_string(r)
@@ -430,8 +475,8 @@ operator_join :: fn(s, a, b) = {
     if a.is_string() && b.is_string() {
         out&.reserve(a.to_obj()[].string.s.len + b.to_obj()[].string.s.len)
     };
-    coerce_string(a, s.canvas, out&);
-    coerce_string(b, s.canvas, out&);
+    coerce_string(a, out&);
+    coerce_string(b, out&);
     s.canvas.new_obj(string = (s = out&.shrink_to_fit()))
 }
 sensing_touchingcolor :: fn(s, colour) = {  println("TODO: sensing_touchingcolor"); false.from_bool() };
@@ -440,7 +485,7 @@ sensing_mousey :: fn(s) = s.canvas.sensing.mouse.pos.y.cast();
 sensing_mousedown :: fn(s) = s.canvas.sensing.mouse.down.from_bool();
 operator_round :: fn(a) = round(a.coerce_number());
 looks_costumenumbername :: fn(s, which) = { 
-    @switch(which.coerce_string(s.canvas)) {   // TODO: fold
+    @switch(which.coerce_string()) {   // TODO: fold
         @case("name") => s.sprite.class.costumes[s.sprite.looks.costume].name;
         @case("number") => s.sprite.looks.costume.float() + 1;
         @default => unreachable();
@@ -451,14 +496,38 @@ sensing_answer :: fn(s) = { println("TODO: sensing_answer"); 0 }
 event_broadcastandwait :: fn(s, event) void = println("TODO: event_broadcastandwait");
 sensing_resettimer :: fn(s) void = { s.canvas.sensing.timer_start = timestamp_s(); }
 sensing_timer :: fn(s) = timestamp_s() - s.canvas.sensing.timer_start;
-looks_seteffectto :: fn(s, value, effect) void = @println("TODO: looks_seteffectto % %", effect.coerce_string(s.canvas), value);
+looks_seteffectto :: fn(s, value, effect) void = @println("TODO: looks_seteffectto % %", effect.coerce_string(), value);
 sensing_distanceto :: fn(s, name) = { println("TODO: sensing_distanceto"); 0 }
 sensing_dayssince2000 :: fn(s) = { 
     // TODO: real time
     (timestamp_s() / (60*60*24)) + 9660
 };
+// month,date,day are 1 indexed; hour,minute,second are 0 indexed;
+sensing_current :: fn(s, which) = {
+    // TODO: localtime_r
+    which := which.coerce_string();
+    second := timestamp() / 1000;
+    @switch(which) {
+        @case("SECOND") => second.mod(60).float();
+        @case("MINUTE") => second.div(60).mod(60).float();
+        @case("HOUR") => second.div(60*60).mod(24).float();
+        @case("DATE") => 1;
+        @case("DAYOFWEEK") => 1;  // sunday
+        @case("MONTH") => 1;
+        @case("YEAR") => 2026;
+        @default => @panic("sensing_current: %", which);
+    }
+}
 // TODO: let you choose this
 sensing_username :: fn(s) = s.canvas.new_string("User1234");
+// TODO: which clone does it use? 
+// TODO: property is constant so don't have to have the variable names at runtime. 
+//       but if object is computed, will need to switch on it to choose which local index to use. 
+sensing_of :: fn(s, object, property) = { @println("TODO: sensing_of % %", object.coerce_string(), property.coerce_string()); 0 }
+sensing_setdragmode :: fn(s, mode) void = @println("TODO: sensing_setdragmode %", mode.coerce_string());
+sensing_loudness :: fn(s) = 0;
+sound_volume :: fn(s) = 0;
+music_getTempo :: fn(s) = 0;
 };
 
 pow :: fn(a: f64, b: f64) f64 #libc;
@@ -494,7 +563,7 @@ fn coerce_list_index(s: *Script, list: Value, idx: Value) ?Ty(*RawList(Value), i
             @default => ();
         };
     };
-    i := idx.coerce_number().int() - 1;
+    i := idx.coerce_number().floor().int() - 1;
     @if(i < 0 || i >= list.len) return(.None);
     (Some = (list, i))
 }
@@ -502,9 +571,9 @@ fn coerce_list_index(s: *Script, list: Value, idx: Value) ?Ty(*RawList(Value), i
 fn lookup_costume_index(name: Value, s: *Script) i64 = {
     costumes := s.sprite.class.costumes;
     if name.is_number() {
-        return name.int().sub(1).mod(costumes.len);
+        return name.floor().int().sub(1).mod(costumes.len);
     };
-    name := name.coerce_string(s.canvas);
+    name := name.coerce_string();
     enumerate costumes { i, it |
         @if(it.name.to_obj()[].string.s == name) return(i);
     };
@@ -526,12 +595,12 @@ key_indices :: @static {
 };
 
 fn lookup_key_index(name: Value, s: *Script) i64 = {
-    name := name.coerce_string(s.canvas);
+    name := name.coerce_string();
     key_indices.get(name) || 42
 }
 
 fn lookup_broadcast_index(name: Value, s: *Script) i64 = {
-    name := name.coerce_string(s.canvas);
+    name := name.coerce_string();
     s.canvas.broadcasts&.get(name) || { 
         @println("warning: invalid broadcast name: (%)", name); 
         -1
@@ -694,7 +763,7 @@ fn assign_strings(c: *Canvas, v: []Value, indices: []Ty(u32, u32)) void = {
 
 // (r,g,b,a)
 pack_scratch_rgba :: fn(c: Array(f64, 4)) u32 = {
-    f :: fn(x, n) => c&[x].mul(255).int().bit_and(255).shift_left(n);
+    f :: fn(x, n) => c&[x].mul(255).floor().int().bit_and(255).shift_left(n);
     trunc(@or(f(0, 16), f(1, 8), f(2, 0), f(3, 24)))
 };
 unpack_scratch_rgba :: fn(x: u32) Array(f64, 4) = {

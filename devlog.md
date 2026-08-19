@@ -1,4 +1,10 @@
 
+## (Aug 19) sb3
+
+- improved pen_line so the big letters aren't totally broken and the level squares work. 
+  things being replaced with weird As can't be about the pen_line, it's not consistant per letter.  
+- tried decoding codepoints for letter_of, didn't help
+
 ## (Aug 18) sb3
 
 - some of the blocks are too paste-y, rewrite them in terms of other blocks
