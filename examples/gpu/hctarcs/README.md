@@ -41,10 +41,6 @@ most other blocks are not implemented yet.
   - is touching, if on edge bounce
   - clones
   - drag
-  - for broadcastandwait without allocating a tree of all the scripts being waited on,
-    i just need to have a broadcast accept a callback on its stack 
-    so when its done it can and decrement a counter on the old script's stack, 
-    and the send broadcast has to keep track of how many are started. 
 - strings should be utf16
 - ui
   - cli/CLIPBOARD_PASTED/FILES_DROPPED to load .sb3 (needs to embed the compiler)
@@ -57,7 +53,7 @@ most other blocks are not implemented yet.
   - keyboard, drag, click bounds, scroll, ask
   - dump Node ast back to builder franca code and textbox edit as franca
   - collect warnings when loading the project and show them at the end
-- add simple tests: looks_sayforsecs,motion_glidesecstoxy
+- add simple tests: looks_sayforsecs,motion_glidesecstoxy,broadcast,broadcastandwait,clone,timer,setbackdropandwait, 0x_hex and #_colour strings
 - what happens if you broadcast the same message again while someone else is waiting on a broacast_and_wait
 - should look at the extensions array first to give nicer error message before dying on an unknown upcode
 

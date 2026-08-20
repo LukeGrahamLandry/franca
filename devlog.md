@@ -4,6 +4,7 @@
 - improved pen_line so the big letters aren't totally broken and the level squares work. 
   things being replaced with weird As can't be about the pen_line, it's not consistant per letter.  
 - tried decoding codepoints for letter_of, didn't help
+- today i was mostly just going around adding random things. im sure ive built up fun stuff to debug tomorrow because its tedious to test it. real projects kinda don't work until everything works it seems. 
 
 ## (Aug 18) sb3
 

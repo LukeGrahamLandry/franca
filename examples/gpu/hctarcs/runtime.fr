@@ -74,11 +74,10 @@ Monitor :: @struct {
 Trigger :: @tagged(
     Broadcast: i64,
     KeyPress: i64,
+    BackdropSwitch: i64,
     SpriteClicked,
     CloneStart,
     Flag, 
-    
-    // TODO: key pressed, sprite clicked, backdrop switches, loudness>, recieve message
 );
 
 // TODO: less bloated layout
@@ -171,6 +170,9 @@ fn coerce_number(it: Value) f64 = {
     @if(it.is_bool()) return(it.to_bool().int().float());
     if it.is_string() { 
         it := it.to_obj();
+        if it.string.s.starts_with("0x") {
+            @println("TODO: there is hex %", it.string.s);
+        };
         n, s := parse_float(it.string.s);
         // TODO: i think its supposed to ignore whitespace
         @if(s.len == 0) return(n);
@@ -389,26 +391,58 @@ looks_size :: fn(s) = s.sprite.looks.size * 100;
 looks_switchcostumeto :: fn(s, idx: i64) void = {
     s.sprite.looks.costume = idx;
 }
+looks_switchbackdropto :: fn(s, idx: i64) void = {
+    s.canvas.stage.looks.costume = idx;
+    s.canvas.send_event(BackdropSwitch = idx);
+};
 looks_nextcostume :: fn(s) void = {
     s.sprite.looks.costume = mod(s.sprite.looks.costume + 1, s.sprite.class.costumes.len);
 }
+looks_nextbackdrop :: fn(s) void = {
+    c, s := (s.canvas, s.canvas.stage);
+    s.looks.costume = mod(s.looks.costume + 1, s.class.costumes.len);
+    c.send_event(BackdropSwitch = s.looks.costume);
+};
 looks_hide :: fn(s) void = { s.sprite.looks.hide = true; };
 looks_show :: fn(s) void = { s.sprite.looks.hide = false; };
 looks_say :: fn(s, msg) void = { s.sprite.looks.say = msg; s.sprite.looks.thinking = false; };
 looks_think :: fn(s, msg) void = { s.sprite.looks.say = msg; s.sprite.looks.thinking = true; };
 
 looks_cleargraphiceffects :: fn(s) void = println("looks_cleargraphiceffects");
-looks_switchbackdropto :: fn(s, idx) void = @println("TODO: looks_switchbackdropto %", idx);
 sensing_touchingobject :: fn(_) = { println("sensing_touchingobject"); false.from_bool() };
 sensing_coloristouchingcolor :: fn(a, b) = { println("sensing_coloristouchingcolor"); false.from_bool() };
 sensing_keypressed :: fn(s, idx: i64) = s.canvas.sensing.pressed&.get(idx).from_bool();
-control_wait :: fn(s, t) void = @println("TODO: wait %", t);
 motion_ifonedgebounce :: fn(s) void = println("TODO: motion_ifonedgebounce");
 looks_gotofrontback :: fn(s, _) void = println("TODO: looks_gotofrontback");
 looks_changeeffectby :: fn(s, d, e) void = println("TODO: looks_changeeffectby");
-control_delete_this_clone :: fn(s) void = println("TODO: control_delete_this_clone");  // TODO: also have to also return all the way up somehow?
-control_create_clone_of :: fn(s, _) void = println("TODO: control_create_clone_of");
-motion_glidesecstoxy :: fn(s, t, x, y) void = println("TODO: motion_glidesecstoxy");
+control_delete_this_clone :: fn(s) void = {
+    // TODO: can't remove from sprites array here because means the next guy will be skipped this frame
+    // TODO: don't let you delete the main guy
+    println("TODO: control_delete_this_clone");
+    // TODO: also have to also return all the way up somehow?
+}; 
+control_create_clone_of :: fn(s, which) void = {
+    @assert_eq(which.coerce_string(), "_myself_", "TODO: other clones");
+    c, src := (s.canvas, s.sprite);
+    dest := c.new_sprite(src.class);
+    dest.pos = src.pos;
+    dest.direction = src.direction;
+    dest.pen = src.pen;
+    dest.looks = src.looks;
+    v := dest.vars();
+    v.copy_from(src.vars());
+    
+    // lists are the only mutable thing, they're always at the end, they can't contain other lists.
+    i := v.len() - 1;
+    while => i >= 0 && v[i].is_list() {
+        lst := v[i].to_obj()[].list;
+        new := lst.items().shallow_copy(c.gpa).as_raw_list();
+        v[i] = c.new_list(new);
+        i -= 1;
+    };
+    
+    c.send_event(dest, .CloneStart, .None);
+}
 data_deletealloflist :: fn(s, list) void = list.to_obj()[].list&.clear();
 data_lengthoflist :: fn(s, list) = list.to_obj()[].list.len.float();
 data_addtolist :: fn(s, item, list) void = {
@@ -493,7 +527,6 @@ looks_costumenumbername :: fn(s, which) = {
 };
 sensing_askandwait :: fn(s, q) void = println("TODO: sensing_askandwait");
 sensing_answer :: fn(s) = { println("TODO: sensing_answer"); 0 }
-event_broadcastandwait :: fn(s, event) void = println("TODO: event_broadcastandwait");
 sensing_resettimer :: fn(s) void = { s.canvas.sensing.timer_start = timestamp_s(); }
 sensing_timer :: fn(s) = timestamp_s() - s.canvas.sensing.timer_start;
 looks_seteffectto :: fn(s, value, effect) void = @println("TODO: looks_seteffectto % %", effect.coerce_string(), value);
@@ -568,8 +601,8 @@ fn coerce_list_index(s: *Script, list: Value, idx: Value) ?Ty(*RawList(Value), i
     (Some = (list, i))
 }
 
-fn lookup_costume_index(name: Value, s: *Script) i64 = {
-    costumes := s.sprite.class.costumes;
+fn lookup_costume_index(name: Value, sprite: *SpriteInstance) i64 = {
+    costumes := sprite.class.costumes;
     if name.is_number() {
         return name.floor().int().sub(1).mod(costumes.len);
     };
@@ -623,15 +656,19 @@ fn pop_async(s: *Script, n: i64) void = {
     s.futures.len -= n;
 }
 
-// TODO: SpriteClicked needs to send to a specific one
-fn send_event(c: *Canvas, event: Trigger) void = {
+fn send_event(c: *Canvas, event: Trigger) void = { c.send_event(event, .None); }
+fn send_event(c: *Canvas, event: Trigger, waiter: ?*f64) i64 = {
     // :SLOW should sort by class so don't have to recompare for each clone
-    for c.clones { s |
-        c.send_event(s, event);
+    count := 0;
+    range(0, c.clones.len) { i |  // only send to clones that existed at the beginning (ex. if sync FlagClicked spawns a clone, can't send it FlagClicked)
+        s := c.clones[i];  // can reallocate for new clones
+        count += c.send_event(s, event, waiter);
     };
+    count
 }
 
-fn send_event(c: *Canvas, s: *SpriteInstance, event: Trigger) void = {
+fn send_event(c: *Canvas, s: *SpriteInstance, event: Trigger, waiter: ?*f64) i64 = {
+    count := 0;
     ::AutoEq(Trigger);
         enumerate s.class.events { i, it |
             if it.trigger& == event& {
@@ -643,10 +680,25 @@ fn send_event(c: *Canvas, s: *SpriteInstance, event: Trigger) void = {
                 
                 slot.futures&.clear();
                 s: Script = (canvas = c, sprite = s, data = slot);
+                if waiter { waiter |
+                    @debug_assert(event&.is(.Broadcast), "only for broadcastandwait");
+                    s.futures&.reserve(3, c.gpa);
+                    s&.push_val_async(bit_cast_unchecked(*f64, f64, waiter));
+                    s&.push_async(fn(s) = {
+                        // TODO: this is a problem if the waiter's trigger got reset before we do this because now the pointer is junk
+                        waiter := s.futures[s.futures.len - 1];
+                        s.pop_async(1);
+                        @assert(waiter.is_number());
+                        waiter := bit_cast_unchecked(f64, *f64, waiter);
+                        waiter[] -= 1;
+                    });
+                };
                 s.futures&.reserve(1, c.gpa);
                 s&.push_async(it.callee);
+                count += 1;
             };
         };
+    count
 }
 
 
