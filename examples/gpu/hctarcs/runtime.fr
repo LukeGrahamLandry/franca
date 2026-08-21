@@ -22,6 +22,7 @@ Canvas :: @rec @struct {
         pressed := zeroed(StaticBitSet(43));
     };
     broadcasts: RawHashMap(Str, i64) = init();
+    metadata: []Str = empty();
 };
 
 // this is the handle to a running script passed around in the compiled code. only need one at a time. 
@@ -36,6 +37,9 @@ ScriptSlot :: @struct {
     // async needs to reify (function arguments, loop counters, continuation function pointer). 
     // to make progress the runtime pops the last thing from the stack and calls it as a function pointer. 
     futures: RawList(Value) = empty();
+    without_refresh_depth: u32 = 0;
+    // this is a sad hack because i dont have tail calls :(
+    no_yield: bool = false;
 };
 
 // TODO: maybe it would be better to generate MySprite :: @struct(base: SpriteInstance, vars: Array(Value, N)); 
@@ -679,6 +683,7 @@ fn send_event(c: *Canvas, s: *SpriteInstance, event: Trigger, waiter: ?*f64) i64
                 };
                 
                 slot.futures&.clear();
+                //slot.without_refresh_depth = 0;
                 s: Script = (canvas = c, sprite = s, data = slot);
                 if waiter { waiter |
                     @debug_assert(event&.is(.Broadcast), "only for broadcastandwait");
@@ -709,13 +714,20 @@ fn poll_scripts(c: *Canvas) i64 = {
     range(0, c.clones.len) { i | // can be reallocated in callee (for clone)
         sprite := c.clones[i];
         each sprite.scripts { slot |
+            dowhile {
+            again := false;
             if slot.futures&.pop() { callee |
                 s: Script = (canvas = c, sprite = sprite, data = slot);
                 // TODO: could keep min,max of all the addresses of the cont function pointers and assert these bits are in that range (in case of compiler bugs). 
                 @debug_assert(callee.is_number(), "corrupt callee");
                 callee := bit_cast_unchecked(Value, @FnPtr(s: *Script) void, callee);
+                s.no_yield = false;
                 callee(s&);
                 ran += 1;
+                again = s.no_yield;
+            };
+            
+            again
             };
         };
         i += 1;

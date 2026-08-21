@@ -3,6 +3,7 @@
 Project :: @struct {
     sprites: RawList(*Sprite);
     broadcasts: RawList(*Node);  // TODO: why does scratch store these per sprite?
+    meta: ?Raw.ApiMeta;
 };
 Sprite :: @struct {
     name: Str;
@@ -58,6 +59,15 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
     ::X;
     p := @try(parse_json(Raw.Project, project, temp())) return;
     project := zeroed(Project);
+    project.meta = .None;
+    
+    // this isn't a thing in real scratch projects but when i download them i save extra info from the api 
+    if files&.get("meta.json") { meta |
+        @match(parse_json(Raw.ApiMeta, meta, temp())) {
+            fn Ok(it) => { project.meta = (Some = it); };
+            fn Err(msg) => @eprintln("warning: failed parse meta: %", msg);
+        };
+    };
     
     stage := p.targets&.find(fn(it) => it.isStage)
         || return(Err = "missing Stage");
@@ -586,7 +596,14 @@ Monitor :: @struct {
     isDiscrete := false;
 };
 
-Value :: Str;
+ApiMeta :: @struct {
+    id: i64;
+    title: Str;
+    description: Str;
+    instructions: Str;
+    author: @struct(id: i64, username: Str);
+    history: @struct(created: Str, modified: Str, shared: Str);
+};
 
 FloatOrString :: @tagged(Float: f64, String: Str);
 fn parse_json(json: *JsonParser, self: *FloatOrString) bool = {
@@ -775,6 +792,9 @@ X :: {
 ::DeriveJson(Raw.Monitor.FieldType(.opcode));
 ::DeriveJson(Raw.Opcode);
 ::DeriveJson(Raw.MutationRepr);
+::DeriveJson(Raw.ApiMeta);
+::DeriveJson(Raw.ApiMeta.FieldType(.author));
+::DeriveJson(Raw.ApiMeta.FieldType(.history));
 };
 
 #use("@/lib/encoding/json.fr");
@@ -881,7 +901,7 @@ block_defs :: @parse_block_defs(
 // ...
 ((event_whenflagclicked, event_whenthisspriteclicked, event_whenstageclicked, control_start_as_clone, control_delete_this_clone, procedures_prototype, motion_xposition, motion_yposition, pen_penUp, pen_penDown, pen_clear, pen_stamp, looks_cleargraphiceffects, looks_show, looks_hide, motion_ifonedgebounce, sensing_mousex, sensing_mousey, sensing_mousedown, sensing_answer, sensing_resettimer, sensing_timer, sensing_dayssince2000, looks_nextcostume, looks_nextbackdrop, sound_stopallsounds, sensing_username, motion_direction, looks_size, sensing_loudness, sound_volume, music_getTempo), ()),
 // these aren't real
-((franca_block, franca_literal, franca_var, franca_var_stage, franca_string), ()),
+((franca_block, franca_literal, franca_var, franca_var_stage, franca_string, franca_call_cont), ()),
 // can't be placed in the gui but projects that use it still load (and my old mandelbrot is one of them). 
 (control_for_each, (VALUE, SUBSTACK), (VARIABLE)),
 ((pen_setPenHueToNumber, pen_changePenHueBy), (HUE)),

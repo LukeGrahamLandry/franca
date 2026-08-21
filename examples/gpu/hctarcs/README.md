@@ -35,7 +35,6 @@ most other blocks are not implemented yet.
     - broadcast and wait
     - glide _ secs to _ (waits until the glide is done)
     - ask _ and wait
-    - turbo mode: instead of yielding each loop iteration, run until out of time in the frame. 
   - events
     - scroll sends up/down arrow event but the is_pressed blocks say false
   - is touching, if on edge bounce
@@ -46,11 +45,9 @@ most other blocks are not implemented yet.
   - cli/CLIPBOARD_PASTED/FILES_DROPPED to load .sb3 (needs to embed the compiler)
   - show warnings if projects use unsupported features (sound, cloud variables, extensions)
   - load project by id
-  - for external ones, put info from meta.json in the output and have button in ui to show it. 
   - see generated code
-  - flag/pause/stop
   - see the code as blocks
-  - keyboard, drag, click bounds, scroll, ask
+  - drag, click bounds, scroll, ask
   - dump Node ast back to builder franca code and textbox edit as franca
   - collect warnings when loading the project and show them at the end
 - add simple tests: looks_sayforsecs,motion_glidesecstoxy,broadcast,broadcastandwait,clone,timer,setbackdropandwait, 0x_hex and #_colour strings

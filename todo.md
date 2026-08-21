@@ -11,7 +11,10 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
+- when fetching dependencies with curl can i give it multiple urls at once to be faster?
 - import_c/ffi/include: whitelist what libc functions are allowed to be imported.
+- ^ access untypedefed struct/enum
+- ^ bit_or of enum for flags is painful
 - run examples/circuit/tc/test.fr in ci
 - tc: console offset is unsafe if bounds checks are disabled
 - in ci without gpu, still build a.ppm for the things that do software rendering. (instead of writting empty a.ppm in run_tests)

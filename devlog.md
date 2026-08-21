@@ -1,4 +1,19 @@
 
+## (Aug 21) sb3
+
+- trial and error to get text with a horizontal scroll bar. not loving it. 
+- allow disable turbo mode. 
+  - yield less. only need to do it for loops. often can directly call the first iter of cont. 
+  - the slow mandelbrot is as though do-work is not runwithoutscreenrefresh.
+    problem is rn loops always have the yield inserted if they're body is async, even if they're in a rwsr block. 
+    in that case still need to put the counter on the stack so they can yield, but not insert extra. 
+    same thing for return from a block, it can pop directly instead of going back to the loop. 
+  - still not good enough ah im wrong about how rwsr works. it nests so 
+    if you call a slow block from a fast block it still doesn't yield. 
+    now more loops are recursion which is a problem because i don't do tail call elimination. hack in a flag for not yielding the frame for now. 
+  - that fixed the "rope physics" project
+  - TODO: quicksort still doesn't work in nonturbo mode
+
 ## (Aug 20) 
 
 ok my goal is (list the sprites and have a button to send fake click event since can't know the size without parsing the svg). 

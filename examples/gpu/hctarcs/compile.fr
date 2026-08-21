@@ -80,7 +80,18 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
             };
             
             start := self.futures_depth;
-            self.compile_async(@slice(it.args[0]));
+            if self.is_async(it) && it.op == .procedures_definition {
+                if it.flags.run_without_screen_refresh {
+                    @fmt(out, "s.without_refresh_depth += 1;\n");
+                };
+                // avoid extra yield for the return
+                // this relies on franca_call_cont popping from the stack not calling statically (which the if_else callsite wants to change)
+                cont: Node = (op = .franca_call_cont, args = empty(), literal = 0, flags = (async = .yes));
+                self.compile_async(@slice(it.args[0], cont&));
+            } else {
+                self.compile_async(@slice(it.args[0]));
+            };
+            
             @debug_assert_eq(self.futures_depth, start, "leaked futures_depth");
             
             @if(self.is_async(it)) @fmt(out, ";DEPTH::%", self.max_futures);
@@ -117,6 +128,7 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
     floats_blob := f64.list(temp());
     
     @fmt(out, "initialize :: fn(c: *Rt.Canvas) void = {\n");
+    @fmt(out, "c.metadata = metadata;\n");
     @fmt(out, "a := c.gpa;\nfloats_blob := f64.reinterpret_bytes(floats_blob);\n");
     @fmt(out, "c.classes = a.alloc_uninit(Rt.SpriteClass, %);\n", p.sprites.len);
     @fmt(out, "c.init_strings(strings);\n");  // Obj for the const string so can use them in sprite vars below. 
@@ -207,6 +219,17 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
     @fmt(out, ");\n");
     
     embed_bytes(out, "floats_blob", floats_blob&.items().interpret_as_bytes());
+    
+    if p.meta& { it |
+        @fmt(out, "metadata :: @const_slice(\n");
+        s := @slice(@tfmt("%", it.id), it.title, it.description, it.instructions, @tfmt("%", it.author.id), it.author.username, it.history.created, it.history.modified, it.history.shared);
+        for s { it |
+            @fmt(out, "\"%\",\n", => self.safe_string_body(it));
+        };
+        @fmt(out, ");\n");
+    } else {
+        @fmt(out, "metadata :[]Str: empty();\n");
+    };
 }
 
 fn safe_string_body(self: *Compile, it: Str) void = {
@@ -493,9 +516,23 @@ fn compile_async(self: *Compile, continuation: []*Node) void = {
     
     cont_id := self.next_cont_id; self.next_cont_id += 1;
     
+    call_async :: fn() => @fmt(out, "return s.cont_%();\n", cont_id);  // like push_async(true) but without yielding
     push_async :: fn(ret: bool) => @fmt(out, "%s.push_async(cont_%);\n", @if(ret, "return ", ""), cont_id);
     declare_cont :: fn(debug: Str) => @fmt(out, "cont_% :: fn(s: *Rt.Script) void = {  // %.%\n", cont_id, it.op, debug);
-
+    loop_body :: fn(body) => {
+        push_async(false);
+        def := self.current_def;
+        if def.op != .procedures_definition {
+            self.compile_async(@slice(body));
+        } else {
+            // TODO: if a slow block is only called from fast blocks, can make it fast and not have this check. and inverse if never called from fast. 
+            tag := @if(!def.flags.run_without_screen_refresh, "check_refresh", "");
+            cont: Node = (op = .franca_call_cont, args = empty(), string = tag, literal = cont_id.float(), flags = (async = .yes));
+            self.compile_async(@slice(body, cont&));
+        };
+        @fmt(out, ";return()};\n");
+    };
+    
     if @is(it.op, .sensing_askandwait) {
         @fmt(out, "println(\"TODO: %\");\n", it.op);
         compile_async(self, continuation);
@@ -523,8 +560,9 @@ fn compile_async(self: *Compile, continuation: []*Node) void = {
             @fmt(out, "s.pop_async(1);  // %.end [count]\n", it.op); 
         }
         fn control_wait_until() => {
+            self.max_futures = max(self.max_futures, self.futures_depth + 1);
             // the condition will never be async but it has to yield so that the state can change
-            push_async(true);
+            call_async();
             declare_cont("body");
             cond := it.args[0];
             @fmt(out, "if !");
@@ -534,7 +572,6 @@ fn compile_async(self: *Compile, continuation: []*Node) void = {
             @fmt(out, "};\n// %.end\n", it.op);
         }
         fn procedures_call() => {
-            // TODO: is it supposed to run to the first await point before yielding?
             def := it.args[0];
             args := it.args[1].args;
             @debug_assert_eq(args.len, def.args[1].args.len);
@@ -545,12 +582,15 @@ fn compile_async(self: *Compile, continuation: []*Node) void = {
                 @fmt(out, ");\n");
                 self.futures_depth += 1;  // later args can still reference our own args so don't mess up the stack
             };
-            self.max_futures = max(self.max_futures, self.futures_depth + 2);
+            self.max_futures = max(self.max_futures, self.futures_depth + 1);
             self.futures_depth -= args.len;
             push_async(false);
-            @fmt(out, "return s.push_async(@\"proc_% %\");\n", def.literal, => self.safe_string_body(def.string));
+            @fmt(out, "return s.@\"proc_% %\"();\n", def.literal, => self.safe_string_body(def.string));
             
             declare_cont("ret");
+            if self.is_async(def) && def.flags.run_without_screen_refresh {
+                @fmt(out, "s.without_refresh_depth -= 1;\n");
+            };
             @fmt(out, "s.pop_async(%);  // %.end [..params]\n", args.len, it.op);
         }
         fn control_wait() => {
@@ -580,17 +620,15 @@ fn compile_async(self: *Compile, continuation: []*Node) void = {
             self.compile(limit);
             @fmt(out, ".coerce_number());\n");
             @fmt(out, "s.push_val_async(0);\n");
-            push_async(true);
-            inc_futures(self, 2) {
+            call_async();
+            inc_futures(self, 3) {
                 declare_cont("body");
                 
                 @fmt(out, "i := s.futures[s.futures.len - 1]&; i[] += 1;\n");
                 @fmt(out, "if i[] <= s.futures[s.futures.len - 2] {\n");
                 compile(self, var);
                 @fmt(out, " = i[];\n");
-                push_async(false);
-                self.compile_async(@slice body);
-                @fmt(out, ";return();};\n");
+                loop_body(body);
                 
                 @fmt(out, "s.pop_async(2);  // %.end [limit, i]\n", it.op); 
             };
@@ -600,51 +638,57 @@ fn compile_async(self: *Compile, continuation: []*Node) void = {
             @fmt(out, "s.push_val_async(");
             self.compile(limit);
             @fmt(out, ".coerce_number());\n");
-            push_async(true);
+            call_async();
             
             inc_futures(self, 2) {
                 declare_cont("body");
                 
                 @fmt(out, "i := s.futures[s.futures.len - 1]&; i[] -= 1;\n");
                 @fmt(out, "if i[] >= 0 {\n");
-                push_async(false); // continue looping
-                self.compile_async(@slice body);
-                @fmt(out, ";return();};\n");
+                loop_body(body);
                 @fmt(out, "s.pop_async(1);  // %.end [i]\n", it.op);
             };
         }
         fn control_repeat_until() => {
             cond, body := (it.args[0], it.args[1]);
-            push_async(true);
+            call_async();
             
             declare_cont("body");
             @fmt(out, "if !");
             compile(self, cond);
             @fmt(out, ".to_bool() {\n");
-            push_async(false);
             inc_futures(self, 1) {
-                compile_async(self, @slice body);
+                loop_body(body);
             };
-            
-            @fmt(out, "return()};\n// %.end\n", it.op);
         }
-        
         // the ifs need to remember to call `continuation` at the end but don't want to
-        // emit it's code twice. so rn put it on the stack but TODO: better would be able to append 
-        // a new node type that just references the cont_N function to the body's compile_async. 
-        // then each branch can just direct call the cont at the end without an extra yield. 
+        // emit it's code twice. so emit into a function that both branches call at the end. 
         fn control_if_else() => {
             push_async(false);
             inc_futures(self, 1) {
+                cont: Node = (op = .franca_call_cont, args = empty(), literal = cont_id.float(), flags = (async = .yes));
                 @fmt(out, "if ");
                 compile(self, it.args[0]);
                 @fmt(out, ".to_bool() {\n");
-                compile_async(self, @slice it.args[1]);
+                compile_async(self, @slice(it.args[1], cont&));
                 @fmt(out, "} else {\n");
-                compile_async(self, @slice it.args[2]);
-                @fmt(out, ";};\nreturn();\n");
+                compile_async(self, @slice(it.args[2], cont&));
+                @fmt(out, ";};\n");
             };
             declare_cont("end");
+        }
+        fn franca_call_cont() => {
+            check_refresh := it.string == "check_refresh";
+            @assert_eq(continuation.len, 0, "franca_call_cont");
+            // TODO: direct call instead of pushing it to the stack but need to deal with scoping better 
+            // @fmt(out, "return cont_%(s);\n", it.literal);
+            if check_refresh {
+                @fmt(out, "@if(s.without_refresh_depth == 0) return();\n");
+            };
+            //@fmt(out, "cont_% := bit_cast_unchecked(Rt.Value, @FnPtr(s: *Rt.Script) void, s.futures&.pop().unwrap());\n", it.literal);
+            //@fmt(out, "return cont_%(s);\n", it.literal);
+            @fmt(out, "s.no_yield = true; return();\n");
+            return();
         }
         @default => @panic("TODO: compile_async %", it.op);
     };

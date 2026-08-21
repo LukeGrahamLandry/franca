@@ -1,4 +1,6 @@
 
+FEAT_UI :: true && !IS_WASM_PLAYGROUND;
+
 State :: @struct {
     draw: Sgl.Self;
     img: Sg.Image;
@@ -6,20 +8,41 @@ State :: @struct {
     images: List(Img);
     image_i: i64;
     dirty: bool;
+    ui: Ui.State;
+    
+    turbo_mode: bool;
+    paused: bool;
+    allow_full_fps: bool;
+    fps_limit_parity: bool;
 };
 
-Img :: @struct(initialize: @FnPtr(c: *Rt.Canvas) void);
+Img :: @struct(initialize: @FnPtr(c: *Rt.Canvas) void, title: Str);
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    state.fps_limit_parity = !state.fps_limit_parity;
+    if !state.allow_full_fps && state.fps_limit_parity {
+        sapp.webgpu.noframe = true;
+        return();
+    };
+    
     c := state.canvas&;
     @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
     
+    if !state.paused {
     // TODO: don't spam if all are in a wait block
-    start := timestamp();
     ran := 1;
-    while => ran != 0 && timestamp() - start < 10 {
-        ran = c.poll_scripts();
-    };
+        if state.turbo_mode {
+            start := timestamp();
+            while => ran != 0 && timestamp() - start < 10 {
+                range(0, 5) { _ |
+                    if ran != 0 {
+                        ran = c.poll_scripts();
+                    };
+                };
+            };
+        } else {
+            ran = c.poll_scripts();
+        };
     state.dirty = ran != 0;
     
     Rt'Render'finish_frame(c);
@@ -28,17 +51,32 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     each data { it |
         it[] = it[].rotate_left(8).byte_swap();  // TODO: slow
     };
-    Easy'commit_screen_fit_image(sg, sapp, state.draw&, state.img, c.frame_pixels, c.size.x / c.size.y);
+    };
+    
+    Easy'glue_begin_pass(sapp, sg, zeroed(Sg.PassAction));
+    Easy'draw_screen_fit_image(sg, sapp, state.draw&, state.img, c.frame_pixels, c.size.x / c.size.y);
+    state.draw&.draw_layer(sg, 0);
+    @if(FEAT_UI) {
+        Ui'Nuklear'nk_input_end(state.ui.ctx&);
+        draw_ui(state);
+        draw(state.ui&, sg, sapp);
+    };
+    sg.end_pass();
+    sg.commit();
 };
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    @if(FEAT_UI) on_init(state.ui&, sg);
+    
     state.draw&.setup(allocator = general_allocator(), sg = sg, max_commands = 2, max_vertices = 6);
     state.img = sg.make(width = 480, height = 360, pixel_format = .RGBA8, data = zeroed(Sg.ImageData), usage = .DYNAMIC);
     state.images = list(general_allocator());
     
     inline_for builtin_sources { $src |
+        S :: import(@afmt(ast_alloc(), "{ % };", src[]));
         state.images&.push(
-            initialize = @run import(@afmt(ast_alloc(), "{ % };", src[])).initialize,
+            initialize = @run S.initialize,
+            title = @if(S.metadata.len() > 2, S.metadata[1], /*:leak*/@afmt(general_allocator(), "%", state.images.len)),
         );
     };
     next_example(state, 0);
@@ -76,6 +114,8 @@ fn key_event(c: *Rt.Canvas, key: Sapp.Keycode, down: bool) void = {
 }
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    @if(FEAT_UI) on_event(state.ui&, sapp, event);
+    
     c := state.canvas&;
     @match(event.type) {
         fn RESIZED() => ();
@@ -125,6 +165,9 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 c.send_event(sprite, .SpriteClicked, .None);
             };
         }
+        fn MOUSE_SCROLL() => {
+            // TODO
+        }
         @default => return();
     };
     state.dirty = true;
@@ -154,9 +197,10 @@ fn next_example(state: *State, delta: i64) void = {
     @if(c.gc_head != 0  /* not first frame zero init */) drop(c);
     init_canvas(c, general_allocator(), initialize);
     c.send_event(.Flag);
+    state.paused = false;
 }
 
-driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
+driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics2(vtable, @source_file_name(), true);
 main :: fn() void = Easy'start(State);
 #use("@/graphics/lib.fr");
 
@@ -165,7 +209,139 @@ fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     drop(state.images&);
     sg.destroy(state.frame);
     state.draw&.destroy(sg, general_allocator());
+    @if(FEAT_UI) on_cleanup(state.ui&, sg);
 }
 
 Rt :: import("@/examples/gpu/hctarcs/runtime.fr");
 builtin_sources :: import("@/examples/gpu/hctarcs/main.fr").src;
+IS_WASM_PLAYGROUND :: import("@/examples/gpu/hctarcs/main.fr").IS_WASM_PLAYGROUND;
+Ui :: import("@/graphics/deps/nuklear.fr");
+
+fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
+    S :: fn(s: CStr) => bit_cast_unchecked(*u8, *i8, s.ptr);
+    SS :: fn(s: Str) => bit_cast_unchecked(*u8, *i8, s.ptr);
+    ctx, c := (state.ui.ctx&, state.canvas&);
+    flags := (@as(u32) nk_panel_flags.NK_WINDOW_MOVABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_SCALABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_MINIMIZABLE);
+    if nk_begin(ctx, S"", nk_rect(10, 10, 300, 300), flags) {
+        if nk_tree_push_hashed(ctx, .NK_TREE_NODE, S"Controls", .NK_MAXIMIZED, S"", 0, 0) {
+            nk_layout_row_static(ctx, 0, 60, 4);
+            if nk_button_label(ctx, S"Reset") {
+                next_example(state, 0);
+            };
+            // TODO: to make pausing more sane i should change how the wait timers work. 
+            //       currently they use absolute time so can't be paused. 
+            nk_checkbox_label(ctx, S"Pause", state.paused&);
+            nk_checkbox_label(ctx, S"Turbo", state.turbo_mode&);
+            nk_checkbox_label(ctx, S"60fps", state.allow_full_fps&);
+            nk_tree_pop(ctx);
+        };
+        
+        if nk_tree_push_hashed(ctx, .NK_TREE_NODE, S"Projects", .NK_MINIMIZED, S"", 0, 1) {
+            nk_layout_row_dynamic(ctx, 0, 2);
+            @if(nk_button_label(ctx, S"Prev")) next_example(state, -1);
+            @if(nk_button_label(ctx, S"Next")) next_example(state, 1);
+            
+            nk_layout_row_dynamic(ctx, 0, 1);
+            enumerate state.images { i, it |
+                s := S(@fmt_cstr("%", it.title));
+                if nk_button_label(ctx, s) {
+                    state.image_i = i;
+                    next_example(state, 0);
+                };
+            };
+            nk_tree_pop(ctx);
+        };
+        
+        if nk_tree_push_hashed(ctx, .NK_TREE_NODE, S"Sprites", .NK_MINIMIZED, S"", 0, 2) {
+            nk_layout_row_dynamic(ctx, 0, 2);
+            enumerate c.clones { i, sprite |
+                nk_label(ctx, S(@fmt_cstr("%", sprite.class.name)), 0);
+                if nk_button_label(ctx, S"Click") {
+                    c.send_event(sprite[], .SpriteClicked, .None);
+                };
+            };
+            nk_tree_pop(ctx);
+        };
+        
+        if nk_tree_push_hashed(ctx, .NK_TREE_NODE, S"Monitors", .NK_MINIMIZED, S"", 0, 3) {
+            nk_layout_row_dynamic(ctx, 20, 2);
+            
+            buf := @ref u8.list(temp());
+            m_i: i32 = 0;
+            each c.classes { class |
+                continue :: local_return;
+                sprite := c.clones.find(fn(it) => identical(it.class, class)) || continue();
+                vars := sprite[].vars();
+                m_i += 1;
+                each class.monitors { m |
+                    if !m.hide {
+                        buf.clear();
+                        name := S(@fmt_cstr("%", m.name));
+                        
+                        value := vars[m.var];
+                        if value.is_list() {
+                            l := value.to_obj()[].list;
+                            nk_layout_row_dynamic(ctx, 100, 1);
+                            flags := (@as(u32) nk_panel_flags.NK_WINDOW_TITLE);
+                            if nk_group_begin(ctx, name, flags) {
+                                nk_layout_row_dynamic(ctx, 20, 1);
+                                enumerate l { i, value |
+                                    buf.clear();
+                                    coerce_string(value[], buf);
+                                    nk_label(ctx, S(@fmt_cstr("%. %", i, buf.items())), 0);
+                                };
+                                nk_group_end(ctx);
+                            };
+                            nk_layout_row_dynamic(ctx, 20, 2);
+                        } else {
+                            nk_label(ctx, name, 0);
+                            coerce_string(value, buf);
+                            @match(m.mode) {
+                                fn Slider(it) => {
+                                    step := @if(it.discrete, 1.0, 0.1);
+                                    nk_property_double(ctx, S("#"), it.lo, vars[m.var]&, it.hi, step, step.cast());
+                                }
+                                @default => {
+                                    nk_label(ctx, S(@fmt_cstr("%", buf.items())), 0);
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+            nk_tree_pop(ctx);
+        };
+        
+        // TODO: probably need to make it a edit box so you can copy from it. 
+        @if(c.metadata.len != 0)
+        if nk_tree_push_hashed(ctx, .NK_TREE_NODE, S"Credits", .NK_MINIMIZED, S"", 0, 4) {
+            nk_layout_row_dynamic(ctx, 200, 1);
+            if nk_group_begin(ctx, S"metadata", 0) {
+                for c.metadata { it |
+                    nk_layout_row_static(ctx, 13, 5000, 1);
+                    i := 0;
+                    start := 0;
+                    while => i < it.len {
+                        if it[i] == "\n".ascii() {
+                            if i > start {
+                                it := it.slice(start, i);
+                                nk_text(ctx, SS(it), it.len.intcast(), 0);
+                            };
+                            start = i + 1;
+                        };
+                        i += 1;
+                    };
+                    if i > start {
+                        it := it.slice(start, i);
+                        nk_text(ctx, SS(it), it.len.intcast(), 0);
+                    };
+                    nk_layout_row_dynamic(ctx, 2, 1);
+                    nk_rule_horizontal(ctx, (r=255,g=255,b=255,a=255), true);
+                };
+                nk_group_end(ctx);
+            };
+            nk_tree_pop(ctx);
+        };
+    };
+    nk_end(ctx);
+}
