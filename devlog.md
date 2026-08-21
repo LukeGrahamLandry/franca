@@ -1,4 +1,15 @@
 
+## (Aug 20) 
+
+ok my goal is (list the sprites and have a button to send fake click event since can't know the size without parsing the svg). 
+want to try someone else's ui thingy, dearimgui is what i've used before but it's not 
+worth dealing with a c++ compiler. try nuklear. 
+- careful of float2 being 8 byte aligned. my shader compiler isn't good about reflecting the constraints back to the cpu side. 
+- NK_UINT_DRAW_INDEX
+- im getting stuff on the screen but its weirdly dependent on the screen size and mouse input pos doesn't line up and different between metal and wgpu.
+  my apply_scissor_rect is the problem, lol i pasted it as apply_viewport when fixing it for floats. 
+  now metal works and wgpu is asymetrical about high_dpi somewhere. 
+
 ## (Aug 19) sb3
 
 - improved pen_line so the big letters aren't totally broken and the level squares work. 

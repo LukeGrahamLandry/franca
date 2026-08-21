@@ -66,7 +66,7 @@ and splices in placeholders so it can interact with surrounding expressions.
 
 ## Reflection to Generate Shaders    
 
-- https://github.com/floooh/sokol/blob/master/util/sokol_debugtext.h#L2374-L3879
+- https://github.com/floooh/sokol/blob/61a5accf2427a23f90bfd66a6a41423ca8112217/util/sokol_debugtext.h#L2374-L3879
 
 
 - can rot. if i run thier shader compiler i don't get the same bytes of metal ir out. 
@@ -93,7 +93,7 @@ Shaders :: @struct(
 
 ## Data in Strings
 
-- https://github.com/floooh/sokol/blob/master/util/sokol_debugtext.h#L825-L2372
+- https://github.com/floooh/sokol/blob/61a5accf2427a23f90bfd66a6a41423ca8112217/util/sokol_debugtext.h#L825-L2372
 
 
 since franca can read files at compile time, we could just store the data in a binary file and embed it in the program. 

@@ -1,0 +1,279 @@
+// TODO: ctx.clip.(copy, paste)
+// TODO: make it work in web. my wasm compiler doesn't like a shape of control flow in stbtt__run_charstring. panic! missing br_if target @120 -> @122
+// TODO: high_dpi doesn't work with -wgpu
+// TODO: move the "temporary demo" entry point from this file to tests/external. 
+//       will be annoying to have another import_c block that wants the same header tho. 
+//       probably end up with the stupid casts. 
+// TODO: annoying to have extra copies of the stb libs if the main program also uses them
+
+State :: @struct {
+    HIGH_DPI :: true;  // temporary demo
+    
+    pipe: Sg.Pipeline;
+    smp: Sg.Sampler;
+    img: Sg.Image;
+    font_img: Sg.Image;
+    vertices: Sg.Buffer;
+    indices: Sg.Buffer;
+    
+    ctx: Nuklear.nk_context;
+    atlas: Nuklear.nk_font_atlas;
+    buffers: Array(Nuklear.nk_buffer, 3);
+};
+
+Shaders :: @struct(
+    InV  :: @struct(pos: Vec2, uv: Vec2, colour: UByte4, pad: u32),
+    OutV :: @struct(pos: Vec4 #position, colour: Vec4 #user, uv: Vec2 #user),
+    Uni :: @struct(size: Vec2),
+    vs   :: fn(in: Buf(Shaders.InV) #buffer(0), idx: Buf(u32) #buffer(1), v: u32 #vertex_id, uni: Shaders.Uni #uniform(0)) Shaders.OutV = {
+        v := in[idx[v]];
+        // nk_convert gives positions in pixel coordinates, need -1 to 1. 
+        pos := ((v.pos / uni.size) - vec2(0.5)) * vec2(2, -2);
+        (pos = @vec(pos, 0.5, 1.0), colour = v.colour.unpack(), uv = v.uv)
+    },
+    OutF :: @struct(colour: Vec4 #colour),
+    BndF :: @struct(tex: ShaderTexture2f #tex(0), smp: ShaderSampler #smp(0)),
+    fs   :: fn(in: Shaders.OutV #input, bnd: Shaders.BndF #bind) Shaders.OutF = (
+        colour = sample(bnd.tex, bnd.smp, in.uv) * in.colour,
+    ),
+);
+
+fn on_init(state: *State, sg: *Sg.Self) void #use(Nuklear) = {
+    // it needs a blank image to draw solid colours
+    pixels := @uninitialized Array(u8, 64 * size_of(u32));
+    pixels&.items().set_bytes(0xFF);
+    state.img = sg.make(type = ._2D, width = 8, height = 8, pixel_format = .RGBA8, data = SubImage(pixels&.items()));
+    state.smp = sg.make(min_filter = .NEAREST, mag_filter = .NEAREST, wrap_u = .CLAMP_TO_EDGE, wrap_v = .CLAMP_TO_EDGE);
+
+    state.vertices = sg.make(size = 400_000, usage = .STREAM);
+    state.indices = sg.make(size = 400_000, usage = .STREAM);
+    state.pipe = sg.make(
+        shader = sg.make(choose_shader_impl(SOKOL_BACKEND, Shaders)),
+        colors = (
+            (blend = (  // This makes transparency work
+                enabled = true,
+                src_factor_rgb = .SRC_ALPHA,
+                dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
+            )),
+            ..,
+        ),
+    );
+    
+    ctx, atlas := (state.ctx&, state.atlas&);
+    w: i32 = 0; 
+    h: i32 = 0;
+    nk_font_atlas_init_default(atlas);
+    nk_font_atlas_begin(atlas);
+    font := nk_font_atlas_add_default(atlas, 13, zeroed(*nk_font_config_t));
+    image := nk_font_atlas_bake(atlas, w&, h&, .NK_FONT_ATLAS_RGBA32);
+    image := bit_cast_unchecked(rawptr, *u8, image).slice(intcast(w*h*4));
+    state.font_img = sg.make(width = w, height = h, pixel_format = .RGBA8, data = SubImage(image));
+    null_texture := @ref @as(nk_draw_null_texture) (texture = pack_nk_handle(state.img, state.smp), uv = (x=0,y=0));
+    font_texture := pack_nk_handle(state.font_img, state.smp);
+    nk_font_atlas_end(atlas, font_texture, null_texture);
+    nk_font_atlas_cleanup(atlas);
+    nk_init_default(ctx, font.handle&);
+    nk_input_begin(ctx);
+    each(state.buffers&, nk_buffer_init_default);
+}
+
+// don't forget to call nk_input_end before doing your ui calls. 
+fn draw(state: *State, sg: *Sg.Self, sapp: *Sapp.Self) void #use(Nuklear) = {
+    dpi := sapp.dpi_scale;
+    s := vec2(sapp.width().float().cast(), sapp.height().float().cast());
+    ctx := state.ctx&;
+    bind := zeroed(Sg.Bindings);
+    bind.storage_buffers&[0] = state.vertices;
+    bind.storage_buffers&[1] = state.indices;
+    sg.apply_pipeline(state.pipe);
+    
+    vertex_layout := @const_slice(@as(nk_draw_vertex_layout_element)
+        (attribute = .NK_VERTEX_POSITION, format = .NK_FORMAT_FLOAT, offset = offset_of(Shaders.InV, .pos).bitcast()),
+        (attribute = .NK_VERTEX_TEXCOORD, format = .NK_FORMAT_FLOAT, offset = offset_of(Shaders.InV, .uv).bitcast()),
+        (attribute = .NK_VERTEX_COLOR, format = .NK_FORMAT_R8G8B8A8, offset = offset_of(Shaders.InV, .colour).bitcast()),
+        (attribute = .NK_VERTEX_ATTRIBUTE_COUNT, format = .NK_FORMAT_COUNT, offset = 0),  // NK_VERTEX_LAYOUT_END
+    );
+    
+    cfg: nk_convert_config = (
+        global_alpha = 1,
+        line_AA = .NK_ANTI_ALIASING_ON,
+        shape_AA = .NK_ANTI_ALIASING_ON,
+        circle_segment_count = 22,
+        arc_segment_count = 22,
+        curve_segment_count = 22,
+        tex_null = (texture = pack_nk_handle(state.img, state.smp), uv = (x=0,y=0)),
+        vertex_layout = vertex_layout.ptr,
+        vertex_size = size_of(Shaders.InV),
+        vertex_alignment = 8, // align_of(Shaders.InV),  // TODO: my shader compiler should deal with this for you :ShaderLimitation
+    );
+    
+    each(state.buffers&, nk_buffer_clear);
+    cmds, vbuf, ibuf := (state.buffers&[0]&, state.buffers&[1]&, state.buffers&[2]&);    
+    result := nk_convert(ctx, cmds, vbuf, ibuf, cfg&);
+    @debug_assert_eq(result, 0, "nk_convert failed");
+    
+    get_buf :: fn(buf: *nk_buffer) []u8 = u8.ptr_from_raw(nk_buffer_memory_const(buf)).slice(nk_buffer_total(buf).bitcast());
+    sg.update_buffer(state.vertices, get_buf(vbuf));
+    sg.update_buffer(state.indices, get_buf(ibuf));
+    
+    uni: Shaders.Uni = (size = s);
+    s := s * dpi;
+    
+    sg.apply_viewport(@as(f32) 0, 0, s.x, s.y, true);
+    ::[]Shaders.Uni;
+    sg.apply_uniforms(0, uni&.slice(1).interpret_as_bytes());
+    
+    cmd := nk__draw_begin(ctx, cmds);
+    n := 0;
+    ::ptr_utils(@type cmd[]);
+    while => !cmd.is_null() {
+        img, smp := unpack_nk_handle(cmd.texture);
+        bind.images&[0] = img;
+        bind.samplers&[0] = smp;
+        sg.apply_bindings(bind&);
+        
+        r := cmd.clip_rect;
+        sg.apply_scissor_rect(r.x * dpi, r.y * dpi, r.w * dpi, r.h * dpi, true);
+        
+        sg.draw(n, cmd.elem_count.zext(), 1);
+        n += cmd.elem_count.zext();
+        
+        cmd = nk__draw_next(cmd, cmds, ctx);
+    };
+    sg.apply_scissor_rect(@as(f32) 0, 0, s.x, s.y, true);
+        
+    nk_clear(ctx);
+    nk_input_begin(ctx);
+}
+
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void #use(Nuklear) = {
+    mx, my := (event.mouse_x.div(sapp.dpi_scale).cast().floor().int().intcast(), event.mouse_y.div(sapp.dpi_scale).cast().floor().int().intcast());
+    ctx := state.ctx&;
+    @match(event.type) {
+        // TODO: CLIPBOARD_PASTED
+        fn CHAR() => nk_input_unicode(ctx, event.char_code);
+        fn MOUSE_SCROLL() => nk_input_scroll(ctx, (x = event.scroll_x, y = event.scroll_y));
+        fn MOUSE_MOVE() => nk_input_motion(ctx, mx, my);
+        @default => {
+            if @is(event.type, .MOUSE_DOWN, .MOUSE_UP) {
+                nk_input_button(ctx, @match(event.mouse_button) {
+                    fn LEFT() => .NK_BUTTON_LEFT;
+                    fn MIDDLE() => .NK_BUTTON_MIDDLE;
+                    fn RIGHT() => .NK_BUTTON_RIGHT;
+                    @default => return();
+                }, mx, my, event.type == .MOUSE_DOWN);
+            };
+            
+            if @is(event.type, .KEY_DOWN, .KEY_UP) {
+                nk_input_key(ctx, fix_key(event), event.type == .KEY_DOWN);
+            };
+        };
+    };
+};
+
+fix_key :: fn(event: *Sapp.Event) Nuklear.nk_keys = @match(event.key_code) {
+    fn LEFT_SHIFT() => .NK_KEY_SHIFT;
+    fn RIGHT_SHIFT() => .NK_KEY_SHIFT;
+    fn LEFT_CONTROL() => .NK_KEY_CTRL;
+    fn RIGHT_CONTROL() => .NK_KEY_CTRL;
+    fn DELETE() => .NK_KEY_DEL;
+    fn ENTER() => .NK_KEY_ENTER;
+    fn TAB() => .NK_KEY_TAB;
+    fn BACKSPACE() => .NK_KEY_BACKSPACE;
+    fn C() => @if(event.modifiers.get(.super) != 0, .NK_KEY_COPY, .NK_KEY_NONE);
+    fn X() => @if(event.modifiers.get(.super) != 0, .NK_KEY_CUT, .NK_KEY_NONE);
+    fn V() => @if(event.modifiers.get(.super) != 0, .NK_KEY_PASTE, .NK_KEY_NONE);
+    fn UP() => .NK_KEY_UP;
+    fn DOWN() => .NK_KEY_DOWN;
+    fn LEFT() => .NK_KEY_LEFT;
+    fn RIGHT() => .NK_KEY_RIGHT;
+    fn LEFT_ALT() => .NK_KEY_ALT;
+    fn RIGHT_ALT() => .NK_KEY_ALT;
+    fn Z() => @if(event.modifiers.get(.super) != 0, @if(event.modifiers.get(.shift) != 0, .NK_KEY_TEXT_REDO, .NK_KEY_TEXT_UNDO), .NK_KEY_NONE);
+    fn A() => @if(event.modifiers.get(.super) != 0, .NK_KEY_TEXT_SELECT_ALL, .NK_KEY_NONE);
+    // TODO: F1-F12
+    @default => .NK_KEY_NONE;
+};
+
+fn unpack_nk_handle(handle: Nuklear.nk_handle) Ty(Sg.Image, Sg.Sampler) = 
+    bit_cast_unchecked(@type handle, Ty(Sg.Image, Sg.Sampler), handle);
+fn pack_nk_handle(img: Sg.Image, smp: Sg.Sampler) Nuklear.nk_handle = {
+    data := (img, smp);
+    @run @assert_eq(size_of(@type data), size_of(Nuklear.nk_handle));
+    (ptr = bit_cast_unchecked(@type data, rawptr, data))
+}
+
+fn on_cleanup(state: *State, sg: *Sg.Self) void #use(Nuklear) = {
+    sg.destroy(sg.get_shader(state.pipe));
+    sg.destroy(state.pipe);
+    sg.destroy(state.img);
+    sg.destroy(state.font_img);
+    sg.destroy(state.smp);
+    sg.destroy(state.vertices);
+    sg.destroy(state.indices);
+    each(state.buffers&, nk_buffer_free);
+    nk_font_atlas_clear(state.atlas&);
+    nk_free(state.ctx&);
+}
+
+#use("@/graphics/lib.fr");
+Nuklear :: {
+    root := Foreign'nuklear();
+    Ffi  :: import("@/examples/import_c/ffi.fr");
+    // TODO: concatenate them myself instead of the prebuilt nuklear.h (tho their ci does check and reading one file is faster)
+    c_source := @tfmt("""
+        #define NK_IMPLEMENTATION
+        #define NK_INCLUDE_FIXED_TYPES
+        #define NK_INCLUDE_STANDARD_BOOL
+        #define NK_INCLUDE_DEFAULT_ALLOCATOR
+        #define NK_INCLUDE_VERTEX_BUFFER_OUTPUT
+        #define NK_INCLUDE_FONT_BAKING
+        #define NK_INCLUDE_DEFAULT_FONT
+        #define NK_UINT_DRAW_INDEX
+        #define NK_INCLUDE_STANDARD_VARARGS  // TODO: remove, just for overview
+        #define NK_INCLUDE_STANDARD_IO       // ^
+        #include "%/nuklear.h"
+        
+        // TODO: this is unfortunate
+        typedef struct nk_context nk_context;
+        typedef struct nk_font_atlas nk_font_atlas;
+        typedef struct nk_draw_null_texture nk_draw_null_texture;
+        typedef struct nk_font_config nk_font_config_t;
+        typedef struct nk_buffer nk_buffer;
+        typedef struct nk_convert_config nk_convert_config;
+        typedef struct nk_draw_vertex_layout_element nk_draw_vertex_layout_element;
+        typedef enum nk_keys nk_keys;
+        
+        // temporary demo
+        #include "%/demo/common/canvas.c"
+        typedef struct nk_canvas nk_canvas;
+        typeof(canvas_begin) *canvas_begin_ = canvas_begin;
+        typeof(canvas_end) *canvas_end_ = canvas_end;
+        typeof(canvas) *canvas_ = canvas;
+        #include "%/demo/common/overview.c"
+        typeof(overview) *overview_ = overview;
+        #include "%/demo/common/node_editor.c"
+        typeof(node_editor) *node_editor_ = node_editor;
+    """, root, root, root, root);
+    Ffi'include(current_compiler_context(), c_source)
+};
+
+// temporary demo
+driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
+main   :: fn() void = Easy'start(State);
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = on_init(state, sg);
+fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = on_cleanup(state, sg);
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void #use(Nuklear) = {
+    ctx := state.ctx&;
+    nk_input_end(ctx);
+    canvas_[](ctx);
+    node_editor_[](ctx);
+    overview_[](ctx);
+    Easy'glue_begin_pass(sapp, sg, (colors = ((
+        load_action = .CLEAR,
+        clear_value = (r = 0, g = 0, b = 0, a = 1),
+    ), ..)));
+    draw(state, sg, sapp);
+    sg.end_pass();
+    sg.commit();
+};
