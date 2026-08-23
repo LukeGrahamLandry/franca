@@ -10,6 +10,11 @@ int main() {
     int after = __LINE__;
     ASSERT(4, after - before);
     
+    /*
+     * this multiline comment starts with a new line */
+    ASSERT(15, __LINE__);
+    /*/ first star can't close the comment */
+    
     // clang disagrees about if we're setting the current line or the next line. 
 #line 500 "foo"
     ASSERT(501, __LINE__);

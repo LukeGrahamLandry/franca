@@ -36,7 +36,8 @@ fn include(src: Str) ScopeId #fold = {
     include(fr, src)
 }
 
-fn include(fr: CompCtx, c_source: Str) ScopeId = {
+fn include(fr: CompCtx, c_source: Str) ScopeId = include(fr, c_source, (whitelist = .None));
+fn include(fr: CompCtx, c_source: Str, limits: FrcImportLimits) ScopeId = {
     msg :: "import_c: frc module abi mismatch\nrecompile your franca compiler";
     @assert_eq(fr.vtable.frc_module_magic_v, Incremental.MAGIC, msg);
 
@@ -46,11 +47,11 @@ fn include(fr: CompCtx, c_source: Str) ScopeId = {
     //       so it just leaks them and you have to delete the cache directory occasionally to reclaim disk space. 
     name := Sha256'hex(c_source);
     // checking entry_source is redundant rn because its hash is used as the file name 
-    if fr.check_cache(name, c_source) { header |
-        result := fr'vtable'import_frc(fr.data, header.FrIncr'as_bytes());
-        return result.or(fn(err) => fr.report_error(err));
+    bytes := @match(fr.check_cache(name, c_source)) {
+        fn Some(h) => h.FrIncr'as_bytes();
+        fn None() => jit_barrier(include_cold)(fr, c_source, name);
     };
-    jit_barrier(include_cold)(fr, c_source, name)
+    fr.import_frc(bytes, limits)
 }
 
 check_cache :: fn(fr: CompCtx, name: Str, entry_source: Str) ?*Incremental.Header = {
@@ -68,7 +69,7 @@ check_cache :: fn(fr: CompCtx, name: Str, entry_source: Str) ?*Incremental.Heade
     .None
 }
 
-include_cold :: fn(fr: CompCtx, c_source: Str, name: Str) ScopeId = {
+include_cold :: fn(fr: CompCtx, c_source: Str, name: Str) []u8 = {
     c := import_c'init_fr(fr);
     no_cache := get_build_options()[].no_cache;
     c.hash_files_for_frc_deps = !no_cache;
@@ -80,8 +81,7 @@ include_cold :: fn(fr: CompCtx, c_source: Str, name: Str) ScopeId = {
     };
     fr'vtable'drop_qbe_module(QbeModule.raw_from_ptr(c.m));
     c.arena_storage&.deinit();
-    result := fr'vtable'import_frc(fr.data, bytes);
-    result.or(fn(err) => fr.report_error(err))
+    bytes
 }
 
 import_c :: import_module("@/examples/import_c/ffi.fr");

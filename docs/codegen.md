@@ -207,6 +207,7 @@ and then uses that to run luajit's disassemblers.
 ## TODO: document me!
 
 - import_frc
+- FrcImportLimits
 - add_to_scope, intern_type, intern_func
 - using the backend library to insert ir directly
 - Talk about doing stuff from within comptime vs through a CompCtx. 

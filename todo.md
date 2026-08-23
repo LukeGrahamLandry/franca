@@ -12,7 +12,29 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
 - when fetching dependencies with curl can i give it multiple urls at once to be faster?
-- import_c/ffi/include: whitelist what libc functions are allowed to be imported.
+- import_c/ffi/FrcImportLimits
+  - do it for compile_host_exe too
+  - show a sane source location in the error message
+  - allow inserting redirects where it asks for a libc thing and you give your own. 
+    - ex. wrap fopen to check that its a path you like. 
+    - that will also let me get rid of temporary_funcid
+  - maybe always allow math/isalpha/memcpy/etc. 
+    ex. examples/disassemble needing to list all the ctype.h functions is a bit useless. 
+  - tests of the whitelisting that are supposed to error
+  - since it's in the compiler, expose it for import_module() (when importing franca code) too. 
+    but since i want that to keep symmetry with the normal import(), need to allow limits there too, 
+    which is more involved because that doesn't go through a seperate compctx. 
+    also since its only a limit error if its actually used in the callgraph, 
+    the hard case when you import the same library in two places with different limits. 
+  - do i want to do something magic for the ones with different names on different targets? (ex. `__stdoutp` vs `stdout`)
+- import_c: make it easy to have one call implement a library and another use it. 
+  - ex. graphics/deps/nuklear should be minimal to use from franca code but i want an example 
+    program that uses that backend for thier demo code which needs to import the nuklear stuff. 
+  - same problem examples/disassemble/gen_keep_alive does something similar for the luajit vm functions. 
+    but it's too painful to need to have a seperate driver that gives you the Qbe.Module so you can call declare_alias. 
+    that case makes it more obvious that letting FrcImportLimits have redirects would also solve this problem 
+  - need to deal with the other library reincluding the header with the implementation ifdef-ed out. 
+    similar to how import_module uses redirects to stomp signetures. 
 - ^ access untypedefed struct/enum
 - ^ bit_or of enum for flags is painful
 - run examples/circuit/tc/test.fr in ci
@@ -125,8 +147,6 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
   - should add it here so can autotest if i break something
   - add to docs? `site/src/components/MultiLanguageCode.js`
 - guess_library_path: follow if try_get_executable_path is a symlink
-- allow list imports with import_c/include. well designed libs like stb,wuffs,wasm4 will have a very sane short list 
-  and it doesn't do anything anyway because c isn't memory safe but there's no reason to make it easy. 
 - catch the mistake of calling destroy_compiler on the one from current_compiler_context
   if you fail at copy pasting from default_driver... not that i'd ever make that mistake of course... 
 - finish examples/gpu/rtc.fr. 

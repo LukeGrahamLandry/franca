@@ -233,6 +233,7 @@ FrcModule :: @struct {
     sym: []u32;  // [One(Sym)] = FuncId or BakedVarId
     fty: []Type; // [One(FTy)] 
     data_symbols: []Ty(One(Sym), DynamicImport);
+    limits: FrcImportLimits;
 };
 
 // one per (CodegenWorker, Header) pair. 
@@ -248,7 +249,7 @@ FrcModuleInstance :: @struct {
 // TODO: this is what i want but is not the case now... (because instance.syms needs the mangled names so need to reserve FuncId-s upfront)
 // no work to actually translate into Func/BakedValue graph is done yet. 
 // thing are loaded lazily the first time they're referenced (just like normal franca code). 
-fn import_frc(self: *SelfHosted, bytes: []u8) CRes(ScopeId) = {
+fn import_frc_impl(self: *SelfHosted, bytes: []u8, limits: *FrcImportLimits) CRes(ScopeId) = {
     zone := zone_begin(.ImportCache);
     header := or check(bytes) { e |
         zone_end(zone);
@@ -276,6 +277,7 @@ fn import_frc(self: *SelfHosted, bytes: []u8) CRes(ScopeId) = {
         sym = a.alloc_init(u32, zext header.sym.count, fn(_) => Qbe.no_symbol), 
         fty = a.alloc_zeroed(Type, zext header.fty.count),
         data_symbols = empty(),
+        limits = limits[],
     ));
     @err_assert(header.fty.count != 0, "tried to import_frc without frontend type info (fty)") return;
     
@@ -585,9 +587,14 @@ fn move_from_module(emit_ir: *EmitIr, import: *FrcImport) CRes(CodegenTask) = {
     i := import.get_sym();
     it := header.get(i);
     
+    if it.segment == .Import {
+        @try(check_import(header.get(it.ali.target), module)) return;
+    };
+    
     if it.segment == .Alias {
         // TODO: mostly untested because import_module caching is disabled currently  -- Oct 13, 2025
         target := instance.syms[it.ali.target.off.zext()];
+        @try(check_import(header.get(it.ali.target), module)) return;
         
         // :FrcExtraImportShims
         // now that not always in root_scope, it might be a weak import that isn't filled 
@@ -621,6 +628,8 @@ fn move_from_module(emit_ir: *EmitIr, import: *FrcImport) CRes(CodegenTask) = {
                 // this recurses through relocations
                 emit_ir.reference_constant(id);
             };
+            
+            @try(check_import(it, module)) return;
             
             // Since we don't run fold.fr, symbols won't be marked so they won't be emitted 
             // if they're an inlinable export from CompCtx to the FrcModule and only used there. 
@@ -695,6 +704,7 @@ import_baked_var :: fn(self: *SelfHosted, shared: *FrontendCodegen, inst: *FrcMo
             target = (BakedVarId = @try(import_baked_var(self, shared, inst, xx)) return);
         };
         relocs[r] = (target = target, off = it.off, addend = it.addend);
+        @try(check_import(h.get(xx), module)) return;
         r += 1;
     };
     @debug_assert_eq(relocs.len, r);
@@ -705,6 +715,17 @@ import_baked_var :: fn(self: *SelfHosted, shared: *FrontendCodegen, inst: *FrcMo
     
     (Ok = id)
 };
+
+// TODO: rn this is done eagarly for import_baked_var (becase that's done eagarly), should wait until actually used. 
+fn check_import(it: *Sym, module: *FrcModule) CRes(void) = {
+    if it.segment == .Import {
+        if module.limits.whitelist { whitelist |
+            name := module.header.get(it.name);
+            @err_assert(whitelist.contains(name), "import_frc Import(%) is not whitelisted", name) return;
+        };
+    };
+    .Ok
+}
 
 fn emit_import_ref(self: *EmitIr, it: *FrcImport, p: EmitIr.P) CRes(Qbe.Ref) = {
     inst := @try(self.find_module(it)) return;

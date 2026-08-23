@@ -207,6 +207,7 @@ new_state_for_dis :: fn() *Lua.lua_State #use(Lua) = {
     L
 }
 
+// TODO: set LUA_REGISTRYINDEX LUA_NOENV true
 fn open_and_pop(L: *Lua.lua_State, name: Str, open: @FnPtr(L: *Lua.lua_State) i32) void #use(Lua) = {
     @if(FEAT_JIT, {
         lua_pushcclosure(L, open, 0);
@@ -306,9 +307,22 @@ Dis :: {
     arm := read_entire_file_or_crash(ast_alloc(), @tfmt("%/src/jit/dis_arm64.lua", luajit));
     amd := read_entire_file_or_crash(ast_alloc(), @tfmt("%/src/jit/dis_x86.lua", luajit));
     
-    lua := Ffi'include(src.items());
+    // TODO: do this for feat_jit too. the extnames are seen as imports tho and i generate them my iterating the imported functions after compiling. 
+    allow :: @const_slice(
+        "_longjmp", "_setjmp", 
+        "abort", "localeconv", "strerror", "clock", 
+        "snprintf", "fprintf", "fflush", "fwrite", "fread", "getc", "fopen", "fclose", "feof", "freopen", "ferror", 
+        "frexp", "floor", "fmod", "pow", "abs", "ldexp", 
+        "free", "realloc", "time", "getenv", 
+        "toupper", "tolower", "isalpha", "iscntrl", "isdigit", "isgraph", "islower", "ispunct", "isspace", "isupper", "isalnum", "isxdigit", 
+        "memchr", "memcmp", "memcpy", "strchr", "strcmp", "strlen", "strtod", "strpbrk", "strcpy", "strcoll", "strstr", "strncmp", "strspn", 
+        "__stdinp", "stdin", "__stderrp", "stderr", "__stdoutp", "stdout", "__error", "__errno_location", 
+    );
+    
+    lua := Ffi'include(current_compiler_context(), src.items(), (whitelist = @if(FEAT_JIT, .None, (Some = allow))));
     @anon_literal(_ = amd, _ = arm, _ = lua)
 };
+
 
 // TODO: this trick where you can use the asm(alias) to reexport a macro as a function 
 //       without thinking of a new name is cute. should have a more succinct way of doing it.

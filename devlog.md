@@ -1,4 +1,13 @@
 
+## (Aug 22)
+
+import_c
+- fix line desync if newline directly after opening multiline comment. 
+- my assert macro reimporting puts,exit inside so they get pushed to the list everytime is annoying even if it doesn't matter. 
+- ffi/include() whitelist imports so you can notice if you update your image decoder library and it tries to exec something now.
+  - unfortunate that rn import_c reexports everything in headers, so the imports of the module include things you don't call. 
+    tho i guess doing it in the compiler when importing is better anyway because it means it can extend to franca libraries eventually (through import_module). 
+
 ## (Aug 21) sb3
 
 - trial and error to get text with a horizontal scroll bar. not loving it. 
