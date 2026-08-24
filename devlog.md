@@ -5985,7 +5985,7 @@ had to start keeping track to feel a sense of progress.
   - xcode's hardware counters thing is actually much more interesting than i gave it credit for 
     because it gives you the profile graph by symbol when you ask it for counters the same as 
     when you ask for time but the percentages are wildly different. 
-      - there's this that tells you what the names mean: https://github.com/jiegec/apple-pmu/blob/master/a8.md
+      - there's this that tells you what the names mean: https://github.com/jiegec/apple-pmu/blob/a3189acf7724186a39f6543e63e34a71f3c42596/a8.md
       - resolve_in_overload_set_new is 25% of the time but 60% of the 
         BRANCH_COND_MISPRED_NONSPEC, L1D_CACHE_MISS_ST_NONSPEC, L1D_CACHE_MISS_LD_NONSPEC 
 - don't want to deal with fixing bugs. taking a break and trying to write a wuffs compiler 
@@ -6100,7 +6100,7 @@ with something that yields back to that top level loop.
   meh, the aarch64 still crashes on my program, kinda reduces my enthusiasm. don't really care enough 
   to fix the rest to work with the new writers. could still compare x86_64 tho, not not inspired anymore.
 - semi-unrelated; this is fascinating to me. https://github.com/ziglang/zig/blob/771523c67534fc47800608eb720886e9f53da7b4/src/codegen/aarch64/Select.zig#L7172-L7369 
-  like that can't be a better way to express that information than mine https://github.com/LukeGrahamLandry/franca/blob/main/backend/arm64/abi.fr#L555-L593 
+  like that can't be a better way to express that information than mine https://github.com/LukeGrahamLandry/franca/blob/95e1fc28b5c4dd026351cb04dc1c7473633613b4/backend/arm64/abi.fr#L555-L593 
   i'm very curious to see how much faster theirs is than mine once it works. 
   because i recall llvm release was only 2x-3x of qbe so like... there's not a lot of room. 
   my backend/arm64 is 2274 lines and their src/codegen/aarch64 is 24340 lines (not counting the assembler/disassembler) .
@@ -7547,7 +7547,7 @@ in hindsight to be something obvious that everybody knows. Even in other languag
 time decisions, the api they expose tends to not be linked to the system one, which sounds obvious when you 
 write it down. 
   - https://github.com/ziglang/zig/blob/6810ffa424fccae0ecbf2f9e3db80069d8e7543b/lib/std/fs/File.zig#L397
-  - https://git.sr.ht/~sircmpwn/hare/tree/master/item/rt/+linux/stat.ha#L24
+  - https://git.sr.ht/~sircmpwn/hare/tree/cda5dc501bd4cee08fd24d08208a16547ba44bc1/item/rt/+linux/stat.ha#L24
   - https://github.com/golang/go/blob/d4c6effaa7b95a2ea149ece4a400c0ace2773839/src/os/stat_linux.go#L13-L14
     but fileStat is different on unix vs windows, so kinda in between
   - rust's fs::Metadata changes with the target, but you always call the same getters, 
@@ -9860,7 +9860,7 @@ do i have the bit order reversed again? no. :LazSpecLies
 RGB in changed bit set, the one for r being identical to g/b is backwards from the spec????
 or im going crazy and can't read. 
 spec says "If bit 6 is set, Green and Blue are equal to the uncompressed value of Red", 
-but the c++ code says `if (sym & (1 << 6)) { NOT equal } else { equal }` https://github.com/LASzip/LASzip/blob/master/src/lasreaditemcompressed_v2.cpp#L477
+but the c++ code says `if (sym & (1 << 6)) { NOT equal } else { equal }` https://github.com/LASzip/LASzip/blob/525b7c8d0b1b100e26793e2467aed16b45407620/src/lasreaditemcompressed_v2.cpp#L477
 - now im right for points 0-3. 
 4 should be `4294605888 4294935618 4294967247` but i get `4294605952 4294935618 4294967247` then colours are garbage. 
 i was clamping to 255 for the high byte instead of 255<<8. 
@@ -10008,7 +10008,7 @@ so like is it not doing a syscall? i can't see it in Instruments.
 like surely im calling it a billion times. but how can it be doing magic memory protection things if it's just 
 in userspace? like could i write my own code that does whatever it does? 
 
-i can find the pthread code on github `https://github.com/apple/darwin-libpthread/blob/main/src/pthread.c#L1292` 
+i can find the pthread code on github `https://github.com/apple/darwin-libpthread/blob/2b46cbcc56ba33791296cd9714b2c90dae185ec7/src/pthread.c#L1292` 
 but idk where `os_thread_self_restrict_rwx_to_rx` is declared. 
 where's `<os/thread_self_restrict.h>`? looked in `https://github.com/apple/darwin-xnu`... empty file... `¯\_(ツ)_/¯`
 
@@ -10644,7 +10644,7 @@ but other than that it self compiles on linux now!
 
 - on x64 i randomly get stuck infinitely recursing on garbage instructions. 
 which sounds a lot like you just need to call `__clear_cache` but apparently you shouldn't have to on x64 and 
-it compiles to nothing: `https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/builtins/clear_cache.c#L63`
+it compiles to nothing: `https://github.com/llvm/llvm-project/blob/0f99bc2d685c572c3b38fd0e1ca56be12d7e2f6a/compiler-rt/lib/builtins/clear_cache.c#L63`
 the problem goes away when running with `use_threads :: false` 
 - sprinkle some mutex around 
 - add `assert` instruction so you can easily crash without manually making a bunch of blocks in the frontend. 
@@ -12413,11 +12413,11 @@ chained_starts_in_offset.segment_offset is actually the offset in virtual memory
 before i thought it was the offset in the file.
 its just a fun coincidence that normal binaries made by clang have thier segments packed together in virtual memory so those numbers are the same.
 and this dump to text thingy (which i was using because i couldn't get objdump to give me the information i want)
-`https://github.com/qyang-nj/llios/blob/main/macho_parser/sources/chained_fixups.cpp#L126` gets it wrong too,
+`https://github.com/qyang-nj/llios/blob/1b5bcc445e1b093c0962695e4ad111a88ad0b7cd/macho_parser/sources/chained_fixups.cpp#L126` gets it wrong too,
 and segfaults if you have your sections spaced out (unless you use segment_offset incorrectly).
 however, `llvm-objdump --chained-fixups --macho` doesn't bother tryingto give you that information and doesn't crash
 (it just tells you the imports table and shows you the page_starts without showing the rest of the chain).
-oh and look at that they even have a comment with the information i needed: `https://github.com/llvm/llvm-project/blob/main/llvm/include/llvm/BinaryFormat/MachO.h#L1086`
+oh and look at that they even have a comment with the information i needed: `https://github.com/llvm/llvm-project/blob/bcb6e2703bf03c1a299c75676dc3ccc999e30fe8/llvm/include/llvm/BinaryFormat/MachO.h#L1086`
 if only i saw that 8 hours ago.
 
 so recap of things we learned:
@@ -12972,8 +12972,8 @@ manually changing that in the llvm ir makes it only complain about the `_NS*` as
   i'd really not have magic global state that decides rounding behaviour.
   looking at cranelift's disassembly (which does the rounding i want), it says `cvt_float64_to_sint64_sat_seq %xmm7, %rsi, %rax, %xmm6`,
   which... drum roll please... doesn't exist 🎉🎉.
-  googling `cvt_float64_to_sint64_sat_seq` has one result and its a cranelift test. https://cocalc.com/github/bytecodealliance/wasmtime/blob/main/cranelift/filetests/filetests/isa/x64/fcvt.clif
-  ah of course, https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/codegen/src/isa/x64/lower.isle#L3680
+  googling `cvt_float64_to_sint64_sat_seq` has one result and its a cranelift test. https://github.com/bytecodealliance/wasmtime/blob/a05baa387d4f0f34ea585ff37414a5646651c4c8/cranelift/filetests/filetests/isa/x64/fcvt.clif (helpfully mirrored by whatever the fuck cocalc.com is).
+  ah of course, https://github.com/bytecodealliance/wasmtime/blob/a05baa387d4f0f34ea585ff37414a5646651c4c8/cranelift/codegen/src/isa/x64/lower.isle#L3680
   silly me, i want cvttps2dq not CVTSD2SI, but no thats a vector, the second t is trucate so cvttsd2si? hehe ye https://www.felixcloutier.com/x86/cvttsd2si
   why do we even have an instruction for "eh fuck it whatever rounding the last guy wanted is probably fine".
 
@@ -13325,7 +13325,7 @@ we need to appritiate reddit bro for a moment
 
 ```
 
-// https://github.com/peterdelevoryas/mylang/blob/master/src/llvm.rs#L52
+// https://github.com/peterdelevoryas/mylang/blob/9625e38f36bab571cac12a14f1091e6333d04cb1/src/llvm.rs#L52
 for func_decl in &module.func_decls {
 let lltype = type_bld.func_type(&func_decl.ty);
 let mut name = func_decl.name.deref().to_string();

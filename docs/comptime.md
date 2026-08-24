@@ -115,7 +115,7 @@ human readable / editable
 
 ## Generating Switches
 
-- https://github.com/rui314/chibicc/blob/main/tokenize.c#L144-L156
+- https://github.com/rui314/chibicc/blob/44bea4c85a48d440bc0f704abe64eac80e9165dc/tokenize.c#L144-L156
 
 it's much faster if you manually write out a bit switch statement. 
 

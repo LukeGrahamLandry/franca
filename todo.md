@@ -11,6 +11,7 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
+- hctarcs 549996194 in wasm has runtime error integer overflow when you win the first level
 - doom input in the web demo at least. also use the upcoming import_c redirects to do it on native without the os/user/libc thing.
 - tests/gui.fr -wgpu: crashes sometimes
 - capture warning spam from circuit and hctarcs

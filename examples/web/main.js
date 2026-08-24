@@ -439,6 +439,7 @@ for (const it of document.getElementsByTagName("textarea")) {
 
 document.getElementById("wisdom").innerText = manifest.wisdom[Math.floor(Math.random() * manifest.wisdom.length)];
 document.getElementById("repro.txt").href = `/${manifest_version}/repro.txt`;
+document.getElementById("repro.png").href = `/${manifest_version}/repro.png`;
 
 document.getElementById("togglecanvas").addEventListener("click", (e) => enable_graphics(e.target.checked));
 function enable_graphics(on) {

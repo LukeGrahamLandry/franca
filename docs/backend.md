@@ -58,7 +58,7 @@ the function pointers to the backend.
 - amd64, x86_64, and x64 are the same thing. x86 means the 32 bit one but nobody cares about that anymore so sometimes that's the same thing too.
 - arm64 and aarch64 are the same thing. the latter is what arm calls it but that's such an annoying word.
 - If you use llvm you don't get full c-abi compatibility for free.
-For example, here's where rustc does it in the frontend https://github.com/rust-lang/rust/blob/master/compiler/rustc_target/src/abi/call/mod.rs
+For example, here's where rustc does it in the frontend https://github.com/rust-lang/rust/blob/111f2e8a39fce63c6daac7eae88023f1e87c15d4/compiler/rustc_target/src/abi/call/mod.rs#L872
 
 ## Instructions
 
