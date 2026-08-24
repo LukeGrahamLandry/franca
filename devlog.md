@@ -1,5 +1,5 @@
 
-## (Aug 22)
+## (Aug 22,23)
 
 import_c
 - fix line desync if newline directly after opening multiline comment. 
@@ -7,6 +7,19 @@ import_c
 - ffi/include() whitelist imports so you can notice if you update your image decoder library and it tries to exec something now.
   - unfortunate that rn import_c reexports everything in headers, so the imports of the module include things you don't call. 
     tho i guess doing it in the compiler when importing is better anyway because it means it can extend to franca libraries eventually (through import_module). 
+---
+
+- fr: catch the mistake of calling destroy_compiler on the one from current_compiler_context
+- default_driver: require the input file directly after the action so it doesn't care about file extension
+- tests for errors that crash harder than @assert_compile_error can catch
+  - confused myself because the bake check runs when dropping the compiler when is after running main if jitted 
+    so if you assert on the uninit memory's value you see the assert fail before it notices the bake wasn't allowed. 
+- like tests/gpu but for the programs that do software rendering for the interesting part 
+  - seed the random numbers for chip8,scratch
+  - scratch colour wheel doesn't repro. i was afraid sin/cos would be slightly different. printed them, inputs are different too,
+    so its just timing. because update does some math on timer which is then passed to cos. 
+  - if im going to be putting these on the website, 9mb ppm isn't reasonable. 500k png is better. add nonzero alpha byte. 
+  - ci
 
 ## (Aug 21) sb3
 

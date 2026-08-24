@@ -49,13 +49,16 @@ fn run_tests(harness: *Harness) void = {
         "rom image loader v1", 
         "Conways Game Of Life 16x16 Soup", 
         "Matrix Display Playground",
+        "line drawer",
     );
     for visual { it |
         harness.load(it).run(100);
     };
+    
+    harness.load("Bad Apple").run(100000);
 }
 
-main :: fn() void = {
+init_harness :: fn(image_callback: ?ImageFn) Harness = {
     root := Foreign'tc_archive();
 
     name := "Tetris";
@@ -67,19 +70,27 @@ main :: fn() void = {
         world = zeroed(World),
         tc_file_loader_device = tc_file_loader_device,
         msg = list(general_allocator()),
+        image_callback = image_callback || (f = fn(_0, _1) = (), userdata = zeroed(rawptr)),
     );
     reset_jit(harness.fr&);
-    
-    harness.run_tests();
-    
+    harness[]
+}
+
+fn assert_ok(harness: *Harness) void = {
+    harness.reset_case();
     destroy_jit(harness.fr&);
-    @if(harness.prev_msg_len == harness.msg.len) @fmt(harness.msg&, " [ok]\n");
     println(harness.msg.items());
     @assert_eq(harness.error, 0, "failed some tc tests");
     harness.msg&.drop();
 }
 
-Harness :: @struct {
+main :: fn() void = {
+    harness := @ref init_harness(.None);
+    harness.run_tests();
+    assert_ok(harness);
+}
+
+Harness :: @rec @struct {
     world: World;
     circuits: []Tc.Circuit;
     temp: Alloc.Mark;
@@ -89,15 +100,25 @@ Harness :: @struct {
     fr: CachedCompilerEnv = ();
     tc_file_loader_device: []Tc.LoadedFile;
     root: ?ComponentId = .None;
+    image_callback: ImageFn;
+    time := 0;
 };
+ImageFn :: @rec @struct(f: @FnPtr(self: *Harness, userdata: rawptr) void, userdata: rawptr);
 
-fn load(self: *Harness, name: Str) *Harness = {
+fn reset_case(self: *Harness) void = {
+    @if(self.root.is_some()) self'image_callback'f(self, self.image_callback.userdata);  // for tests/images.fr
     temp().reset(self.temp);
+    time := timestamp();
     if self.prev_msg_len == self.msg.len {
-        @fmt(self.msg&, " [ok]");
+        @fmt(self.msg&, " [ok] %ms", time - self.time);
     } else {
         self.error += 1;
     };
+    self.time = time;
+}
+
+fn load(self: *Harness, name: Str) *Harness = {
+    self.reset_case();
     @fmt(self.msg&, "\n(%):", name);
     self.prev_msg_len = self.msg.len;
     

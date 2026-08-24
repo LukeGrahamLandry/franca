@@ -24,6 +24,7 @@ test_cmds :: @S(
     @S("tests/exe/c_ffi.fr"),
     @S("tests/c.fr"),
     @S("tests/exe/errors.fr"),
+    @S("tests/exe/errors_comptime.fr"),
     @S("tests/exe/ffi_c.fr"),
     @S("examples/minijinja.fr"),
     @S("examples/life/test.fr"),
@@ -40,6 +41,7 @@ with_fetch_deps :: @S(
     // TODO: this only has deps because it runs webgpu_api.fr but don't really need that
     @S("tests/exe/wasm.fr"),
     @S("tests/external/wuffs.fr"),  // dep:wuffs
+    @S("tests/images.fr"),
 );
 
 with_cc_deps :: @S(
@@ -120,6 +122,13 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
                 finish_repro_file();
                 println(choose_repro_path());
                 maybe_deploy_srht_site();
+                
+                if IS_GITHUB {
+                    make_dirs_or_crash("target/repro");
+                    copy_file("target/repro/repro.png", "target/release/repro.png");
+                    copy_file("target/repro/repro.txt", "target/release/repro.txt");
+                    // copy_file("target/repro/a.ppm", "target/a.ppm");
+                };
             };
             @case("run-no-deps") => {
                 for bins { code, dest |
@@ -207,7 +216,6 @@ do_it :: fn(vtable: *ImportVTable, s: Str) void = {
                 } else {
                     print("SKIP: @/graphics is metal only rn\n");
                     run(@slice("tests/external/hare.fr"));
-                    write_entire_file_or_crash("target/a.ppm", "");  // test.yml wants to upload output from tests/gpu.fr
                 
                     run(@slice("tests/external/janet.fr", "-test"));
                 };
@@ -464,8 +472,6 @@ prospero :: fn(franca_path: Str) void = {
         ok, o, e := exec_and_catch(franca_path, args, temp());
         expect := "eaf99bcf6ab0ee750678cbef374e5fcbc7548d2385b4718c6d1e0e04ae0cc656";
         @assert_eq(expect, Sha256'hex(o.items()), "update https://lukegrahamlandry.ca/words/prospero#:~:text=sha256");
-        // something for viewer to read in tests/gpu.fr
-        write_entire_file_or_crash("target/a.ppm", o.items());
     };
 };
 
@@ -547,10 +553,11 @@ maybe_deploy_srht_site :: fn() void = {
     @fmt(out&, "\n<script>console.log(new SharedArrayBuffer());</script> <!-- this is why i can't use srht for the compiler demo -->");
     write_entire_file_or_crash("target/release/index.html", out.items());
     
-    copy :: fn(dest, src) => write_entire_file_or_crash(dest, read_entire_file_or_crash(temp(), src));
+    copy :: copy_file;
     dir := @tfmt("target/release/%", commit);
     make_dirs_or_crash(dir);
     copy(@tfmt("%/repro.txt", dir), "target/release/repro.txt");  // make it less confusing if github actions wins the race
+    copy(@tfmt("%/repro.png", dir), "target/release/repro.png");  // ^
     
     Syscall'chdir("target/release");
     sh(@slice("tar", "-cvzf", "../site.tar.gz", "."));
@@ -585,27 +592,39 @@ check_for_xcode :: fn() bool = {
 };
 
 ci_end :: fn() void = {
+    rootfs_hash := build_web_and_get_hash(get_executable_path(temp()));
+
     i := cli_args().index_of(fn(it) => it[] == "ci-end") || 0;
     commit := cli_args().index(i + 1)[].str();
-    path := "repro-macos-14.txt/repro-macos-14.txt";
-    check :: fn(s) => { diff(path, s); @println("OK: %", s); };
-    check("repro-macos-15-intel.txt/repro-macos-15-intel.txt");
-    check("repro-ubuntu-latest.txt/repro-ubuntu-latest.txt");
-    check("repro-ubuntu-24.04-arm.txt/repro-ubuntu-24.04-arm.txt");
     
-    rootfs_hash := build_web_and_get_hash(get_executable_path(temp()));
-    copy :: fn(dest, src) => write_entire_file_or_crash(dest, read_entire_file_or_crash(temp(), src));
-    copy(@tfmt("target/web/%/repro.txt", rootfs_hash), path);
+    matrix := @const_slice("macos-14", "macos-15-intel", "ubuntu-latest", "ubuntu-24.04-arm", "srht");
+    ext := @const_slice("txt", "png");
+
+    if true {
+        make_dirs_or_crash("repro-srht");
+        for ext { ext |
+            srht_path := @tfmt("repro-srht/repro.%", ext);
+            url := @tfmt("https://fr.lukegrahamlandry.ca/%/repro.%", commit, ext);
+            println(url);
+            ok, out, err := exec_and_catch(Foreign.EXE.curl, @slice(
+                url, "-o", srht_path, "-L", "-f", "-s", 
+            ), temp());
+            if !ok {
+                @println("SKIP: builds.sr.ht LOST THE RACE");
+                matrix.len -= int(matrix[matrix.len - 1] == "srht");
+            };
+        };
+    };
     
-    srht_path := "repro-srht.txt";
-    url := @tfmt("https://fr.lukegrahamlandry.ca/%/repro.txt", commit);
-    println(url);
-    ok, out, err := exec_and_catch(Foreign.EXE.curl, @slice(
-        url, "-o", srht_path, "-L", "-f", "-s", 
-    ), temp());
-    if !ok {
-        @println("SKIP: builds.sr.ht LOST THE RACE\n%\n%", out.items(), err.items());
-    } else {
-        check(srht_path);
+    for ext { ext |
+        a := @tfmt("repro-%/repro.%", matrix[0], ext);
+        for matrix { matrix |
+            b := @tfmt("repro-%/repro.%", matrix, ext);
+            diff(a, b); 
+            @println("OK: %", b);
+        };
+        copy_file(@tfmt("target/web/%/repro.%", rootfs_hash, ext), a);
     };
 }
+
+copy_file :: fn(dest: Str, src: Str) void = write_entire_file_or_crash(dest, read_entire_file_or_crash(temp(), src));

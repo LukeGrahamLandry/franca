@@ -1,0 +1,61 @@
+
+main :: fn() = {
+    require_error("called destroy_compiler", """
+    main :: fn() void = @run {
+        fr := current_compiler_context();
+        fr'vtable'destroy_compiler(fr.data);
+    };
+    """);
+    
+    // note the body of these isn't asserting the value of the constant because it will be uninit memory 
+    // and will run before panic_on_volatile_bake because the compiler is dropped at the end (which should be changed). 
+    require_error("Compile Error: baked volatile pages", """
+    main :: fn() void = {
+        foo :: @ref 123;
+        println(foo[]);
+    };
+    """);
+    require_error("Compile Error: baked volatile pages", """
+    main :: fn() void = {
+        bar :: temp().boxed(i64, 456);    
+        println(bar[]);
+    };
+    """);
+    
+    Q :: "\"\"\"";  // TODO: my multiline string syntax doesn't nest which is unfortunate. 
+    require_error("Compile Error: import_frc Import(printf) is not whitelisted", @tfmt("""
+        main :: import("@/examples/import_c/ffi.fr")'include(current_compiler_context(), %
+            #include <stdio.h>
+            void main(void) {
+                printf("Hello World!\n");
+            }
+        %, (whitelist = (Some = empty())))'main;
+    """, Q, Q));
+    require_error("Compile Error: import_frc Import(puts) is not whitelisted", @tfmt("""
+        main :: import("@/examples/import_c/ffi.fr")'include(current_compiler_context(), %
+            #include <stdio.h>
+            static struct { int (*f)(char*, ...); } vtable = { .f = puts };
+            void main(void) {
+                vtable.f("Hello World");
+            }
+        %, (whitelist = (Some = empty())))'main;
+    """, Q, Q));
+    
+    // TODO: don't hang on (recursive inline, recursive const declaration) then test them here
+}
+
+// TODO: i don't like that this spews cache files (same problem as examples/lox/aot)
+require_error :: fn(needle: Str, src: Str) void = {
+    file := open_temp_file();
+    file.fd&.write(src);
+    franca := get_executable_path(temp());
+    ok, o, e := exec_and_catch(franca, @slice(file&.s_name()), temp());
+    file.remove();
+    sig := "A franca program received a fatal signal.";
+    e := e&.items();
+    @assert(!ok && e.contains(needle) && !e.contains(sig), "compiling:%\nexpected fail: (%) but found:\n%%", src, needle, o.items(), e);
+}
+
+#use("@/lib/sys/fs.fr");
+#use("@/lib/sys/process.fr");
+#use("@/lib/sys/subprocess.fr");

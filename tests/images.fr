@@ -1,0 +1,239 @@
+// my graphics programs don't support all targets yet but some of them most 
+// of the interesting work is on the gpu side and the application part is secondary. 
+// so this is the equivalent of tests/gpu but can run on non-(metal,webgpu) platforms. 
+// i want pixel perfect repro between targets so fake timestamps (and seed rng). 
+
+// TODO: web playground entry point that runs this to repro and shows you the diff if not. 
+
+main :: fn() void = {    
+    output := @ref Wasm4'Atlas'new_sized(temp(), 2048, 2048);
+    end_line :: fn() => { output.y += output.current_row_height; output.current_row_height = 0; output.x = 0; };
+
+    @mark_reset_temp chip8(output);
+    end_line();
+    @mark_reset_temp life(output);
+    end_line();
+    @mark_reset_temp wasm4(output);
+    @mark_reset_temp circuit(output);
+    end_line();
+    @mark_reset_temp prospero(output);
+    @mark_reset_temp ascii_table(output);
+    end_line();
+    @mark_reset_temp hctarcs(output);
+
+    dest :: "target/release/repro.png";
+    write_entire_file_or_crash(dest, write_to_png(output));
+    if cli_args().contains(fn(it) => it[] == "-show") {
+        franca := get_executable_path(temp());  // only works if jitted
+        a := make_args_for_exec(franca, @slice("examples/gpu/viewer.fr", "-jit", dest), temp());
+        become(a[0], a);
+    } else {
+        @println("wrote frames to %\n(pass '-show' cli arg to open the viewer)", dest);
+    };
+    #use("@/lib/sys/subprocess.fr");
+    #use("@/lib/sys/process.fr");
+    #use("@/lib/sys/fs.fr");
+};
+
+Wasm4 :: import("@/tests/external/wasm4.fr");
+wasm4 :: fn(output: *Atlas) void #use(Wasm4) = {
+    w := W.cast().int();
+    img_buf := temp().alloc_uninit(u32, w*w);
+    ::Array(u8, 4); ::Array(u8, 6400);  // HACK: these are used in fields of the import_c-ed struct and then indexed from franca so need to instantiate the overloads.
+    for_rev builtin_carts { cart |
+        screenshot_rgba(cart, img_buf);
+        output.push(img_buf, w, w);
+    };
+};
+
+prospero :: fn(output: *Wasm4.Atlas) void = {
+    #use("@/examples/prospero.fr");
+    AstExternal :: import("@/compiler/ast_external.fr");
+    #use("@/backend/lib.fr");
+    vtable := ImportVTable.zeroed();
+    @if(FEAT_JIT) AstExternal'fill_backend_vtable(vtable&);
+    
+    width := 512;
+    p := parse_program(temp(), Foreign'fidget());
+    pixels, yes, no := render(p&, width, vtable&);
+    
+    data := temp().alloc_init(u32, width*width, fn(i) => {
+        y, x := i.udiv_mod(width);
+        i := (width - y - 1) * width + x;
+        @if(bshas(pixels&, i), 0xFF000000, 0xFFFFFFFF)
+    });
+    output.push(data, width, width);
+};
+
+ascii_table :: fn(output: *Wasm4.Atlas) void = {
+     #use("@/examples/ascii_table.fr");
+     font := load_font(16, temp());
+     canvas := new_canvas(512, 600, font);
+     build_ascii_table(canvas&);
+     canvas := canvas.out;
+     data := temp().alloc_init(u32, canvas.pixels.len, fn(i) => {
+         it: u32 = canvas.pixels[i].zext();
+         it.shift_left(16).bit_or(it.shift_left(8)).bit_or(it).bit_or(0xFF000000)
+     });
+     output.push(data, canvas.w, canvas.h);
+};
+
+hctarcs :: fn(output: *Wasm4.Atlas) void = {
+    #use("@/examples/gpu/hctarcs/runtime.fr");
+    #use("@/examples/gpu/hctarcs/main.fr");
+    
+    indices :: @const_slice(0, 1, 3, 5, 7, 10);
+    inline_for indices { $i |
+        S :: import(@afmt(ast_alloc(), "{ % };", src[i[]]));
+        ::import("@/examples/gpu/hctarcs/compile.fr").simple_ops;  // infer the impl param types 
+        snapshot(output, S.initialize);
+    };
+    snapshot :: fn(output: *Wasm4.Atlas, initialize: @FnPtr(c: *Canvas) void) void = {
+        mark := temp().mark();
+        c := @ref zeroed(Canvas);
+        init_canvas(c, temp(), initialize);
+        c.rng = Random.xoshiro256SS.new(1234);
+        c.fixed_timestamp = (Some = 10000);
+        c.send_event(.Flag);
+        ran := 1;
+        frames := 0;
+        while => ran > 0 && frames < 10 {
+            ran = c.poll_scripts();
+            frames += 1;
+            c.fixed_timestamp.Some += 1.0/30;
+        };
+        Render'finish_frame(c);
+        
+        each c.frame_pixels { it |
+            it[] = it[].rotate_left(8).byte_swap().bit_or(0xFF000000);
+        };
+        output.push(c.frame_pixels, 480, 360);
+        drop(c);
+        temp().reset(mark);
+    };
+};
+
+// TODO: the clock component can be set from the outside. do that when i have a visual example that needs it to repro. 
+// TODO: threads, the compiling is the slow part mostly
+// these are kinda slow so runs the non-image ones too so dont have to rerun everything to get those. 
+circuit :: fn(output: *Wasm4.Atlas) void = {
+    harness := @ref init_harness(Some = (f = snapshot_screens, userdata = Wasm4.Atlas.raw_from_ptr(output)));
+    run_tests(harness);
+    assert_ok(harness);
+};
+
+#use("@/examples/circuit/tc/test.fr");
+snapshot_screens :: fn(harness: *Harness, output: rawptr) void = {
+    output := Wasm4.Atlas.ptr_from_raw(output);
+    Screen :: @struct(x: i64, y: i64, data: []u32);
+    screens := Screen.list(temp());
+    
+    world := harness.world&;
+    root := harness.root.unwrap();
+    circuit := harness.circuits.find(fn(it) => it.compiled.is_some() && it.compiled.Some.id == root.id).unwrap();
+    c := world[root];
+    each circuit.gates { gate |
+        continue :: local_return;
+        i := gate.logical_gate_index;
+        @if(i == -1) continue();
+        it := c.gates[i]&;
+        @if(it.kind.group() != .Tc1) continue();
+        gate_kind := it.kind.name(.Tc1);
+        
+        if gate_kind == .DotMatrixDisplay {
+            buf := world.storage.subslice(c.instance_offset_by_gate[i], 7*8*32/64);
+            buf := u32.reinterpret_bytes(buf.interpret_as_bytes());
+            screens&.push(x = gate.pos.x.cast().int(), y = gate.pos.y.cast().int(), data = buf);
+        };
+    };
+    
+    @if(screens.len == 0) return();
+
+    // rectangle that encloses the screen components
+    w, h, X, Y := (MIN_i64, MIN_i64, MAX_i64, MAX_i64);    
+    each screens { it |
+        it.x *= 2; it.y *= 2;  // 2 screen dots = 1 grid unit
+        w = max(w, it.x + 6); h = max(h, it.y + 8);
+        X = min(X, it.x); Y = min(Y, it.y);
+    };
+    each screens { it |
+        it.x -= X; it.y -= Y;
+    };
+    w -= X; h -= Y;
+    
+    img_buf := temp().alloc_zeroed(u32, w*h);
+    for screens { screen |
+        range(0, 8) { y |
+            range(0, 6) { x |
+                I := (screen.y + y)*w + screen.x+x;
+                img_buf[I] = screen.data[y*6+x].byte_swap().bit_or(0xFF000000);
+            };
+        };
+    };
+    
+    output.push(img_buf, w, h);
+};
+
+chip8 :: fn(output: *Wasm4.Atlas) void = {
+    #use("@/examples/gpu/chip8.fr");
+    
+    for builtin_roms { it |
+        cpu := @ref zeroed(Cpu);
+        init(cpu, it.rom);
+        cpu.rng = Random.xoshiro256SS.new(1234);
+        range(0, 512) { _ |
+            cpu.tick();
+        };
+        data := temp().alloc_init(u32, 64*32, fn(i) => @if(cpu.display&[i] == 0, 0xFF000000, 0xFFFFFFFF));
+        output.push(data, 64, 32);
+    };
+};
+
+life :: fn(output: *Wasm4.Atlas) void = {
+    #use("@/examples/life/eval.fr");
+    #use("@/examples/life/pattern.fr");
+
+    memo := @ref zeroed(Memo);
+    new_memo(memo, temp());  // TODO: allow passing smaller size
+    in := "x = 9, y = 9\n2bo2bobob$2obob3ob$bo6bo$2o5bob2$bo5b2o$o6bob$b3obob2o$bobo2bo!"; // Kok's galaxy
+    it := read(memo, in).or(fn(it) => panic(it));
+    memo.root = it.node; memo.size = it.size;
+    memo.root = memo.zero_fill_grow(memo.root&, memo.size);
+    memo.size *= 2;
+    range(0, 8+1) { _ |
+        in := @ref empty_bitboard(temp(), memo.size);
+        decompress(in, memo, memo.root, memo.size);
+        
+        w := memo.size.intcast();
+        data := temp().alloc_init(u32, w*w, fn(i) => {
+            y, x := i.intcast().udiv_mod(memo.size);
+            @if(in.get(x, y) == 0, 0xFF000000, 0xFFFFFFFF)
+        });
+        output.push(data, w, w);
+        
+        eval(memo, 1, true);
+    };
+    
+};
+
+write_to_png :: fn(output: *Wasm4.Atlas) []u8 = {
+    pixels := output.buf;
+    out := @ref u8.list(temp());
+    w, h := (intcast(output.width), intcast(output.y + output.current_row_height));
+    #use(import("@/examples/gpu/hctarcs/tests.fr").Stb);
+    callback: stbi_write_func : fn(context, data, size) = {
+        data := u8.ptr_from_raw(data).slice(size.zext());
+        List(u8).ptr_from_raw(context).push_all(data);
+    };
+    res := stbi_write_png_to_func(callback, List(u8).raw_from_ptr(out), w, h, 4, u32.raw_from_ptr(pixels.ptr), w*4);
+    @assert(res != 0, "failed to write image");
+    out.items()
+};
+
+mark_reset_temp :: fn(e: FatExpr) FatExpr #macro = 
+    @{ mark := temp().mark(); @must_return @[e]; temp().reset(mark); };
+
+// TODO: annoying that overloads reference these even tho none are actually used
+GRAPHICS_TARGET_WEB :: false;
+SOKOL_BACKEND :: RenderBackend.METAL_MACOS;
+#use("@/graphics/lib.fr");

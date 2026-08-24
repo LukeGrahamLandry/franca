@@ -11,6 +11,10 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
+- doom input in the web demo at least. also use the upcoming import_c redirects to do it on native without the os/user/libc thing.
+- tests/gui.fr -wgpu: crashes sometimes
+- capture warning spam from circuit and hctarcs
+- panic_on_volatile_bake is in drop so runs after running the main program if you aren't using default_driver. compiler/lib should drop earlier if doing ExecStyle.Aot
 - when fetching dependencies with curl can i give it multiple urls at once to be faster?
 - import_c/ffi/FrcImportLimits
   - do it for compile_host_exe too
@@ -20,7 +24,6 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
     - that will also let me get rid of temporary_funcid
   - maybe always allow math/isalpha/memcpy/etc. 
     ex. examples/disassemble needing to list all the ctype.h functions is a bit useless. 
-  - tests of the whitelisting that are supposed to error
   - since it's in the compiler, expose it for import_module() (when importing franca code) too. 
     but since i want that to keep symmetry with the normal import(), need to allow limits there too, 
     which is more involved because that doesn't go through a seperate compctx. 
@@ -37,13 +40,9 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
     similar to how import_module uses redirects to stomp signetures. 
 - ^ access untypedefed struct/enum
 - ^ bit_or of enum for flags is painful
-- run examples/circuit/tc/test.fr in ci
+- "__stderrp", "stderr" is another case where the import_c caching doesn't work if you use emulator to run on the same file system because it doesn't understand that code can be target dependent
 - tc: console offset is unsafe if bounds checks are disabled
-- in ci without gpu, still build a.ppm for the things that do software rendering. (instead of writting empty a.ppm in run_tests)
-  - share code with the examples/gpu/viewer.fr gpu test (it needs ppms as input)
-  - scratch, prospero, ascii_table
-  - also easy to write a new main for wasm4,chip8,life,circuit/tc to show that the code is reusable
-  - ci_end: add the repro images 
+- the tc circuit tests are a good source of programs where insert_phis takes a really long time
 - libm (float/trig) functions without libc
 - to make importing Viewer just for stb_image less confusing, reexport stbi_image_free (with a FEAT_PNG check)
 - just for good luck, map comptime jit memory as read only (not exec) after the compiler is done when jitting with ExecStyle.AOT. 
@@ -147,8 +146,6 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
   - should add it here so can autotest if i break something
   - add to docs? `site/src/components/MultiLanguageCode.js`
 - guess_library_path: follow if try_get_executable_path is a symlink
-- catch the mistake of calling destroy_compiler on the one from current_compiler_context
-  if you fail at copy pasting from default_driver... not that i'd ever make that mistake of course... 
 - finish examples/gpu/rtc.fr. 
   make graphics/shaders translation support a more interesting subset of the language. 
   need to be able to pass around pointers to mutable arrays on the stack.
@@ -461,15 +458,7 @@ Compile Error: not callable V:()
   because `foo :: fn` in the imported thing will be scoped correctly but `fn foo` will be lifted. 
 - bloat2: don't count bss. rn EXTRA can be negative. 
 - add a test that tries to bake a bunch of stuff in the general allocator to catch the mistake i made with panic_on_volatile_bake more reliably. 
-- tests that are supposed to panic_on_volatile_bake
-```
-main :: fn() void = {
-    foo :: @ref 123;
-    bar :: temp().boxed(i64, 456);    
-    println(foo[]);
-    println(bar[]);
-}
-```
+  - TODO: what does that mean?
 - without MarkNotDone in for lit_fn, its sketchy if you use something 
   that's #avoid_shim inside an @run block (like CVariadic). 
   maybe it's fine. the workaround is just wrap it in `(fn=())()` 
