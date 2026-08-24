@@ -10,6 +10,7 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
         out = out, 
         string_lookup = init(temp()), string_constants = list(temp()),
         project = p,
+        warning = p.warning.assume_owned(temp()),
     );
     self := self&;
     
@@ -104,7 +105,7 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
             continue :: local_return;
             @if(emitted_images&.contains(it.md5)) continue();
             if it.fmt != "png" || !Viewer.FEAT_PNG {
-                @println("warning: i don't support svgs yet so (%) won't render", it.name);
+                @fmt(self.warning&, "i don't support svgs yet so (%) won't render\n", it.name);
                 emitted_images&.insert(it.md5, ("", 0, 0, false));
                 continue();
             };
@@ -128,7 +129,7 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
     floats_blob := f64.list(temp());
     
     @fmt(out, "initialize :: fn(c: *Rt.Canvas) void = {\n");
-    @fmt(out, "c.metadata = metadata;\n");
+    @fmt(out, "c.metadata = (credits = metadata, warning = warning);\n");
     @fmt(out, "a := c.gpa;\nfloats_blob := f64.reinterpret_bytes(floats_blob);\n");
     @fmt(out, "c.classes = a.alloc_uninit(Rt.SpriteClass, %);\n", p.sprites.len);
     @fmt(out, "c.init_strings(strings);\n");  // Obj for the const string so can use them in sprite vars below. 
@@ -230,6 +231,7 @@ compile_to_franca :: fn(p: *S.Project, out: *List(u8)) void = {
     } else {
         @fmt(out, "metadata :[]Str: empty();\n");
     };
+    @fmt(out, "warning :: \"%\";\n", => self.safe_string_body(self.warning.items()));
 }
 
 fn safe_string_body(self: *Compile, it: Str) void = {
@@ -260,6 +262,7 @@ Compile :: @struct {
     next_cont_id := 0;
     futures_depth := 0;  // how far back on futures stack is first parameter of current_def
     max_futures := 0;    // to reserve at the start
+    warning: List(u8);
 };
 
 // TODO: in builder check that not using a !simple_ops.has_result where a value is needed and give error. 
@@ -336,7 +339,7 @@ compile :: fn(self: *Compile, it: *Node) void = {
             i := params.index_of(fn(check) => check.literal == it.literal) || {
                 // TODO: redundant because the loader does this too 
                 // sadly not an error. ex. this is why turbowarp's "is compiled?" block works in normal scratch. 
-                @eprintln("warning: used argument % outside it's function", it.string); 
+                @fmt(self.warning&, "used argument % outside it's function\n", it.string); 
                 return @fmt(out, "0.0");
             };
             if self.is_async(def) {

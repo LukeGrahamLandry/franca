@@ -107,7 +107,7 @@ load_level_tests :: fn(circuits: []Circuit, campaign_root: Str, a: Alloc) void =
 
 LoadedFile :: @struct(data: []u8, name: Str);
 // TODO: don't require loading a specific circuit at this point (allow just loading all)
-load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64, []LoadedFile) = {
+load_all_circuits :: fn(original_root: Str, a: Alloc, warn: *List(u8)) Ty([]Circuit, i64, []LoadedFile) = {
     root := original_root;
     root_name := name_from_path(root);
     while => !root.ends_with("schematics/") && root.len > 0 {
@@ -125,13 +125,13 @@ load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64, []Loade
     for files { path |
         continue :: local_return;
         in := read_entire_file(temp(), path) || {
-            @println("failed to read [%]", path);
+            @fmtln(warn, "failed to read [%]", path);
             continue();
         };
         name := name_from_path(path).shallow_copy(a);
         res := load_circuit(in, a, name);
         info := res.or(fn(msg) => {
-            @eprintln("failed to load [%]: %", path, msg);
+            @fmtln(warn, "failed to load [%]: %", path, msg);
             continue();
         });
         info.is_arch = path.contains("architecture");
@@ -148,7 +148,7 @@ load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64, []Loade
         each info.programs { it |
             continue :: local_return;
             if has_path_escapes(it.name) {
-                @println("Assembly path [%] is sketchy", it.name);
+                @fmtln(warn, "Assembly path [%] is sketchy", it.name);
                 continue();
             };
             // TODO: if i want to load for other levels, i need the mapping to names from https://turingcomplete.game/api_level_meta
@@ -174,14 +174,14 @@ load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64, []Loade
             file_index := it.settings&[0]&;
             file_index[] = -1;
             if has_path_escapes(it.data) {
-                @println("FileLoader path [%] is sketchy", it.data);
+                @fmtln(warn, "FileLoader path [%] is sketchy", it.data);
                 continue();
             };
             @if(it.data == "") continue();  // none selected
             
             path := @tfmt("%%", dir, it.data);
             data := read_entire_file(a, path) || {
-                @println("- failed to read [%] for file loader in [%]", path, name);
+                @fmtln(warn, "- failed to read [%] for file loader in [%]", path, name);
                 continue();
             };
             file_index[] = tc_file_loader_device.len;
@@ -192,7 +192,7 @@ load_all_circuits :: fn(original_root: Str, a: Alloc) Ty([]Circuit, i64, []Loade
     };
     
     root_index := circuits.index_of(fn(it) => it.name == root_name) || {
-        @eprintln("couldn't find (%). shouldn't happen if path is in tc save directory", root_name);        
+        @fmtln(warn, "couldn't find (%). shouldn't happen if path is in tc save directory", root_name);        
         0
     };
     
@@ -210,10 +210,10 @@ HACK_NONE_PIN_POSITION :: 999999;
 // - detect use-before-def (bad input or just confused) gracefully and error instead of crashing on franca compile error later. 
 
 // diagram -> gate graph
-compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Component), arena: Alloc) void = {
+compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Component), arena: Alloc, warn: *List(u8)) void = {
     c := circuits[root_index]&;
     if c.compiled.is_some() {
-        @println("why am i compiling % twice?", c.name);
+        @fmtln(warn, "why am i compiling % twice?", c.name);
         return();
     };
     
@@ -224,19 +224,19 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         // TODO: detect cycles (malformed data file)
         ::AutoEq(CustomId); ::RefEq(CustomId);
         child_index := circuits.index_of(fn(it) => it.id == custom_id) || {
-            @eprintln("missing dependency custom component % in (%)", custom_id.id, c.name);
+            @fmtln(warn, "missing dependency custom component % in (%)", custom_id.id, c.name);
             unimplemented = true;
             continue();
         };
         if circuits[child_index].compiled.is_none() {
-            compile_circuit(circuits, child_index, components, arena);
+            compile_circuit(circuits, child_index, components, arena, warn);
         };
     };
     @if(c.compiled.is_some()) return();
     
-    @if(SPAM_LOG) @println("loading (%):", c.name);
+    @if(SPAM_LOG) @fmtln(warn, "loading (%):", c.name);
     a := arena;
-    gates, wire_count := find_pins(c, a, circuits);
+    gates, wire_count := find_pins(c, a, circuits, warn);
     custom_pins := Ty(i64, i64).list(a);
     switches := Circuit.SwitchablePin.list(a);
     
@@ -279,14 +279,14 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
             continue();
         }
         
-        out_arity, in_arity := get_arity(shape, original_gate, circuits);
+        out_arity, in_arity := get_arity(shape, original_gate, circuits, warn);
         
         if in_arity != it.inputs.len || out_arity != it.outputs.len {
             unimplemented = true;
-            @eprintln("TODO: arity error (%) I: % vs %; O: % vs %; gate %/%", shape.name, shape.in_arity, it.inputs.len, shape.out_arity, it.outputs.len, i, gates.len);
+            @fmtln(warn, "TODO: arity error (%) I: % vs %; O: % vs %; gate %/%", shape.name, shape.in_arity, it.inputs.len, shape.out_arity, it.outputs.len, i, gates.len);
         }
         if shape.pins.len == 0 && shape.name != "LevelScreen" && !shape.name.starts_with("Probe") && shape.name != "Custom" {
-            @println("TODO: no pins for %", shape.name);
+            @fmtln(warn, "TODO: no pins for %", shape.name);
             unimplemented = true;
         };
         
@@ -325,7 +325,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         @match(shape.body) { 
             fn Unimplemented() => {
                 kill&.set(i);
-                @eprintln("TODO: not implemented (%)", shape.name);
+                @fmtln(warn, "TODO: not implemented (%)", shape.name);
                 unimplemented = true;
             }
             fn IO() => {
@@ -374,7 +374,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
             fn Custom() => {
                 child := find_custom_impl(original_gate, circuits) || {
                     // should be unreachable because of the `dependencies` in the data file. 
-                    @println("missing custom component %", original_gate.custom_id.id);
+                    @fmtln(warn, "missing custom component %", original_gate.custom_id.id);
                     unimplemented = true;
                     kill&.set(i);
                     continue();
@@ -387,16 +387,16 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 };
                 
                 if child.has_arch_pins {
-                    println("TODO: allow LevelInputArch/LevelOutputArch inside custom component?");
+                    @fmtln(warn, "TODO: allow LevelInputArch/LevelOutputArch inside custom component?");
                     unimplemented = true;
                 };
                 
                 @if(!unimplemented)
                 if child.has_bidirectional_pins {
-                    @if(SPAM_LOG) @println("(%) calls (%) with bidirectional pins", c.name, child.name);
+                    @if(SPAM_LOG) @fmtln(warn, "(%) calls (%) with bidirectional pins", c.name, child.name);
                     kill&.set(i);
                     child_logical := child.compiled || {
-                        @println("TODO: missing (%).compiled", child.name);
+                        @fmtln(warn, "TODO: missing (%).compiled", child.name);
                         unimplemented = true;
                         continue();
                     };
@@ -442,7 +442,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         logical_to_circuit.len = 0;
         in.len = 0;
         out.len = 0;
-        @eprintln("something was unimplemented in (%)", c.name);
+        @fmtln(warn, "something was unimplemented in (%)", c.name);
     };
     
     bit_width := @if(!c.has_arch_pins, bit_width.items(), empty());
@@ -455,9 +455,9 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     insert_consts_for_dead_wires(components.items(), gates&);
     @if(!c.has_arch_pins) @debug_assert_eq(bit_width.len, custom_pins.len);
     @if(!c.v2)  // TODO
-    insert_bit_width_casts(components.items(), gates&, wire_count&, bit_width);
+    insert_bit_width_casts(components.items(), gates&, wire_count&, bit_width, warn);
     logical_to_circuit&.push_repeated(gates.len - logical_to_circuit.len, -1);
-    new_gates, order := schedule_gates(c, gates, wire_count, a, out.items(), in.items(), components.items());
+    new_gates, order := schedule_gates(c, gates, wire_count, a, out.items(), in.items(), components.items(), warn);
     gates := new_gates;
     @assert_eq(logical_to_circuit.len, gates.len, "confused gate tracking in (%)", c.name);
     
@@ -477,12 +477,12 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         bit_width = bit_width,
     );
     c.bit_width = bit_width;
-    calculate_usage(components.items(), components.len - 1, a);
-    find_links_for_lastest_component(c, components.items());
+    calculate_usage(components.items(), components.len - 1, a, warn);
+    find_links_for_lastest_component(c, components.items(), warn);
 }
 
 // TODO: report errors better
-find_links_for_lastest_component :: fn(c: *Circuit, components: []Component) void = {
+find_links_for_lastest_component :: fn(c: *Circuit, components: []Component, warn: *List(u8)) void = {
     component := components[components.len - 1]&;
     each c.gates { it |
         continue :: local_return;
@@ -491,7 +491,7 @@ find_links_for_lastest_component :: fn(c: *Circuit, components: []Component) voi
         };
         
             if it.logical_gate_index == -1 {
-                @println("TODO: console without logical_gate_index can't update param for linked component");
+                @fmtln(warn, "TODO: console without logical_gate_index can't update param for linked component");
                 continue();
             };
             // TODO: can id be negative?
@@ -499,22 +499,22 @@ find_links_for_lastest_component :: fn(c: *Circuit, components: []Component) voi
             linked0, s := convert_number(custom_string, 10, dec_digit);
             if s.len == custom_string.len {
                 if custom_string != "" {
-                    println("console string didn't start with a number so can't find linked component");
-                    println(custom_string);
+                    @fmtln(warn, "console string didn't start with a number so can't find linked component");
+                    @fmtln(warn, "%", custom_string);
                 };
                 continue();
             };
             
             ram := c.gates.find(fn(it) => it.link_id == linked0) || {
-                @println("didn't find console's linked id %", linked0);
+                @fmtln(warn, "didn't find console's linked id %", linked0);
                 continue();
             };
             if ram.logical_gate_index == -1 {
-                @println("TODO: console's linked ram doesn't have logical_gate_index");
+                @fmtln(warn, "TODO: console's linked ram doesn't have logical_gate_index");
                 continue();
             };
             if get_storage_count(components, component.gates[ram.logical_gate_index]&) == 0 {
-                @println("TODO: console's linked component doesn't have storage");
+                @fmtln(warn, "TODO: console's linked component doesn't have storage");
                 continue()
             };
             instance := component.instance_offset_by_gate[ram.logical_gate_index];
@@ -577,7 +577,7 @@ inline_for_bidirectional_gates :: fn(child_logical: *Component, gates: *List(Com
         gates.push(kind = gate.kind, outputs = out, inputs = in, param = gate.param);
         extra_gates[] += 1;
     };
-    //@println("- inline added wires %..<%", original_wire_count, wire_count[]);
+    //@fmtln(warn, "- inline added wires %..<%", original_wire_count, wire_count[]);
     duplicates
 }
 
@@ -592,7 +592,7 @@ fn push_inputs_outputs(gates: *List(Component.Gate), out: []WireId, in: []WireId
     gates.push(kind = O, inputs = out, outputs = empty());
 }
 
-schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, a: Alloc, out: []WireId, in: []WireId, components: []Component) Ty(List(Component.Gate), []i64) = {
+schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, a: Alloc, out: []WireId, in: []WireId, components: []Component, warn: *List(u8)) Ty(List(Component.Gate), []i64) = {
     order := i64.list(temp());
     ready: DynamicBitSet = empty(temp()); // [WireId]
     done: DynamicBitSet = empty(temp());  // [index in gates]
@@ -654,11 +654,11 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
             if !done&.get_set(i) {
                 it := gates[i]&;
                 kind := components[it.kind.id.zext()]&;
-                @eprintln("TODO: cycles! gate (%) in (%)", kind.name, c.name);
+                @fmtln(warn, "TODO: cycles! gate (%) in (%)", kind.name, c.name);
                 for kind.inputs_for_pure_eval { i |
                     id := it.inputs[i];
                     if !ready&.get(id.id.zext()) {
-                        @eprintln("- w% not ready", id.id);
+                        @fmtln(warn, "- w% not ready", id.id);
                     }
                 };
                 order&.push(i);
@@ -696,7 +696,7 @@ templates :: import("@/examples/circuit/tc/builtin.fr").templates;
 
 // return._0[_].kind.id is in just the tc range. 
 // `circuits` is needed for finding the pins when `c` uses a custom component. 
-find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Gate), i64) = {
+find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8)) Ty(List(Component.Gate), i64) = {
     #use("@/examples/circuit/parse.fr");
     pos_key :: fn(a: Vec2) i64 = bit_cast_unchecked(Vec2, i64, a);
     
@@ -724,7 +724,7 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
     enumerate c.gates& { gate_i, it |
         continue :: local_return;
         shape := get_builtin_shape(it.kind);
-        out_arity, in_arity := get_arity(shape, it, circuits);
+        out_arity, in_arity := get_arity(shape, it, circuits, warn);
         
         w := a.alloc_init(WireId, out_arity + in_arity, fn(_) => (id = 0xFFFFFFFF));
         
@@ -749,7 +749,7 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
             || shape.name == "Custom"            // might just be for a visual block
         ;
         if no_pins && !allow_no_pins {
-            @eprintln("TODO: % has no pins", shape.name);
+            @fmtln(warn, "TODO: % has no pins", shape.name);
         };
         
         out, in := (w.slice(0, out_arity), w.rest(out_arity));
@@ -772,7 +772,7 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
             big_pins := @is(k, .Ram, .RamLatency, .RamFast);
             if big_pins || @is(k, .RamDualLoad, .Program, .Rom) {
                 if s1 > 3 && !big_pins {
-                    @println("% doesn't allow >64 bit data width index=%", shape.name, s1);
+                    @fmtln(warn, "% doesn't allow >64 bit data width index=%", shape.name, s1);
                     it.settings&[1] = 3;
                     s1 = 3;
                 };
@@ -780,12 +780,12 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
                 if k != .Program {
                     s&.set(.storage_size, s.get(.storage_size).align_to(s.word_size()) / s.word_size());
                 } else {
-                    ensure_assembled_and_update_size(c, s&, gate_i, a);
+                    ensure_assembled_and_update_size(c, s&, gate_i, a, warn);
                 };
                 if k == .Rom {
                     size := s.get(.storage_size) * s.word_size();
-                    @if(size > it.data.len) @println("TODO: rom file too large for storage");
-                    @if(size < it.data.len) @println("TODO: rom file too small for storage");
+                    @if(size > it.data.len) @fmtln(warn, "TODO: rom file too large for storage");
+                    @if(size < it.data.len) @fmtln(warn, "TODO: rom file too small for storage");
                     it.data = it.data.slice(0, min(size, it.data.len));
                 };
                 
@@ -806,7 +806,7 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
                 param = s.repr.bitcast();
             };
             if k == .Mul64 {
-                @if(!second_output_is_unused && query_current_arch() == .wasm32) @println("TODO: mul64 high wasm");
+                @if(!second_output_is_unused && query_current_arch() == .wasm32) @fmtln(warn, "TODO: mul64 high wasm");
                 s: Builtin.Settings.Mul64 = construct(need_high = int(!second_output_is_unused));
                 param = s.repr.bitcast();
             }
@@ -823,15 +823,15 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit) Ty(List(Component.Ga
     (logic_gates, next_wire_id.zext())
 };
 
-fn ensure_assembled_and_update_size(circuit: *Circuit, s: *Builtin.Settings.Ram, gate_i: i64, a: Alloc) void = {
+fn ensure_assembled_and_update_size(circuit: *Circuit, s: *Builtin.Settings.Ram, gate_i: i64, a: Alloc, warn: *List(u8)) void = {
     asm := circuit.programs.find(fn(it) => it.level_id == Circuit.Program.SANDBOX_LEVEL_ID && it.gate_index == gate_i) 
-        || return(@println("TODO: missing program assembly for gate[%]", gate_i));
+        || return(@fmtln(warn, "TODO: missing program assembly for gate[%]", gate_i));
     word_size := s[].word_size();
     if asm.assembled.is_none() {
         if asm.assembly { in |
             out := @ref u8.list(s[].get(.storage_size) * word_size, a);
-            Tc'Asm'assemble(out, in, word_size, circuit.mnemonics).or(fn(msg) => {
-                @println("failed to assemble (%): %", asm.name, msg);
+            Tc'Asm'assemble(out, in, word_size, circuit.mnemonics, warn).or(fn(msg) => {
+                @fmtln(warn, "failed to assemble (%): %", asm.name, msg);
                 return();
             });
             asm.assembled = (Some = out.items());
@@ -853,10 +853,10 @@ fn find_custom_impl(g_gate: *Circuit.Gate, circuits: []Circuit) ?*Circuit = {
     .None
 }
 
-fn get_arity(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit) Ty(i64, i64) = {
+fn get_arity(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, warn: *List(u8)) Ty(i64, i64) = {
     @if(group(shape.kind) != .Tc1 || name(shape.kind, .Tc1) != .Custom) return(shape.out_arity, shape.in_arity);
     child := find_custom_impl(gate, circuits) || {
-        @eprintln("TODO: custom component missing from dependencies?? %", gate.custom_id.id);
+        @fmtln(warn, "TODO: custom component missing from dependencies?? %", gate.custom_id.id);
         return(0, 0);
     };
     child.arity
@@ -867,7 +867,7 @@ fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, 
     dx, dy := (0, 0);
     if group(shape.kind) == .Tc1 && name(shape.kind, .Tc1) == .Custom {
         child := find_custom_impl(gate, circuits)
-            || return(@eprintln("TODO: custom component missing from dependencies?? %", gate.custom_id.id));
+            || @panic("TODO: custom component missing from dependencies?? %", gate.custom_id.id);
         pins = child.pins;
         
         // TODO: i don't understand why this is part of the gate not the component or why 15 is the magic number but it makes the ones i've tested look right so here we are. 
@@ -892,14 +892,14 @@ fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, 
 }
 
 // TODO: what if a bidirectional pin is given too big a value?
-fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate), wire_count: *i64, bit_width: []u8) void = {
+fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate), wire_count: *i64, bit_width: []u8, warn: *List(u8)) void = {
     a := gates.gpa;
     cast_id: ComponentId = (id = trunc(component_offset(.Tc2) - 1));
     @debug_assert_eq(components[cast_id.id.zext()].name, "SyntheticCast_FR");
     width := temp().alloc_zeroed(u8, wire_count[]);
     outputs, inputs := (gates[gates.len - 1].inputs, gates[0].outputs);
     known := outputs.len + inputs.len == bit_width.len;
-    @if(!known) println("TODO: missing some io sizes?");
+    @if(!known) @fmtln(warn, "TODO: missing some io sizes?");
     original_output_index := gates.len - 1;
     @if(known)
     enumerate inputs { i, id |
@@ -914,7 +914,7 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
         c := components[gate.kind.id.zext()]&;
         name := c.name;
         o_n, i_n := c.arity();
-        @if(bit_width.len != o_n + i_n) continue(@println("TODO: missing widths for %", name));
+        @if(bit_width.len != o_n + i_n) continue(@fmtln(warn, "TODO: missing widths for %", name));
         enumerate gate.outputs { i, id |
             // multiple switches of different sizes might ouput to the same wire
             width[id.id.zext()] = max(bit_width[i], width[id.id.zext()]);
@@ -928,7 +928,7 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
     maybe_cast :: fn(want: u8, id: *WireId) => {
         break :: local_return;
         found := width[id.id.zext()];
-        @if(found == 0) @println("TODO: unknown wire size w%", id.id);
+        @if(found == 0) @fmtln(warn, "TODO: unknown wire size w%", id.id);
         if want < found && want != 0 {
             old := id[];
             if get(casts&, (old, want)) { new |
@@ -939,7 +939,7 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
             new: WireId = (id = wire_count[].trunc());
             wire_count[] += 1;
             id[] = new;
-            // @println("cast % => % (want=%, found=%)", old.id, new.id, want, found);
+            // @fmtln(warn, "cast % => % (want=%, found=%)", old.id, new.id, want, found);
             casts&.insert((old, want), new);
             gates.push(
                 kind = cast_id,
@@ -969,7 +969,7 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
     gates.items().swap(original_output_index, gates.len - 1);
     @debug_assert_eq(components[gates[gates.len - 1].kind.id.zext()].name, "output");
     n := gates.len - original_output_index - 1;
-    //@if(n != 0) @println("- inserted % casts", n);
+    //@if(n != 0) @fmtln(warn, "- inserted % casts", n);
     
     // TODO: save `widths` and use it when rendering wire values in the ui
 }

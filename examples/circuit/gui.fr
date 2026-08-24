@@ -56,6 +56,7 @@ State :: @struct {
     loading: ?@struct(start_time: i64, done: u32 = 0, frame_count := 0, root_index: i64, started_compiling := false);
     loader_thread: ?*Thread;
     have_load_work_futex: u32;
+    warnings: List(u8);
     prev_timestamp_us: i64;
     frame_time_history: RawDeque(i64);
     frame_time_history_sum: i64;
@@ -557,6 +558,14 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             goal_top_right := vec2(-100 * width, height*3);
             off = goal_top_right - circuit_top_right;
             
+            if state.loading.is_none() {
+                sdtx.color = pack_rgba(255, 255, 255, 255);
+                sdtx.origin = world_to_text_pos(tc_to_world_pos(vec2(lo.x, hi.y + 5)));
+                sdtx.pos = vec2(0);
+                sdtx.put(state.warnings.items());
+                sdtx.origin = vec2(0);
+            };
+            
             {  // vaguely the grid for custom component pins
                 grid_size :: 8;
                 sgl.color = pack_rgba(40, 40, 40, 255);
@@ -649,7 +658,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                 a := tc_to_world_pos(it.pos);
                 b := tc_to_world_pos(it.pos + vec2(dx.float().cast(), dy.float().cast()));
                 
-                out_arity, in_arity := get_arity(info, it, state.circuit);
+                out_arity, in_arity := get_arity(info, it, state.circuit, @static u8.list(panicking_allocator));
                 is_input := i >= out_arity;
                 sgl.color = pack_rgba(0, 100 * int(in_arity + out_arity > 0), 100 * int(!is_input), 255);
                 sgl.line(a, b, W/4);
@@ -1263,9 +1272,10 @@ fn load_path(state: *State, path: Str) void = {
     state.tree&.clear();
     state.circuit_arena&.reset_retaining_capacity();
     a := state.circuit_arena&.borrow();
+    state.warnings = list(a);
     
     // if it uses custom components, need to load everything to find them
-    circuits, root_index, tc_file_loader_device := Tc'load_all_circuits(path, a);
+    circuits, root_index, tc_file_loader_device := Tc'load_all_circuits(path, a, state.warnings&);
     
     // TODO: don't hardcode this!!
     path := "/Users/luke/Library/Application Support/Steam/steamapps/common/Turing Complete/campaign";
@@ -1275,7 +1285,7 @@ fn load_path(state: *State, path: Str) void = {
     state.circuit = circuits;
     if circuits.len == 0 || root_index == -1 {
         state.circuit = empty();
-        @eprintln("failed to load [%]", path);
+        @fmtln(state.warnings&, "failed to load [%]", path);
         return();
     };
     load_circuit_index_async(state, root_index, tc_file_loader_device, start);
@@ -1285,6 +1295,7 @@ fn load_circuit_index_async(state: *State, root_index: i64, tc_file_loader_devic
     @debug_assert(state.loading.is_none());
     state.world.tc_file_loader_device = tc_file_loader_device;
     state.loading = (Some = (start_time = start, root_index = root_index));
+    state.load_time = 0;
     state.tree&.clear();
     state.push_tree_node(diagram_circuit = (Some = root_index));
     if state.loader_thread.is_none() {
@@ -1318,7 +1329,7 @@ fn load_circuit_index_worker(state: *State) void = {
    
     components := @ref Component.list(a);
     components.push_all(finished_defs.components);
-    Tc'compile_circuit(circuits, root_index, components, a);
+    Tc'compile_circuit(circuits, root_index, components, a, state.warnings&);
     loading.started_compiling = true;
     
     jit_circuit(state.fr&, components.items(), a);
@@ -1346,7 +1357,6 @@ fn load_circuit_index_worker(state: *State) void = {
     state.ticks_per_eval = max(c.default_tick_rate / 10 / 60, 1);
     
     state.load_time = timestamp() - loading.start_time;
-    @eprintln("loaded in %ms", state.load_time);
     loading.done = 1;
 }
 

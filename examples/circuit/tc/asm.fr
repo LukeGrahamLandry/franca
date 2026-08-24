@@ -23,14 +23,15 @@ Parse :: @struct {
     token: ?Token;
     is_first_pass := true;
     need_second_pass_for_labels := false;
+    warn: *List(u8);
 };
 
 operators :: "+-*/%|&^";
 evaluators :: @const_slice(@as(@FnPtr(i64, i64) i64) add, sub, mul, udiv, umod, bit_or, bit_and, bit_xor);
 
-assemble :: fn(out: *List(u8), in: Str, word_size: i64, mnemonics: Str) Result(void, Str) = {
-    self: Parse = (in=in,line=1,word_size=word_size,out=out,constants=init(temp()),out_start=out.len,token=.None); self := self&;
-    parse_mnemonics(self.constants&, mnemonics);
+assemble :: fn(out: *List(u8), in: Str, word_size: i64, mnemonics: Str, warn: *List(u8)) Result(void, Str) = {
+    self: Parse = (in=in,line=1,word_size=word_size,out=out,constants=init(temp()),out_start=out.len,token=.None,warn=warn); self := self&;
+    parse_mnemonics(self.constants&, mnemonics, warn);
     // labels can be used in arithmetic so can't just do a simple patching thing
     range(0, 2) { iter |
         self.is_first_pass = iter == 0;
@@ -120,7 +121,7 @@ fn parse_unary(self: *Parse, t: Token) Result(i64, Str) = {
             value := self.constants&.get(name) || {
                 // am i seriously supposed to just allow junk?
                 //@if(!self.is_first_pass) return(Err = @tfmt("undeclared ident '%' on line %", name, self.line));
-                @if(!self.is_first_pass) @println("warning: undeclared ident '%' on line %", name, self.line);
+                @if(!self.is_first_pass) @fmtln(self.warn, "asm; undeclared ident '%' on line %", name, self.line);
                 self.need_second_pass_for_labels = true;
                 0
             };
@@ -212,7 +213,7 @@ fn next(self: *Parse) Token = {
                         @case("\"".ascii()) => "\"";
                         @case("\\".ascii()) => "\\";
                         @default => {
-                            @println("TODO: unknown asm string escape sequence %", c);
+                            @fmtln(self.warn, "TODO: unknown asm string escape sequence %", c);
                             ""
                         };
                     };
@@ -274,7 +275,7 @@ fn next(self: *Parse) Token = {
     .Eof
 }
 
-parse_mnemonics :: fn(constants: *HashMap(Str, i64), mnemonics: Str) void = {
+parse_mnemonics :: fn(constants: *HashMap(Str, i64), mnemonics: Str, warn: *List(u8)) void = {
     while => mnemonics.len > 0 {
         i := 0;
         while => i < mnemonics.len && mnemonics[i] != " ".ascii() {
@@ -288,7 +289,7 @@ parse_mnemonics :: fn(constants: *HashMap(Str, i64), mnemonics: Str) void = {
         value, remaining := convert_number(mnemonics, 10, dec_digit);
         value *= @if(negative, -1, 1);
         if remaining.len > 0 && remaining[0] != "\n".ascii() {
-            println("TODO: malformed parse_mnemonics??");
+            @fmtln(warn, "TODO: malformed parse_mnemonics??");
         }
         mnemonics = remaining.rest(int(remaining != ""));
         constants.insert(name, value);

@@ -4,6 +4,7 @@ Project :: @struct {
     sprites: RawList(*Sprite);
     broadcasts: RawList(*Node);  // TODO: why does scratch store these per sprite?
     meta: ?Raw.ApiMeta;
+    warning: RawList(u8);
 };
 Sprite :: @struct {
     name: Str;
@@ -50,6 +51,16 @@ Zip :: import("@/lib/encoding/pkzip.fr");
 
 // result is in temp(), its fine for it to point into the original sb3 bytes. 
 fn unbuild(sb3: []u8) Result(*Project, Str) = {
+    warning := @ref u8.list(temp());
+    r := unbuild(sb3, warning);
+    @if_let(r&) fn Err(msg) => {
+        warning.push_all(msg[]);
+        msg[] = warning.items();
+    };
+    r
+}
+
+fn unbuild(sb3: []u8, warning: *List(u8)) Result(*Project, Str) = {
     ecd := Zip'find(sb3) || return(Err = "expected zip file");
     files: HashMap(Str, []u8) = init(temp());
     Zip'iter(sb3, ecd) { it |
@@ -60,12 +71,13 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
     p := @try(parse_json(Raw.Project, project, temp())) return;
     project := zeroed(Project);
     project.meta = .None;
+    warning := @ref u8.list(temp());
     
     // this isn't a thing in real scratch projects but when i download them i save extra info from the api 
     if files&.get("meta.json") { meta |
         @match(parse_json(Raw.ApiMeta, meta, temp())) {
             fn Ok(it) => { project.meta = (Some = it); };
-            fn Err(msg) => @eprintln("warning: failed parse meta: %", msg);
+            fn Err(msg) => @fmtln(warning, "failed parse meta: %", msg);
         };
     };
     
@@ -188,7 +200,7 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                     value := b.inputs&.get_ptr(field) || {
                         // TODO: is this actually allowed or only on unreachable blocks? 
                         //       i guess an empty substack is unrepresentable because it's a linked list?
-                        @println("warning: (%): %.% is missing", key, b.opcode, field);
+                        @fmtln(warning, "(%): %.% is missing", key, b.opcode, field);
                         if field == "SUBSTACK" || field == "SUBSTACK1" || field == "SUBSTACK2" {
                             args&.push(temp().boxed(Node, (op = .franca_block, args = empty())));
                         } else {
@@ -243,7 +255,7 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                     mutation := find_parent_prototype(s, blocks&, key, name).or(fn(err) => {
                         it.op = .franca_string;
                         it.string = "";
-                        @println("warning: %", err);
+                        @fmtln(warning, "%", err);
                         continue();
                     }); 
                     proccode := mutation.proccode || return(Err = "missing proccode");
@@ -253,7 +265,7 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                         // TODO: is this actually allowed or only on unreachable blocks? 
                         it.op = .franca_string;
                         it.string = "";
-                        @println("warning: (%): invalid argument name (%)", key, name);
+                        @fmtln(warning, "(%): invalid argument name (%)", key, name);
                         continue();
                     };
                     @if(argumentnames.len != argumentids.len) return(Err = "mutation names/ids arity mismatch");
@@ -291,7 +303,7 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                     def := custom_blocks&.get(it.string) || {
                         // really? it's not even an error to try to call something that isn't defined.
                         // is it possible to make this situation in the website? 973800483 has it. 
-                        @println("warning: (%): % undefined proccode (%)", key, b.opcode, it.string);
+                        @fmtln(warning, "(%): % undefined proccode (%)", key, b.opcode, it.string);
                         it.op = .franca_block;
                         continue();
                     };
@@ -302,7 +314,7 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
                             value := @try(decode_value(value, s, blocks&, (key, b.opcode, field))) return;
                             a&.push(value); 
                         } else {
-                            @println("warning: (%): %.% is missing", key, b.opcode, field);
+                            @fmtln(warning, "(%): %.% is missing", key, b.opcode, field);
                             a&.push(literal_node(String = ""));
                         };
                     };
@@ -358,6 +370,7 @@ fn unbuild(sb3: []u8) Result(*Project, Str) = {
         project.sprites.items().swap(0, i);
     };
 
+    project.warning = warning.as_raw();
     (Ok = temp().boxed(Project, project))
 }
 

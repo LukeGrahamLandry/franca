@@ -14,10 +14,10 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 - hctarcs 549996194 in wasm has runtime error integer overflow when you win the first level
 - doom input in the web demo at least. also use the upcoming import_c redirects to do it on native without the os/user/libc thing.
 - tests/gui.fr -wgpu: crashes sometimes
-- capture warning spam from circuit and hctarcs
 - panic_on_volatile_bake is in drop so runs after running the main program if you aren't using default_driver. compiler/lib should drop earlier if doing ExecStyle.Aot
 - when fetching dependencies with curl can i give it multiple urls at once to be faster?
 - import_c/ffi/FrcImportLimits
+  - option to disallow MachineCode so you can't just put in a syscall instruction
   - do it for compile_host_exe too
   - show a sane source location in the error message
   - allow inserting redirects where it asks for a libc thing and you give your own. 
