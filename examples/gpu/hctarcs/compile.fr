@@ -275,18 +275,19 @@ compile :: fn(self: *Compile, it: *Node) void = {
     @if(out.items().ends_with("\n")) out.push_repeated(self.depth*4, " ".ascii());
     
     if simple_ops.ops&.get(it.op) { data |
+        if @is(it.op, .pen_changePenShadeBy, .pen_setPenShadeToNumber, .motion_ifonedgebounce, .looks_gotofrontback, .looks_changeeffectby, .control_delete_this_clone, .sensing_touchingcolor, .sensing_askandwait, .sensing_answer, .looks_seteffectto, .sensing_distanceto, .sensing_setdragmode, .sensing_of) {
+            @fmtln(self.warning&, "TODO: %", it.op);
+        };
+    
         @if(data.need_self) @fmt(out, "s.");
         @fmt(out, "%(", it.op);
         op := it.op;
-        for it.args { it |
-            compile(self, it);
-
-            // TODO: fold if it's a constant string
-            // TODO: factor out and store the lookup name in simple_ops
-            @if(op == .looks_switchcostumeto) @fmt(out, ".lookup_costume_index(s.sprite)");
-            @if(op == .looks_switchbackdropto) @fmt(out, ".lookup_costume_index(s.canvas.stage)");
-            @if(op == .sensing_keypressed) @fmt(out, ".lookup_key_index(s)");
-            
+        enumerate it.args { i, it |
+            if i == data.lookup_arg_index.zext() {
+                compile_lookup(self, op, it[]);
+            } else {
+                compile(self, it[]);
+            };
             @fmt(out, ", ");
         };
         @fmt(out, ")");
@@ -300,10 +301,6 @@ compile :: fn(self: *Compile, it: *Node) void = {
     ) {
         // i don't do sound yet
         return @fmt(out, "/* % */", it.op);
-    };
-    
-    if @is(it.op, .sound_sounds_menu, .looks_costume, .sensing_touchingobjectmenu, .looks_backdrops, .sensing_keyoptions, .control_create_clone_of_menu, .pen_menu_colorParam, .sensing_distancetomenu, .sensing_of_object_menu, .motion_pointtowards_menu) {
-        return compile(self, it.args[0]);
     };
     
     @match(it.op) {
@@ -377,7 +374,7 @@ compile :: fn(self: *Compile, it: *Node) void = {
             suffix := it.args[1].string;
             suffix := @if(suffix == "e ^", "e_pow", suffix);
             suffix := @if(suffix == "10 ^", "10_pow", suffix);
-            @assert(simple_ops.mathop_names.contains(suffix), "TODO: %.%", it.op, suffix);
+            @assert(simple_ops.op_names&.get_ptr(it.op).unwrap().contains(suffix), "TODO: %.%", it.op, suffix);
             @fmt(out, "%_%(", it.op, suffix);
             compile(self, it.args[0]);
             @fmt(out, ")");
@@ -410,8 +407,8 @@ compile :: fn(self: *Compile, it: *Node) void = {
         }
         fn event_broadcast() => {
             @fmt(out, "idx := ");
-            compile(self, it.args[0]);
-            @fmt(out, ".lookup_broadcast_index(s);\n");
+            compile_lookup(self, it.op, it.args[0]);
+            @fmt(out, ";\n");
             @fmt(out, "s.canvas.send_event(Broadcast = idx);\n");
             // TODO: this isn't good enough because might be inside a custom block and then need to return all the way up. 
             //       so any custom blocks that might be called from an event_whenbroadcastreceived 
@@ -477,6 +474,25 @@ compile :: fn(self: *Compile, it: *Node) void = {
             compile(self, body);
             @fmt(out, ";};\n");
         }
+        fn sensing_of() => {
+            object, property := (it.args[0], it.args[1]);
+            @assert_eq(property.op, .franca_string, "sensing_of property must be constant");
+            property := property.string;
+            // TODO: reciever can be computed and then need to switch on it because var index won't be the same in each class
+            @assert_eq(object.op, .franca_string, "TODO: sensing_of non-constant reciever");
+            object := object.string;
+            if object == "_stage_" {
+                object = "Stage";
+            };
+            class_i := self.project.sprites.index_of(fn(it) => it.name == object) 
+                || @panic("invalid sensing_of object (%)", object);
+            var_i := self.project.sprites[class_i].variables.index_of(fn(it) => it.string == property)
+                || @panic("invalid sensing_of(%) property (%)", object, property);
+            
+            // TODO: there are special properties for pos/dir/costume/size/volume
+            // always the main sprite not a clone
+            return @fmt(out, "s.canvas.clones[%].vars()[%]", class_i, var_i);
+        }
         @default => {
             if @is(it.op, .data_hidevariable, .data_showvariable, .data_hidelist, .data_showlist) {
                 var := it.args[0];
@@ -497,12 +513,17 @@ compile :: fn(self: *Compile, it: *Node) void = {
                 return @fmt(out, "%.class.monitors[%].hide = %;\n", s, m, h);
             };
             
+            if @is(it.op, .looks_costumenumbername, .sensing_current) {
+                suffix := it.args[0].string;
+                @assert(simple_ops.op_names&.get_ptr(it.op).unwrap().contains(suffix), "TODO: %.%", it.op, suffix);
+                return @fmt(out, "s.%_%()", it.op, suffix);
+            };
+            
             @panic("TODO: compile %", it.op);
         };
     };
 }
 
-// TODO: are you always supposed to yield on the first iteration? or should there be one direct call. 
 fn compile_async(self: *Compile, continuation: []*Node) void = {
     out := self.out;
     @if(continuation.len == 0) return();
@@ -548,8 +569,8 @@ fn compile_async(self: *Compile, continuation: []*Node) void = {
         // allocate a tree of all the scripts being waited on. 
         fn event_broadcastandwait() => {
             @fmt(out, "idx := ");
-            compile(self, it.args[0]);
-            @fmt(out, ".lookup_broadcast_index(s);\n");
+            compile_lookup(self, it.op, it.args[0]);
+            @fmt(out, ";\n");
             @fmt(out, "s.push_val_async(0);\n");
             @fmt(out, "waiter := s.data.futures[s.futures.len - 1]&;\n");
             @fmt(out, "waiter[] += s.canvas.send_event((Broadcast = idx), (Some = waiter)).float();\n");
@@ -848,11 +869,75 @@ fn lower(self: *Compile, it: **Node) void = {
             n[2] = (op = .motion_direction, args = empty());
             it[] = n[0]&;
         }
-        @default => ();
+        @default => {
+            if @is(it.op, .sound_sounds_menu, .looks_costume, .sensing_touchingobjectmenu, .looks_backdrops, .sensing_keyoptions, .control_create_clone_of_menu, .pen_menu_colorParam, .sensing_distancetomenu, .sensing_of_object_menu, .motion_pointtowards_menu) {
+                it[] = it.args[0];
+                @assert(@is(it.op, .franca_string, .franca_literal), "menu op expected a constant");
+                return self.lower(it);
+            };
+        };
     };
     each it.args.rest(int(it.op == .procedures_call)) { it |
         self.lower(it);
     };
+}
+
+// oval inputs with drop downs can technically be computed strings but the common case is a constant string. 
+fn compile_lookup(self: *Compile, op: S.Raw.Opcode, it: *Node) void = {
+    out := self.out;
+    // TODO: don't get bamboozled if you name your broadcast a number
+    if it.op == .franca_string {
+        string := it.string;
+        if op == .sensing_keypressed {
+            if Rt.key_indices.get(string) { i |
+                return @fmt(out, "%", i);
+            } else {
+                @fmtln(self.warning&, "invalid key name (%)", string);
+            };
+        };
+        if @is(op, .looks_switchcostumeto, .looks_switchbackdropto) {
+            sprite_i := @if(op == .looks_switchcostumeto, self.current_sprite, 0);
+            sprite := self.project.sprites[sprite_i]&;
+            if sprite.costumes.index_of(fn(it) => it.name == string) { i |
+                return @fmt(out, "%", i);
+            } else {
+                @fmtln(self.warning&, "invalid costume name for (%): (%)", sprite.name, string);
+            };
+        }
+        if @is(op, .pen_setPenColorParamTo, .pen_changePenColorParamBy) {
+            return @fmt(out, "%", Rt'lookup_pen_field_index(string));
+        };
+        if @is(op, .event_broadcastandwait, .event_broadcast) {
+            if self.project.broadcasts.index_of(fn(it) => it.string == string) { i |
+                return @fmt(out, "%", i);
+            } else {
+                @fmtln(self.warning&, "invalid broadcast name (%)", string);
+            };
+        };
+    };
+    
+    if it.op == .franca_literal && @is(op, .looks_switchcostumeto, .looks_switchbackdropto) {
+        sprite_i := @if(op == .looks_switchcostumeto, self.current_sprite, 0);
+        sprite := self.project.sprites[sprite_i]&;
+        if it.literal > 0 && it.literal <= sprite.costumes.len.float() && it.literal == floor(it.literal) {
+            return @fmt(out, "%", it.literal - 1);
+        } else {
+            @fmtln(self.warning&, "invalid costume index for (%): (%)", sprite.name, it.literal);
+        };
+    };
+    
+    compile(self, it);
+    
+    @fmt(out, "%", @match(op) {
+        fn looks_switchcostumeto() => ".lookup_costume_index(s.sprite)";
+        fn looks_switchbackdropto() => ".lookup_costume_index(s.canvas.stage)";
+        fn sensing_keypressed() => ".lookup_key_index(s)";
+        fn pen_setPenColorParamTo() => ".coerce_string().Rt'lookup_pen_field_index()";
+        fn pen_changePenColorParamBy() => ".coerce_string().Rt'lookup_pen_field_index()";
+        fn event_broadcastandwait() => ".lookup_broadcast_index(s)";
+        fn event_broadcast() => ".lookup_broadcast_index(s)";
+        @default => @panic("TODO: lookup for %", op);
+    });
 }
 
 fn const_string(self: *Compile, it: Str) i64 = 
@@ -875,9 +960,9 @@ fn embed_bytes(out: *List(u8), name: Str, data: Str) void = {
 }
 
 simple_ops :: @static {
-    Data :: @struct(need_self: bool, has_result: bool);
+    Data :: @struct(need_self: bool, has_result: bool, lookup_arg_index: u8);
     out: OptionalEnumMap(S.Raw.Opcode, Data) = empty();
-    mathop_names := Str.list(ast_alloc());
+    op_names: HashMap(S.Raw.Opcode, RawList(Str)) = init(ast_alloc());
     I :: Type.scope_of(Rt.impl);
     for get_constants(I) { n | 
         name := n.str();
@@ -897,18 +982,36 @@ simple_ops :: @static {
             func.ret = (Finished = Rt.Value);
         };
         
-        if S.Raw.Opcode.from_name(name) { op |
-            out&.insert(op, (need_self = s, has_result = v));
-        } else {
-            prefix := "operator_mathop_";
-            if name.starts_with(prefix) {
-                mathop_names&.push(name.rest(prefix.len));
-            } else {
-                @println("warning: unknown opcode in Rt.impl: %", name);
+        func := get_function_ast(fid, true, false, true, false);
+        
+        lookup_arg_index: u8 = 255;
+        enumerate func.arg.bindings& { i, it |
+            @debug_assert(it.ty&.is(.Finished));
+            if it.ty.Finished == i64 {
+                lookup_arg_index = (i - int(s)).trunc();
             };
         };
+        
+        if S.Raw.Opcode.from_name(name) { op |
+            out&.insert(op, (need_self = s, has_result = v, lookup_arg_index = lookup_arg_index));
+        } else {
+            ok := false;
+            if name.index_of("_".ascii()) { i |
+                if name.rest(i + 1).index_of("_".ascii()) { j |
+                    subname := name.rest(i + j + 2);
+                    name := name.slice(0, i + j + 1);
+                    if S.Raw.Opcode.from_name(name) { op |
+                        ops := op_names&.get_or_insert(op, => empty());
+                        ops.push(subname, ast_alloc());
+                        ok = true;
+                    };
+                };
+            };
+            @if(!ok) @println("warning: unknown opcode in Rt.impl: %", name);
+        };
     };
-    @anon_literal(ops = out, mathop_names = mathop_names.items())
+    //looks_costumenumbername_number
+    @anon_literal(ops = out, op_names = op_names.raw)
 };
 
 // `v` needs to be in scope as a slice to write into. 

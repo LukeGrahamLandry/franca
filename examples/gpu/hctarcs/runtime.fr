@@ -54,7 +54,14 @@ SpriteInstance :: @rec @struct {  // !Sized
     // TODO: since you can query your position, might need to store this as f64 in case you do hacky thing like using it as a variable. 
     pos: Vec2 = vec2(0);
     direction: f64 = 90;  // deg. 0 is up, 90 is right. 
-    pen: (@struct(down := false, colour: u32 = 255, size: f64 = 1)) = ();
+    pen: (@struct {
+        size: f64 = 1;
+        down := false;
+        // you can set one component of hsv at a time and rgb->hsv->rgb isn't lossless because there are multiple white/black. 
+        hsv_valid := false;  // be lazy for programs that only set to a hex colour don't bother computing hsv
+        colour: u32 = 255;  // AARRGGBB
+        hsva: Array(f64, 4) = (0,0,0,0);  // 0-1  // TODO: chunky. don't need this much precision at all
+    }) = ();
     looks: (@struct(costume := 0, size: f64 = 1, hide := false, thinking := false, say: Value = 0)) = ();
     // each trigger can only have one running at a time so this is parallel to class.events 
     scripts: []ScriptSlot;
@@ -64,6 +71,7 @@ SpriteInstance :: @rec @struct {  // !Sized
 
 SpriteClass :: @rec @struct {
     name: Str;
+    // TODO: sort these and precompute first index of each type so don't have to iter all in send_event
     events: []Handler;
     Handler :: @struct(trigger: Trigger, callee: @FnPtr(s: *Script) void);
     costumes: []Costume;
@@ -345,33 +353,33 @@ pen_setPenColorToColor :: fn(s, a) void = {
         };
     };
     s.sprite.pen.colour = a.coerce_number().floor().int().trunc(); 
+    s.sprite.pen.hsv_valid = false;
 };
 
-fn update_pen_field(pen_colour: *u32, param: Value, $update: @Fn(old: f64) f64) void = {
-    rgb := unpack_scratch_rgba(pen_colour[]);
-    H, S, V := rgb2hsv(rgb&[0], rgb&[1], rgb&[2]);
-    hsv: Array(f64, 4) = (H, S, V, rgb&[3]);
-    // TODO: lookup_index for param
-    dest := @switch(param.coerce_string()) {
-        @case("color") => hsv&[0]&;
-        @case("saturation") => hsv&[1]&;
-        @case("brightness") => hsv&[2]&;
-        @case("transparency") => hsv&[3]&;  // TODO: wasteful to do all the conversion in this case
-        @default => return();
+fn update_pen_field(pen: *FieldType(SpriteInstance, .pen), idx: i64, $update: @Fn(old: f64) f64) void = {
+    @if(idx == -1) return();
+    if !pen.hsv_valid {
+        rgb := unpack_scratch_rgba(pen.colour);
+        H, S, V := rgb2hsv(rgb&[0], rgb&[1], rgb&[2]);
+        pen.hsva = (H, S, V, rgb&[3]);
+        pen.hsv_valid = true;
     };
+    hsv := pen.hsva&;
+    dest := hsv[idx]&;
     dest[] = update(dest[]);
-    r, g, b := hsv2rgb(hsv&[0], hsv&[1], hsv&[2]); 
-    pen_colour[] = pack_scratch_rgba(r, g, b, hsv&[3]);
+    // TODO: wasteful to do all the conversion if its alpha
+    r, g, b := hsv2rgb(hsv[0], hsv[1], hsv[2]); 
+    pen.colour = pack_scratch_rgba(r, g, b, hsv[3]);
 }
 
-// TODO: probably mod instead of clamp
-pen_setPenColorParamTo :: fn(s, param, value) void = {
-    value := value.coerce_number().clamp(0, 100) / 100;
-    update_pen_field(s.sprite.pen.colour&, param, fn(_) => value);
+pen_setPenColorParamTo :: fn(s, param: i64, value) void = {
+    value := value.coerce_number().cycle(100);
+    update_pen_field(s.sprite.pen&, param, fn(_) => value);
 }
-pen_changePenColorParamBy :: fn(s, param, value) void = {
-    value := value.coerce_number().clamp(0, 100) / 100;
-    update_pen_field(s.sprite.pen.colour&, param, fn(old) => clamp(old + value, 0, 1));
+
+pen_changePenColorParamBy :: fn(s, param: i64, value) void = {
+    value := value.coerce_number();
+    update_pen_field(s.sprite.pen&, param, fn(old) => cycle(old*100 + value, 100));
 }
 
 // TODO: what is shade in hsv? https://en.scratch-wiki.info/wiki/Pen_Shade_(value) is it >50 is saturation and <50 is value?
@@ -396,7 +404,6 @@ pen_stamp :: fn(s) void = {
 looks_setsizeto :: fn(s, percent) void = { s.sprite.looks.size = percent / 100; }
 looks_changesizeby :: fn(s, percent) void = { s.sprite.looks.size += percent / 100; }
 looks_size :: fn(s) = s.sprite.looks.size * 100;
-// in scratch input is a name. here compiler inserts lookup_costume_index calls so they can (eventually) be folded. 
 looks_switchcostumeto :: fn(s, idx: i64) void = {
     s.sprite.looks.costume = idx;
 }
@@ -455,7 +462,9 @@ control_create_clone_of :: fn(s, which) void = {
 data_deletealloflist :: fn(s, list) void = list.to_obj()[].list&.clear();
 data_lengthoflist :: fn(s, list) = list.to_obj()[].list.len.float();
 data_addtolist :: fn(s, item, list) void = {
-    list.to_obj()[].list&.push(item, s.canvas.gpa);
+    list := list.to_obj()[].list&;
+    @if(list.len >= 200_000) return();
+    list.push(item, s.canvas.gpa);
 }
 data_itemoflist :: fn(s, idx, lst) = {
     list, i := s.coerce_list_index(lst, idx) 
@@ -480,6 +489,7 @@ data_insertatlist :: fn(s, item, idx, lst) void = {
         s.data_addtolist(item, lst);
     };
     list, i := s.coerce_list_index(lst, idx) || return();
+    @if(list.len >= 200_000) return();
     list.insert(i, item, s.canvas.gpa);
 }
 data_listcontainsitem :: fn(s, item, list) = data_itemnumoflist(s, item, list).ne(0).from_bool();
@@ -527,13 +537,8 @@ sensing_mousex :: fn(s) = s.canvas.sensing.mouse.pos.x.cast();
 sensing_mousey :: fn(s) = s.canvas.sensing.mouse.pos.y.cast();
 sensing_mousedown :: fn(s) = s.canvas.sensing.mouse.down.from_bool();
 operator_round :: fn(a) = round(a.coerce_number());
-looks_costumenumbername :: fn(s, which) = { 
-    @switch(which.coerce_string()) {   // TODO: fold
-        @case("name") => s.sprite.class.costumes[s.sprite.looks.costume].name;
-        @case("number") => s.sprite.looks.costume.float() + 1;
-        @default => unreachable();
-    }
-};
+looks_costumenumbername_name :: fn(s) = s.sprite.class.costumes[s.sprite.looks.costume].name;
+looks_costumenumbername_number :: fn(s) = s.sprite.looks.costume.float() + 1;
 sensing_askandwait :: fn(s, q) void = println("TODO: sensing_askandwait");
 sensing_answer :: fn(s) = { println("TODO: sensing_answer"); 0 }
 sensing_resettimer :: fn(s) void = { s.canvas.sensing.timer_start = s.canvas.timestamp_s(); }
@@ -545,27 +550,15 @@ sensing_dayssince2000 :: fn(s) = {
     (s.canvas.timestamp_s() / (60*60*24)) + 9660
 };
 // month,date,day are 1 indexed; hour,minute,second are 0 indexed;
-sensing_current :: fn(s, which) = {
-    // TODO: localtime_r
-    which := which.coerce_string();
-    second := s.canvas.timestamp_s();
-    @switch(which) {
-        @case("SECOND") => second.mod(60).float();
-        @case("MINUTE") => second.div(60).mod(60).float();
-        @case("HOUR") => second.div(60*60).mod(24).float();
-        @case("DATE") => 1;
-        @case("DAYOFWEEK") => 1;  // sunday
-        @case("MONTH") => 1;
-        @case("YEAR") => 2026;
-        @default => @panic("sensing_current: %", which);
-    }
-}
+sensing_current_SECOND :: fn(s) = s.canvas.timestamp_s().floor().int().mod(60).float();
+sensing_current_MINUTE :: fn(s) = s.canvas.timestamp_s().floor().int().div(60).mod(60).float();
+sensing_current_HOUR :: fn(s) = s.canvas.timestamp_s().floor().int().div(60*60).mod(24).float();
+sensing_current_DATE :: fn(s) = 1;
+sensing_current_DAYOFWEEK :: fn(s) = 1;
+sensing_current_MONTH :: fn(s) = 1;
+sensing_current_YEAR :: fn(s) = 2026;
 // TODO: let you choose this
 sensing_username :: fn(s) = s.canvas.new_string("User1234");
-// TODO: which clone does it use? 
-// TODO: property is constant so don't have to have the variable names at runtime. 
-//       but if object is computed, will need to switch on it to choose which local index to use. 
-sensing_of :: fn(s, object, property) = { @println("TODO: sensing_of % %", object.coerce_string(), property.coerce_string()); 0 }
 sensing_setdragmode :: fn(s, mode) void = @println("TODO: sensing_setdragmode %", mode.coerce_string());
 sensing_loudness :: fn(s) = 0;
 sound_volume :: fn(s) = 0;
@@ -581,7 +574,9 @@ acos :: fn(a: f64) f64 #libc;
 asin :: fn(a: f64) f64 #libc;
 atan :: fn(a: f64) f64 #libc;
 fmod :: fn(a: f64, b: f64) f64 #libc;
-round :: fn(round: f64) f64 #libc;
+round :: fn(a: f64) f64 #libc;
+fn trunc(a: f64) f64 = { trunc :: fn(a: f64) f64 #libc; trunc(a) }
+fract :: fn(a: f64) f64 = a - trunc(a);
 
 fn update_pos(s: *Script, $body: @Fn(old: Vec2) Vec2) void = {
     old := s.sprite.pos;
@@ -621,6 +616,9 @@ fn lookup_costume_index(name: Value, sprite: *SpriteInstance) i64 = {
     };
     0
 }
+
+lookup_pen_field_index :: fn(name: Str) i64 =  
+    (@const_slice("color", "saturation", "brightness", "transparency")).index_of(name) || -1;
 
 key_indices :: @static {
     out: HashMap(Str, i64) = init(ast_alloc());
@@ -830,6 +828,18 @@ fn assign_strings(c: *Canvas, v: []Value, indices: []Ty(u32, u32)) void = {
     };
 }
 
+// TODO: does this wrap negatives the right direction?
+// TODO: is there a less insane way to do this? maybe its a normal operation i just don't know the name of. 
+// fraction of how far `value` is between 0 and `range` inclusive. so cycles like (fmod(value, range)/range) but value==range outputs 1.0. 
+cycle :: fn(value: f64, range: f64) f64 = {
+    value := value.abs();
+    if value > range {
+        value -= floor(value/range - 0.0001) * range;
+    };
+    value /= range;
+    value
+}
+
 // (r,g,b,a)
 pack_scratch_rgba :: fn(c: Array(f64, 4)) u32 = {
     f :: fn(x, n) => c&[x].mul(255).floor().int().bit_and(255).shift_left(n);
@@ -843,8 +853,8 @@ unpack_scratch_rgba :: fn(x: u32) Array(f64, 4) = {
 // 0.0 to 1.0
 hsv2rgb :: fn(H: f64, S: f64, V: f64) Ty(f64, f64, f64) = {
     H *= 360.0;
-    f :: fn(n) => {
-        k := fmod(n.float() + (H / 60.0), 6.0);
+    f :: fn(n: f64) => {
+        k := fmod(n + (H / 60.0), 6.0);
         abs(V - V * S * max(0.0, min(min(k, 4 - k), 1.0)))
     };
     (f(5), f(3), f(1))

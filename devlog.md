@@ -1,4 +1,12 @@
 
+## (Aug 24) sb3
+
+- hoist menu index lookups of constant strings and be more generic about the ones that are seperate impls
+- sensing_of to access vars almost fixes colour wheel click details, but now the box is the wrong colour (always red). 
+- hmm consider there are multiple hsv tuples for white and black (hue does nothing when saturation is 0). 
+  you can't set one hsv component at a time, converting to rgb and back after each one. need to store as hsv. works!
+- 984959784 seems to hang in list insert if i sigint it. 200k limit help? nope. 
+
 ## (Aug 22,23)
 
 import_c

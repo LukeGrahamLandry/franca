@@ -32,7 +32,6 @@ most other blocks are not implemented yet.
 - they do nan in an insane way? 0 / 0 == NaN but (0 / 0) + 1 == 1 but (0 / 0) > 50 == true
 - implement more blocks
   - async
-    - broadcast and wait
     - glide _ secs to _ (waits until the glide is done)
     - ask _ and wait
   - events
@@ -49,10 +48,10 @@ most other blocks are not implemented yet.
   - see the code as blocks
   - drag, click bounds, scroll, ask
   - dump Node ast back to builder franca code and textbox edit as franca
-  - collect warnings when loading the project and show them at the end
 - add simple tests: looks_sayforsecs,motion_glidesecstoxy,broadcast,broadcastandwait,clone,timer,setbackdropandwait, 0x_hex and #_colour strings
 - what happens if you broadcast the same message again while someone else is waiting on a broacast_and_wait
 - should look at the extensions array first to give nicer error message before dying on an unknown upcode
+- localtime_r for correct sensing_current
 
 ## notes
 
