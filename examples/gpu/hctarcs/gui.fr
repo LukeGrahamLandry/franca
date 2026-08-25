@@ -9,6 +9,7 @@ State :: @struct {
     image_i: i64;
     dirty: bool;
     ui: Ui.State;
+    idle_last_frame: bool;
     
     turbo_mode: bool;
     paused: bool;
@@ -26,7 +27,10 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     
     c := state.canvas&;
-    @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
+    if Easy'should_skip_frame(sapp, state.dirty&) {
+        state.idle_last_frame = true;
+        return();
+    };
     
     if !state.paused {
     // TODO: don't spam if all are in a wait block
@@ -57,7 +61,20 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     Easy'draw_screen_fit_image(sg, sapp, state.draw&, state.img, c.frame_pixels, c.size.x / c.size.y);
     state.draw&.draw_layer(sg, 0);
     @if(FEAT_UI) {
-        Ui'Nuklear'nk_input_end(state.ui.ctx&);
+        ctx := state.ui.ctx&;
+        
+        if state.idle_last_frame {
+            // this avoids situation where you scroll one tick of scroll wheel and the 
+            // bar updates but the content doesn't move until you send another event. 
+            // https://github.com/Immediate-Mode-UI/Nuklear/blob/0dbc52f86404f9e1f26ce0df3015ed23ff54a726/nuklear.h#L1049
+            Ui'Nuklear'nk_input_end(ctx);
+            draw_ui(state);
+            Ui'Nuklear'nk_clear(ctx);
+            Ui'Nuklear'nk_input_begin(ctx);
+            state.idle_last_frame = false;
+        };
+    
+        Ui'Nuklear'nk_input_end(ctx);
         draw_ui(state);
         draw(state.ui&, sg, sapp);
     };

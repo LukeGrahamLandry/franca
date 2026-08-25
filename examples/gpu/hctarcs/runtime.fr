@@ -195,16 +195,27 @@ fn coerce_number(it: Value) f64 = {
     @if(it.is_number()) return(it);
     @if(it.is_bool()) return(it.to_bool().int().float());
     if it.is_string() { 
-        it := it.to_obj();
-        if it.string.s.starts_with("0x") {
-            n, s := convert_number(it.string.s.rest(2), 16, hex_digit);
-            @if(s.len == 0) return(n.float());
+        if string_to_number(it.to_obj()[].string.s) { n |
+            return n;
         };
-        n, s := parse_float(it.string.s);
-        // TODO: i think its supposed to ignore whitespace
-        @if(s.len == 0) return(n);
     };
     0
+}
+
+string_to_number :: fn(string: Str) ?f64 = {
+    if string.starts_with("0x") {
+        n, s := convert_number(string.rest(2), 16, hex_digit);
+        @if(s.len == 0) return(Some = n.float());
+    };
+    n, s := parse_float(string);
+    // TODO: i think its supposed to ignore whitespace
+    @if(s.len == 0) return(Some = n);
+    @switch(string) {
+        @case("-Infinity") => return(Some = -1.0/0.0);
+        @case("Infinity") => return(Some = 1.0/0.0);
+        @default => ();
+    };
+    .None
 }
 
 fn coerce_string(it: Value, out: *List(u8)) void = {
@@ -317,7 +328,7 @@ operator_multiply :: fn(a, b) = a * b;
 operator_divide :: fn(a, b) = a / b;
 // TODO: these are polymorphic but if compiler knows both types, don't have to do the checks 
 // TODO: how are strings ordered
-operator_lt :: fn(a: Any, b: Any) bool = a < b;
+operator_lt :: fn(a: Any, b: Any) bool = a.coerce_number() < b.coerce_number();
 operator_equals :: fn(s, a: Any, b: Any) bool = {
     @if(a.is_number() && b.is_number()) return(a == b);
     a.coerce_string() == b.coerce_string()
@@ -878,9 +889,12 @@ fn init_strings(c: *Canvas, strings: []Str) void = {
     });
 }
 
-fn assign_strings(c: *Canvas, v: []Value, indices: []Ty(u32, u32)) void = {
-    for indices { d, s |
+fn assign_strings(c: *Canvas, v: []Value, indices: []u32) void = {
+    i := 0;
+    while => i < indices.len {
+        d, s := (indices[i], indices[i + 1]);
         v[d.zext()] = c.constants[s.zext()];
+        i += 2;
     };
 }
 

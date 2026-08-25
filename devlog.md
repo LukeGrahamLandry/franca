@@ -13,6 +13,9 @@
     hmm?? no maybe i just got lucky? that's offputting... im not going crazy tho cause it does have the numbers i printed as hex in a list. 
   - now i can also not do the coercisons when its obviously not need based on the argumenbt blocks
   - not doing useless from_bool+to_bool quicksort average: 0.125 -> 0.096
+  - can't assume any strings that parse as numbers can be converted while loading. 
+    - its fine if only used as number or if parse->display is lossless
+  - coerce in lt costs 0.20 on quicksort, lowering changevarby to have a coerce costs 0.05
 
 ## (Aug 24) sb3
 
