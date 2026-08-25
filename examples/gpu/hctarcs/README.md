@@ -25,9 +25,9 @@ most other blocks are not implemented yet.
 - support+test outputting broadcasts/keys from the ast builder
 - images should be drawn at half size
 - use the right value tags when outputting .sb3
-- coerce_number for all the math ops
 - gpu rendering
-- infer types
+- prepass to infer types of vars
+  - if all uses of a var/param are the same type can hoist the conversion to writes
 - hell, they're gonna have SVGs in there
 - they do nan in an insane way? 0 / 0 == NaN but (0 / 0) + 1 == 1 but (0 / 0) > 50 == true
 - implement more blocks
@@ -37,7 +37,6 @@ most other blocks are not implemented yet.
   - events
     - scroll sends up/down arrow event but the is_pressed blocks say false
   - is touching, if on edge bounce
-  - clones
   - drag
 - strings should be utf16
 - ui
@@ -61,3 +60,4 @@ most other blocks are not implemented yet.
   when an oval is chosen from the menu, there's an inserted fake block that has a field as though it were a rectangle. 
 - there are some blocks that don't exist in the website's ui but still work if projects have them. 
   (while, for_each).
+- expressions can't be async and can't have side effects

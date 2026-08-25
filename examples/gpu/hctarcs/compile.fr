@@ -269,6 +269,11 @@ Compile :: @struct {
 // TODO: generic way to insert string->index lookups for costumes,broadcast,clone_of,etc.
 //       similarly many of the ones with constant fields should be compiled to call different functions like mathop. 
 
+fn compile_cast(self: *Compile, it: *Node, dest: ValueType) void = {
+    compile(self, it);
+    push_cast(self, dest, it.flags.type);
+}
+
 // the sync parts can always be compiled this way. 
 compile :: fn(self: *Compile, it: *Node) void = {
     out := self.out;
@@ -283,15 +288,21 @@ compile :: fn(self: *Compile, it: *Node) void = {
         @fmt(out, "%(", it.op);
         op := it.op;
         enumerate it.args { i, it |
-            if i == data.lookup_arg_index.zext() {
+            if data.arg[i] == .Index {
                 compile_lookup(self, op, it[]);
             } else {
                 compile(self, it[]);
             };
+            push_cast(self, data.arg[i], it.flags.type);
             @fmt(out, ", ");
         };
         @fmt(out, ")");
-        @if(!data.has_result) @fmt(out, ";\n");
+        @match(data.ret) {
+            fn Bool() => @fmt(out, ".from_bool()");
+            fn Void() => @fmt(out, ";\n");
+            @default => ();
+        };
+        it.flags.type = data.ret;
         return();
     };
     
@@ -304,7 +315,9 @@ compile :: fn(self: *Compile, it: *Node) void = {
     };
     
     @match(it.op) {
-        fn franca_literal() => if abs(it.literal) != 1.0/0.0 && it.literal.floor() == it.literal {
+        fn franca_literal() => {
+            it.flags.type = .Float;
+        if abs(it.literal) != 1.0/0.0 && it.literal.floor() == it.literal {
             if it.literal >= 0 {
                 @fmt(out, "%.0", it.literal);
             } else {
@@ -313,6 +326,7 @@ compile :: fn(self: *Compile, it: *Node) void = {
         } else {
             @fmt(out, "(@as(f64) bitcast(%))", fmt_hex(it.literal));
         };
+        }
         fn franca_string() => @fmt(out, "s.canvas.constants[%]", self.const_string(it.string));
         fn franca_block() => {
             if it.args.len == 1 {
@@ -350,25 +364,28 @@ compile :: fn(self: *Compile, it: *Node) void = {
             compile(self, it.args[0]);
             @fmt(out, ";\n");
         }
+        // TODO: what if the var is a string
         fn data_changevariableby() => {
             compile(self, it.args[1]);
             @fmt(out, " += ");
-            compile(self, it.args[0]);
+            compile_cast(self, it.args[0], .Float);
             @fmt(out, ";\n");
         }
         fn operator_or() => {
-            @fmt(out, "from_bool(");
-            compile(self, it.args[0]);
-            @fmt(out, ".to_bool() || ");
-            compile(self, it.args[1]);
-            @fmt(out, ".to_bool())");
+            @fmt(out, "(");
+            compile_cast(self, it.args[0], .Bool);
+            @fmt(out, " || ");
+            compile_cast(self, it.args[1], .Bool);
+            @fmt(out, ").from_bool()");
+            it.flags.type = .Bool;
         }
         fn operator_and() => {
-            @fmt(out, "from_bool(");
-            compile(self, it.args[0]);
-            @fmt(out, ".to_bool() && ");
-            compile(self, it.args[1]);
-            @fmt(out, ".to_bool())");
+            @fmt(out, "(");
+            compile_cast(self, it.args[0], .Bool);
+            @fmt(out, " && ");
+            compile_cast(self, it.args[1], .Bool);
+            @fmt(out, ").from_bool()");
+            it.flags.type = .Bool;
         }
         fn operator_mathop() => {
             suffix := it.args[1].string;
@@ -376,8 +393,9 @@ compile :: fn(self: *Compile, it: *Node) void = {
             suffix := @if(suffix == "10 ^", "10_pow", suffix);
             @assert(simple_ops.op_names&.get_ptr(it.op).unwrap().contains(suffix), "TODO: %.%", it.op, suffix);
             @fmt(out, "%_%(", it.op, suffix);
-            compile(self, it.args[0]);
+            compile_cast(self, it.args[0], .Float);
             @fmt(out, ")");
+            it.flags.type = .Float;
         }
         fn procedures_call() => {
             def := it.args[0];
@@ -443,22 +461,22 @@ compile :: fn(self: *Compile, it: *Node) void = {
         }
         fn control_repeat_until() => {
             @fmt(out, "while => !");
-            compile(self, it.args[0]);
-            @fmt(out, ".to_bool() {\n");
+            compile_cast(self, it.args[0], .Bool);
+            @fmt(out, " {\n");
             compile(self, it.args[1]);
             @fmt(out, ";};\n");
         }
         fn control_repeat() => {
             @fmt(out, "range(0, ");
-            compile(self, it.args[0]);
+            compile_cast(self, it.args[0], .Float);
             @fmt(out, ".int()) { _ |\n");
             compile(self, it.args[1]);
             @fmt(out, ";};\n");
         }
         fn control_if_else() => {
             @fmt(out, "if ");
-            compile(self, it.args[0]);
-            @fmt(out, ".to_bool() {\n");
+            compile_cast(self, it.args[0], .Bool);
+            @fmt(out, " {\n");
             compile(self, it.args[1]);
             @fmt(out, ";} else {\n");
             compile(self, it.args[2]);
@@ -467,7 +485,7 @@ compile :: fn(self: *Compile, it: *Node) void = {
         fn control_for_each() => {
             limit, body, var := (it.args[0], it.args[1], it.args[2]);
             @fmt(out, "range(0, ");
-            compile(self, limit);
+            compile_cast(self, limit, .Float);
             @fmt(out, ".int()) { i |\n");
             compile(self, var);
             @fmt(out, " = i.float();\n");
@@ -515,6 +533,7 @@ compile :: fn(self: *Compile, it: *Node) void = {
             
             if @is(it.op, .looks_costumenumbername, .sensing_current) {
                 suffix := it.args[0].string;
+                it.flags.type = @if(it.op == .sensing_current || suffix == "number", .Float, .String);
                 @assert(simple_ops.op_names&.get_ptr(it.op).unwrap().contains(suffix), "TODO: %.%", it.op, suffix);
                 return @fmt(out, "s.%_%()", it.op, suffix);
             };
@@ -590,8 +609,8 @@ fn compile_async(self: *Compile, continuation: []*Node) void = {
             declare_cont("body");
             cond := it.args[0];
             @fmt(out, "if !");
-            compile(self, cond);
-            @fmt(out, ".to_bool() {\n");
+            compile_cast(self, cond, .Bool);
+            @fmt(out, " {\n");
             push_async(true);   // continue waiting
             @fmt(out, "};\n// %.end\n", it.op);
         }
@@ -618,9 +637,10 @@ fn compile_async(self: *Compile, continuation: []*Node) void = {
             @fmt(out, "s.pop_async(%);  // %.end [..params]\n", args.len, it.op);
         }
         fn control_wait() => {
+            t := it.args[0];
             @fmt(out, "duration := ");
-            compile(self, it.args[0]);
-            @fmt(out, ".coerce_number() / (60*60*24);\n");
+            compile_cast(self, t, .Float);
+            @fmt(out, " / (60*60*24);\n");
             @fmt(out, "s.push_val_async(sensing_dayssince2000(s) + duration);\n");
             push_async(true);
             self.max_futures = max(self.max_futures, self.futures_depth + 2);
@@ -641,8 +661,8 @@ fn compile_async(self: *Compile, continuation: []*Node) void = {
         fn control_for_each() => {
             limit, body, var := (it.args[0], it.args[1], it.args[2]);
             @fmt(out, "s.push_val_async(");
-            self.compile(limit);
-            @fmt(out, ".coerce_number());\n");
+            self.compile_cast(limit, .Float);
+            @fmt(out, ");\n");
             @fmt(out, "s.push_val_async(0);\n");
             call_async();
             inc_futures(self, 3) {
@@ -660,8 +680,8 @@ fn compile_async(self: *Compile, continuation: []*Node) void = {
         fn control_repeat() => {
             limit, body := (it.args[0], it.args[1]);
             @fmt(out, "s.push_val_async(");
-            self.compile(limit);
-            @fmt(out, ".coerce_number());\n");
+            self.compile_cast(limit, .Float);
+            @fmt(out, ");\n");
             call_async();
             
             inc_futures(self, 2) {
@@ -679,8 +699,8 @@ fn compile_async(self: *Compile, continuation: []*Node) void = {
             
             declare_cont("body");
             @fmt(out, "if !");
-            compile(self, cond);
-            @fmt(out, ".to_bool() {\n");
+            compile_cast(self, cond, .Bool);
+            @fmt(out, " {\n");
             inc_futures(self, 1) {
                 loop_body(body);
             };
@@ -692,8 +712,8 @@ fn compile_async(self: *Compile, continuation: []*Node) void = {
             inc_futures(self, 1) {
                 cont: Node = (op = .franca_call_cont, args = empty(), literal = cont_id.float(), flags = (async = .yes));
                 @fmt(out, "if ");
-                compile(self, it.args[0]);
-                @fmt(out, ".to_bool() {\n");
+                compile_cast(self, it.args[0], .Bool);
+                @fmt(out, " {\n");
                 compile_async(self, @slice(it.args[1], cont&));
                 @fmt(out, "} else {\n");
                 compile_async(self, @slice(it.args[2], cont&));
@@ -833,8 +853,8 @@ fn lower(self: *Compile, it: **Node) void = {
             it[] = n[0]&;
         }
         fn argument_reporter_boolean() => {
-            // TODO: use this information 
             it.op = .argument_reporter_string_number;
+            it.flags.type = .Bool;
         }
         fn motion_goto() => {
             it.op = .motion_gotoxy;
@@ -872,6 +892,10 @@ fn lower(self: *Compile, it: **Node) void = {
             n[1] = (op = .operator_subtract, args = @slice(n[2]&, value) a);
             n[2] = (op = .motion_direction, args = empty());
             it[] = n[0]&;
+        }
+        fn operator_gt() => {
+            it.op = .operator_lt;
+            it.args.swap(0, 1);
         }
         @default => {
             if @is(it.op, .sound_sounds_menu, .looks_costume, .sensing_touchingobjectmenu, .looks_backdrops, .sensing_keyoptions, .control_create_clone_of_menu, .pen_menu_colorParam, .sensing_distancetomenu, .sensing_of_object_menu, .motion_pointtowards_menu) {
@@ -918,9 +942,15 @@ fn compile_lookup(self: *Compile, op: S.Raw.Opcode, it: *Node) void = {
                 @fmtln(self.warning&, "invalid broadcast name (%)", string);
             };
         };
+        if op == .pen_setPenColorToColor {
+            if Rt'string_to_colour(string) { i |
+                return @fmt(out, "%", i);
+            };
+        };
     };
     
-    if it.op == .franca_literal && @is(op, .looks_switchcostumeto, .looks_switchbackdropto) {
+    if it.op == .franca_literal {
+    if @is(op, .looks_switchcostumeto, .looks_switchbackdropto) {
         sprite_i := @if(op == .looks_switchcostumeto, self.current_sprite, 0);
         sprite := self.project.sprites[sprite_i]&;
         if it.literal > 0 && it.literal <= sprite.costumes.len.float() && it.literal == floor(it.literal) {
@@ -928,6 +958,10 @@ fn compile_lookup(self: *Compile, op: S.Raw.Opcode, it: *Node) void = {
         } else {
             @fmtln(self.warning&, "invalid costume index for (%): (%)", sprite.name, it.literal);
         };
+    };
+    if op == .pen_setPenColorToColor {
+        return @fmt(out, "%", it.literal.floor());
+    };
     };
     
     compile(self, it);
@@ -940,7 +974,34 @@ fn compile_lookup(self: *Compile, op: S.Raw.Opcode, it: *Node) void = {
         fn pen_changePenColorParamBy() => ".coerce_string().Rt'lookup_pen_field_index()";
         fn event_broadcastandwait() => ".lookup_broadcast_index(s)";
         fn event_broadcast() => ".lookup_broadcast_index(s)";
+        fn pen_setPenColorToColor() => ".Rt'coerce_colour()";
         @default => @panic("TODO: lookup for %", op);
+    });
+}
+
+ValueType :: @enum(Float, String, Bool, Any, List, Index, Void);
+fn push_cast(self: *Compile, dest_type: ValueType, src_type: ValueType) void = {
+    suffix := ".from_bool()";
+    if dest_type == .Bool && self.out.items().ends_with(suffix) {
+        self.out.len -= suffix.len;
+        return();
+    };
+
+    @if(dest_type == src_type) @match(dest_type) {
+        fn Float() => return();
+        fn String() => return(@fmt(self.out, ".to_obj()[].string.s"));
+        fn Bool() => return(@fmt(self.out, ".to_bool_assume()"));
+        @default => ();
+    };
+    
+    @fmt(self.out, "%", @match(dest_type) {
+        fn Bool() => ".to_bool()";
+        fn String() => ".coerce_string()";
+        fn List() => ".to_obj()[].list&";
+        fn Float() => ".coerce_number()";   
+        fn Void() => @panic("void isn't allowed as an input");
+        fn Any() => "";
+        fn Index() => "";   // lookup is inserted seperately
     });
 }
 
@@ -964,7 +1025,7 @@ fn embed_bytes(out: *List(u8), name: Str, data: Str) void = {
 }
 
 simple_ops :: @static {
-    Data :: @struct(need_self: bool, has_result: bool, lookup_arg_index: u8);
+    Data :: @struct(need_self: bool, arg: []ValueType, ret: ValueType);
     out: OptionalEnumMap(S.Raw.Opcode, Data) = empty();
     op_names: HashMap(S.Raw.Opcode, RawList(Str)) = init(ast_alloc());
     I :: Type.scope_of(Rt.impl);
@@ -976,28 +1037,47 @@ simple_ops :: @static {
         if s {
             func.arg.bindings[0].ty = (Finished = *Rt.Script);
         };
-        each func.arg.bindings& { it |
-            if it.ty&.is(.Infer) {
-                it.ty = (Finished = Rt.Value);
+        
+        fix_type :: fn(it: *LazyType) ValueType = {
+            ty := ValueType.Float;
+            if it.is(.Infer) {
+                it[] = (Finished = Rt.Value);
             };
+            @if_let(it) fn PendingEval(e) => if e.ident() { s |
+                (fr_ty: Type, sc_ty: ValueType) := @switch(s) {
+                    @case(sym("Any")) => (Rt.Value, .Any);
+                    @case(sym("List")) => (*RawList(Rt.Value), .List);
+                    @case(sym("Str")) => (Str, .String);
+                    @case(sym("i64")) => (i64, .Index);
+                    @case(sym("bool")) => (bool, .Bool);
+                    @case(sym("void")) => (void, .Void);
+                    @default => compile_error("invalid scratch type", e.loc);
+                };
+                it[] = (Finished = fr_ty);
+                ty = sc_ty;
+            };
+            ty
         };
-        v := func.ret&.is(.Infer);
-        if v {
+        
+        in := ValueType.list(func.arg.bindings.len, ast_alloc());
+        each func.arg.bindings.items().rest(int(s)) { it |
+            in&.push(fix_type(it.ty&));
+        };
+        ret := fix_type(func.ret&);
+        @assert_ne(ret, .List, "lists aren't first class");
+        if ret == .String {  
+            // can't trivially convert from the slice back to the gc-ed Value, just want to remember the type info
             func.ret = (Finished = Rt.Value);
         };
         
         func := get_function_ast(fid, true, false, true, false);
         
-        lookup_arg_index: u8 = 255;
-        enumerate func.arg.bindings& { i, it |
-            @debug_assert(it.ty&.is(.Finished));
-            if it.ty.Finished == i64 {
-                lookup_arg_index = (i - int(s)).trunc();
-            };
-        };
-        
         if S.Raw.Opcode.from_name(name) { op |
-            out&.insert(op, (need_self = s, has_result = v, lookup_arg_index = lookup_arg_index));
+            out&.insert(op, (
+                need_self = s, 
+                arg = in.items(),
+                ret = ret,
+            ));
         } else {
             ok := false;
             if name.index_of("_".ascii()) { i |
@@ -1014,7 +1094,6 @@ simple_ops :: @static {
             @if(!ok) @println("warning: unknown opcode in Rt.impl: %", name);
         };
     };
-    //looks_costumenumbername_number
     @anon_literal(ops = out, op_names = op_names.raw)
 };
 

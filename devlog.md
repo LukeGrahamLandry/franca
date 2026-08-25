@@ -6,6 +6,13 @@
   the annoying thing is when someone's waiting on us to finish handling broacast 
   because im trying to keep that info on the stack. another thing in writing 
   tests for it, its clear scratch has an order that im not following. 
+- obvious problem is that im not doing coerce_number on all the math. 
+  - not going to put it in the implementations because eventually the compiler 
+    will be infering types and eliding conversions so it needs to know the signetures of all the operations anyway. 
+  - that made progress on scratch-in-scratch. now spams "there is hex" instead of crashing. 
+    hmm?? no maybe i just got lucky? that's offputting... im not going crazy tho cause it does have the numbers i printed as hex in a list. 
+  - now i can also not do the coercisons when its obviously not need based on the argumenbt blocks
+  - not doing useless from_bool+to_bool quicksort average: 0.125 -> 0.096
 
 ## (Aug 24) sb3
 
