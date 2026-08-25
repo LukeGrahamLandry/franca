@@ -1,4 +1,12 @@
 
+## (Aug 25) sb3
+
+- !! i wasn't adding the clone to the list
+- did delete. this is going to be the same as stop all i guess.
+  the annoying thing is when someone's waiting on us to finish handling broacast 
+  because im trying to keep that info on the stack. another thing in writing 
+  tests for it, its clear scratch has an order that im not following. 
+
 ## (Aug 24) sb3
 
 - hoist menu index lookups of constant strings and be more generic about the ones that are seperate impls

@@ -24,6 +24,7 @@ Canvas :: @rec @struct {
     broadcasts: RawHashMap(Str, i64) = init();
     metadata: (@struct(credits: []Str = empty(), warning := "")) = ();
     fixed_timestamp: ?f64 = .None;
+    have_deletions_this_frame := false;
 };
 
 // this + seeding the rng lets you get deterministic replay
@@ -41,11 +42,14 @@ Script :: @rec @struct {
 ScriptSlot :: @struct {
     // async needs to reify (function arguments, loop counters, continuation function pointer). 
     // to make progress the runtime pops the last thing from the stack and calls it as a function pointer. 
-    futures: RawList(Value) = empty();
-    without_refresh_depth: u32 = 0;
+    futures: RawList(Value);
+    waiter: *f64;
+    without_refresh_depth: u32;
     // this is a sad hack because i dont have tail calls :(
-    no_yield: bool = false;
+    no_yield: bool;
 };
+
+null_waiter :: @static_mut 0.0;
 
 // TODO: maybe it would be better to generate MySprite :: @struct(base: SpriteInstance, vars: Array(Value, N)); 
 //       (which would be same layout) because then could name var fields so it would be readable. 
@@ -65,6 +69,7 @@ SpriteInstance :: @rec @struct {  // !Sized
     looks: (@struct(costume := 0, size: f64 = 1, hide := false, thinking := false, say: Value = 0)) = ();
     // each trigger can only have one running at a time so this is parallel to class.events 
     scripts: []ScriptSlot;
+    deleted := false;
     // TODO: direction, say/think/ask, look effects, layer, volume, drag mode
     // vars: Array(Value, self.var_count) #inline; // [vars,lists]; 
 };
@@ -134,6 +139,10 @@ fn new_sprite(c: *Canvas, class: *SpriteClass) *SpriteInstance = {
     data := c.gpa.alloc_uninit(Value, N + class.var_count);
     instance := bit_cast_unchecked(*f64, *SpriteInstance, data.ptr);
     instance[] = (class = class, scripts = c.gpa.alloc_zeroed(ScriptSlot, class.events.len));
+    each instance.scripts { it |
+        it.waiter = null_waiter;
+    };
+    c.clones&.push(instance, c.gpa);
     instance
 }
 
@@ -431,12 +440,27 @@ sensing_keypressed :: fn(s, idx: i64) = s.canvas.sensing.pressed&.get(idx).from_
 motion_ifonedgebounce :: fn(s) void = println("TODO: motion_ifonedgebounce");
 looks_gotofrontback :: fn(s, _) void = println("TODO: looks_gotofrontback");
 looks_changeeffectby :: fn(s, d, e) void = println("TODO: looks_changeeffectby");
-control_delete_this_clone :: fn(s) void = {
-    // TODO: can't remove from sprites array here because means the next guy will be skipped this frame
-    // TODO: don't let you delete the main guy
-    println("TODO: control_delete_this_clone");
-    // TODO: also have to also return all the way up somehow?
-}; 
+control_delete_this_clone :: fn(s: *Script) void = {
+    ::ptr_utils(SpriteInstance);
+    i := ptr_diff(s.canvas.classes.ptr, s.sprite.class);
+    if identical(s.sprite, s.canvas.clones[i]) {
+        // trying to delete the main clone is a nop. (doesn't even stop blocks higher in the callstack so don't clear futures)
+        return();
+    };
+    s.without_refresh_depth = 0;  // in case we're returning to an unyielding loop, need to go all the way back up
+    s.sprite.deleted = true;
+    s.canvas.have_deletions_this_frame = true;
+    
+    // TODO: if one of these was a broacastandwait then another sprite can have waiter pointing at this memory we're about to free
+    each s.sprite.scripts { it |
+        // discarding all scripts but if someone else is waiting on them, this has to count as them ending. 
+        it.waiter[] -= 1;
+        it.waiter = null_waiter;
+        
+        // still in the loop in poll_scripts, need to make future ones stop as well. 
+        s.futures&.clear(); 
+    };
+};
 control_create_clone_of :: fn(s, which) void = {
     @assert_eq(which.coerce_string(), "_myself_", "TODO: other clones");
     c, src := (s.canvas, s.sprite);
@@ -476,6 +500,8 @@ data_replaceitemoflist :: fn(s, idx, item, lst) void = {
     list[i] = item;
 }
 data_deleteoflist :: fn(s, idx, lst) void = {
+    @if(idx.is_string() && idx.coerce_string() == "all") return(data_deletealloflist(s, lst));
+    
     list, i := s.coerce_list_index(lst, idx) || return();
     _ := list.ordered_remove(i);
 }
@@ -685,20 +711,29 @@ fn send_event(c: *Canvas, s: *SpriteInstance, event: Trigger, waiter: ?*f64) i64
                     continue();  // keys are special for some reason
                 };
                 
+                // might be restarting a broadcast TODO: a test that needs this
+                slot.waiter[] -= 1;
+                slot.waiter = null_waiter;
+                
                 slot.futures&.clear();
-                //slot.without_refresh_depth = 0;
+                
+                slot.without_refresh_depth = 0;
                 s: Script = (canvas = c, sprite = s, data = slot);
                 if waiter { waiter |
                     @debug_assert(event&.is(.Broadcast), "only for broadcastandwait");
                     s.futures&.reserve(3, c.gpa);
+                    s.waiter = waiter;
                     s&.push_val_async(bit_cast_unchecked(*f64, f64, waiter));
                     s&.push_async(fn(s) = {
-                        // TODO: this is a problem if the waiter's trigger got reset before we do this because now the pointer is junk
                         waiter := s.futures[s.futures.len - 1];
+                        ::ptr_utils(f64);
                         s.pop_async(1);
                         @assert(waiter.is_number());
                         waiter := bit_cast_unchecked(f64, *f64, waiter);
+                        // TODO: since need to have it on the slot anyway (for delete clone) don't bother putting it on the stack too
+                        @assert(identical(waiter, s.waiter), "confused waiter");
                         waiter[] -= 1;
+                        s.waiter = null_waiter;
                     });
                 };
                 s.futures&.reserve(1, c.gpa);
@@ -722,6 +757,7 @@ fn poll_scripts(c: *Canvas) i64 = {
             if slot.futures&.pop() { callee |
                 s: Script = (canvas = c, sprite = sprite, data = slot);
                 // TODO: could keep min,max of all the addresses of the cont function pointers and assert these bits are in that range (in case of compiler bugs). 
+                //       (^ don't forget the extra push_async for waiter in send_event)
                 @debug_assert(callee.is_number(), "corrupt callee");
                 callee := bit_cast_unchecked(Value, @FnPtr(s: *Script) void, callee);
                 s.no_yield = false;
@@ -734,6 +770,19 @@ fn poll_scripts(c: *Canvas) i64 = {
             };
         };
         i += 1;
+    };
+    
+    // mark_deleted can't neively remove itself from the array because next guy would be skipped. 
+    // but TODO: think about the indices carefully and fuse this with the above loop
+    if c.have_deletions_this_frame {
+        // the first classes.len() must stay in order but they can't be deleted so it's fine to swap_remove here
+        // TODO: does the order clones run in the frame matter?
+        unordered_retain(c.clones&) { it |
+            deleted := it.deleted;
+            @if(deleted) drop(c, it[]);
+            !deleted
+        };
+        c.have_deletions_this_frame = false;
     };
     
     c.maybe_collect_garbage();

@@ -71,14 +71,18 @@ fn define(s: *Sprite, b: *Node, warp: bool, $body: FuncId) *Node = {
     b
 }
 
-fn whenflagclicked(s: *Sprite, $body: FuncId) *Node = {
-    b := make("event_whenflagclicked", @slice(block(body)));
+fn whenflagclicked(s: *Sprite, $body: FuncId) *Node = when_body(s, "event_whenflagclicked", body);
+fn whenspriteclicked(s: *Sprite, $body: FuncId) *Node = when_body(s, "event_whenthisspriteclicked", body);
+fn whenclonestarts(s: *Sprite, $body: FuncId) *Node = when_body(s, "control_start_as_clone", body);
+
+fn when_body(s: *Sprite, op: Str, $body: FuncId) *Node = {
+    b := make(op, @slice(block(body)));
     s.blocks&.push(b, ast_alloc());
     b
 }
 
-fn whenspriteclicked(s: *Sprite, $body: FuncId) *Node = {
-    b := make("event_whenthisspriteclicked", @slice(block(body)));
+fn when_broadcast(s: *Sprite, name: *Node, $body: FuncId) *Node = {
+    b := make("event_whenbroadcastreceived", @slice(block(body), name));
     s.blocks&.push(b, ast_alloc());
     b
 }
@@ -94,6 +98,12 @@ fn repeat(count: *Node, $body: FuncId) *Node = make("control_repeat", @slice(cou
 fn forever($body: FuncId) *Node = make("control_forever", @slice(block(body)));
 fn if(cond: *Node, $then: FuncId, $else: FuncId) *Node = make("control_if_else", @slice(cond, block(then), block(else)));
 fn if(cond: *Node, $then: FuncId) *Node = make("control_if", @slice(cond, block(then)));
+
+fn clone_myself() *Node = make("control_create_clone_of", @slice(N("_myself_")));
+fn delete_myself() *Node = make("control_delete_this_clone", empty());
+fn broadcast_wait(name: *Node) *Node = make("event_broadcastandwait", @slice(name));
+fn broadcast(name: *Node) *Node = make("event_broadcast", @slice(name));
+
 fn mouse_x() *Node = make("sensing_mousex", empty());
 fn mouse_y() *Node = make("sensing_mousey", empty());
 fn mouse_down() *Node = make("sensing_mousedown", empty());
@@ -187,6 +197,16 @@ fn lists(s: *Sprite, $Count: i64) TupleArray(*Node, Count) #generic = {
     s.variables(Count)
 }
 
+fn broadcasts(s: *Project, $Count: i64) TupleArray(*Node, Count) #generic = {
+    out := zeroed(Array(*Node, Count));
+    each out& { it |
+        name := @afmt(ast_alloc(), "cast%", s.broadcasts.len);
+        it[] = N(name);
+        s.broadcasts&.push(it[], ast_alloc());
+    };
+    bit_cast_unchecked(@type out, TupleArray(*Node, Count), out)
+}
+
 fn TupleArray($T: Type, $N: i64) Type = Ty(ast_alloc().alloc_init(Type, N, fn(_) => T));
 
 // //
@@ -261,6 +281,10 @@ fn build(p: *Project, out_json: *List(u8), out_zip: *List(u8)) void = {
             );
         };
     };
+    
+    for p.broadcasts { it |
+        p2.targets[0].broadcasts&.insert(it.string, it.string, temp());
+    };
 
     dump_json(p2&, out_json);
     files.push(name = "project.json", data = out_json.items());
@@ -293,7 +317,7 @@ fn emit_block(it: *Node, blocks: *RawHashMap(Str, Raw.Block2)) Str = {
     blocks.insert(key, zeroed(Raw.Block2), temp());
     
     b: Raw.Block = (opcode = it.op);
-    arg_i := 0;
+    arg_i := int(is_hat(it.op) && it.op != .procedures_definition);
     shape := block_defs.shapes.get(it.op).unwrap();
     for shape.inputs { field |
         value: Raw.ValueRef = @if_else {
@@ -304,7 +328,7 @@ fn emit_block(it: *Node, blocks: *RawHashMap(Str, Raw.Block2)) Str = {
         arg_i += 1;
     };
     for shape.fields { field |
-        if field != "VARIABLE" && field != "LIST" && field != "BROADCAST_OPTION" {
+        if field != "VARIABLE" && field != "LIST" {
             @assert_eq(it.args[arg_i].op, .franca_string, "%.% expected const string", it.op, field);
             name := it.args[arg_i].string;
             b.fields&.insert(field, (name, .None), temp());
@@ -343,7 +367,7 @@ fn emit_block(it: *Node, blocks: *RawHashMap(Str, Raw.Block2)) Str = {
             b.next = (Some = emit_block(it.args[0], key, blocks));
         }
         @default => {
-            if @is(it.op, .event_whenflagclicked, .event_whenthisspriteclicked) {
+            if is_hat(it.op) {
                 b.next = (Some = emit_block(it.args[0], key, blocks));
             };
         };
