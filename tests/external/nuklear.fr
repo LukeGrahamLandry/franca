@@ -1,0 +1,68 @@
+// the interesting part is the render backend in:
+#use("@/graphics/deps/nuklear.fr");  
+// this file just connects it to nuklear's demo programs:
+// https://github.com/Immediate-Mode-UI/Nuklear/blob/0dbc52f86404f9e1f26ce0df3015ed23ff54a726/demo/common/
+// so you can see all the builtin widgets. 
+
+#use("@/graphics/lib.fr");
+driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
+main :: fn() void = Easy'start(State);
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    Demo'init_colours();
+    on_init(state, sg);
+}
+fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = on_cleanup(state, sg);
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    ctx := state.ctx&;
+    Nuklear'nk_input_end(ctx);
+    ctx := bit_cast_unchecked(*Nuklear.nk_context, *Demo.nk_context, ctx);  // HACK
+    Demo'examples(ctx);
+    Easy'glue_begin_pass(sapp, sg, (colors = ((
+        load_action = .CLEAR,
+        clear_value = (r = 0, g = 0, b = 0, a = 1),
+    ), ..)));
+    draw(state, sg, sapp);
+    sg.end_pass();
+    sg.commit();
+};
+
+Demo :: {
+    root := Foreign'nuklear();
+    Ffi  :: import("@/examples/import_c/ffi.fr");
+    c_source := @tfmt("""
+        #define NK_IMPLEMENTATION  // unfortunate
+        #define NK_INCLUDE_FIXED_TYPES
+        #define NK_INCLUDE_STANDARD_BOOL
+        #define NK_INCLUDE_DEFAULT_ALLOCATOR
+        #define NK_INCLUDE_VERTEX_BUFFER_OUTPUT
+        #define NK_INCLUDE_FONT_BAKING
+        #define NK_INCLUDE_DEFAULT_FONT
+        #define NK_UINT_DRAW_INDEX
+        #define NK_INCLUDE_STANDARD_VARARGS 
+        #define NK_INCLUDE_STANDARD_IO
+        #include "%/nuklear.h"
+        
+        typedef struct nk_context nk_context;
+        
+        #define INCLUDE_STYLE
+        #include "%/demo/common/style.c"
+        #include "%/demo/common/overview.c"
+        #include "%/demo/common/canvas.c"
+        #include "%/demo/common/node_editor.c"
+        #include "%/demo/common/calculator.c"
+        #include "%/demo/common/style_configurator.c"
+        
+        static struct nk_color color_table[NK_COLOR_COUNT];
+        void examples(nk_context *ctx) {
+            canvas(ctx);
+            node_editor(ctx);
+            calculator(ctx);
+            style_configurator(ctx, color_table);
+            overview(ctx);
+        }
+        void init_colours() {
+            memcpy(color_table, nk_default_color_style, sizeof(color_table));
+        }
+    """, root, root, root, root, root, root, root);
+    Ffi'include(current_compiler_context(), c_source)
+};

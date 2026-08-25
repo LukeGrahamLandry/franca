@@ -1,14 +1,9 @@
 // TODO: ctx.clip.(copy, paste)
 // TODO: make it work in web. my wasm compiler doesn't like a shape of control flow in stbtt__run_charstring. panic! missing br_if target @120 -> @122
 // TODO: high_dpi doesn't work with -wgpu
-// TODO: move the "temporary demo" entry point from this file to tests/external. 
-//       will be annoying to have another import_c block that wants the same header tho. 
-//       probably end up with the stupid casts. 
 // TODO: annoying to have extra copies of the stb libs if the main program also uses them
 
 State :: @struct {
-    HIGH_DPI :: true;  // temporary demo
-    
     pipe: Sg.Pipeline;
     smp: Sg.Sampler;
     img: Sg.Image;
@@ -45,7 +40,7 @@ fn on_init(state: *State, sg: *Sg.Self) void #use(Nuklear) = {
     state.img = sg.make(type = ._2D, width = 8, height = 8, pixel_format = .RGBA8, data = SubImage(pixels&.items()));
     state.smp = sg.make(min_filter = .NEAREST, mag_filter = .NEAREST, wrap_u = .CLAMP_TO_EDGE, wrap_v = .CLAMP_TO_EDGE);
 
-    state.vertices = sg.make(size = 400_000, usage = .STREAM);
+    state.vertices = sg.make(size = 600_000, usage = .STREAM);
     state.indices = sg.make(size = 400_000, usage = .STREAM);
     state.pipe = sg.make(
         shader = sg.make(choose_shader_impl(SOKOL_BACKEND, Shaders)),
@@ -230,8 +225,6 @@ Nuklear :: {
         #define NK_INCLUDE_FONT_BAKING
         #define NK_INCLUDE_DEFAULT_FONT
         #define NK_UINT_DRAW_INDEX
-        #define NK_INCLUDE_STANDARD_VARARGS  // TODO: remove, just for overview
-        #define NK_INCLUDE_STANDARD_IO       // ^
         #include "%/nuklear.h"
         
         // TODO: this is unfortunate
@@ -245,41 +238,7 @@ Nuklear :: {
         typedef enum nk_keys nk_keys;
         typedef enum nk_panel_flags nk_panel_flags;
         typedef enum nk_edit_flags nk_edit_flags;
-        
-        // temporary demo
-        #include "%/demo/common/canvas.c"
-        typedef struct nk_canvas nk_canvas;
-        typeof(canvas_begin) *canvas_begin_ = canvas_begin;
-        typeof(canvas_end) *canvas_end_ = canvas_end;
-        typeof(canvas) *canvas_ = canvas;
-        #include "%/demo/common/overview.c"
-        typeof(overview) *overview_ = overview;
-        #include "%/demo/common/node_editor.c"
-        typeof(node_editor) *node_editor_ = node_editor;
-    """, root, root, root, root);
-    // TODO: the demo won't build with these
+    """, root);
     allow :: @const_slice("puts", "exit", "qsort", "free", "malloc", "memset", "memcpy", "floor", "ceil", "sqrt", "fabs");
     Ffi'include(current_compiler_context(), c_source, (whitelist = (Some = allow)))
-    // Ffi'include(current_compiler_context(), c_source)  // for now use this one if you want the demo
-    
-};
-
-// temporary demo
-driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
-main   :: fn() void = Easy'start(State);
-fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = on_init(state, sg);
-fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = on_cleanup(state, sg);
-fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void #use(Nuklear) = {
-    ctx := state.ctx&;
-    nk_input_end(ctx);
-    canvas_[](ctx);
-    node_editor_[](ctx);
-    overview_[](ctx);
-    Easy'glue_begin_pass(sapp, sg, (colors = ((
-        load_action = .CLEAR,
-        clear_value = (r = 0, g = 0, b = 0, a = 1),
-    ), ..)));
-    draw(state, sg, sapp);
-    sg.end_pass();
-    sg.commit();
 };
