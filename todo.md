@@ -11,6 +11,12 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
+- don't die if linked against a libc that isn't compiled with frame pointers. 
+  walk_stack_trace should try to stop if it doesn't like the pointer somehow. 
+  maybe just look at StaticTls.Thread.stack, bit sad to not be able to do 
+  it across stack switching tho (like examples/elf_loader.fr)
+- remove #log_asm. it's redundant with #log_ir("D"). make sure it works with AsmFunction too. 
+- a.ppm->a.png and put it in repro/ dir from macos ci and put it on website
 - hctarcs 549996194 in wasm has runtime error integer overflow when you win the first level
 - doom input in the web demo at least. also use the upcoming import_c redirects to do it on native without the os/user/libc thing.
 - tests/gui.fr -wgpu: crashes sometimes
@@ -62,6 +68,9 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 - infer #fold from the body
 - do my tests not work in debian/trixie? https://builds.sr.ht/~lukegrahamlandry/job/1852278
   died in tests/exe/wasm.fr (twice) but worked when i ssh-ed in and ran it alone? 
+- something weird with the hare test that execs env on ubuntu/26.04
+  - https://builds.sr.ht/~lukegrahamlandry/job/1852272
+  - https://builds.sr.ht/~lukegrahamlandry/job/1852254
 - graphics/easy.fr support easily building with emit_c+clang by automatically passing apple's magic linker args for each framework. 
 - lox/lox_main.fr: exit with status if there was an error so works with normal lox test runner
 - figure out how to make my programs a real macos app. 
@@ -105,6 +114,10 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
   - circuit/README.md
   - gpu/maze_game/README.md
   - web/(get,serve).fr
+  - backend/meta/dis.fr
+  - gpu/hctarcs/README.md
+  - examples/import_c/ffi.fr
+  - examples/emit_c.fr
 - use bubblewrap more
   - more fine grained settings. ie. enforce that the no-deps tests don't try to fetch anything, etc.
   - always run the with-deps tests in the sandbox? especially the ones that depend on other people's binaries (wuffs,tc,wasm4)
@@ -398,6 +411,10 @@ export function w $main() {
     drivers have to remember to be consistant with the entry file, cache needs to deal with it somehow, etc. 
   - don't want to use absolute paths anywhere because they end up in the executable if you build with -debug-info (also the .frc files)
   - want to hold on to file descriptors instead of doing paths relative to cwd so comptime code can't confuse the compiler by calling chdir
+  - a guiding goal is you need to be able to give someone a franca library in the form 
+    of a zip file and they can import it. so the code needs to not have absolute paths in it. 
+    maybe import_module should set that file to the root somehow so you get a special identifier you 
+    can use to do relative imports like zig's @import("root")
 - go through and add cases to check_opt.fr for everything in backend/opt
 - should error if you try to make a bake_relocatable_value which will never be called because the type doesn't contain pointers
 - deal with Crash'hook_backtrace();
@@ -469,8 +486,6 @@ Compile Error: not callable V:()
   get_constant doesn't recurse up parents. 
   ex. builtin_macro would like to eval a symbol as though it were written in the source.
 - each build_for_graphics program gets a new 300k cache file for its driver. 
-  - also it shouldn't statically call make_exec because that compiles the whole output_wasm_module_jit
-- add wasm binary to repro. really should just include hashes of everything that's expected to be platform independent in the build artifact. 
 - something that shows you unreferenced constants across compilation units. 
   also let driver do something less cringe than get_tagged.
   so maybe add back compiler event hooks
@@ -579,7 +594,6 @@ cset	w0, eq
   and try to call a function that was forward declared but not linked against
 - make stack trace debug info work accross multiple compilers. it needs to go in GlobalFrancaRuntime
   (test with crashing in examples/repl.fr when running it as a driver)
-- `f :: fn() = ` isn't getting an inferred name (report_called_uncompiled_or_just_fix_the_problem)
 - make it easy to run all the tests with qemu-user
   - -L /usr/x86_64-linux-gnu
   - document what needs to be installed: qemu-user-static, libc6-amd64-cross, libc6-riscv64-cross
@@ -612,7 +626,6 @@ cset	w0, eq
   pick one blessed struct to have the top level fields when the rest of your file is a namespace which looks odd. 
 - real error handling for lib/sys/posix.fr. need to be able to remap the errno values to something consistant. 
 - i hate the vscode/zed extension build junk being in here. each are 300 lines of dependencies. 
-- `@inline` at the callsite 
 - need an option to make `@safety` assertions give you more information. it's hard without a runtime bootstrapping 
   step because ie. `fn index([]T)` needs to get compiled really early before you can do anything. 
 - do something for detecting if you discard a Result without unwrapping it
@@ -632,7 +645,6 @@ cset	w0, eq
 - set a good example; don't have tests that rely on layout of codegenentry. use the functions on the vtable. i think import_c/test/test.fr does this wrong
 - always zero struct padding when baking constants (even when behind a pointer and even when the struct contains no pointers). 
 - document `store v, [Sxxx]` vs `store v, Sxxx` on amd64
-- extend the cross repro tests to all the example programs. not just the compiler. maybe just add a file with hashes of binaries to the released artifact. 
 - I need to improve @enum for bit flags so i can use that in posix.fr so it doesn't suck as much to call mmap. 
 - i think bake_relocatable_value always gets a jit shim which is a bit wasteful. 
   happens because get_custom_bake_handler just calls vtable.get_jitted_ptr which 
@@ -668,7 +680,7 @@ cset	w0, eq
 ## things i don't autotest
 
 - many i compile in ci but don't run
-  - examples/gpu/(geo, terminal, app_events)
+  - examples/gpu/(geo, app_events)
   - run_tests.deps_compile_only
   - run_tests.dylib_compile_only
   - tests/compiler.compile_only
@@ -761,8 +773,6 @@ bufs: [][]u8 = (ptr = bit_cast_unchecked(i64, @run(*[]u8), buf_ptr), len = buf_l
 ## import_c
 
 - test `__attribute__((alias(foo)))`
-- the line numbers in my error messages are wrong sometimes!
-  shows the right text tho so its not a massive deal but kinda cringe 
 - make sure my detect_include_guard is working on all the system headers 
 - i get "unterminated conditional directive" on apple's unistd.h without -D_POSIX_C_SOURCE=200809L
 - C23: `__has_c_attribute`, allow `[[]]` instead of `__attribute__`
@@ -795,6 +805,7 @@ as different types even when they're the same size.
   - git
   - linux kernel
   - sqlite
+  - https://git.sr.ht/~sircmpwn/vim-classic
 - :AsmNotYetImplemented
 - for inline assembly, i think it would be easier to give up on ExprLevelAsm
   and use someone else's assembler to compile the `asm` blocks into an elf file 
@@ -830,15 +841,14 @@ All is fine! (passed 35 tests)
 - `franca examples/os/build.fr -vzf -smp 2 -append "nocache on;spawn kaleidoscope;kaleidoscope;"`
   it doesn't like two at once? (with -smp 1 it works but is SUPER slow which should also be fixed)
 
-
 ## import_symbol / weak
 
 TODO: my @import_symbol always does a weak symbol even though it in the macro body i say weak=false.
 TODO: test that makes weak and non weak of symbols i know don't exist and makes sure the dynamic loader crashes correctly. 
 TODO: tests that @import_symbol give you null for a missing weak symbol (instead of address of a stub like when you #import a function), 
       it works right now but is fragile. 
+      ...maybe not anymore... see the comment in errors_comptime.fr
 TODO: fallback to the syscall version automatically if a weak symbol is unavailable
-TODO: @import_symbol of non-existant throws TraceTrap at comptime
 TODO: be consistant about spelling: zeros or zeroes
 
 ## random failures
@@ -863,8 +873,8 @@ Assertion Failed. Expected (-43 == 6
 - import_c: tests/todo/b.c
 - same string constant as Str and CStr :MiscompileCStr
 - :ConstInFuncOrLoseTemp
-- literal for a 64 bit integer with the high bit set shouldn't need a bit cast 
 - :UseDoesntWork
+- @bit_fields in incremental.fr don't work inline in the structs
 - :BitFieldsCompileError there's places in Qbe and Incremental where it won't let you have 
 a field of type @bit_fields or you get:
 ```
@@ -880,14 +890,15 @@ TODO: end of loop. still too many options for 'index'
 
 ## 
 
+- test #log_ir from the outside like tests/exe/errors_comptime.fr
 - put more stuff in read only data. 
   - maybe have @static and @mut_static. same for @const_slice. track that in PageMap? 
 - #log_ir should fire multiple times for functions with $const parameters (ie. native_isel)
 - shouldn't be able to typo a name as easily. like S :: import_module{enqueue :: enqueue_task}); then S.enqueue_task will get you the wrong one and be slow. 
 - why was the quicksort wrapper trying to be emitted for import_module (when not marked #fold)
 - get compilation order dependence under control!!
-- fix callgraph sorting to improve inlining. like make sure the ge/le in lex_int/is_ascii_digit are inlined 
-- @bit_fields in incremental.fr don't work inline in the structs
+- dec_digit #log_ir("R") is insane. each branch has two storel and then join and load both to return. its 23 arm instructions. 
+- one time i tried to put #log_ir("D") on dec_digit and it hung
 - #ir tries to ignore zero-sized params but not if they're first which is sad
 - "need to be consistant about how to handle modules like this that don't actually compile anything"
 - reduce disk usage bloat. rn fetch_or_crash stores the unzipped thing and the zip file so you have everything twice. 
@@ -896,7 +907,6 @@ delete the rest. thing to think about is that you want to union those between di
 different subsets of the same resources. 
 - document #weak: docs/(annotations.md, imports.md)
 - deal with `NOSYS`
-- make #log_asm work for the #asm replacement 
 - experiment with outputting even more info in .frc and an lsp that reads it back. 
 
 ## tests i skip
@@ -943,8 +953,6 @@ amd
 
 ## wasm
 
-- let frontends directly provide signeture for imports since they probably know instead of only trying to infer from callsites. 
-  (currently emit_ir just always outputs a shim with a direct call which works but is hacky and not something i'd be proud to explain). 
 - generate better code (see comments in wasm/isel.fr)
 - (see comments in wasm/abi.fr)
 - finish PromotePointers in import_wasm/run.fr
@@ -956,11 +964,8 @@ amd
   - https://github.com/WebAssembly/tool-conventions/blob/main/Linking.md
 - make import_c work without hacks
   - setjmp/longjmp with exceptions
-- import_wasm working in wasm would be cute. 
-  - dont reserve giant virtual memory
-  - don't depend on libc (import_wasm/run.fr/Exports for the .ssa tests)
 - stack traces
-- make the wasmtime version work
+- have a host implementation that uses wasmtime
 - add a .ssa test that tests dynalloc with a deeper callstack
 - in wasm/make_exec use debug_out when dumping module so you can redirect it
 - make sure `::@as(rawptr)(fn() void = ())` gives you the got_lookup_offset not the junk jit_addr. 
@@ -975,7 +980,6 @@ amd
   - compiler/main.fr jit: `wasm-jit $__franca_aot_debug_info should have known got_lookup_offset`
   - queen.ssa calloc(int, int)
 - add the small franca tests to the web demo
-- add the import_c things with dependencies to the web demo
 - web demo: hare, wuffs, more nontrivial c programs
 - use dump_wasm to disassemble one function at a time (like i do with llvm-mc) 
   instead of only all at once in output_wasm_module_jit
@@ -1217,6 +1221,7 @@ need to be careful about the refs which have tags in the high bits so won't leb 
 
 - :TodoMacosSyscall
 - how are you supposed to ask for page size? blink wants 64k instead of 4k. 
+  - auxvec
 - elf_loader.fr doesn't work on linker output: `panic! not divisible by page size`
 - if you have a static compiler and want to link a libc thing
   and notice that the path to dynamic loader is valid, 
@@ -1425,7 +1430,7 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 
 ### Terminal
 
-- i've seen it crash :FUCKED
+- leaks pipe fds sometimes
 - cmd+f only search the cursor's current output block. cmd+shift+f to search the whole buffer
 - cmd+enter be same as cmd+click (open link the cursor's on)
 - change save file while running
@@ -1449,7 +1454,7 @@ so maybe that whole system needs a bit of a rework. like maybe waiting and do al
 - tell child programs that im a terminal. ie. ls gives me one column instead of two.
 - if something's outputting invalid utf8, switch to hex view,
 actually that's a bit too agressive but certainly stop processing ANSI escape codes. 
-- rebake the texture for dynamic font size so i can handle when you move between monitors with different dpi correctly
+- automatically resample_font when you move between monitors with different dpi
 - scroll when you resize to lock the bottom position instead of the top
 - tabs
 - drag a tab out to make a new window
@@ -1473,7 +1478,6 @@ actually that's a bit too agressive but certainly stop processing ANSI escape co
   but its 5 seconds with the poll loop condition changed to `(len != 0 && (len < space || realloc))`.
   (which is still slow but better. and also wrong because then its a blocking poll 
    until the process doesn't get a turn to run between reads tho its fine for my terminal because it has realloc=false)
-- let you get out of lock_to_bottom while a process is spamming output
 - scrollbar feels bad because i stop sending events when the mouse goes off the window
 - horizontal scrollbar
 
@@ -1496,18 +1500,13 @@ actually that's a bit too agressive but certainly stop processing ANSI escape co
 - think about fancy logging system instead of @debug_log in `graphics`
 - inspection gui like sokol_gfx_imgui
 - i enjoyed https://sotrh.github.io/learn-wgpu/, an implementation of that would be a good example program
-- replace cimgui
-- https://github.com/id-Software/DOOM
 - implement #trace
-- test that runs all the interactive things in sequence
 - geo: `// TODO: the controls feel really bad. you can like lose key presses.`
 make sure that's not something i broke (i think it was always like that, 
 just a problem with how that program is doing directions not with the app lib)
-- generate the shader desc structs instead of pasting them
 - :LazyMagicNumbers
 - :DEPTH (which is also for msaa)
 - bindgroups_cache 
-- comptime thing to generate SgShaderDesc
 - web
   - safari
   - remap key codes (keytable)
@@ -1524,7 +1523,6 @@ just a problem with how that program is doing directions not with the app lib)
     ideally i could just spit out a wasm file and a js file and it would just work. 
   - its cringe that im pre-generating webgpu.g.js and webgpu.g.fr instead of doing it in the browser like everything else. 
   - be able to precompile the graphics library so the demo isn't as slow
-  - make downloading one compiled for aot macos graphics work in the demo and give sane error if you try for linux
 
 ## stuff i broke
 
@@ -1555,10 +1553,11 @@ through the ImportVTable explicitly. but that feels a bit too wishy washy to me?
   but they have different representations and you can have a the other combinations they're just not useful. 
 - :NoInlineImport
 - ._N and .len on Array
-- #use field in guess_type for #where
+- #use field in type_of for #where
 - make auto deref always work (you shouldn't need to `[]` for returned structs)
 - compiler/values.fr has a big comment
-- make namespacing nice enough that i can have less stuff loaded in every program by `core.fr`
+- its sad that driver_api is auto imported into every program and squats good type names if you're writing a compiler. 
+  similarly autoimporting fmt,meta,list,hash,macros,option,math is a lot of junk but its all used so often that its annoying otherwise. 
 - if constant folding can get rid of all the branchs that use an import, the binary shouldn't need that import
 - auto #fold functions returning StructLiteralP (same as already do for Value).
 ie. `fn init() Self = (arr = @as(Slice(Entry)) empty(), len_including_tombstones = 0, capacity = 0);`
@@ -1568,16 +1567,6 @@ ie. `fn init() Self = (arr = @as(Slice(Entry)) empty(), len_including_tombstones
   because 'self.parse_expr(Prec.None)' and symmetry with structs.
 - unpack `a, b, c = call()` without declaring new variables
 - make compilation order of struct sizing less sketchy for offset_of
-- propagate types through constants. `a: u32 : 0; b := a;` b should have type u32 even though int literals default to i64.
-  (to fix `foo.id != SG_INVALID_ID.trunc()`)
-- still allow coerce to c string if there was a `\` escape.
-- this should work
-```
-A :: @struct();
-B :: @tagged(a: A);
-b: B = (a = ()); 
-b = .a;
-```
 - mix named and positional args
 - allow specifying the Tag type for @tagged and default to the smallest possible
 - let macros access requested type (of thier call site, not just infered of thier args) or provide an infered a type before processing.
@@ -1603,6 +1592,7 @@ the right/fast/safe/whatever thing to do is also the easy thing to do.
   - make number casts less annoying and less error prone 
   - do a pass at trying to replace pointer<->int casts with some higher level thing
   - be consistant about using rawptr when it's a pointer (not i64)
+  - replacement for thread locals by dynamically adding things to the StaticTls. 
   need to be able to do it from jit as well (ie. it can't just be extra fields on the struct). 
   - rename print() to debug()? make it clear that it's not what you should be using if you just want 
   to output text (it's unbuffered because i think it's more important to not lose things if you crash). 
@@ -1610,21 +1600,20 @@ the right/fast/safe/whatever thing to do is also the easy thing to do.
   - don't be using relative file paths. i feel like having a cwd is dumb.
   - errno stuff
 - make sure all the allocators respect required alignment 
-- catch multiple branches with the same switch value.
-- (cap, alloc) args are swaped between list:List and init:RsVec
+- (cap, alloc) args are swaped between list:List and init:RawList
 - `[CPU Time]` on macos-x64 is wrong. (different libc magic numbers? clang libc_constants says no). // :WrongClockTime
 - maybe have a `push_compiler_error_context` and `pop_compiler_error_context` for macros so @fmt could easily add a message like `while evaluating format string`?
 - is :jnz_is_Kw really what i want the semantic to be?
 - RSlot overflow
 - default arg values (any const expr and inject at callsite? or based on other args so generate shims or multiple entry points to the function)
 - implement examples/testing.fr/fetch_or_crash() with import_c (libcurl) instead of exec-ing shit
+  - i have my own get.fr, just need to actually use it (and deal with the bootstrapping problem, so build get.fr first with curl then stop using curl)
 - fetch_or_crash hashes are of the compressed file which is garbage. will break if github changes compression level or whatever. 
-- bake for list/hashmap need to get rid of uninit memory
-- List.shrink_to_fit for places that i push and then return a slice so you can free it on allocators that don't track size
+  - i started doing content based hash, just need to actually use it.
+- if OptionalEnumMap gets remove() then it needs a bake_relocatable_values to clear uninit memory
 
 ## cleanup 
 
-- ImportVTable: implement add_to_scope with add_expr_to_scope
 - sema needs to get simplified. 
 - fix the hack that requires `#ir({ (o, k) })`. it should allow just a tuple and still evaluate it as an expression instead of just grabbing the identifiers. 
 - backend fails_typecheck make sure sel0:sel1 and blit0:blit1 and cas0:cas1. 
@@ -1649,11 +1638,11 @@ and not need to serialize the arguments to a string.
 - have a test where you force inline everything that's not recursive to stress test the backend dealing with large functions.
 - compiler/test.fr run for jit as well
 - automated test that builds are still reproducible (including with -debug-info)
-  (currently i only do it for the compiler via `run_tests release` in ci but should do it for all the programs)
+  (repro.txt is still a small subset of programs and there are a few i know are broken so can't put in yet)
 - fix the test programs to not all write to `./a.out` or whatever so they can run in parallel.  
   (including cross for different arches at the same time)
 - test compile error for conflicting #use
-- compile all the examples in run_tests: toy
+- compile all the examples in run_tests: toy, aoc/2025
 - repro doesn't work when you do `-repeat`
 - have one command that lets me run the tests on all targets
 - tests for failing progeams. 
@@ -1664,7 +1653,6 @@ and not need to serialize the arguments to a string.
     should say "missing function main()". previously it was segfaulting because get_addr never returned None. 
 - compiler/tests.fr stops when something doesn't compile but it should show which other tests passed like it does for runtime failures
 - `default_driver.fr run` should jit instead of stomping a.out and exec-ing it. 
-- think about how to test the gui programs more convincingly than just that they produce a binary
 - test using import_(c, wasm)/ffi from a precompiled driver to make sure they're not relying on being in their own compilation context 
 - make the crash examples work without needing to set the env variable / run jitted
 - instead of hardcoding `clang`, use env var CC or something more sane.
@@ -1809,7 +1797,21 @@ A :: @struct {
 @assert_eq(A.a, 123);  // kinda weird
 ```
 - tail calls
+  - very nice for threaded interpreters (rn hctarcs has to do a hack with ScriptSlot.no_yield which is annoying and presumably slow)
 // TODO: destructure through a pointer? 
+
+```
+// currently all of these compile but i probably don't want to allow `c` because it overflows to -1
+// but `d` i want to allow because it should be possible to just tell me 
+// the bytes you want in the program without me freaking out that the high bit is set
+main :: fn() void = {
+    a: u64 = 18446744073709551615;
+    b: u64 = 0xFFFFFFFFFFFFFFFF;
+    c: i64 = 18446744073709551615;
+    d: i64 = 0xFFFFFFFFFFFFFFFF;
+    @println("% % % %", a, b, c, d);
+}
+```
 
 ## demos 
 

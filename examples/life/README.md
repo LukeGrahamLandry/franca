@@ -1,4 +1,4 @@
-> franca examples/life/gui.fr -jit -unsafe
+> franca examples/life/gui.fr -unsafe
 
 Life: grid of cells that live or die based on its neighbours. 
 - https://en.wikipedia.org/wiki/Conway%27s_Game_of_Life

@@ -1,4 +1,23 @@
 
+## (Aug 26)
+
+my philosophy is that `franca example.fr` should try to do something interesting 
+before you bother reading the instructions for what cli args it takes so you're 
+convinced to care about the program. so for graphics programs, default to running 
+jitted and make you explicitly ask for aot instead. 
+
+--- 
+i think my woes with srht dying in drop(compiler) is glibc isn't compiled 
+with frame pointers on the distros that dont work. hence my walk_stack to see 
+if you called destroy wrong dies. in lldb im getting like fp=2 or some shit above my impl2.
+- ubuntu/25.10 works and objdump glibc.so `__libc_start_main` looks like it has frame pointers. 
+- ubuntu/22.04 doesn't work and no frame pointers. 
+- which is consistant with https://ubuntu.com/blog/ubuntu-performance-engineering-with-frame-pointers-by-default
+  talking about enabling them in 24.04 which is in the middle of those. 
+- that's a different problem than ubuntu/26.04 having something weird with the hare test that execs env. 
+  so i can just avoid this for now but i have to be smarter about frame pointers
+  eventually because my whole obsession is about not being dependent on random system configuration. 
+
 ## (Aug 25) sb3
 
 - !! i wasn't adding the clone to the list
@@ -11841,10 +11860,10 @@ but it's pretty pleasing for so little work.
 ## (Nov 29/30)
 
 - frontend: slow progress on new emit_ir from ast instead of going through old Bc.
-- arm: fixealways run in the slow jit anymore. d HFA abi. it was always passing >16 byte structs in memory which i learned was wrong a from soft_draw example a while ago.
+- arm: fixed HFA abi. it was always passing >16 byte structs in memory which i learned was wrong a from soft_draw example a while ago.
   > <https://lists.sr.ht/~mpu/qbe/%3CCAHT_M7Pp-6_vSjOd-WkRt4ACJWLrKq=YpgUrnzW0Vy=T-7AFYg@mail.gmail.com%3E>
 - arm: fixed incorrectly transcribed udiv bits. only manifested on fold test with fold turned off which is strange.
-  always run in the slow jit anymore.always run in the slow jit anymore. didn't mess up franca because i only use signed math currently.
+  didn't mess up franca because i only use signed math currently.
 - amd: temporary rort/byte_swap #asm impl. revealed bug with const arg + FuncImpl.Merged that im going to ignore for now.
   that gets sha256_examples working on x64 (but only with linker, not my exe... odd).
 - incantation to get sane disassembler: in `~/.lldbinit`: `settings set target.x86-disassembly-flavor intel`
