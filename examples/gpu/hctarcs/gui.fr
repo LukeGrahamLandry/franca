@@ -1,5 +1,8 @@
 
 FEAT_UI :: true && !IS_WASM_PLAYGROUND;
+FEAT_LOADER :: false;  // embed the franca compiler so new projects can be jitted at runtime
+// TODO: make embeding the builtin ones optional when FEAT_LOADER. 
+//       need to allow having no project active (which will be good while loading anyway). 
 
 State :: @struct {
     draw: Sgl.Self;
@@ -7,6 +10,7 @@ State :: @struct {
     canvas: Rt.Canvas;
     images: List(Img);
     image_i: i64;
+    builtin_image_count: i64;
     dirty: bool;
     ui: Ui.State;
     idle_last_frame: bool;
@@ -15,6 +19,8 @@ State :: @struct {
     paused: bool;
     allow_full_fps: bool;
     fps_limit_parity: bool;
+    
+    loader: Loader;
 };
 
 Img :: @struct(initialize: @FnPtr(c: *Rt.Canvas) void, title: Str);
@@ -24,6 +30,9 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     if !state.allow_full_fps && state.fps_limit_parity {
         sapp.webgpu.noframe = true;
         return();
+    };
+    if state.loader.done == 1 && state.loader.initialize.is_some() {
+        state.dirty = true;
     };
     
     c := state.canvas&;
@@ -84,7 +93,9 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     @if(FEAT_UI) on_init(state.ui&, sg);
-    
+    init(state.loader&);
+    sapp.desc.enable_dragndrop = true;;
+    sapp.desc.enable_clipboard = true;
     state.draw&.setup(allocator = general_allocator(), sg = sg, max_commands = 2, max_vertices = 6);
     state.img = sg.make(width = 480, height = 360, pixel_format = .RGBA8, data = zeroed(Sg.ImageData), usage = .DYNAMIC);
     state.images = list(general_allocator());
@@ -96,8 +107,16 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             title = @if(S.metadata.len() > 2, S.metadata[1], /*:leak*/@afmt(general_allocator(), "%", state.images.len)),
         );
     };
+    state.builtin_image_count = state.images.len;
     next_example(state, 0);
-    state.dirty = true;
+    
+    for cli_args() { it |
+        it := it.str();
+        if it.ends_with(".sb3") || !it.contains(fn(c) => dec_digit(c[]).is_none()) {
+            load_project_async(state, it);
+        };
+        
+    };
 }
 
 key_to_index :: fn(key: Sapp.Keycode) i64 = {
@@ -185,6 +204,9 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         fn MOUSE_SCROLL() => {
             // TODO
         }
+        fn FILES_DROPPED() => for event.drop { it |
+            load_project_async(state, it);
+        };
         @default => return();
     };
     state.dirty = true;
@@ -207,6 +229,7 @@ fn mouse_to_canvas(c: *Rt.Canvas, event: *Sapp.Event, sapp: *Sapp.Self) Vec2 = {
 
 fn next_example(state: *State, delta: i64) void = {
     @if(state.images.len == 0) return();
+    state.dirty = true;
     state.image_i = mod(state.image_i + delta + state.images.len, state.images.len);
     
     c := state.canvas&;
@@ -222,6 +245,7 @@ main :: fn() void = Easy'start(State);
 #use("@/graphics/lib.fr");
 
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    drop(state.loader&);
     @if(state.canvas.gc_head != 0) drop(state.canvas&);
     drop(state.images&);
     sg.destroy(state.img);
@@ -255,6 +279,21 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
         
         if nk_tree_push_hashed(ctx, .NK_TREE_NODE, S"Projects", .NK_MINIMIZED, S"", 0, 1) {
             nk_layout_row_dynamic(ctx, 0, 2);
+            
+            @if(FEAT_LOADER) {
+                // TODO: this really needs paste
+                buf := @static_mut zeroed(Array(u8, 256));  // TODO: be thread safe if multiple *State embeded (like maze_game would)
+                length := @static_mut @as(i32) 0;
+                // TODO: need to make enum as flags like this less painful
+                flags := (@as(u32) nk_edit_flags.NK_EDIT_ALWAYS_INSERT_MODE).bit_or(@as(u32) nk_edit_flags.NK_EDIT_SIG_ENTER).bit_or(@as(u32) nk_edit_flags.NK_EDIT_SELECTABLE).bit_or(@as(u32) nk_edit_flags.NK_EDIT_CLIPBOARD);
+                r := nk_edit_string(ctx, flags, bit_cast_unchecked(*u8, *i8, buf.as_ptr()), length, buf.items().len().intcast(), nk_filter_default);
+                flags := @as(u32) nk_edit_events.NK_EDIT_COMMITTED;
+                if nk_button_label(ctx, S"Load") || r.bit_and(flags) != 0 {
+                    path := buf.items().slice(0, length[].intcast());
+                    load_project_async(state, path);
+                };
+            };
+            
             @if(nk_button_label(ctx, S"Prev")) next_example(state, -1);
             @if(nk_button_label(ctx, S"Next")) next_example(state, 1);
             
@@ -332,6 +371,27 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
         @if(c.metadata.credits.len != 0) text_box(ctx, S"Credits", 4, c.metadata.credits);
         @if(c.metadata.warning.len != 0) text_box(ctx, S"Warnings", 5, @slice(c.metadata.warning));
         
+        @if(FEAT_LOADER)
+        if state.loader.start_time != 0 {
+            s := @if(!state.loader.working, 
+                state.loader.buf.items(),
+                @tfmt("loading for %ms", timestamp() - state.loader.start_time));
+            // TODO: this is misleading beaucse it shows even if you selected a project that isn't this one (like a builtin one)
+            text_box(ctx, S"Loader Log", 6, @slice(s));
+            text_box(ctx, S"Generated Code", 7, @slice(state.loader.source));
+            
+            if state.loader.initialize { initialize |
+                state.loader.initialize = .None;
+                if query_current_arch() == .wasm32 {
+                    _, m := state.loader.fr.it.unwrap();
+                    (m.target.wasm_jit_event)(.Sync);
+                };
+                state.images&.push(initialize = initialize, title = "jitted");
+                state.image_i = state.images.len - 1;
+                next_example(state, 0);
+            };
+        };
+        
         // TODO: probably need to make it a edit box so you can copy from it. 
         text_box :: fn(ctx: *nk_context, name: *i8, id: i32, text: []Str) void =
         if nk_tree_push_hashed(ctx, .NK_TREE_NODE, name, .NK_MINIMIZED, S"", 0, id) {
@@ -366,4 +426,204 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
         };
     };
     nk_end(ctx);
+}
+
+// TODO: this is unfortunatly paste-y with examples/circuit/(parse, gui).fr does
+
+#use("@/lib/sys/threads.fr");
+Futex :: import("@/lib/sys/sync/futex.fr");
+Qbe :: import("@/backend/lib.fr");
+Franca :: import("@/examples/repl.fr").R;
+CachedCompilerEnv :: @struct(it: ?Ty(CompCtx, *Qbe.Module) = .None);
+
+// TODO: keep a list of paths that were successfully loaded so you can reopen them even tho compiler was reset
+Loader :: @struct {
+    start_time: i64;
+    done: u32 = 0;
+    thread: ?*Thread;
+    have_load_work_futex: u32;
+    fr: CachedCompilerEnv;
+    buf: List(u8);
+    initialize: ?Initialize;  // result of a compilation
+    working: bool;
+    source: Str;
+};
+
+fn init(self: *Loader) void = {
+    self.thread = .None;
+    self.fr = (it = .None);
+    self.buf = list(general_allocator());
+    self.initialize = .None;
+}
+
+fn load_project_async(state: *State, path: Str) void = {
+    @if(!FEAT_LOADER) return(eprintln("FEAT_LOADER is disabled"));
+    
+    // can't have old jitted thing active because compiler is going to be reset
+    if state.image_i >= state.builtin_image_count {
+        // wasteful since going to be stompped again by the new thing
+        next_example(state, -state.image_i);
+    };
+    state.images.len = state.builtin_image_count;
+    
+    self := state.loader&;
+    @debug_assert(!self.working, "can't load two at once");
+    self.buf&.clear();
+    self.buf&.push_all(path);
+    load_project_async(self);
+}
+
+fn load_project_async(self: *Loader) void = {
+    self.working = true;
+    self.start_time = timestamp();
+    self.done = 0;
+    
+    if self.thread.is_none() {
+        self.thread = (Some = start_thread(Loader, fn(self) = {
+            while => self.have_load_work_futex == 1 {
+                worker(self);
+                u32.atomic_add(self.have_load_work_futex&, MAX_u32);
+                Futex'wait_while(self.have_load_work_futex&, fn(tmp) => tmp == 0);
+            };
+        }, self));
+    };
+    self.have_load_work_futex = 1;
+    Futex'wake(self.have_load_work_futex&, 1);
+}
+
+fn worker(self: *Loader) void = {
+    mark := temp().mark();
+    worker_body(self);
+    temp().reset(mark);
+    self.done = 1;
+    self.working = false;  // TODO: remove. redundant with .done
+}
+
+fn worker_body(self: *Loader) void = {
+    path := self.buf.items().shallow_copy(temp());
+    @fmt(self.buf&, "\n");
+    
+    self.source = "";
+    reset_jit(self.fr&);
+    fr, _ := self.fr.it.unwrap();
+    
+    in := path;
+    if read_entire_file(temp(), in) { data |
+        in = data;
+    } else {
+        id, remaining := convert_number(path, 10, dec_digit);
+        if remaining.len > 0 {
+            return @fmt(self.buf&, "failed to read file and doesn't look like a project id number.\n");
+        };
+        @fmt(self.buf&, "fetch_sb3(%)\n", id);
+        start := timestamp();
+        in = import("@/examples/gpu/hctarcs/main.fr")'fetch_sb3(id, false).or(fn(msg) => {
+            return @fmt(self.buf&, "%", msg);
+        });
+        @fmt(self.buf&, "fetched in %ms\n", timestamp() - start);
+    };
+    
+    start := timestamp();
+    r := unbuild(in).or(fn(msg) => {
+        return @fmt(self.buf&, "%", msg);
+    });
+    
+    out := list(u8, fr.get_alloc());
+    @fmt(out&, "{");
+    // TODO: this has panics which should be converted to errors
+    import("@/examples/gpu/hctarcs/compile.fr")'compile_to_franca(r, out&);
+    @fmt(out&, ";initialize_fn::{ ::import(\"@/examples/gpu/hctarcs/compile.fr\").simple_ops;; @as(@FnPtr(c: *Rt.Canvas) void) initialize };");
+    @fmt(out&, "};");
+    @fmt(self.buf&, "parsed in %ms\n", timestamp() - start);
+    
+    start := timestamp();
+    self.source = out.items();
+    initialize := jit_circuit(self.fr&, out.items());
+    self.initialize = (Some = initialize);
+    @fmt(self.buf&, "compiled in %ms\n", timestamp() - start);
+}
+
+Initialize :: @FnPtr(c: *Rt.Canvas) void;
+jit_circuit :: fn(slot: *CachedCompilerEnv, src: Str) Initialize = {
+    fr, m := slot.it.unwrap();
+    comptime_ctx := bit_cast_unchecked(Compiler, **rawptr, fr.data)[][];  // TODO: making everybody deal with this is kinda trash
+    
+    result := zeroed(Initialize);
+    push_as_tls(.comptime, comptime_ctx) {
+        // TODO: create_function_for_value is more convoluted than i need here 
+        //       if i put in all the source when creating the CompCtx i can just 
+        //       get the funcid directly. but eventually will want to not reset the CompCtx 
+        //       every time so it compiles faster but then need to deal with :CantReuseCompilerLikeThis
+        fid := create_function_for_value(fr, src, "initialize_fn");
+        {fr.vtable.emit_qbe_included}(Qbe.Module.raw_from_ptr(m), fr&, @slice(fid), .GiveMeTheCodeAndGiveItToMeRaw);
+        name := fr'vtable'mangle_name(fr.data, fid);
+        callee := m.get_addr(name).unwrap();
+        callee := bit_cast_unchecked(rawptr, @FnPtr() Initialize, callee);
+        result = callee();
+        Franca'end_profile();
+    };
+    result
+}
+
+destroy_jit :: fn(slot: *CachedCompilerEnv) void = 
+    if slot.it&.take() { fr, m |
+        fr'vtable'drop_qbe_module(Qbe.Module.raw_from_ptr(m));
+        fr'vtable'destroy_compiler(fr.data);
+    };
+
+reset_jit :: fn(slot: *CachedCompilerEnv) void = {    
+    if true {
+        // TODO: sometimes skip and reuse the setup work (saves ~60ms) but :CantReuseCompilerLikeThis
+        destroy_jit(slot);
+    };
+    slot := slot.it&;
+    Franca'start_profile();
+    
+    @if(slot[].is_none())
+    push_as_tls(.comptime, zeroed(rawptr)) {
+        v := Franca'init_driver_vtable();
+        opts := v.default_build_options();
+        opts.no_cache = true;
+        //opts.set_unsafe(!@run safety_check_enabled(.DebugAssertions));
+        opts.set_unsafe(true);
+        fr := v.with(v'init_compiler(opts));
+        make_and_resolve_and_compile_top_level(fr.data, fr.vtable, """ #include_std("lib/core.fr"); """, "-");
+        m := fr.get_alloc().box_uninit(Qbe.Module);
+        init_default_module_dyn(m, fr.vtable, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly));
+        slot[] = (Some = (fr, m));
+    };
+};
+
+#use("@/compiler/ast_external.fr");
+create_function_for_value :: fn(fr: CompCtx, src: Str, var_name: Str) FuncId = {
+    v, c := (fr.vtable, fr.data);
+    @assert(src.starts_with("{") && src.ends_with("};"), "compile_value wants block like import()");
+    src := src.slice(1, src.len - 2);
+    import_literal_file_name :: "(import literal)";
+    file := v'add_file(c, import_literal_file_name, src).shrink();
+    stmts := v'parse_stmts(c, file&);
+    stmts := stmts.or(fn(err) => fr.report_error(err));
+    loc := stmts[0].loc;
+    func: Func = empty_fn(fr.intern_string("compile_value_literal"), loc);
+    func.body = (Normal = (expr = (Block = (
+        body = stmts.as_raw_list(),
+        ret_label = .None,
+        flags = 0,
+        scope = NOSCOPE,
+        result = fr.get_alloc().boxed(FatExpr, (expr = (
+            GetNamed = fr.intern_string(var_name),
+        ), loc = loc)),
+    )), loc = loc));
+    func.resolve_scope = TOP_LEVEL_SCOPE;
+    fr.intern_func(func&)
+};
+
+fn drop(loader: *Loader) void = {
+    if loader.thread { loader_thread |
+        loader.have_load_work_futex = 999;
+        Futex'wake(loader.have_load_work_futex&, 1);
+        loader_thread.join();
+    };
+    destroy_jit(loader.fr&);
+    loader.buf&.drop();
 }

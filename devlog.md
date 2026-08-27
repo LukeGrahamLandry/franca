@@ -18,6 +18,15 @@ if you called destroy wrong dies. in lldb im getting like fp=2 or some shit abov
   so i can just avoid this for now but i have to be smarter about frame pointers
   eventually because my whole obsession is about not being dependent on random system configuration. 
 
+---
+sb3: gui jit at runtime and load from project id
+- as a starting point its a paste of the circuits one but hopefully what part is common will become clear and i can fix it later. 
+- for nuklear text input it was typing a \r when i try to submit with enter 
+  but problem was just that still send an EventType.CHAR for that. it 
+  doesn't use the nk_input_key special keys to filter out nk_input_unicode.  
+  they do the newline themself. no CHAR when holding cmd also fixes cmd-a 
+  to select all. before it was deleting all and typing an `a` which i understand now. 
+
 ## (Aug 25) sb3
 
 - !! i wasn't adding the clone to the list

@@ -11,6 +11,11 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
+- hctarcs generated file main use gui instead of temporary_main
+- hctarcs: one of the builtin ones has floatunrepresentableinintegerrange in wasm when printing in literal_node to check if the string is floaty because my display does .int()
+- circuit: clock shematic shows the wrong time in web
+- circuit: collect_schematics should sort them (instead of walk_directory_unordered) 
+  so when you press `l` the order they're shown in the ui is consistant (rn different on macos and web)
 - don't die if linked against a libc that isn't compiled with frame pointers. 
   walk_stack_trace should try to stop if it doesn't like the pointer somehow. 
   maybe just look at StaticTls.Thread.stack, bit sad to not be able to do 
@@ -144,6 +149,9 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
   - prebuild them for ^ so its fast if you don't modify
   - "see inside" button that opens the current playground view (like scratch)
   - be able to edit multiple source files and save changes on refresh? annoying because then need to repack the archive. 
+  - make exec-ing a second graphics program work. ex. `franca examples/gpu/mandelbrot.fr` in the terminal. 
+    need some idea for opening new windows. is it better to do like the 
+    multiplexer example i started or try to add multiple canvases to the page.  
 - all the casting is a bit unreasonable. 
   i tend to favour i64/f64 in the cast fns i write so if you want ex. f32->i32 it might be multiple hops. 
   i could just write out more conversions (backend has the ops for more) but it gets annoying to think of unique names or add @as to complex expressions. 
