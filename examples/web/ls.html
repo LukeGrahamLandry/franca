@@ -1,0 +1,115 @@
+<title>Franca Source Files</title>
+<div id="sidebar">
+    <input id="file_path"> <button onclick="open_by_path()">Open</button>
+    <button onclick="show_all_content()">show all files concatenated</button>
+    <div id="files_list">hopefully this loads soon...</div>
+</div>
+<textarea id="file_content" readonly></textarea>
+<script>
+(async () => {
+    const rootfs_hash = await (await fetch(`/rootfs_hash.txt`)).text();
+    const rootfs_blob = await (await fetch(`/mirror/${rootfs_hash}`)).arrayBuffer();
+    
+    // (length, off(indices), [blob; indices=[off(name), length(name), off(data), length(data)]])
+    const unpack = (rootfs) => {
+        const files = { contents: {} };
+        const by_full_path = {};
+        const d = new DataView(rootfs);
+        const get = (off) => d.getUint32(off, true);
+        const end = get(0);
+        let off = get(4)+8;
+        while (off < end) {
+            const name = new TextDecoder().decode(new DataView(rootfs, get(off+0)+8, get(off+4)));
+            const parts = name.split("/");
+            let pointer = files;
+            for (let dir of parts.slice(0, parts.length - 1)) {
+                if (pointer.contents[dir] === undefined) { 
+                    pointer.contents[dir] = { contents: {}, is_dir: true };
+                }
+                pointer = pointer.contents[dir];
+            }
+            const data = new TextDecoder().decode(new DataView(rootfs, get(off+8)+8, get(off+12)));
+            pointer.contents[parts[parts.length - 1]] = { is_dir: false, data, full_path: name };
+            by_full_path[name] = data;
+            
+            off += 16;
+        }
+        return [files, by_full_path];
+    };
+    
+    
+    const make_tree = (files_in) => {
+        let s = "";
+        let files = Object.entries(files_in.contents);
+        files.sort((a, b) => a[0] > b[0] ? 1 : (a[0] === b[0] ? 0 : -1));
+        // this is fine because the file names are mine. if i extend this to do it for deps need to be more careful. 
+        for (const [name, file] of files) {
+            if (file.is_dir) s += `<details><summary>${name}</summary>${make_tree(file)}</details>`;
+        }
+        for (const [name, file] of files) {
+            if (!file.is_dir) s += `<span onclick="window.show_file('${file.full_path}')" style="margin-left: 20px; color: lightblue;">${name}</span><br>`;
+        }
+        return s
+    }
+    let [file_tree, by_path] = unpack(rootfs_blob);
+    file_tree.is_dir = true;
+    file_tree = { contents: { franca: file_tree }, is_dir: true }; 
+    const file_path_input = document.getElementById("file_path");
+    const file_content = document.getElementById("file_content");
+    window.show_file = (path) => {
+        file_path_input.value = path;
+        file_content.value = by_path[path];
+    }
+    window.open_by_path = () => show_file(file_path_input.value);
+    file_path_input.onsubmit = open_by_path;
+    file_path_input.addEventListener("keypress", (event) => {
+        if (event.key === "Enter") open_by_path();
+    });
+    const files_list = document.getElementById("files_list");
+    files_list.innerHTML = make_tree(file_tree);
+    files_list.getElementsByTagName("details")[0].setAttribute("open", "true");
+    
+    window.show_all_content = () => {
+        let s = "";
+        for (const [name, data] of Object.entries(by_path)) {
+            s += `/////\n///// ${name}\n/////\n`
+            s += data;
+        }
+        file_content.value = s;
+    };
+    
+    const path = new URLSearchParams(window.location.search).get("file");
+    if (path !== null) show_file(path);
+})();
+</script>
+<style>
+    details {
+        margin-left: 10px;
+        cursor: pointer;
+    }
+    html, body {
+        color-scheme: dark;
+        height: 100%; 
+        overflow: hidden;
+        margin: 0;
+    }
+    #sidebar {
+        position: absolute;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        width: 20%;
+        overflow-y: auto;
+    }
+    #file_content {
+        position: absolute;
+        left: 20%;
+        width: 80%;
+        height: 100%;
+        outline: none;
+        border: none;
+        font-family: monospace;
+        white-space: pre;
+        resize: none;
+    }
+</style>

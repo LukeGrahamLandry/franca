@@ -27,6 +27,12 @@ sb3: gui jit at runtime and load from project id
   they do the newline themself. no CHAR when holding cmd also fixes cmd-a 
   to select all. before it was deleting all and typing an `a` which i understand now. 
 
+---
+minimal ugly thing just so i can look at the files on my website without going through github. 
+even srht is annoying when not logged in because anubis, which like fair i hate the ai people too 
+but its sad that the outcome is that everything is made slower artificially. 
+really feels like the universe is a psyop against people who give a shit about anything at this point. 
+
 ## (Aug 25) sb3
 
 - !! i wasn't adding the clone to the list
