@@ -6,7 +6,7 @@ A self sufficient programming language.
 
 ## Features
 
-The main gimmick is full compile-time code execution: anything you can do at runtime, you can do at comptime. 
+The main gimmick is compile-time code execution.
 Comptime code doesn't run in an interpreter. It's JITted to machine code by the same backend as the rest of your program. 
 Supporting that while also allowing cross compilation and reproducible builds is... nontrivial, but it mostly works. 
 Comptime code can dynamically allocate memory, make syscalls, and generate code. 
@@ -22,23 +22,6 @@ runtime code will automatically be included in the final binary.
 - manual memory management with explicit allocators 
 - no seperate build system language. write a program that builds your program
 - c abi support so you can call extern-c code written in other languages
-  - (limitations: no f16,f80,f128,i128,bitfields,tls,stack switching)
-
-## Supported Targets
-
-The self-hosted backend generates machine code for arm64 (aarch64), amd64 (x86_64), riscv64, and wasm32. 
-There is no dependency on assemblers, linkers, llvm, or xcode-codesign. 
-
-- mach-o (macos), elf (linux)
-- executables, dynamic libraries, relocatable object files
-- jit for comptime execution 
-
-On windows you can use WSL. 
-
-The compiler does not depend on libc (on linux, when built with -syscalls). 
-
-The webassembly target is still a work in progress (doesn't follow c abi, poor codegen, etc), 
-but the compiler can (slowly) compile itself. 
 
 ## Nontrivial Example Programs
 
@@ -51,12 +34,12 @@ but the compiler can (slowly) compile itself.
 - Lightly optimising codegen backend [@/backend](./backend) (based on Qbe)
 - C compiler (using that backend^) [@/examples/import_c](./examples/import_c) (based on Chibicc)
   - can run at comptime so franca programs can import c libraries directly without depending on another compiler
-  - compiles real programs: see tests/external/(lua, hare, bubblewrap, raylib, ...).fr
+  - compiles real programs: see tests/external/(lua, nuklear, hare, bubblewrap, raylib, ...).fr
 - Windowing/3d graphics library [@/graphics](./graphics) (based on Sokol)
-  - very unfinished! macos-arm64-metal/webgpu only currently
 - You can try the [WebAssembly demo](https://franca.lukegrahamlandry.ca) in your browser without installing anything. 
   It can even cross compile a native version of the compiler that you can download as a way to bootstrap your first franca installation. 
-- The beginnings of an operating system for aarch64 [@/examples/os](./examples/os)
+- The beginnings of an operating system for aarch64 [@/examples/os](./examples/os) (unsurprisingly it runs [doom](./examples/os/bin/doom.fr)).
+- Emulators of various fantasy computers: [scratch](./examples/gpu/hctarcs), [circuits](./examples/circuit), [wasm4](./tests/external/wasm4.fr), [webassembly](./examples/import_wasm)
 
 Some of the examples have more detailed writeups. 
 - [Prospero](https://lukegrahamlandry.ca/words/prospero)
@@ -82,6 +65,24 @@ These are not polished yet but hopefully better than nothing.
 - [debugging](./docs/debugging.md)
 - [caching](./docs/caching.md): details about `.frc` files
 - [lib_summary](./docs/lib_summary.md): list of useful code provided with the franca distribution 
+
+## Supported Targets
+
+The self-hosted backend generates machine code for arm64 (aarch64), amd64 (x86_64), riscv64, and wasm32. 
+There is no dependency on assemblers, linkers, llvm, or xcode-codesign. 
+
+- mach-o (macos), elf (linux)
+- executables, dynamic libraries, relocatable object files
+- jit for comptime execution 
+
+On windows you can use WSL. 
+
+The compiler does not depend on libc (on linux, when built with -syscalls). 
+
+The webassembly target is still a work in progress (doesn't follow c abi, poor codegen, etc), 
+but the compiler can (slowly) compile itself. 
+
+The graphics examples only support metal/webgpu currently. 
 
 ## Getting Started
 
@@ -158,7 +159,7 @@ there must be proportional terrible things or I'm probably just lying.
 - I don't have a nice debug mode that detects undefined behaviour (overflow, wrong tagged field, etc).
 - The compiler does an insane amount of redundant work.
   Like sometimes it reparses and re-resolves names for each specialization of a generic.
-  There just happens to only be ~90k lines of code ever written in this langauge so its not a big deal yet.
+  There just happens to only be ~120k lines of code ever written in this langauge so its not a big deal yet.
   See examples/60fps.fr for a fun speed test.
 - There's some hoops you need to jump through when you want conditional compilation on different platforms 
   (because I care about cross compiling working seamlessly). 
@@ -173,3 +174,9 @@ there must be proportional terrible things or I'm probably just lying.
   that could be fixed by unfinished features (#where) that I haven't bothered to work on. 
 - Similarly, there are some known bugs (see tests/todo/) that I don't care enough to fix until they annoy me (or someone else) more. 
 - No source level debugging
+- c abi limitations: no f16,f80,f128,i128,bitfields,tls,stack switching
+
+## Output of some graphics example programs
+
+![](https://franca.lukegrahamlandry.ca/a.png)
+![](https://franca.lukegrahamlandry.ca/b.png)

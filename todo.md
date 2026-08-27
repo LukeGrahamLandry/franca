@@ -21,7 +21,6 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
   maybe just look at StaticTls.Thread.stack, bit sad to not be able to do 
   it across stack switching tho (like examples/elf_loader.fr)
 - remove #log_asm. it's redundant with #log_ir("D"). make sure it works with AsmFunction too. 
-- a.ppm->a.png and put it in repro/ dir from macos ci and put it on website
 - hctarcs 549996194 in wasm has runtime error integer overflow when you win the first level
 - doom input in the web demo at least. also use the upcoming import_c redirects to do it on native without the os/user/libc thing.
 - tests/gui.fr -wgpu: crashes sometimes
