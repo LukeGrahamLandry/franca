@@ -96,6 +96,7 @@ fn unbuild(sb3: []u8, warning: *List(u8)) Result(*Project, Str) = {
         };
     };
     
+    uses_cloud_variables := false;
     each p.targets { s |
         // TODO: im assuming block,var,param will all be unique which isn't true
         blocks: HashMap(Str, *Node) = init(temp());
@@ -105,6 +106,7 @@ fn unbuild(sb3: []u8, warning: *List(u8)) Result(*Project, Str) = {
         if !s.isStage {
             next_var_id := 1.0;  // different index space from locals
             each stage.variables& { key, it |
+                uses_cloud_variables = uses_cloud_variables || it.cloud;
                 @try(push_var(blocks&, sprite&, next_var_id&, key, it.name, true)) return;
             };
             each stage.lists& { key, it |
@@ -370,6 +372,9 @@ fn unbuild(sb3: []u8, warning: *List(u8)) Result(*Project, Str) = {
         i := project.sprites.index_of(fn(it) => it.name == "Stage").unwrap();
         project.sprites.items().swap(0, i);
     };
+    if uses_cloud_variables {
+        @fmtln(warning, "cloud variables are not implemented");
+    };
 
     project.warning = warning.as_raw();
     (Ok = temp().boxed(Project, project))
@@ -487,11 +492,11 @@ Project :: @struct {
     meta: Meta;
 };
 
-VariableRepr :: @struct(name: Str, init: FloatOrString);  // AAAAAAA my system is stupid because i can't put #json_null_value on a tuple
+VariableRepr :: @struct(name: Str, init: FloatOrString, cloud := false);  // AAAAAAA my system is stupid because i can't put #json_null_value on a tuple
 fn parse_json(json: *JsonParser, self: *VariableRepr) bool = {
     it := zeroed(Ty(Str, FloatOrString, ?bool /*cloud*/));
     parse_json(json, it&) || return(false);
-    self[] = (name = it._0, init = it._1);
+    self[] = (name = it._0, init = it._1, cloud = it._2 || false);
     true
 }
 fn dump_json(self: *VariableRepr, out: *List(u8)) void = {

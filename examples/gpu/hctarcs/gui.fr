@@ -1,8 +1,7 @@
 
 FEAT_UI :: true && !IS_WASM_PLAYGROUND;
 FEAT_LOADER :: false;  // embed the franca compiler so new projects can be jitted at runtime
-// TODO: make embeding the builtin ones optional when FEAT_LOADER. 
-//       need to allow having no project active (which will be good while loading anyway). 
+FEAT_BUILTIN :: true;  // embed (aot) the example projects listed in ./main.fr
 
 State :: @struct {
     draw: Sgl.Self;
@@ -14,6 +13,7 @@ State :: @struct {
     dirty: bool;
     ui: Ui.State;
     idle_last_frame: bool;
+    canvas_active: bool;
     
     turbo_mode: bool;
     paused: bool;
@@ -23,7 +23,9 @@ State :: @struct {
     loader: Loader;
 };
 
-Img :: @struct(initialize: @FnPtr(c: *Rt.Canvas) void, title: Str);
+// all builtins and at most one jitted will have initialize=true. 
+// for jitted, title will be the path/projectid and selecting it again will recompile.
+Img :: @struct(initialize: ?@FnPtr(c: *Rt.Canvas) void, title: Str);
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.fps_limit_parity = !state.fps_limit_parity;
@@ -31,7 +33,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sapp.webgpu.noframe = true;
         return();
     };
-    if state.loader.done == 1 && state.loader.initialize.is_some() {
+    // while loading want to update the time display. when done need to run ui to enable the canvas. 
+    if !state.fps_limit_parity && (state.loader.start_time != 0 || state.builtin_image_count == 0) {
         state.dirty = true;
     };
     
@@ -41,7 +44,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         return();
     };
     
-    if !state.paused {
+    if !state.paused && state.canvas_active {
     // TODO: don't spam if all are in a wait block
     ran := 1;
         if state.turbo_mode {
@@ -67,8 +70,10 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     
     Easy'glue_begin_pass(sapp, sg, zeroed(Sg.PassAction));
+    if state.canvas_active {
     Easy'draw_screen_fit_image(sg, sapp, state.draw&, state.img, c.frame_pixels, c.size.x / c.size.y);
     state.draw&.draw_layer(sg, 0);
+    };
     @if(FEAT_UI) {
         ctx := state.ui.ctx&;
         
@@ -100,10 +105,13 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.img = sg.make(width = 480, height = 360, pixel_format = .RGBA8, data = zeroed(Sg.ImageData), usage = .DYNAMIC);
     state.images = list(general_allocator());
     
+    @run @ct_assert(FEAT_BUILTIN || FEAT_LOADER, @source_location, "no projects makes this program useless");
+    state.dirty = true;
+    @if(FEAT_BUILTIN)
     inline_for builtin_sources { $src |
         S :: import(@afmt(ast_alloc(), "{ % };", src[]));
         state.images&.push(
-            initialize = @run S.initialize,
+            initialize = (Some = @run S.initialize),
             title = @if(S.metadata.len() > 2, S.metadata[1], /*:leak*/@afmt(general_allocator(), "%", state.images.len)),
         );
     };
@@ -113,7 +121,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     for cli_args() { it |
         it := it.str();
         if it.ends_with(".sb3") || !it.contains(fn(c) => dec_digit(c[]).is_none()) {
-            load_project_async(state, it);
+            load_project_async(state, it, true);
         };
         
     };
@@ -152,20 +160,33 @@ fn key_event(c: *Rt.Canvas, key: Sapp.Keycode, down: bool) void = {
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     @if(FEAT_UI) on_event(state.ui&, sapp, event);
     
-    c := state.canvas&;
+    if state.canvas_active && send_event(state.canvas&, sapp, event) {
+        state.dirty = true;
+    };
+    
     @match(event.type) {
-        fn RESIZED() => ();
+        fn RESIZED() => { state.dirty = true; };
         fn KEY_DOWN() => @match(event.key_code) {
             fn LEFT_BRACKET() => state.next_example(-1);
             fn RIGHT_BRACKET() => state.next_example(1);
-            @default => {
-                key_event(state.canvas&, event.key_code, true);
+            @default => ();
+        };
+        fn FILES_DROPPED() => for event.drop { it |
+            load_project_async(state, it, true);
+        };
+        @default => ();
+    };
+}
+
+fn send_event(c: *Rt.Canvas, sapp: *Sapp.Self, event: *Sapp.Event) bool = {
+    @match(event.type) {
+        fn KEY_DOWN() => {
+            key_event(c, event.key_code, true);
                 
                 // on_event will get repeats which send_event will ignore until the old script is done
                 c.send_event(KeyPress = key_to_index(event.key_code));
-            };
         };
-        fn KEY_UP() => key_event(state.canvas&, event.key_code, false);
+        fn KEY_UP() => key_event(c, event.key_code, false);
         fn MOUSE_MOVE() => {
             c.sensing.mouse.pos = mouse_to_canvas(c, event, sapp);
         }
@@ -204,12 +225,9 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         fn MOUSE_SCROLL() => {
             // TODO
         }
-        fn FILES_DROPPED() => for event.drop { it |
-            load_project_async(state, it);
-        };
-        @default => return();
+        @default => return(false);
     };
-    state.dirty = true;
+    true
 }
 
 fn mouse_to_canvas(c: *Rt.Canvas, event: *Sapp.Event, sapp: *Sapp.Self) Vec2 = {
@@ -233,9 +251,13 @@ fn next_example(state: *State, delta: i64) void = {
     state.image_i = mod(state.image_i + delta + state.images.len, state.images.len);
     
     c := state.canvas&;
-    initialize := state.images[state.image_i].initialize;
-    @if(c.gc_head != 0  /* not first frame zero init */) drop(c);
+    img := state.images[state.image_i];
+    initialize := img.initialize || {
+        return load_project_async(state, img.title, false);
+    };
+    @if(state.canvas_active) drop(c);
     init_canvas(c, general_allocator(), initialize);
+    state.canvas_active = true;
     c.send_event(.Flag);
     state.paused = false;
 }
@@ -246,7 +268,10 @@ main :: fn() void = Easy'start(State);
 
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     drop(state.loader&);
-    @if(state.canvas.gc_head != 0) drop(state.canvas&);
+    @if(state.canvas_active) drop(state.canvas&);
+    for state.images.items().rest(state.builtin_image_count) { it |
+        general_allocator().dealloc(u8, it.title);
+    };
     drop(state.images&);
     sg.destroy(state.img);
     state.draw&.destroy(sg, general_allocator());
@@ -266,6 +291,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
     if nk_begin(ctx, S"", nk_rect(10, 10, 300, 300), flags) {
         if nk_tree_push_hashed(ctx, .NK_TREE_NODE, S"Controls", .NK_MAXIMIZED, S"", 0, 0) {
             nk_layout_row_static(ctx, 0, 60, 4);
+            // TODO: need to be able to resend flag without resetting the sprites
             if nk_button_label(ctx, S"Reset") {
                 next_example(state, 0);
             };
@@ -290,7 +316,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                 flags := @as(u32) nk_edit_events.NK_EDIT_COMMITTED;
                 if nk_button_label(ctx, S"Load") || r.bit_and(flags) != 0 {
                     path := buf.items().slice(0, length[].intcast());
-                    load_project_async(state, path);
+                    load_project_async(state, path, true);
                 };
             };
             
@@ -310,6 +336,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
         
         if nk_tree_push_hashed(ctx, .NK_TREE_NODE, S"Sprites", .NK_MINIMIZED, S"", 0, 2) {
             nk_layout_row_dynamic(ctx, 0, 2);
+            @if(state.canvas_active)
             enumerate c.clones { i, sprite |
                 nk_label(ctx, S(@fmt_cstr("%", sprite.class.name)), 0);
                 if nk_button_label(ctx, S"Click") {
@@ -324,6 +351,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
             
             buf := @ref u8.list(temp());
             m_i: i32 = 0;
+            @if(state.canvas_active)
             each c.classes { class |
                 continue :: local_return;
                 sprite := c.clones.find(fn(it) => identical(it.class, class)) || continue();
@@ -368,26 +396,32 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
             nk_tree_pop(ctx);
         };
         
+        if state.canvas_active {
         @if(c.metadata.credits.len != 0) text_box(ctx, S"Credits", 4, c.metadata.credits);
         @if(c.metadata.warning.len != 0) text_box(ctx, S"Warnings", 5, @slice(c.metadata.warning));
+        };
         
-        @if(FEAT_LOADER)
-        if state.loader.start_time != 0 {
-            s := @if(!state.loader.working, 
-                state.loader.buf.items(),
-                @tfmt("loading for %ms", timestamp() - state.loader.start_time));
-            // TODO: this is misleading beaucse it shows even if you selected a project that isn't this one (like a builtin one)
-            text_box(ctx, S"Loader Log", 6, @slice(s));
-            text_box(ctx, S"Generated Code", 7, @slice(state.loader.source));
+        @if(FEAT_LOADER) {
+            self := state.loader&;
+            if self.start_time != 0 || state.image_i >= state.builtin_image_count {
+                s := @if(self.done == 1, 
+                    self.buf.items(),
+                    @tfmt("loading for %ms", timestamp() - self.start_time));
+                text_box(ctx, S"Loader Log", 6, @slice(s));
+                text_box(ctx, S"Generated Code", 7, @slice(self.source));
+            };
             
-            if state.loader.initialize { initialize |
-                state.loader.initialize = .None;
+            @if(self.done == 1)
+            if self.initialize { initialize |
+                self.initialize = .None;
+                self.start_time = 0;
                 if query_current_arch() == .wasm32 {
-                    _, m := state.loader.fr.it.unwrap();
+                    _, m := self.fr.it.unwrap();
                     (m.target.wasm_jit_event)(.Sync);
                 };
-                state.images&.push(initialize = initialize, title = "jitted");
-                state.image_i = state.images.len - 1;
+                
+                state.images[self.image_i].initialize = (Some = initialize);
+                state.image_i = self.image_i;
                 next_example(state, 0);
             };
         };
@@ -436,7 +470,6 @@ Qbe :: import("@/backend/lib.fr");
 Franca :: import("@/examples/repl.fr").R;
 CachedCompilerEnv :: @struct(it: ?Ty(CompCtx, *Qbe.Module) = .None);
 
-// TODO: keep a list of paths that were successfully loaded so you can reopen them even tho compiler was reset
 Loader :: @struct {
     start_time: i64;
     done: u32 = 0;
@@ -445,8 +478,8 @@ Loader :: @struct {
     fr: CachedCompilerEnv;
     buf: List(u8);
     initialize: ?Initialize;  // result of a compilation
-    working: bool;
     source: Str;
+    image_i: i64;
 };
 
 fn init(self: *Loader) void = {
@@ -456,25 +489,34 @@ fn init(self: *Loader) void = {
     self.initialize = .None;
 }
 
-fn load_project_async(state: *State, path: Str) void = {
+fn load_project_async(state: *State, path: Str, new: bool) void = {
     @if(!FEAT_LOADER) return(eprintln("FEAT_LOADER is disabled"));
+    // TODO: queue them so multiple command line arguments work?
+    @if(state.loader.start_time != 0 && state.loader.done == 0) return(eprintln("can't load two at once"));
     
     // can't have old jitted thing active because compiler is going to be reset
-    if state.image_i >= state.builtin_image_count {
-        // wasteful since going to be stompped again by the new thing
-        next_example(state, -state.image_i);
+    @if(state.canvas_active) drop(state.canvas&);
+    state.canvas_active = false;
+    each state.images.items().rest(state.builtin_image_count) { it |
+        it.initialize = .None;
     };
-    state.images.len = state.builtin_image_count;
     
     self := state.loader&;
-    @debug_assert(!self.working, "can't load two at once");
+    
+    if new {
+        self.image_i = state.images.len;
+        // TODO: only if not error
+        state.images&.push(initialize = .None, title = path.shallow_copy(general_allocator()));
+    } else {
+        self.image_i = state.images.index_of(fn(it) => it.title == path).unwrap();
+    };
+    
     self.buf&.clear();
     self.buf&.push_all(path);
     load_project_async(self);
 }
 
 fn load_project_async(self: *Loader) void = {
-    self.working = true;
     self.start_time = timestamp();
     self.done = 0;
     
@@ -496,7 +538,6 @@ fn worker(self: *Loader) void = {
     worker_body(self);
     temp().reset(mark);
     self.done = 1;
-    self.working = false;  // TODO: remove. redundant with .done
 }
 
 fn worker_body(self: *Loader) void = {
@@ -520,7 +561,12 @@ fn worker_body(self: *Loader) void = {
         in = import("@/examples/gpu/hctarcs/main.fr")'fetch_sb3(id, false).or(fn(msg) => {
             return @fmt(self.buf&, "%", msg);
         });
-        @fmt(self.buf&, "fetched in %ms\n", timestamp() - start);
+        t := timestamp() - start;
+        if t <= 5 {
+            @fmt(self.buf&, "cached\n");
+        } else {
+            @fmt(self.buf&, "fetched in %ms\n", t);
+        };
     };
     
     start := timestamp();

@@ -40,17 +40,13 @@ most other blocks are not implemented yet.
   - drag
 - strings should be utf16
 - ui
-  - cli/CLIPBOARD_PASTED/FILES_DROPPED to load .sb3 (needs to embed the compiler)
-  - show warnings if projects use unsupported features (sound, cloud variables, extensions)
-  - load project by id
-  - see generated code
   - see the code as blocks
   - drag, click bounds, scroll, ask
   - dump Node ast back to builder franca code and textbox edit as franca
 - add simple tests: looks_sayforsecs,motion_glidesecstoxy,broadcast,broadcastandwait,clone,timer,setbackdropandwait, 0x_hex and #_colour strings
-- what happens if you broadcast the same message again while someone else is waiting on a broacast_and_wait
 - should look at the extensions array first to give nicer error message before dying on an unknown upcode
 - localtime_r for correct sensing_current
+- FEAT_LOADER makes it not a self contained exe (execs curl and needs franca source files) 
 
 ## notes
 
