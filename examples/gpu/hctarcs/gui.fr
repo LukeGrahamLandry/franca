@@ -44,6 +44,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         return();
     };
     
+    @if(FEAT_LOADER) check_done_loading(state);
+    
     if !state.paused && state.canvas_active {
     // TODO: don't spam if all are in a wait block
     ran := 1;
@@ -123,7 +125,6 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         if it.ends_with(".sb3") || !it.contains(fn(c) => dec_digit(c[]).is_none()) {
             load_project_async(state, it, true);
         };
-        
     };
 }
 
@@ -410,20 +411,6 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                 text_box(ctx, S"Loader Log", 6, @slice(s));
                 text_box(ctx, S"Generated Code", 7, @slice(self.source));
             };
-            
-            @if(self.done == 1)
-            if self.initialize { initialize |
-                self.initialize = .None;
-                self.start_time = 0;
-                if query_current_arch() == .wasm32 {
-                    _, m := self.fr.it.unwrap();
-                    (m.target.wasm_jit_event)(.Sync);
-                };
-                
-                state.images[self.image_i].initialize = (Some = initialize);
-                state.image_i = self.image_i;
-                next_example(state, 0);
-            };
         };
         
         // TODO: probably need to make it a edit box so you can copy from it. 
@@ -480,6 +467,27 @@ Loader :: @struct {
     initialize: ?Initialize;  // result of a compilation
     source: Str;
     image_i: i64;
+};
+
+check_done_loading :: fn(state: *State) void = {
+    self := state.loader&;
+    @if(self.done == 1)
+    if self.initialize { initialize |
+        self.initialize = .None;
+        self.start_time = 0;
+        if query_current_arch() == .wasm32 {
+            _, m := self.fr.it.unwrap();
+            (m.target.wasm_jit_event)(.Sync);
+        };
+        
+        state.images[self.image_i].initialize = (Some = initialize);
+        state.image_i = self.image_i;
+        next_example(state, 0);
+        
+        if !FEAT_UI {
+            eprint(state.c.metadata.warnings.items());
+        };
+    };
 };
 
 fn init(self: *Loader) void = {

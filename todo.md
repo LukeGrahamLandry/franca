@@ -11,6 +11,13 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
+- nuklear frame buffer rendering and get it to work on my os and do virtio keyboard/mouse input through same api as app and get rid of unfinished usb driver. 
+- tests/gpu.fr reproducible. output
+  - stackie: fake time
+  - farm_game: seed random
+  - wasm4: funcid in mangled cart name is different between me and ci 
+    which is odd (might be a general problem for reproducible binaries) but also should use readable name anyway. 
+    rn what is shown on the screen depends if you build with -keep-names which is silly.
 - hctarcs generated file main use gui instead of temporary_main
 - hctarcs: one of the builtin ones has floatunrepresentableinintegerrange in wasm when printing in literal_node to check if the string is floaty because my display does .int()
 - circuit: clock shematic shows the wrong time in web

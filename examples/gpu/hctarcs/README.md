@@ -30,6 +30,7 @@ most other blocks are not implemented yet.
   - if all uses of a var/param are the same type can hoist the conversion to writes
 - hell, they're gonna have SVGs in there
 - they do nan in an insane way? 0 / 0 == NaN but (0 / 0) + 1 == 1 but (0 / 0) > 50 == true
+  - i think its just always treated as the string "NaN" so compare is lexical but in other math its 0
 - implement more blocks
   - async
     - glide _ secs to _ (waits until the glide is done)
@@ -47,6 +48,7 @@ most other blocks are not implemented yet.
 - should look at the extensions array first to give nicer error message before dying on an unknown upcode
 - localtime_r for correct sensing_current
 - FEAT_LOADER makes it not a self contained exe (execs curl and needs franca source files) 
+- all the parse_json-s take a really long time to compile
 
 ## notes
 

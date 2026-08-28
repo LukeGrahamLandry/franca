@@ -1,4 +1,9 @@
 
+## (Aug 28) sb3
+
+- doing eq/lt properly. its lexical for strings but not if they would parse as a float. 
+  - string_to_number was making the empty string be 0 which is right for math but not for comparison
+
 ## (Aug 26)
 
 my philosophy is that `franca example.fr` should try to do something interesting 

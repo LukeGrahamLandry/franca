@@ -190,7 +190,6 @@ fn from_obj(it: *Obj) Value = {
     bit_cast_unchecked(i64, Value, it)
 };
 
-// TODO: comparison isn't this simple because "a">50 = true
 fn coerce_number(it: Value) f64 = {
     @if(it.is_number()) return(it);
     @if(it.is_bool()) return(it.to_bool().int().float());
@@ -203,18 +202,27 @@ fn coerce_number(it: Value) f64 = {
 }
 
 string_to_number :: fn(string: Str) ?f64 = {
+    while => string.len > 0 && string[0].is_ascii_whitespace() {
+        string = string.rest(1);
+    };
+    @if(string.len == 0) return(.None);
     if string.starts_with("0x") {
         n, s := convert_number(string.rest(2), 16, hex_digit);
-        @if(s.len == 0) return(Some = n.float());
+        n := n.float();
+        @if(s.len == 0 || !s.contains(fn(it) => !it[].is_ascii_whitespace())) return(Some = n);
     };
     n, s := parse_float(string);
-    // TODO: i think its supposed to ignore whitespace
-    @if(s.len == 0) return(Some = n);
-    @switch(string) {
-        @case("-Infinity") => return(Some = -1.0/0.0);
-        @case("Infinity") => return(Some = 1.0/0.0);
-        @default => ();
+    if s.len != 0 {
+        s2 := string;
+        negative := s2.starts_with("-");
+        s2 := s2.rest(int(negative));
+        i := "Infinity";
+        if s2.starts_with(i) {
+            s = s2.rest(i.len);
+            n = (@if(negative, -1.0, 1.0)) / 0.0;
+        };
     };
+    @if(s.len == 0 || !s.contains(fn(it) => !it[].is_ascii_whitespace())) return(Some = n);
     .None
 }
 
@@ -316,6 +324,19 @@ fn drop(c: *Canvas) void = {
     c.gc_head = 0;
 }
 
+attempt_numeric_compare :: fn(a, b, $cmp_f, $cmp_s) #where = {
+    @if(a.is_number() && b.is_number()) return(cmp_f(a, b));
+    
+    a := a.coerce_string();
+    b := b.coerce_string();
+    if string_to_number(a) { a |
+        if string_to_number(b) { b |
+            return cmp_f(a, b);
+        };
+    };
+    cmp_s(a, b)
+} 
+
 // the type annotations are reflected on to generate `simple_ops` for the compiler 
 // and that info is used to insert coersions as needed. 
 // no annotation means number.
@@ -328,13 +349,18 @@ operator_add :: fn(a, b) = a + b;
 operator_subtract :: fn(a, b) = a - b;
 operator_multiply :: fn(a, b) = a * b;
 operator_divide :: fn(a, b) = a / b;
-// TODO: these are polymorphic but if compiler knows both types, don't have to do the checks 
-// TODO: how are strings ordered
-operator_lt :: fn(a: Any, b: Any) bool = a.coerce_number() < b.coerce_number();
-operator_equals :: fn(s, a: Any, b: Any) bool = {
-    @if(a.is_number() && b.is_number()) return(a == b);
-    a.coerce_string() == b.coerce_string()
-}
+operator_lt :: fn(a: Any, b: Any) bool = attempt_numeric_compare(a, b, lt) { a, b |
+    yield :: local_return;
+    range(0, min(a.len, b.len)) { i |
+        a := a[i].ascii_to_lower();
+        b := b[i].ascii_to_lower();
+        if a != b {
+            yield a < b;
+        };
+    };
+    a.len < b.len
+};
+operator_equals :: fn(s, a: Any, b: Any) bool = attempt_numeric_compare(a, b, eq, eq);
 operator_not :: fn(a: bool) bool = !a;
 // TODO: i think i need to know if things were inputted as integers or floats. 
 operator_random :: fn(s, lo, hi) = (hi - lo)*s.canvas.rng&.rand_float() + lo;
@@ -502,7 +528,7 @@ data_addtolist :: fn(s, item: Any, list: List) void = {
 }
 data_itemoflist :: fn(s, idx: Any, lst: List) Any = {
     list, i := s.coerce_list_index(lst, idx) 
-        || return(-1.0/0.0);  // TODO: return(s.canvas.new_string(""));
+        || return(s.canvas.new_string(""));
     list[i]
 }
 data_replaceitemoflist :: fn(s, idx: Any, item: Any, lst: List) void = { 

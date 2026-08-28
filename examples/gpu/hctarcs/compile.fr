@@ -287,9 +287,25 @@ fn compile_cast(self: *Compile, it: *Node, dest: ValueType) void = {
     push_cast(self, dest, it.flags.type);
 }
 
-compile :: fn(self: *Compile, it: *Node) void = {
+fn compile(self: *Compile, it: *Node) void = {
     out := self.out;
     @if(out.items().ends_with("\n")) out.push_repeated(self.depth*4, " ".ascii());
+    
+    if @is(it.op, .operator_lt, .operator_equals) {
+        // these are polymorphic but often the expressions are known to be numbers
+        // TODO: wasteful to emit an extra time just to infer types
+        mark := out.len;
+        @fmt(out, "(");
+        compile_cast(self, it.args[0], .Float);
+        @fmt(out, " % ", @if(it.op == .operator_lt, "<", "=="));
+        compile_cast(self, it.args[1], .Float);
+        @fmt(out, ").from_bool()");
+        it.flags.type = .Bool;
+        if it.args[0].flags.type == .Float && it.args[1].flags.type == .Float {
+            return();
+        };
+        out.len = mark;
+    };
     
     if simple_ops.ops&.get(it.op) { data |
         if @is(it.op, .pen_changePenShadeBy, .pen_setPenShadeToNumber, .motion_ifonedgebounce, .looks_gotofrontback, .looks_changeeffectby, .sensing_touchingcolor, .sensing_askandwait, .sensing_answer, .looks_seteffectto, .sensing_distanceto, .sensing_setdragmode) {
