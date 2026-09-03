@@ -1,0 +1,85 @@
+
+main :: fn() void = {
+    grid := @ref new_grid(temp(), 10, 10);
+    binary_tree(grid, @ref Random.xoshiro256SS.new_seeded());
+    @println("%", grid);
+}
+
+Grid :: @struct(links: []u8, w: i64, h: i64);
+
+new_grid :: fn(a: Alloc, w: i64, h: i64) Grid = (links = a.alloc_zeroed(u8, w*h), w = w, h = h);
+fn drop(grid: *Grid, a: Alloc) void = a.dealloc(u8, grid.links);
+
+// for each cell, randomly choose either north or east to connect
+binary_tree :: fn(grid: *Grid, rng: *Random.Rng) void = {
+    range(0, grid.h) { row |
+        range(0, grid.w) { col |
+            choice := rng.rand_int(2) == 1;
+            if choice || grid.grid_index(col, row, .north).is_none() {
+                grid.link(col, row, .east);
+            };
+            if !choice || grid.grid_index(col, row, .east).is_none() {
+                grid.link(col, row, .north);
+            };
+        }
+    }
+}
+
+Dir :: @enum(north, south, east, west, none);
+
+grid_index :: fn(grid: *Grid, x: i64, y: i64, dir: Dir) ?i64 = {
+    dx, dy := @match(dir) {
+        fn north() => (0, -1);
+        fn south() => (0, 1);
+        fn east() => (1, 0);
+        fn west() => (-1, 0);
+        fn none() => (0, 0);
+    };
+    x += dx; y += dy;
+    @if(x < 0 || y < 0 || x >= grid.w || y >= grid.h) return(.None);
+    (Some = x*grid.w+y)
+};
+
+
+fn other(dir: Dir) Dir = {
+    x := @const_slice(Dir.south, .north, .west, .east, .none);
+    x[@as(i64) dir]
+}
+
+fn link(grid: *Grid, x: i64, y: i64, dir: Dir) void = {
+    if grid.grid_index(x, y, dir) { i |
+        grid.set(grid.grid_index(x, y, .none).unwrap(), dir);
+        grid.set(i, dir.other());
+    };
+}
+
+fn get(grid: *Grid, i: i64, dir: Dir) bool = 
+    (@as(i64) grid.links[i].zext()).shift_right_logical(@as(i64) dir).bit_and(1) == 1;
+
+fn get(grid: *Grid, x: i64, y: i64, dir: Dir) bool = 
+    grid.get(grid.grid_index(x, y, .none).unwrap(), dir);
+
+fn set(grid: *Grid, i: i64, dir: Dir) void = 
+    { grid.links[i] = grid.links[i].bit_or(1.shift_left(@as(i64) dir)); }
+
+fn display(grid: *Grid, out: *List(u8)) void = {
+    out.reserve((2 + (4 * grid.w)) * grid.h);
+
+    out.push_all("+");
+    range(0, grid.w, fn(_) => out.push_all("---+"));
+    out.push_all("\n");
+    
+    range(0, grid.h) { row |
+        out.push_all("+");
+        range(0, grid.w) { col |
+            s := @if(grid.get(col, row, .east), "    ", "   |");
+            out.push_all(s);
+        };
+        out.push_all("\n|");
+        range(0, grid.w) { col |
+            s := @if(grid.get(col, row, .south), "   +", "---+");
+            out.push_all(s);
+        };
+        out.push_all("\n");
+    };
+}

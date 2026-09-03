@@ -1,4 +1,9 @@
 
+## (Sep 3) maze2d
+
+probably the last of my old projects i want to preserve is the ray traced 2.5d maze thingy. 
+for reference the old one is (2195, 2717) lines (code, total). 
+
 ## (Aug 28) sb3
 
 - doing eq/lt properly. its lexical for strings but not if they would parse as a float. 
