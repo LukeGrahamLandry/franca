@@ -13,7 +13,6 @@ State :: @struct {
     resized: bool;
     grid: Gen.Grid;
     world: World;
-    first_person: bool;
 };
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -26,6 +25,8 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.framebuffer = list(general_allocator());
     state.dirty = true;
     resize(state, sapp, sg);
+    
+    sapp.lock_mouse(state.world.player.first_person);
 }
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -34,11 +35,12 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.dirty = update(state.world&, dt);
     @if(state.resized) resize(state, sapp, sg);
     buf := state.framebuffer.items();
-    buf.set_zeroed();
-    if state.first_person {
+    if state.world.player.first_person {
         Render'draw3d(state.world&, buf, sapp.width());
     } else {
-        Render'draw2d(state.grid&, buf, sapp.width());
+        buf.set_zeroed();
+        p := state.world.player.pos / state.world.cfg.scale;
+        Render'draw2d(state.grid&, p, buf, sapp.width(), min(sapp.width(), sapp.height()));
     };
     aspect := cast(sapp.width().float() / sapp.height().float());
     Easy'commit_screen_fit_image(sg, sapp, state.draw&, state.img, state.framebuffer.items(), aspect);
@@ -52,7 +54,6 @@ fn resize(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     it.len = 0;
     it.reserve(w*h);
     it.len = w*h;
-    it.items().set_zeroed();
     state.resized = false;
 } 
 
@@ -68,20 +69,19 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 };
                 state.world.player.move += dir * @if(event.type == .KEY_DOWN, @as(f32) 1.0, -1);
                 state.dirty = true;
-                @println("% %", state.world.player.move.x, state.world.player.move.y);
             };
 
     @match(event.type) {
         fn RESIZED() => { state.resized = true; }
         fn MOUSE_MOVE() => {
             state.world.player.turn += event.mouse_dx;
-            @println("% %", state.world.player.look.x, state.world.player.look.y);
         }
         fn KEY_DOWN() => {
             @match(event.key_code) {
                 fn SPACE() => { 
-                    state.first_person = !state.first_person; 
-                    sapp.lock_mouse(state.first_person);
+                    it := state.world.player.first_person&;
+                    it[] = !it[];
+                    sapp.lock_mouse(it[]);
                 }
                 @default => return();
             };

@@ -44,6 +44,7 @@ Player :: @struct {
     look: Vec2;
     move: Vec2;
     turn: f32;
+    first_person: bool;
     region: i64;
     portals: Array(WallRef, 2);
     material: *Material;
@@ -58,6 +59,7 @@ fn create_empty_world(world: *World, a: Alloc) void = {
     world.player.material = world.materials[2];
     world.player.look = vec2(1, 0);
     world.player.pos = vec2(world.cfg.scale / 2);
+    world.player.first_person = true;
 }
 
 fn create_maze_region(world: *World, grid: *Gen.Grid, scale: f32) void = {
@@ -109,13 +111,37 @@ fn update(world: *World, dt: f32) bool = {
     p.turn = 0;
     
     if p.move.x != 0 || p.move.y != 0 {
-        real_move := p.look.rotate(p.move.normalize().angle() - (3.1415/2));
-        p.pos += real_move * dt * world.cfg.move_speed;
+        relative_move := p.move.normalize();
+        real_move := p.look.rotate(relative_move.angle() - (3.1415/2));
+        if !p.first_person {
+            real_move = -relative_move;
+        };
+        real_move *= dt * world.cfg.move_speed;
+        real_move = handle_collisions(world, real_move);
+        p.pos += real_move;
     };
     
     true
 }
 
+
+fn handle_collisions(world: *World, move_direction: Vec2) Vec2 = {
+    p := world.player&;
+    region := world.regions[p.region]&;
+
+    hit := region.single_ray_trace(p.pos, move_direction, 1);
+    wall := hit.hit_wall || return(move_direction);
+    
+    hit_back := wall.normal.dot(move_direction) > 0.0;
+    wall_dir_unit := wall.line.direction().normalize();
+    slide_direction := wall_dir_unit * move_direction.dot(wall_dir_unit);
+    move_direction = slide_direction;
+    
+    if move_direction.norm_sq() > 0.1*0.1 {
+        return handle_collisions(world, move_direction * 0.9);
+    };
+    vec2(0)
+}
 
 fn normal(self: Line) Vec2 = normalize(self.b - self.a);
 
@@ -125,3 +151,5 @@ fn angle_between(self: Vec2, other: Vec2) f32 = {
     a := self.normalize().dot(other).acosf();
     @if(self.y >= 0, a, -a)
 }
+
+Gen :: import("@/examples/gpu/maze2d/gen.fr");

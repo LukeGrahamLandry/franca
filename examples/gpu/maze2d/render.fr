@@ -1,16 +1,18 @@
 
-draw2d :: fn(grid: *Gen.Grid, buf: []u32, w: i64) void = {
+draw2d :: fn(grid: *Gen.Grid, player: Vec2, buf: []u32, stride: i64, w: i64) void = {
     scale := cast(w.float() / (grid.w+1).float());  // +1 extra cell for the solid edge
-    h := buf.len/w;
-    line :: fn(x: i64, y: i64, d: Vec2) void => {
-        start := floor(vec2(x.float().cast(), y.float().cast()) * scale);
+    line2 :: fn(start: Vec2, d: Vec2, c: u32) void => {
+        start := floor(start * scale);
         end := floor(start + d*scale);
         range(start.y.cast().int(), end.y.cast().int()) { y |
             range(start.x.cast().int(), end.x.cast().int()) { x |
-                i := (y)*w+x;
-                buf[i] = 0xFFFFFFFF;
+                i := (y)*stride+x;
+                buf[i] = c;
             };
         };
+    };
+    line :: fn(x: i64, y: i64, d: Vec2) void => {
+        line2(vec2(x.float().cast(), y.float().cast()), d, 0xFFFFFFFF);
     };
     range(0, grid.h) { row |
         range(0, grid.w) { col |
@@ -20,6 +22,10 @@ draw2d :: fn(grid: *Gen.Grid, buf: []u32, w: i64) void = {
     };
     line(grid.w, 0, vec2(0.1, grid.w.float().cast()));
     line(0, grid.h, vec2(grid.h.float().cast(), 0.1));
+    
+    if player.x >= 0 && player.y >= 0 && player.x < grid.w.float().cast() && player.y < grid.h.float().cast() {
+        line2(player, vec2(0.15), 0xFF0000FF);
+    };
 }
 
 draw3d :: fn(world: *World, buf: []u32, w: i64) void = {
@@ -39,6 +45,7 @@ draw3d :: fn(world: *World, buf: []u32, w: i64) void = {
         
         // draw the floor
         cumulative_dist: f32 = 0.0;
+        highest_pixel := screen_height;
         each segments { segment |
             ray_line := segment.line;
             length := ray_line.direction().norm();
@@ -63,6 +70,7 @@ draw3d :: fn(world: *World, buf: []u32, w: i64) void = {
                 draw_vertical(buf, w, colour, x, top, last_top);
                 last_top = top;
             };
+            highest_pixel = last_top;
             
             cumulative_dist += length;
         };
@@ -74,7 +82,9 @@ draw3d :: fn(world: *World, buf: []u32, w: i64) void = {
             top, bottom := project_to_screen(cumulative_dist, screen_height);
     
             draw_vertical(buf, w, colour, x, top, bottom);
+            highest_pixel = top;
         };
+        draw_vertical(buf, w, vec3(0), x, 0, highest_pixel);
     };
 }
 
@@ -191,14 +201,14 @@ algebraic_intersection :: fn(self: Line, other: Line) Vec2 = {
     vec2(a&[2], b&[2])
 }
 
-fn slope(self: Line) f32 = {
+fn slope(self: Line) f32 #inline = {
     dir := self.direction();
     dir.y / dir.x
 }
 
 fn is_horizontal(self: Line) bool = self.a.y == self.b.y;
 fn is_vertical(self: Line) bool = self.a.x == self.b.x;
-fn y_intercept(self: Line) f32 = @if(self.is_vertical(), 0.0/0.0,  self.a.y - (self.a.x * self.slope()));
+fn y_intercept(self: Line) f32 #inline = @if(self.is_vertical(), 0.0/0.0,  self.a.y - (self.a.x * self.slope()));
 fn direction(self: Line) Vec2 = self.b - self.a;
 
 // What fraction along the line is the point
