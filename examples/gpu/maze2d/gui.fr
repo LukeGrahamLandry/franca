@@ -1,6 +1,9 @@
 // predecessor of this code: https://github.com/LukeGrahamLandry/2.5d-maze-renderer
 
 Gen :: import("@/examples/gpu/maze2d/gen.fr");
+#use("@/examples/gpu/maze2d/world.fr");
+Render :: import("@/examples/gpu/maze2d/render.fr");
+
 State :: @struct {
     WIDTH :: 500; HEIGHT :: 500;
     draw: Sgl.Self;
@@ -9,50 +12,34 @@ State :: @struct {
     dirty: bool;
     resized: bool;
     grid: Gen.Grid;
+    world: World;
+    first_person: bool;
 };
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.grid = Gen'new_grid(general_allocator(), 10, 10);
     Gen'binary_tree(state.grid&, @ref Random.xoshiro256SS.new_seeded());
+    create_empty_world(state.world&, general_allocator());
+    create_maze_region(state.world&, state.grid&, state.world.cfg.scale);
 
     state.draw&.setup(allocator = general_allocator(), sg = sg, max_commands = 2, max_vertices = 6);
     state.framebuffer = list(general_allocator());
     state.dirty = true;
     resize(state, sapp, sg);
-    // sapp.lock_mouse(true);
-}
-
-fn draw2d(grid: *Gen.Grid, buf: []u32, w: i64) void = {
-    scale := cast(w.float() / (grid.w+1).float());  // +1 extra cell for the solid edge
-    h := buf.len/w;
-    line :: fn(x: i64, y: i64, d: Vec2) void => {
-        start := floor(vec2(x.float().cast(), y.float().cast()) * scale);
-        end := floor(start + d*scale);
-        range(start.y.cast().int(), end.y.cast().int()) { y |
-            range(start.x.cast().int(), end.x.cast().int()) { x |
-                i := (y)*w+x;
-                if i < buf.len {
-                    buf[i] = 0xFFFFFFFF;
-                }
-            };
-        };
-    };
-    range(0, grid.h) { row |
-        range(0, grid.w) { col |
-            @if(!grid.get(col, row, .west)) line(col, row, vec2(0.1, 1));
-            @if(!grid.get(col, row, .north)) line(col, row, vec2(1, 0.1));
-        };
-    };
-    line(grid.w, 0, vec2(0.1, grid.w.float().cast()));
-    line(0, grid.h, vec2(grid.h.float().cast(), 0.1));
-    
-    @println("%", grid);
 }
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     @if(Easy'should_skip_frame(sapp, state.dirty&)) return();
+    dt: f32 = 1.0/60.0;  // TODO
+    state.dirty = update(state.world&, dt);
     @if(state.resized) resize(state, sapp, sg);
-    draw2d(state.grid&, state.framebuffer.items(), sapp.width());
+    buf := state.framebuffer.items();
+    buf.set_zeroed();
+    if state.first_person {
+        Render'draw3d(state.world&, buf, sapp.width());
+    } else {
+        Render'draw2d(state.grid&, buf, sapp.width());
+    };
     aspect := cast(sapp.width().float() / sapp.height().float());
     Easy'commit_screen_fit_image(sg, sapp, state.draw&, state.img, state.framebuffer.items(), aspect);
 };
@@ -70,21 +57,36 @@ fn resize(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 } 
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
-    @match(event.type) {
-        fn RESIZED() => { state.resized = true; }
-        @default => {
-            if @is(event.type, .KEY_DOWN, .KEY_UP) {
+            if !event.key_repeat && @is(event.type, .KEY_DOWN, .KEY_UP) {
+                break :: local_return;
                 dir := @match(event.key_code) {
                     fn W() => vec2(0, 1);
-                    fn A() => vec2(-1, 0);
+                    fn A() => vec2(1, 0);
                     fn S() => vec2(0, -1);
-                    fn D() => vec2(1, 0);
-                    @default => return();
+                    fn D() => vec2(-1, 0);
+                    @default => break();
                 };
+                state.world.player.move += dir * @if(event.type == .KEY_DOWN, @as(f32) 1.0, -1);
                 state.dirty = true;
+                @println("% %", state.world.player.move.x, state.world.player.move.y);
             };
-            return();
-        };
+
+    @match(event.type) {
+        fn RESIZED() => { state.resized = true; }
+        fn MOUSE_MOVE() => {
+            state.world.player.turn += event.mouse_dx;
+            @println("% %", state.world.player.look.x, state.world.player.look.y);
+        }
+        fn KEY_DOWN() => {
+            @match(event.key_code) {
+                fn SPACE() => { 
+                    state.first_person = !state.first_person; 
+                    sapp.lock_mouse(state.first_person);
+                }
+                @default => return();
+            };
+        }
+        @default => return();
     };
     state.dirty = true;
 }

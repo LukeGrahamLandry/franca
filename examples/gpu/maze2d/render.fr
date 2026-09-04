@@ -1,0 +1,258 @@
+
+draw2d :: fn(grid: *Gen.Grid, buf: []u32, w: i64) void = {
+    scale := cast(w.float() / (grid.w+1).float());  // +1 extra cell for the solid edge
+    h := buf.len/w;
+    line :: fn(x: i64, y: i64, d: Vec2) void => {
+        start := floor(vec2(x.float().cast(), y.float().cast()) * scale);
+        end := floor(start + d*scale);
+        range(start.y.cast().int(), end.y.cast().int()) { y |
+            range(start.x.cast().int(), end.x.cast().int()) { x |
+                i := (y)*w+x;
+                buf[i] = 0xFFFFFFFF;
+            };
+        };
+    };
+    range(0, grid.h) { row |
+        range(0, grid.w) { col |
+            @if(!grid.get(col, row, .west)) line(col, row, vec2(0.1, 1));
+            @if(!grid.get(col, row, .north)) line(col, row, vec2(1, 0.1));
+        };
+    };
+    line(grid.w, 0, vec2(0.1, grid.w.float().cast()));
+    line(0, grid.h, vec2(grid.h.float().cast(), 0.1));
+}
+
+draw3d :: fn(world: *World, buf: []u32, w: i64) void = {
+    screen_width := w.float().cast();
+    screen_height := buf.len.float().cast() / screen_width;
+    region := world.regions[world.player.region]&;
+    segments := @ref Segment.list(temp());
+    range(0, w) { x |
+        look_ray := {
+            t := x.float().cast() / screen_width;
+            rad := (t - 0.5) * world.cfg.fov;
+            world.player.look.rotate(rad)
+        };
+    
+        segments.clear();
+        ray_trace(world, region, world.player.pos, look_ray, segments);
+        
+        // draw the floor
+        cumulative_dist: f32 = 0.0;
+        each segments { segment |
+            ray_line := segment.line;
+            length := ray_line.direction().norm();
+            ray_direction := ray_line.direction() / length;
+        
+            sample_length: f32 = 1.0;
+            ceilf :: fn(a: f32) f32 #libc;
+            sample_count := ((length / sample_length).ceilf() + 1).cast().int();
+        
+            // The top of the last floor segment is the bottom of this one.
+            // The top of the floor segment is the bottom of where we'd draw if it was a wall.
+            pixels_drawn, _ := project_to_screen(cumulative_dist, screen_height);
+            last_top := screen_height - pixels_drawn;
+            range(0, sample_count) { i |
+                i := i.float().cast();
+                // the -1 fixes the square of black at the base of a wall. It uses the colour right before the wall instead of right after the wall (which would be in shadow)
+                pos := ray_line.a + ray_direction * ((i - 2) * -sample_length);
+                colour := region.floor.colour;// region.horizontal_surface_colour_memoized(pos);
+        
+                dist := cumulative_dist + i*sample_length;
+                _, top := project_to_screen(dist, screen_height);
+                draw_vertical(buf, w, colour, x, top, last_top);
+                last_top = top;
+            };
+            
+            cumulative_dist += length;
+        };
+    
+        // draw the wall
+        hit := segments.last().unwrap();
+        if hit.hit_wall { wall |
+            colour := wall.material.colour; // hit.region.vertical_surface_colour(hit.line.b, wall, -hit.line.direction());
+            top, bottom := project_to_screen(cumulative_dist, screen_height);
+    
+            draw_vertical(buf, w, colour, x, top, bottom);
+        };
+    };
+}
+
+draw_vertical :: fn(buf: []u32, w: i64, colour: Vec3, x: i64, y0: f32, y1: f32) void = {
+    colour := {
+        r: u32 = (colour.x.min(1.0).max(0.0) * 255.0).cast().int().trunc();
+        g: u32 = (colour.y.min(1.0).max(0.0) * 255.0).cast().int().trunc();
+        b: u32 = (colour.z.min(1.0).max(0.0) * 255.0).cast().int().trunc();
+        r.bit_or(g.shift_left(8)).bit_or(b.shift_left(16)).bit_or(255.shift_left(24))
+    };
+    range(y0.cast().int(), y1.cast().int()) { y |
+        buf[y*w+x] = colour;
+    };
+}
+
+
+fn project_to_screen(z_distance: f32, screen_height: f32) Ty(f32, f32) = {
+    zoom_amount: f32 = 12000.0;
+    screen_wall_height := zoom_amount / z_distance;
+    screen_middle := screen_height / 2.0;
+    half_screen_wall_height := screen_wall_height / 2.0;
+    y_top := (screen_middle - half_screen_wall_height).max(0.0);
+    y_bottom := (screen_middle + half_screen_wall_height).min(screen_height - 1.0);
+    (y_top, y_bottom)
+}
+
+fn rotate(v: Vec2, rad: f32) Vec2 = {
+    s, c := rad.sin_cos();
+    x := c * v.x - s * v.y;
+    y := s * v.x + c * v.y;
+    vec2(x, y)
+}
+
+Segment :: @struct(region: *Region, line: Line, hit_wall: ?*Wall);
+ray_trace :: fn(world: *World, region: *Region, origin: Vec2, direction: Vec2, segments: *List(Segment)) void = {
+    segment := region.single_ray_trace(origin, direction, world.cfg.view_distance);
+    segments.push(segment);
+    while => segment.hit_wall { hit_wall |
+        @if(segments.len > world.cfg.portal_limit) return();
+        
+        return();  // TODO
+        
+        portal := hit_wall.portal() || return();
+        t := hit_wall.line.t_of(segment.line.b).abs();
+        hit_back := hit_wall.normal.dot(direction) > 0.0;
+        hit_edge := t < 0.01 || t > 0.99;
+        @if(hit_back || hit_edge) return();
+
+        // Transform through the portal
+        region := self.regions[portal.to.region]&;
+        origin := portal.translate(segment.line.b);
+        direction := portal.rotate(direction);
+
+        segment = region.single_ray_trace(origin + direction, direction, world.cfg.view_distance);
+        segments.push(segment);
+    };
+}
+
+
+/// Sends a ray through a single region until it hits a wall. Without following portals.
+fn single_ray_trace(region: *Region, origin: Vec2, direction: Vec2, view_distance: f32) Segment = {
+    direction *= view_distance;
+    ray: Line = (a = origin, b = origin + direction);
+
+    shortest_hit_distance_squared: f32 = 1.0/0.0;
+    closest_hit_point := origin + direction;
+    hit_wall: ?*Wall = .None;
+
+    each region.walls { wall |
+        hit := wall.line.intersection(ray);
+        if !hit.x.is_nan() && !hit.y.is_nan() {
+            to_hit := origin - hit;
+            dist := to_hit.norm_sq();
+            if dist < shortest_hit_distance_squared {
+                hit_wall = (Some = wall);
+                shortest_hit_distance_squared = dist;
+                closest_hit_point = hit;
+            }
+        }
+    };
+
+    (region = region, hit_wall = hit_wall, line = (a = origin, b = closest_hit_point))
+}
+
+
+fn intersection(self: Line, other: Line) Vec2 = {
+    hit := self.algebraic_intersection(other);
+    ok := self.contains(hit) && other.contains(hit);
+    @if(ok, hit, vec2(0.0/0.0))
+}
+
+EPSILON :: @as(f32) 0.000001;
+fn contains(self: Line, point: Vec2) bool = {
+    (self.a.y.min(self.b.y) - point.y) < EPSILON
+        && (point.y - self.a.y.max(self.b.y)) < EPSILON
+        && (self.a.x.min(self.b.x) - point.x) < EPSILON
+        && (point.x - self.a.x.max(self.b.x)) < EPSILON
+}
+
+// treats the line segments as infinite
+algebraic_intersection :: fn(self: Line, other: Line) Vec2 = {
+    a: Array(f32, 3) = (-self.slope(), 1.0, self.y_intercept());
+    b: Array(f32, 3) = (-other.slope(), 1.0, other.y_intercept());
+
+    if self.is_vertical() {
+        a = (1.0, 0.0, self.a.x);
+    };
+
+    if other.is_vertical() {
+        b = (1.0, 0.0, other.a.x);
+    };
+
+    reduce(a&, b&);
+    vec2(a&[2], b&[2])
+}
+
+fn slope(self: Line) f32 = {
+    dir := self.direction();
+    dir.y / dir.x
+}
+
+fn is_horizontal(self: Line) bool = self.a.y == self.b.y;
+fn is_vertical(self: Line) bool = self.a.x == self.b.x;
+fn y_intercept(self: Line) f32 = @if(self.is_vertical(), 0.0/0.0,  self.a.y - (self.a.x * self.slope()));
+fn direction(self: Line) Vec2 = self.b - self.a;
+
+// What fraction along the line is the point
+fn t_of(self: Line, point: Vec2) f32 = {
+    dir := self.direction();
+    offset := point - self.a;
+    offset.norm() / dir.norm()
+}
+
+// TODO: this can't be the best way to do this
+reduce :: fn(r1: *Array(f32, 3), r2: *Array(f32, 3)) void = {
+    if r2[0] != 0.0 && r1[0] == 0.0 {
+        range(0, 3) { i |
+            temp := r1[i];
+            r1[i] = r2[i];
+            r2[i] = temp;
+        }
+    }
+
+    xxxx := (r1[0] == 0.0 && r2[0] == 0.0) || (r1[1] == 0.0 && r2[1] == 0.0);
+    if xxxx {
+        r1[2] = 0.0/0.0;
+        r2[2] = 0.0/0.0;
+        return();
+    }
+
+    if r2[0] != 0.0 {
+        scale := r2[0] / r1[0];
+
+        r2[0] = r2[0] - (scale * r1[0]);
+        r2[1] = r2[1] - (scale * r1[1]);
+        r2[2] = r2[2] - (scale * r1[2]);
+    }
+
+    if r1[1] != 0.0 {
+        scale := r1[1] / r2[1];
+
+        r1[0] = r1[0] - (scale * r2[0]);
+        r1[1] = r1[1] - (scale * r2[1]);
+        r1[2] = r1[2] - (scale * r2[2]);
+    }
+
+    if r2[1] != 1.0 {
+        r2[0] /= r2[1];
+        r2[2] /= r2[1];
+        r2[1] /= r2[1];
+    }
+
+    if r1[0] != 1.0 {
+        r1[1] /= r1[0];
+        r1[2] /= r1[0];
+        r1[0] /= r1[0];
+    }
+}
+
+#use("@/examples/gpu/maze2d/world.fr");
+#use("@/graphics/vec.fr");

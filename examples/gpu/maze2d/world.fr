@@ -1,0 +1,127 @@
+
+Line :: @struct(a: Vec2, b: Vec2);
+World :: @struct {
+    regions: RawList(Region);
+    player: Player;
+    materials: RawList(*Material);
+    gpa: Alloc;
+    cfg: (@struct {
+        portal_limit := 15;
+        view_distance: f32 = 1000;
+        move_speed: f32 = 100.0;
+        turn_speed: f32 = 0.2 / 60;
+        fov: f32 = 45.deg_to_rad();
+        scale: f32 = 30;
+    }) = ();
+};
+
+Region :: @struct {
+    walls: RawList(Wall);
+    portals: []Portal;
+    lights: []Light;
+    floor: *Material;
+};
+
+Wall :: @struct {
+    material: *Material;
+    line: Line;
+    normal: Vec2;
+};
+Portal :: @struct(from: WallRef, to: WallRef);
+WallRef :: @struct(region: i64, wall: i64);
+
+Light :: @struct(colour: Vec3, pos: Vec2);
+Material :: @struct {
+    colour := vec3(1);
+    ambient: f32 = 0.1;
+    diffuse: f32 = 0.9;
+    specular: f32 = 0.2;
+    shininess: f32 = 10;
+};
+
+Player :: @struct {
+    pos: Vec2;
+    look: Vec2;
+    move: Vec2;
+    turn: f32;
+    region: i64;
+    portals: Array(WallRef, 2);
+    material: *Material;
+};
+
+fn create_empty_world(world: *World, a: Alloc) void = {
+    world[] = (player = zeroed(Player), regions = empty(), materials = init(a, 3), gpa = a);
+    M :: fn(m: Material) => world.materials&.push(a.boxed(Material, m), a);
+    M(colour = vec3(100/255.0, 100/255.0, 150/255.0), ambient = 0.05);
+    M(colour = vec3(0.2, 0.8, 0.2));
+    M(colour = vec3(1.0, 0.1, 0.1));
+    world.player.material = world.materials[2];
+    world.player.look = vec2(1, 0);
+    world.player.pos = vec2(world.cfg.scale / 2);
+}
+
+fn create_maze_region(world: *World, grid: *Gen.Grid, scale: f32) void = {
+    walls := gen_maze_lines(grid, scale, world.materials[1], world.gpa);
+    world.regions&.push((
+        walls = walls,
+        portals = empty(),
+        floor = world.materials[0],
+        lights = {
+            s, w, h := (scale, grid.w.float().cast(), grid.h.float().cast());
+            lights := @slice(
+                vec2(s/2, h*s - s/2),
+                vec2(w*s - s/2, s/2),
+                vec2(w*s - s/2, h*s - s/2),
+                vec2(s/2, s/2),
+            );
+            world.gpa.alloc_init(Light, lights.len, fn(i) => (pos = lights[i], colour = vec3(1)))
+        },
+    ), world.gpa);
+    @println("Created world for %x% maze with % walls", grid.w, grid.h, world.regions[world.regions.len - 1].walls.len);
+}
+
+// TODO: combine contiguous walls efficiently
+fn gen_maze_lines(grid: *Gen.Grid, scale: f32, material: *Material, a: Alloc) RawList(Wall) = {
+    walls := @ref Wall.list(a);
+    line :: fn(x: i64, y: i64, d: Vec2) void => {
+        start := (vec2(x.float().cast(), y.float().cast()) * scale);
+        end := (start + d*scale);
+        line: Line = (a = start, b = end);
+        walls.push(line = line, normal = line.normal(), material = material);
+    };
+    // :paste from gui/draw2d
+    range(0, grid.h) { row |
+        range(0, grid.w) { col |
+            @if(!grid.get(col, row, .west)) line(col, row, vec2(0, 1));
+            @if(!grid.get(col, row, .north)) line(col, row, vec2(1, 0));
+        };
+    };
+    line(grid.w, 0, vec2(0.1, grid.w.float().cast()));
+    line(0, grid.h, vec2(grid.h.float().cast(), 0.1));
+    
+    walls.as_raw()
+}
+
+fn update(world: *World, dt: f32) bool = {
+    p := world.player&;
+    
+    p.look = p.look.rotate(p.turn /* dt */ * world.cfg.turn_speed);
+    p.turn = 0;
+    
+    if p.move.x != 0 || p.move.y != 0 {
+        real_move := p.look.rotate(p.move.normalize().angle() - (3.1415/2));
+        p.pos += real_move * dt * world.cfg.move_speed;
+    };
+    
+    true
+}
+
+
+fn normal(self: Line) Vec2 = normalize(self.b - self.a);
+
+fn angle(self: Vec2) f32 = self.angle_between(vec2(1, 0));
+fn angle_between(self: Vec2, other: Vec2) f32 = {
+    acosf :: fn(a: f32) f32 #libc;
+    a := self.normalize().dot(other).acosf();
+    @if(self.y >= 0, a, -a)
+}

@@ -1,8 +1,9 @@
 
-## (Sep 3) maze2d
+## (Sep 3,4) maze2d
 
 probably the last of my old projects i want to preserve is the ray traced 2.5d maze thingy. 
 for reference the old one is (2195, 2717) lines (code, total). 
+a lot of which is dead code, what was i doing? 
 
 ## (Aug 28) sb3
 
