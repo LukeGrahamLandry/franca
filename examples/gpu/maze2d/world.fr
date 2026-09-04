@@ -11,13 +11,13 @@ World :: @struct {
         move_speed: f32 = 100.0;
         turn_speed: f32 = 0.2 / 60;
         fov: f32 = 45.deg_to_rad();
-        scale: f32 = 30;
+        scale: f32 = 50;
+        portal_width: f32 = 20;
     }) = ();
 };
 
 Region :: @struct {
     walls: RawList(Wall);
-    portals: []Portal;
     lights: []Light;
     floor: *Material;
 };
@@ -26,6 +26,7 @@ Wall :: @struct {
     material: *Material;
     line: Line;
     normal: Vec2;
+    portal: WallRef = (region = -1, wall = -1);
 };
 Portal :: @struct(from: WallRef, to: WallRef);
 WallRef :: @struct(region: i64, wall: i64);
@@ -51,22 +52,30 @@ Player :: @struct {
 };
 
 fn create_empty_world(world: *World, a: Alloc) void = {
-    world[] = (player = zeroed(Player), regions = empty(), materials = init(a, 3), gpa = a);
+    world[] = (player = zeroed(Player), regions = empty(), materials = init(a, 4), gpa = a);
     M :: fn(m: Material) => world.materials&.push(a.boxed(Material, m), a);
     M(colour = vec3(100/255.0, 100/255.0, 150/255.0), ambient = 0.05);
     M(colour = vec3(0.2, 0.8, 0.2));
     M(colour = vec3(1.0, 0.1, 0.1));
+    M(colour = vec3(0.8, 0.3, 0.3));
+    
+    p := world.player&;
     world.player.material = world.materials[2];
     world.player.look = vec2(1, 0);
     world.player.pos = vec2(world.cfg.scale / 2);
     world.player.first_person = true;
+    p.portals = ((region = 0, wall = 0), (region = 0, wall = 1));
 }
 
 fn create_maze_region(world: *World, grid: *Gen.Grid, scale: f32) void = {
     walls := gen_maze_lines(grid, scale, world.materials[1], world.gpa);
+    
+    each walls.items().slice(0, 2) { it |  // hack
+        it.material = world.materials[3];
+    };
+    
     world.regions&.push((
         walls = walls,
-        portals = empty(),
         floor = world.materials[0],
         lights = {
             s, w, h := (scale, grid.w.float().cast(), grid.h.float().cast());
@@ -79,27 +88,60 @@ fn create_maze_region(world: *World, grid: *Gen.Grid, scale: f32) void = {
             world.gpa.alloc_init(Light, lights.len, fn(i) => (pos = lights[i], colour = vec3(1)))
         },
     ), world.gpa);
-    @println("Created world for %x% maze with % walls", grid.w, grid.h, world.regions[world.regions.len - 1].walls.len);
 }
 
-// TODO: combine contiguous walls efficiently
 fn gen_maze_lines(grid: *Gen.Grid, scale: f32, material: *Material, a: Alloc) RawList(Wall) = {
     walls := @ref Wall.list(a);
+
+    // :HackReservePortalSlots not placed yet is represented as zero length. 
+    walls.push_repeated(2, zeroed(Wall));
+    walls[0].portal.wall = 1;
+    walls[1].portal.wall = 0;
+    
     line :: fn(x: i64, y: i64, d: Vec2) void => {
         start := (vec2(x.float().cast(), y.float().cast()) * scale);
         end := (start + d*scale);
         line: Line = (a = start, b = end);
         walls.push(line = line, normal = line.normal(), material = material);
     };
-    // :paste from gui/draw2d
+    
+    // horizontal sections
+    line(0, grid.h, vec2(grid.h.float().cast(), 0));
     range(0, grid.h) { row |
+        d := vec2(0);
         range(0, grid.w) { col |
-            @if(!grid.get(col, row, .west)) line(col, row, vec2(0, 1));
-            @if(!grid.get(col, row, .north)) line(col, row, vec2(1, 0));
+            if grid.get(col, row, .north) {
+                if d.x != 0 {
+                    line(col, row, d);
+                    d.x = 0;
+                };
+            } else {
+                d.x -= 1;
+            }
+        };
+        if d.x != 0 {
+            line(grid.w, row, d);
         };
     };
-    line(grid.w, 0, vec2(0.1, grid.w.float().cast()));
-    line(0, grid.h, vec2(grid.h.float().cast(), 0.1));
+    
+    // vertical sections
+    line(grid.w, 0, vec2(0, grid.w.float().cast()));
+    range(0, grid.w) { col |
+        d := vec2(0);
+        range(0, grid.h) { row |
+            if grid.get(col, row, .west) {
+                if d.y != 0 {
+                    line(col, row, d);
+                    d.y = 0;
+                };
+            } else {
+                d.y -= 1;
+            }
+        };
+        if d.y != 0 {
+            line(col, grid.h, d);
+        };
+    };
     
     walls.as_raw()
 }
@@ -132,18 +174,82 @@ fn handle_collisions(world: *World, move_direction: Vec2) Vec2 = {
     hit := region.single_ray_trace(p.pos, move_direction, 1);
     wall := hit.hit_wall || return(move_direction);
     
-    hit_back := wall.normal.dot(move_direction) > 0.0;
-    wall_dir_unit := wall.line.direction().normalize();
-    slide_direction := wall_dir_unit * move_direction.dot(wall_dir_unit);
-    move_direction = slide_direction;
+    if wall.portal.region == -1 || wall.normal.dot(move_direction) > 0.0{
+        wall_dir_unit := wall.line.direction().normalize();
+        slide_direction := wall_dir_unit * move_direction.dot(wall_dir_unit);
+        move_direction = slide_direction;
+    } else {
+        p.region = wall.portal.region;
+        walking_backwards := wall.normal.dot(p.look) > 0.000001;
     
+        new_wall := world.index_wall(wall.portal);
+        p.pos = portal_translate(wall, new_wall, p.pos);
+        p.look = portal_rotate(wall, new_wall, p.look);
+        move_direction = portal_rotate(wall, new_wall, move_direction);
+    
+        if walking_backwards {
+            p.look = -p.look;
+        };
+    
+        p.pos += move_direction;  // don't get stuck teleporting back and forth right inside the portal
+        return move_direction;
+    };
+
     if move_direction.norm_sq() > 0.1*0.1 {
         return handle_collisions(world, move_direction * 0.9);
     };
     vec2(0)
 }
 
-fn normal(self: Line) Vec2 = normalize(self.b - self.a);
+fn place_portal_input(world: *World, action: @enum(Left, Right, Remove)) void = {
+    if action == .Remove {
+        for world.player.portals& { it |
+            it := world.index_wall(it);
+            it.line = zeroed(Line);
+        };
+        return();
+    };
+
+    hit := {
+        #use("@/examples/gpu/maze2d/render.fr");
+        segments := @ref Segment.list(temp());
+        ray_trace(world, world.regions[world.player.region]&, world.player.pos, world.player.look, segments);
+        segments.last().unwrap()
+    };
+    hit_wall := hit.hit_wall || return();
+    
+    half_portal_direction := hit_wall.line.direction().normalize() * world.cfg.portal_width/2;
+    normal := @if(world.player.look.dot(hit_wall.normal) < 0.0, hit_wall.normal, -hit_wall.normal);
+    bump_dist: f32 = 0.1;
+    line: Line = (
+        a = hit.line.b + half_portal_direction + normal*bump_dist,
+        b = hit.line.b - half_portal_direction + normal*bump_dist,
+    );
+    
+    replacing_index, connecting_index := (int(action == .Left), int(action == .Right));
+    portal_wall := world.index_wall(world.player.portals&[replacing_index]);
+    portal_wall.normal = normal;
+    portal_wall.line = line;
+
+    // only matters once there are multiple regions
+    // TODO: make the old one zero size then set to new region
+    // portal_wall.portal = world.player.portals[connecting_index];
+    // world.index_wall(portal_wall.portal)[].portal = world.player.portals[replacing_index];
+    
+    // world.update_lighting();
+}
+
+fn index_wall(world: *World, i: WallRef) *Wall = 
+    world.regions[i.region].walls.index(i.wall);
+
+fn normal(self: Line) Vec2 = {
+    @if(self.is_horizontal()) return(vec2(0, 1));
+    @if(self.is_vertical()) return(vec2(1, 0));
+    
+    goal_slope := @as(f32) 1.0 / self.slope();
+    self.b = self.a + vec2(1, goal_slope);
+    self.direction().normalize()
+}
 
 fn angle(self: Vec2) f32 = self.angle_between(vec2(1, 0));
 fn angle_between(self: Vec2, other: Vec2) f32 = {

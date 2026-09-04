@@ -90,9 +90,8 @@ draw3d :: fn(world: *World, buf: []u32, w: i64) void = {
 
 draw_vertical :: fn(buf: []u32, w: i64, colour: Vec3, x: i64, y0: f32, y1: f32) void = {
     colour := {
-        r: u32 = (colour.x.min(1.0).max(0.0) * 255.0).cast().int().trunc();
-        g: u32 = (colour.y.min(1.0).max(0.0) * 255.0).cast().int().trunc();
-        b: u32 = (colour.z.min(1.0).max(0.0) * 255.0).cast().int().trunc();
+        f :: fn(c: f32) u32 = (c.min(1.0).max(0.0) * 255.0).cast().int().trunc();
+        r, g, b := (f(colour.x), f(colour.y), f(colour.z));
         r.bit_or(g.shift_left(8)).bit_or(b.shift_left(16)).bit_or(255.shift_left(24))
     };
     range(y0.cast().int(), y1.cast().int()) { y |
@@ -124,21 +123,22 @@ ray_trace :: fn(world: *World, region: *Region, origin: Vec2, direction: Vec2, s
     segments.push(segment);
     while => segment.hit_wall { hit_wall |
         @if(segments.len > world.cfg.portal_limit) return();
+        @if(hit_wall.portal.region == -1) return();
         
-        return();  // TODO
-        
-        portal := hit_wall.portal() || return();
-        t := hit_wall.line.t_of(segment.line.b).abs();
+        t := hit_wall.line.t_of(segment.line.b);
         hit_back := hit_wall.normal.dot(direction) > 0.0;
-        hit_edge := t < 0.01 || t > 0.99;
+        border_width: f32 = 0.05 / 2;
+        hit_edge := t < border_width || t > 1 - border_width;
         @if(hit_back || hit_edge) return();
 
-        // Transform through the portal
-        region := self.regions[portal.to.region]&;
-        origin := portal.translate(segment.line.b);
-        direction := portal.rotate(direction);
-
-        segment = region.single_ray_trace(origin + direction, direction, world.cfg.view_distance);
+        new_wall := world.index_wall(hit_wall.portal);
+        @if((new_wall.line.a - new_wall.line.b).norm_sq() == 0) return();
+        origin = portal_translate(hit_wall, new_wall, segment.line.b);
+        direction = portal_rotate(hit_wall, new_wall, direction);
+        
+        origin += direction;  // dont start inside the portal
+        region = world.regions[hit_wall.portal.region]&;
+        segment = region.single_ray_trace(origin, direction, world.cfg.view_distance);
         segments.push(segment);
     };
 }
@@ -169,6 +169,19 @@ fn single_ray_trace(region: *Region, origin: Vec2, direction: Vec2, view_distanc
     (region = region, hit_wall = hit_wall, line = (a = origin, b = closest_hit_point))
 }
 
+// transform to same position but relative to the new wall, accounting for walls of different sizes.
+fn portal_translate(from: *Wall, to: *Wall, pos: Vec2) Vec2 = {
+    last_offset := pos - from.line.a;
+    fraction := last_offset.norm() / from.line.direction().norm();
+    new_offset := -to.line.direction() * fraction;
+    to.line.a + new_offset
+}
+
+fn portal_rotate(from: *Wall, to: *Wall, dir: Vec2) Vec2 = {
+    rot_offset := from.normal.angle_between(-to.normal);
+    dir := dir.rotate(rot_offset);
+    @if(dir.dot(to.normal) > 0.0, dir, -dir)
+}
 
 fn intersection(self: Line, other: Line) Vec2 = {
     hit := self.algebraic_intersection(other);
@@ -209,7 +222,7 @@ fn slope(self: Line) f32 #inline = {
 fn is_horizontal(self: Line) bool = self.a.y == self.b.y;
 fn is_vertical(self: Line) bool = self.a.x == self.b.x;
 fn y_intercept(self: Line) f32 #inline = @if(self.is_vertical(), 0.0/0.0,  self.a.y - (self.a.x * self.slope()));
-fn direction(self: Line) Vec2 = self.b - self.a;
+fn direction(self: Line) Vec2 = self.a - self.b;
 
 // What fraction along the line is the point
 fn t_of(self: Line, point: Vec2) f32 = {

@@ -5,6 +5,11 @@ probably the last of my old projects i want to preserve is the ray traced 2.5d m
 for reference the old one is (2195, 2717) lines (code, total). 
 a lot of which is dead code, what was i doing? 
 
+- only seeing through portals at one angle. oops, was doing normal as direction
+- walls look curved through portals. sadly the first time i did this was before i got obsessive about taking notes. 
+  mostly fixed by combining adjacent segments when generating the world. 
+- grid storing connections not walls is a bit counterintuitive
+
 ## (Aug 28) sb3
 
 - doing eq/lt properly. its lexical for strings but not if they would parse as a float. 
