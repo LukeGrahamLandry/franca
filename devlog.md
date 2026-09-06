@@ -1,4 +1,18 @@
 
+## (Sep 6)
+
+the subset of riscv i actually use is quite small, could be cool to write 
+an enumator for that. my long term goal is to make a cpu in TuringComplete that 
+can run my programs but this might be an easier way to experiment. 
+harder than wasm because functions don't have clear delimiters but i can compile traces 
+without jumps and dispatch at the end based on what the pc would have been. see how slow that is. 
+i want to support the emulated program being a jit which is feasable because 
+you have to do the flush icache syscall when adding code so i can "just" intercept that. 
+means i can't rely on having all code available at the beginning tho. 
+
+maybe what i like are projects that have definable steps and a clear end goal. 
+like here i can do run my tests until framebuffer doom and then i win. 
+
 ## (Sep 5) maze2d
 
 - stripy walls after lighting means epsilon is too low

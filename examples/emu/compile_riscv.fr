@@ -1,0 +1,188 @@
+
+Compile :: @struct {
+    f: *Qbe.Fn;
+    b: *Qbe.Blk;
+    register_read := zeroed(OptionalEnumMap(RvReg, Qbe.Ref));
+    register_write := zeroed(EnumSet(RvReg));
+    cpu_addr: Qbe.Ref;
+    pc: Qbe.Ref;
+    entry: *u32;
+    disassemble: bool;
+};
+
+fn compile_trace(emu: *Emulator, entry: rawptr) i64 = {
+    emu.jit_lock&.lock();
+    m := emu.m&;
+    f := @ref Qbe.Fn.zeroed();
+    f.default_init(m);
+    b := newblk(); f.nblk += 1;
+    f.start = b;
+    
+    self: Compile = (
+        f=f,b=b,disassemble=emu.disassemble,
+        cpu_addr = f.newtmp("cpu", .Kl),
+        pc = f.newtmp("pc", .Kl),
+        entry = u32.ptr_from_raw(entry),
+    ); self := self&;
+    push(b, .par, .Kl, self.cpu_addr, Qbe.Null, Qbe.Null);
+    push(b, .par, .Kl, self.pc, Qbe.Null, Qbe.Null);
+    
+    continuation := Qbe.Null;
+    pc := self.entry;
+    while => continuation == Qbe.Null {
+        continuation = decode_instruction(self, pc);
+        pc = pc.offset(1);
+    };
+    for self.register_write& { r |
+        addr := self.compute_reg_addr(r);
+        value := self.register_read&.get(r).unwrap();
+        push(self.b, .storel, .Kw, Qbe.Null, value, addr);
+    };
+    self.b.jmp = (type = .retl, arg = continuation);
+    self.f.ret_cls = .Kl;
+    
+    f.lnk.id = m.intern(@tfmt("trace%", fmt_hex(self.entry)));
+    m.set_debug_types("R", true);
+    Qbe'run_qbe_passes(f);
+    jit_addr, _ := m.get_addr(f.lnk.id).unwrap();
+    
+    trace_index := emu.traces&.len();
+    emu.traces&.push(
+        callee = bit_cast_unchecked(rawptr, FieldType(Trace, .callee), jit_addr),
+        terminator = .Indirect,
+        jump_cache = (0, 0),
+    );
+    emu.trace_lookup&.insert(entry.int_from_rawptr(), trace_index);
+    emu.jit_lock&.unlock();
+    trace_index
+}
+
+fn decode_instruction(self: *Compile, pc: *u32) Qbe.Ref = {
+    b := self.b;
+    op := pc[];
+    opcode := @as(Opcode) @as(i64) op.bit_and(0b1111111).zext();
+    rs1 := @as(RvReg) @as(u8) op.shift_right_logical(7+5+3).bit_and(0b11111).trunc();
+    rs2 := @as(RvReg) @as(u8) op.shift_right_logical(7+5+3+5).bit_and(0b11111).trunc();
+    rd := @as(RvReg) @as(u8) op.shift_right_logical(7).bit_and(0b11111).trunc();
+    @match(opcode) {
+        fn store() => {  // S
+            imm := op.shift_right_logical(32-6).shift_left(5).bit_or(op.shift_right_logical(7).bit_and(0b11111)).zext().sign_extend(10);
+            size := 1.shift_left(op.shift_right_logical(7+5).bit_and(0b11).zext());
+            @dis(self, "[%%%]= str.% %", rs1, @if(imm < 0, "", "+"), imm, size*8, rs2);
+        
+            o: Qbe.O = @switch(size) {
+                @case(1) => .storeb;
+                @case(2) => .storeh;
+                @case(4) => .storew;
+                @case(8) => .storel;
+                @default => unreachable();
+            };
+            value, addr := (self.read(rs2), self.read(rs1));
+            addr := self.inc(addr, imm);
+            push(b, o, .Kw, Qbe.Null, value, addr);
+        }
+        fn load() => {  // I
+            imm := op.shift_right_logical(32-6).shift_left(5).bit_or(op.shift_right_logical(7).bit_and(0b11111)).zext().sign_extend(10);
+            zero_extend := op.shift_right_logical(7+5+2).bit_and(1) == 1;
+            size := 1.shift_left(op.shift_right_logical(7+5).bit_and(0b11).zext());
+            @dis(self, "%= ldr.%% [%%%]", rd, @if(zero_extend, "u", "i"), size*8, rs1, @if(imm < 0, "", "+"), imm);
+            addr, dest := (self.read(rs1), self.write(rd));
+            o: Qbe.O = @switch(size) {
+                @case(1) => @if(zero_extend, .loadub, .loadsb);
+                @case(2) => @if(zero_extend, .loaduh, .loadsh);
+                @case(4) => @if(zero_extend, .loaduw, .loadsw);
+                @case(8) => .load;
+                @default => unreachable();
+            };
+            k := @if(size == 8, Qbe.Cls.Kl, .Kw);
+            addr := self.inc(addr, imm);
+            push(b, o, k, dest, addr, Qbe.Null);
+        }
+        fn op_imm() => {  // I
+            imm := op.shift_right_logical(32-12).zext().sign_extend(11);
+            funct3 := @as(OpI) @as(i64) op.shift_right_logical(7+5).bit_and(0b111).zext();
+            name, o := @match(funct3) {
+                fn add() => ("add", Qbe.O.add);
+                @default => @panic("TODO: op_imm % %", @as(i64) funct3, fmt_hex(op));
+            };
+            @dis(self, "%= % %, %", rd, name, rs1, imm);
+            
+            arg, dest := (self.read(rs1), self.write(rd));
+            push(b, o, .Kl, dest, arg, self.f.getcon(imm));
+        }
+        fn auipc() => {  // U
+            imm := op.bit_and(bit_not(1.shift_left(7+5) - 1)).zext().sign_extend(31);
+            pc_offset := ptr_diff(self.entry, pc) * 4;
+            dest := self.write(rd);
+            push(b, .add, .Kl, dest, self.pc, self.f.getcon(pc_offset + imm));
+            @dis(self, "%= auipc %%", rd, @if(imm < 0, "", "+"), imm);
+        }
+        fn jalr() => {  // I
+            imm := op.shift_right_logical(32-12).zext().sign_extend(11);
+            new_pc, link := (self.read(rs1), self.write(rd));
+            @dis(self, "%= jalr % %%", rd, rs1, @if(imm < 0, "", "+"), imm);
+            new_pc := self.inc(new_pc, imm);
+            
+            // not inc() because of new_pc=link,off=0
+            new_pc_out := self.f.newtmp("new_pc", .Kl);
+            push(b, .add, .Kl, new_pc_out, new_pc, self.f.getcon(imm));
+            
+            pc_offset := ptr_diff(self.entry, pc) * 4;
+            push(b, .add, .Kl, link, self.pc, self.f.getcon(pc_offset + 4));
+            return new_pc_out;
+        }
+        fn op() => {
+            eprintln("TODO: op");
+        }
+        @default => @panic("TODO: opcode % %", op.bit_and(0b1111111), fmt_hex(op));
+    };
+    Qbe.Null
+}
+
+fn inc(self: *Compile, r: Qbe.Ref, off: i64) Qbe.Ref = {
+    @if(off == 0) return(r);
+    out := self.f.newtmp("inc", .Kl);
+    push(self.b, .add, .Kl, out, r, self.f.getcon(off));
+    out
+}
+
+fn read(self: *Compile, r: RvReg) Qbe.Ref = self.read(r, false);
+fn read(self: *Compile, r: RvReg, fake: bool) Qbe.Ref = {
+    @if(r == .Zero) return(Qbe.ConZero);
+    
+    ::?Qbe.Ref;
+    self.register_read&.get(r) || {
+        dest := self.f.newtmp(r.name_str(), .Kl);  // TODO: floats
+        self.register_read&.insert(r, dest);
+        if !fake { 
+            addr := self.compute_reg_addr(r);
+            push(self.b, .load, .Kl, dest, addr, Qbe.Null);
+        };
+        dest
+    }
+}
+
+fn write(self: *Compile, r: RvReg) Qbe.Ref = {
+    // TODO: wasteful @if(r == .Zero) return(Qbe.Null);
+    self.register_write&.set(r);
+    self.read(r, true)
+}
+
+fn compute_reg_addr(self: *Compile, r: RvReg) Qbe.Ref = {
+    off := offset_of(Cpu, .reg) + 8*(@as(u8) r).zext();
+    addr := self.f.newtmp("r_addr", .Kl);
+    push(self.b, .add, .Kl, addr, self.cpu_addr, self.f.getcon(off));
+    addr
+}
+
+#use("@/backend/rv64/bits.fr");
+fn dis(e: FatExpr) FatExpr #macro = {
+    e := e&.items();
+    @{
+        if @[e[0]].disassemble {
+            out := u8.list(temp());
+            @[format_into(@{ out& }, e.rest(1), e[0].loc)];
+            eprintln(out.items());
+        }
+    }
+}

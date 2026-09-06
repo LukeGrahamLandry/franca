@@ -1,0 +1,75 @@
+
+Emulator :: @struct {
+    threads: BucketArray(Cpu);
+    traces: BucketArray(Trace);
+    trace_lookup: HashMap(i64, i64);  // virtual pc -> index in .traces
+    m: Qbe.Module;
+    jit_lock: Mutex;
+    disassemble: bool;
+};
+
+Cpu :: @struct {
+    reg: EnumMap(RvReg, rawptr);
+    pc: i64;
+};
+
+Terminator :: @enum(Direct, Indirect, Syscall);
+Trace :: @struct {
+    callee: @FnPtr(it: *Cpu, pc: i64) i64;
+    terminator: Terminator;
+    jump_cache: Ty(i64, i64);
+};
+
+fn init(emu: *Emulator, gpa: Alloc) void = {
+    emu[] = (
+        threads = init(10, gpa), 
+        traces = init(10, gpa), 
+        trace_lookup = init(gpa),
+        m = zeroed(Qbe.Module),
+        jit_lock = zeroed(Mutex),
+        disassemble = true,
+    );
+    Qbe'backend'init_module(emu.m&, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly));
+}
+
+// TODO: do less locking. its fine for multiple threads to be reading at the same time, just not compiling (which writes). 
+fn run(emu: *Emulator, cpu: *Cpu, pc: i64) void = {
+    emu.jit_lock&.lock();
+    trace_i := emu.lookup_trace(pc);
+    
+    loop {
+        trace := emu.traces&.nested_index(trace_i);
+        
+        emu.jit_lock&.unlock();
+        pc = trace'callee(cpu, pc);
+        emu.jit_lock&.lock();
+        
+        predicted_pc, predicted_trace_i := trace.jump_cache;
+        if pc != predicted_pc {
+            trace_i = emu.lookup_trace(pc);
+            trace.jump_cache = (pc, trace_i);
+        } else {
+            trace_i = predicted_trace_i;
+        };
+    };
+}
+
+
+fn lookup_trace(emu: *Emulator, pc: i64) i64 = {
+    i := emu.trace_lookup&.get(pc) || {
+        i := compile_trace(emu, pc.rawptr_from_int());
+        // TODO: if jump target is constant, compile more before make_exec so waste less memory at the end of the page
+        emu.m&.make_exec();
+        i
+    };
+    @eprintln("compiled trace[%] for %\n", i, fmt_hex(pc));
+    i
+}
+
+Qbe :: import("@/backend/lib.fr").Qbe;
+#use("@/lib/sys/sync/mutex.fr");
+#use("@/lib/collections/bucket_array.fr");
+#use("@/lib/collections/enum_map.fr");
+#use("@/lib/collections/map.fr");
+#use("@/backend/rv64/bits.fr");
+#use("@/examples/emu/compile_riscv.fr");
