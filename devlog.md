@@ -1,4 +1,8 @@
 
+## (Sep 5) maze2d
+
+- stripy walls after lighting means epsilon is too low
+
 ## (Sep 3,4) maze2d
 
 probably the last of my old projects i want to preserve is the ray traced 2.5d maze thingy. 

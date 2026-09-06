@@ -20,6 +20,7 @@ Region :: @struct {
     walls: RawList(Wall);
     lights: []Light;
     floor: *Material;
+    lighting: FloorLightCache;
 };
 
 Wall :: @struct {
@@ -38,6 +39,12 @@ Material :: @struct {
     diffuse: f32 = 0.9;
     specular: f32 = 0.2;
     shininess: f32 = 10;
+};
+FloorLightCache :: @struct {
+    cells: []u32;  // high byte 0 means None, 255 means Some. 
+    width: i64;
+    height: i64;
+    top_left: Vec2;
 };
 
 Player :: @struct {
@@ -86,6 +93,11 @@ fn create_maze_region(world: *World, grid: *Gen.Grid, scale: f32) void = {
                 vec2(s/2, s/2),
             );
             world.gpa.alloc_init(Light, lights.len, fn(i) => (pos = lights[i], colour = vec3(1)))
+        },
+        lighting = {
+            w := (grid.w.float().cast() * scale).cast().int();
+            h := (grid.h.float().cast() * scale).cast().int();
+            (cells = world.gpa.alloc_zeroed(u32, w*h), top_left = vec2(0), width = w, height = h)
         },
     ), world.gpa);
 }
@@ -221,6 +233,7 @@ fn place_portal_input(world: *World, action: @enum(Left, Right, Remove)) void = 
     half_portal_direction := hit_wall.line.direction().normalize() * world.cfg.portal_width/2;
     normal := @if(world.player.look.dot(hit_wall.normal) < 0.0, hit_wall.normal, -hit_wall.normal);
     bump_dist: f32 = 0.1;
+    // TODO: stop it when it hits a wall
     line: Line = (
         a = hit.line.b + half_portal_direction + normal*bump_dist,
         b = hit.line.b - half_portal_direction + normal*bump_dist,

@@ -63,7 +63,7 @@ draw3d :: fn(world: *World, buf: []u32, w: i64) void = {
                 i := i.float().cast();
                 // the -1 fixes the square of black at the base of a wall. It uses the colour right before the wall instead of right after the wall (which would be in shadow)
                 pos := ray_line.a + ray_direction * ((i - 2) * -sample_length);
-                colour := region.floor.colour;// region.horizontal_surface_colour_memoized(pos);
+                colour := region.horizontal_surface_colour_memoized(pos);
         
                 dist := cumulative_dist + i*sample_length;
                 _, top := project_to_screen(dist, screen_height);
@@ -78,22 +78,25 @@ draw3d :: fn(world: *World, buf: []u32, w: i64) void = {
         // draw the wall
         hit := segments.last().unwrap();
         if hit.hit_wall { wall |
-            colour := wall.material.colour; // hit.region.vertical_surface_colour(hit.line.b, wall, -hit.line.direction());
+            colour := hit.region.vertical_surface_colour(hit.line.b, wall, -hit.line.direction());
             top, bottom := project_to_screen(cumulative_dist, screen_height);
     
+            colour := pack_colour(colour);
             draw_vertical(buf, w, colour, x, top, bottom);
             highest_pixel = top;
         };
-        draw_vertical(buf, w, vec3(0), x, 0, highest_pixel);
+        black :: pack_colour(vec3(0));
+        draw_vertical(buf, w, black, x, 0, highest_pixel);
     };
 }
 
-draw_vertical :: fn(buf: []u32, w: i64, colour: Vec3, x: i64, y0: f32, y1: f32) void = {
-    colour := {
-        f :: fn(c: f32) u32 = (c.min(1.0).max(0.0) * 255.0).cast().int().trunc();
-        r, g, b := (f(colour.x), f(colour.y), f(colour.z));
-        r.bit_or(g.shift_left(8)).bit_or(b.shift_left(16)).bit_or(255.shift_left(24))
-    };
+pack_colour :: fn(colour: Vec3) u32 = {
+    f :: fn(c: f32) u32 = (c.min(1.0).max(0.0) * 255.0).cast().int().trunc();
+    r, g, b := (f(colour.x), f(colour.y), f(colour.z));
+    r.bit_or(g.shift_left(8)).bit_or(b.shift_left(16)).bit_or(255.shift_left(24))
+};
+
+draw_vertical :: fn(buf: []u32, w: i64, colour: u32, x: i64, y0: f32, y1: f32) void = {
     range(y0.cast().int(), y1.cast().int()) { y |
         buf[y*w+x] = colour;
     };
@@ -154,8 +157,9 @@ fn single_ray_trace(region: *Region, origin: Vec2, direction: Vec2, view_distanc
     hit_wall: ?*Wall = .None;
 
     each region.walls { wall |
+        // TODO: save one of the .contains() checks by making shortest_hit_distance_squared start as view_distance^2
         hit := wall.line.intersection(ray);
-        if !hit.x.is_nan() && !hit.y.is_nan() {
+        if !hit.x.is_nan() {
             to_hit := origin - hit;
             dist := to_hit.norm_sq();
             if dist < shortest_hit_distance_squared {
@@ -183,13 +187,135 @@ fn portal_rotate(from: *Wall, to: *Wall, dir: Vec2) Vec2 = {
     @if(dir.dot(to.normal) > 0.0, dir, -dir)
 }
 
+fn white_ambient(self: *Material) Vec3 = self.colour * self.ambient * 2;
+fn is_pointing_opposite(a: Vec2, b: Vec2) bool = a.dot(b) >= EPSILON;
+
+/// Calculates the colour of a column of wall based on all lights in the region.
+fn vertical_surface_colour(self: *Region, hit_point: Vec2, wall: *Wall, ray_direction: Vec2) Vec3 = {
+    to_eye := ray_direction.neg().normalize();
+    colour := wall.material.white_ambient();
+    each self.lights { light |
+        colour += self.wall_lighting(wall.material, light, hit_point, wall.normal, to_eye);
+    };
+    colour
+}
+
+fn wall_lighting(self: *Region, material: *Material, light: *Light, hit_point: Vec2, wall_normal: Vec2, to_eye: Vec2) Vec3 = {
+    dir_to_light := (light.pos - hit_point).normalize();
+    light_on_front := dir_to_light.is_pointing_opposite(wall_normal);
+    eye_on_front := to_eye.is_pointing_opposite(wall_normal);
+    in_shadow := light_on_front != eye_on_front || light.blocked_by_shadow(self, hit_point);
+
+    material.calculate_wall_lighting(light, hit_point, wall_normal, to_eye, in_shadow)
+}
+
+/// https://en.wikipedia.org/wiki/Phong_reflection_model
+fn calculate_wall_lighting(self: *Material, light: *Light, hit_point: Vec2, wall_normal: Vec2, to_eye: Vec2, in_shadow: bool) Vec3 = {
+    @if(in_shadow) return(vec3(0));
+
+    base_colour := self.colour * light.colour;
+    dir_to_light := (light.pos - hit_point).normalize();
+    light_on_front := dir_to_light.is_pointing_opposite(wall_normal);
+    if !light_on_front {
+        wall_normal = -wall_normal;
+    }
+
+    cos_light_to_normal := dir_to_light.dot(wall_normal);
+    diffuse_colour := vec3(0);
+    specular_colour := vec3(0);
+    if cos_light_to_normal >= EPSILON {
+        diffuse_colour = base_colour * (self.diffuse * cos_light_to_normal);
+
+        reflection_direction := dir_to_light.neg().reflect(wall_normal);
+        cos_reflect_to_eye := reflection_direction.dot(to_eye);
+
+        if cos_reflect_to_eye >= EPSILON {
+            factor := cos_reflect_to_eye.pow(self.shininess);
+            specular_colour = light.colour * (self.specular * factor);
+        }
+    }
+
+     diffuse_colour + specular_colour
+}
+
+reflect :: fn(self: Vec2, normal: Vec2) Vec2 =
+    self - normal * (self.dot(normal)*2);
+
+fn horizontal_surface_colour_memoized(region: *Region, pos: Vec2) u32 = {
+    light := region.lighting;
+    local := floor(pos - light.top_left);
+    x, y := (local.x.cast().int(), local.y.cast().int());
+    
+    if x >= light.width || y >= light.height || x < 0 || y < 0 {
+        // This shouldn't happen so make it look obviously wrong.
+        return pack_colour(vec3(1, 0, 1));
+    };
+    
+    i := y*light.width + x;
+    c := light.cells[i];
+    if c.shift_right_logical(24) == 0 {
+        // would be more sane if this were (local + light.top_left) so it didn't matter 
+        // which fractioon of square you saw first but this way you're on the right side
+        // and don't get a line of blank at the base of each wall. 
+        c = pack_colour(region.horizontal_surface_colour(pos));
+        light.cells[i] = c;
+    };
+    c
+}
+
+/// Calculates the colour of a point on the floor based on all lights in the region.
+fn horizontal_surface_colour(region: *Region, hit_pos: Vec2) Vec3 = {
+    colour := region.floor.white_ambient();
+    each region.lights { light |
+        colour += region.floor_lighting(region.floor, light, hit_pos);
+    }
+    colour
+}
+
+fn floor_lighting(region: *Region, material: *Material, light: *Light, hit_point: Vec2) Vec3 = 
+    material.calculate_floor_lighting(light, hit_point, light.blocked_by_shadow(region, hit_point));
+
+// diffuse_factor = sum of cos_light_to_normal all the way up the light column.
+// The normal is just up since its the floor. We need the vector from the hit_point to the point on pillar.
+// cos = opposite / adjacent
+// opposite = height of the point up the pillar
+// adjacent = distance from the pillar to the hit_point
+// want to do that for infinitely many points up the pillar
+// f(x) = integral (x / distance) dx
+// f(x) = (1 / (2 * distance)) * x^2
+// f(0) = 0
+// we care about the interval x=(0, height) so answer is just (1 / (2 * distance)) * height^2
+light_pillar_height_sq :: @as(f32) 25;
+max_floor_light_distance :: light_pillar_height_sq * 75;
+max_floor_light_distance_sq :: max_floor_light_distance * max_floor_light_distance;
+fn calculate_floor_lighting(self: *Material, light: *Light, hit_point: Vec2, in_shadow: bool) Vec3 = {
+    @if(in_shadow) return(vec3(0));
+    base_colour := self.colour * light.colour;
+
+    dist_to_light_sq := (light.pos - hit_point).norm_sq();
+    if dist_to_light_sq < max_floor_light_distance_sq {
+        diffuse_factor := (@as(f32) 1.0 / dist_to_light_sq.sqrt()) * light_pillar_height_sq;
+        return base_colour * (self.diffuse * diffuse_factor);
+    };
+    vec3(0)
+}
+
+fn blocked_by_shadow(self: *Light, region: *Region, hit_pos: Vec2) bool = {
+    target, origin := (hit_pos, self.pos);
+    direction := target - origin;
+    length := direction.norm();
+    hit := region.single_ray_trace(origin, direction / length, length);
+    dist := abs(hit.line.b - hit_pos) - vec2(EPSILON);
+    dist.x > 0 || dist.y > 0
+}
+
 fn intersection(self: Line, other: Line) Vec2 = {
     hit := self.algebraic_intersection(other);
     ok := self.contains(hit) && other.contains(hit);
     @if(ok, hit, vec2(0.0/0.0))
 }
 
-EPSILON :: @as(f32) 0.000001;
+EPSILON :: @as(f32) 0.001;
 fn contains(self: Line, point: Vec2) bool = {
     (self.a.y.min(self.b.y) - point.y) < EPSILON
         && (point.y - self.a.y.max(self.b.y)) < EPSILON
