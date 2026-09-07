@@ -10,11 +10,11 @@ Emulator :: @struct {
     jit_lock: Mutex;
     disassemble: bool;
     debug_base_address := 0;
+    syscall_handler: @FnPtr(cpu: *Cpu) void;
 };
 
 Cpu :: @struct {
     reg: EnumMap(RvReg, rawptr);
-    pc: i64;
 };
 
 Terminator :: @enum(Direct, Indirect, Syscall);
@@ -22,6 +22,10 @@ Trace :: @struct {
     callee: @FnPtr(it: *Cpu, pc: i64) i64;
     terminator: Terminator;
     jump_cache: Ty(i64, i64);
+    
+    // TODO: remove these. just for debugging rn
+    read: EnumSet(RvReg);
+    write: EnumSet(RvReg);
 };
 
 fn init(emu: *Emulator, gpa: Alloc) void = {
@@ -32,6 +36,7 @@ fn init(emu: *Emulator, gpa: Alloc) void = {
         m = zeroed(Qbe.Module),
         jit_lock = zeroed(Mutex),
         disassemble = true,
+        syscall_handler = pass_though_syscall,
     );
     Qbe'backend'init_module(emu.m&, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly));
 }
@@ -41,13 +46,29 @@ fn run(emu: *Emulator, cpu: *Cpu, pc: i64) void = {
     emu.jit_lock&.lock();
     trace_i := emu.lookup_trace(pc);
     
+    debug := @ref u8.list(temp());
+    debug_log := true;
     loop {
         trace := emu.traces&.nested_index(trace_i);
         
         emu.jit_lock&.unlock();
-        @eprintln("call trace %", fmt_hex(pc));
+        if debug_log {
+            dump_reg(debug, cpu, trace.read);
+            address := pc - emu.debug_base_address;
+            @fmt(debug, "run trace % to ", fmt_hex(address));
+            eprint(debug.items()); debug.clear();
+        };
         pc = trace'callee(cpu, pc);
+        if debug_log {
+            address := pc - emu.debug_base_address;
+            @fmtln(debug, "%", fmt_hex(address));
+            dump_reg(debug, cpu, trace.write);
+            eprint(debug.items()); debug.clear();
+        };
         emu.jit_lock&.lock();
+        if trace.terminator == .Syscall {
+            emu'syscall_handler(cpu);
+        };
         
         predicted_pc, predicted_trace_i := trace.jump_cache;
         if pc != predicted_pc {
@@ -59,16 +80,43 @@ fn run(emu: *Emulator, cpu: *Cpu, pc: i64) void = {
     };
 }
 
+fn dump_reg(out: *List(u8), cpu: *Cpu, reg: EnumSet(RvReg)) void = {
+    for reg& { r |
+        v := cpu.reg&.get(r);
+        @fmt(out, "(%=%), ", r, fmt_hex(v));
+    };
+    @fmt(out, "\n");
+}
 
 fn lookup_trace(emu: *Emulator, pc: i64) i64 = {
     i := emu.trace_lookup&.get(pc) || {
         i := compile_trace(emu, pc.rawptr_from_int());
         // TODO: if jump target is constant, compile more before make_exec so waste less memory at the end of the page
+        //       (will be more impactful when my backend emits fewer calls as jalr)
         emu.m&.make_exec();
         i
     };
     @eprintln("compiled trace[%] for %\n", i, fmt_hex(pc));
     i
+}
+
+pass_though_syscall :: fn(cpu: *Cpu) void = {
+    n := cpu.reg&.get(.A7).int_from_rawptr();
+    @if(n == 259) @panic("TODO: riscv_flush_icache");
+    @if(n == 134) @panic("TODO: rt_sigaction");
+    @if(query_current_os() != .linux || !@is(query_current_arch(), .aarch64, .rv64)) @panic("TODO: translate syscall");
+    regs := @const_slice(RvReg.A0, .A1, .A2, .A3, .A4, .A5);
+    args := @uninitialized Array(i64, 6);
+    range(0, 6) { i |
+        args&[i] = cpu.reg&.get(regs[i]).int_from_rawptr();
+    };
+    // the idea is to let you do whatever you want but for now while i dont trust it should filter so not just doing random syscalls if i miscompile
+    @eprintln("pass_though_syscall(%, %)", n, args&.items());
+    safe := @const_slice(222, 226);
+    @if(!safe.contains(n)) @panic("TODO: allow more syscalls");
+    
+    result, _ := Syscall'perform_syscall(args&, n);
+    cpu.reg&[.A0] = result.rawptr_from_int();
 }
 
 Qbe :: import("@/backend/lib.fr").Qbe;

@@ -11,6 +11,13 @@
     lol my flag is -syscalls not -static. clearly ive compiled a c program too recently. 
     being able to recognise that immediately is such a win for having so many random projects tho. 
 - now im crashing at (12); auipc is wrong? needs +4 its from the end of the instruction. (37);
+  no that was wrong, i was missing the +4 for link in jal. 
+- but also it gets father the first time after i change the source or clear the cache dir... that bad. 
+  i really hope im just reading junk memory that happens to be mapped if the compiler was doing more work earlier. 
+- ecall. syscall number is 33554436 which is nonsense. 
+  - debug print the register values after running each trace. 
+  - ohh that's 0x2000004 because my fragile os detecting this its macos because im not doing write_argc_argv_envp
+- mmap, mprotect. (68);
 
 > the magic words for producing a disassembler are:
 ```

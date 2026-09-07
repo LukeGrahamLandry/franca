@@ -9,10 +9,13 @@ Compile :: @struct {
     b: *Qbe.Blk;
     register_read := zeroed(OptionalEnumMap(RvReg, Qbe.Ref));
     register_write := zeroed(EnumSet(RvReg));
+    register_read_real := zeroed(EnumSet(RvReg));  // TODO: remove
     cpu_addr: Qbe.Ref;
     pc: Qbe.Ref;
     entry: *u32;
-    disassemble: bool;
+    emu: *Emulator;
+    out: List(u8);  // disassemble
+    terminator_is_syscall := false;
 };
 
 // only one basic block is compiled at a time. 
@@ -31,10 +34,11 @@ fn compile_trace(emu: *Emulator, entry: rawptr) i64 = {
     f.start = b;
     
     self: Compile = (
-        f=f,b=b,disassemble=emu.disassemble,
+        f=f,b=b,emu=emu,
         cpu_addr = f.newtmp("cpu", .Kl),
         pc = f.newtmp("pc", .Kl),
         entry = u32.ptr_from_raw(entry),
+        out = list(temp()),
     ); self := self&;
     push(b, .par, .Kl, self.cpu_addr, Qbe.Null, Qbe.Null);
     // TODO: since jitting initial pc is actually constant
@@ -49,7 +53,7 @@ fn compile_trace(emu: *Emulator, entry: rawptr) i64 = {
         continuation = decode_instruction(self, pc);
         pc = pc.offset(1);
     };
-    self.register_write&.unset(.Zero);  // always reads zero
+    @debug_assert(!self.register_write&.get(.Zero), "always reads zero");
     for self.register_write& { r |
         addr := self.compute_reg_addr(r);
         value := self.register_read&.get(r).unwrap();
@@ -67,8 +71,10 @@ fn compile_trace(emu: *Emulator, entry: rawptr) i64 = {
     trace_index := emu.traces&.len();
     emu.traces&.push(
         callee = bit_cast_unchecked(rawptr, FieldType(Trace, .callee), jit_addr),
-        terminator = .Indirect,
+        terminator = @if(self.terminator_is_syscall, .Syscall, .Indirect),
         jump_cache = (0, 0),
+        read = self.register_read_real, // self.register_read.valid,
+        write = self.register_write,
     );
     emu.trace_lookup&.insert(entry.int_from_rawptr(), trace_index);
     emu.jit_lock&.unlock();
@@ -84,10 +90,14 @@ fn decode_instruction(self: *Compile, pc: *u32) Qbe.Ref = {
     rd := @as(RvReg) @as(u8) op.shift_right_logical(7).bit_and(0b11111).trunc();
     imm12 := op.shift_right_logical(32-12).zext().sign_extend(11);
     imm20 := op.bit_and(bit_not(1.shift_left(7+5) - 1)).zext().sign_extend(31);
+    pc_offset := ptr_diff(self.entry, pc) * 4;
     
     @match(opcode) {
         fn store() => {  // S
-            imm := op.shift_right_logical(32-6).shift_left(5).bit_or(op.shift_right_logical(7).bit_and(0b11111)).zext().sign_extend(10);
+            // @bits(i.imm(11, 5), rs2, rs1, funct3, i.imm(4, 0), opcode);
+            imm := op.shift_right_logical(32-7).shift_left(5)
+                .bit_or(op.shift_right_logical(7).bit_and(0b11111))
+                .zext().sign_extend(11);
             size := op.shift_right_logical(7+5).bit_and(0b11).zext();
             size_bytes := 1.shift_left(size)*8;
             @dis(self, "[%%%]= str.% %", rs1, @if(imm < 0, "", "+"), imm, size_bytes, rs2);
@@ -193,8 +203,7 @@ fn decode_instruction(self: *Compile, pc: *u32) Qbe.Ref = {
         }
         fn auipc() => {  // U
             imm, dest := (imm20, self.write(rd));
-            pc_offset := ptr_diff(self.entry, pc) * 4;
-            push(b, .add, .Kl, dest, self.pc, self.f.getcon(pc_offset + imm + 4));
+            push(b, .add, .Kl, dest, self.pc, self.f.getcon(pc_offset + imm));
             @dis(self, "%= auipc %", rd, imm);
         }
         fn lui() => {  // U
@@ -213,7 +222,6 @@ fn decode_instruction(self: *Compile, pc: *u32) Qbe.Ref = {
             new_pc_out := self.f.newtmp("new_pc", .Kl);
             push(b, .add, .Kl, new_pc_out, new_pc, self.f.getcon(imm));
             
-            pc_offset := ptr_diff(self.entry, pc) * 4;
             push(b, .add, .Kl, link, self.pc, self.f.getcon(pc_offset + 4));
             return new_pc_out;
         }
@@ -235,7 +243,6 @@ fn decode_instruction(self: *Compile, pc: *u32) Qbe.Ref = {
             };
             @dis(self, "b.% %, %, pc%%", o, rs1, rs2, @if(imm < 0, "", "+"), imm);
             cond, new_pc := (self.f.newtmp("cond", .Kw), self.f.newtmp("new_pc", .Kl));
-            pc_offset := ptr_diff(self.entry, pc) * 4;
             fallthrough_pc := self.inc(self.pc, pc_offset + 4);
             jump_pc := self.inc(self.pc, pc_offset + imm);
             push(b, o, .Kw, cond, a0, a1);
@@ -252,14 +259,18 @@ fn decode_instruction(self: *Compile, pc: *u32) Qbe.Ref = {
                 .bit_or(op.shift_right_logical(7+5).bit_and(1.shift_left(8)-1).shift_left(12))
                 .zext().sign_extend(20);
             
-            pc_offset := ptr_diff(self.entry, pc) * 4;
-            push(b, .add, .Kl, self.write(rd), self.pc, self.f.getcon(pc_offset));
+            push(b, .add, .Kl, self.write(rd), self.pc, self.f.getcon(pc_offset + 4));
             @dis(self, "%= jal pc%%", rd, @if(imm < 0, "", "+"), imm);
             return self.inc(self.pc, pc_offset + imm);
         }
         fn system() => {
             @if(op != ecall) @panic("TODO: system %", fmt_hex(op));
-            panic("TODO: ecall");
+            @dis(self, "ecall");
+            self.terminator_is_syscall = true;
+            return self.inc(self.pc, pc_offset + 4);
+        }
+        fn amo() => {
+            @panic("TODO: atomic %", fmt_hex(op));
         }
         @default => @panic("TODO: opcode % %", op.bit_and(0b1111111), fmt_hex(op));
     };
@@ -268,7 +279,7 @@ fn decode_instruction(self: *Compile, pc: *u32) Qbe.Ref = {
 
 funct3_to_op :: fn(funct3: OpI) Qbe.O = @match(funct3) {
     fn add() => .add;
-    fn sltu() => .csltl;
+    fn sltu() => .cultl;
     fn xor() => .xor;
     fn sll() => .shl;
     fn or() => .or;
@@ -294,6 +305,7 @@ fn read(self: *Compile, r: RvReg, fake: bool) Qbe.Ref = {
         dest := self.f.newtmp(r.name_str(), .Kl);  // TODO: floats
         self.register_read&.insert(r, dest);
         if !fake { 
+            self.register_read_real&.set(r);
             addr := self.compute_reg_addr(r);
             push(self.b, .load, .Kl, dest, addr, Qbe.Null);
         };
@@ -320,10 +332,12 @@ fn compute_reg_addr(self: *Compile, r: RvReg) Qbe.Ref = {
 fn dis(e: FatExpr) FatExpr #macro = {
     e := e&.items();
     @{
-        if @[e[0]].disassemble {
-            out := u8.list(temp());
-            @[format_into(@{ out& }, e.rest(1), e[0].loc)];
-            eprintln(out.items());
+        self := @[e[0]];
+        if self.emu.disassemble {
+            self.out&.clear();
+            @[format_into(@{ self.out& }, e.rest(1), e[0].loc)];
+            self.out&.push_all("\n");
+            eprint(self.out.items());
         }
     }
 }
