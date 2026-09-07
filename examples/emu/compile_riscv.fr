@@ -25,7 +25,7 @@ Compile :: @struct {
 fn compile_trace(emu: *Emulator, entry: rawptr) i64 = {
     // this makes it match the addresses in objdump
     address := int_from_rawptr(entry) - emu.debug_base_address;
-    @eprintln("compiling trace from %", fmt_hex(address));
+    //@eprintln("compiling trace from %", fmt_hex(address));
     emu.jit_lock&.lock();
     m := emu.m&;
     f := @ref Qbe.Fn.zeroed();
@@ -43,6 +43,7 @@ fn compile_trace(emu: *Emulator, entry: rawptr) i64 = {
     push(b, .par, .Kl, self.cpu_addr, Qbe.Null, Qbe.Null);
     // TODO: since jitting initial pc is actually constant
     push(b, .par, .Kl, self.pc, Qbe.Null, Qbe.Null);
+    self.register_read&.insert(.Zero, Qbe.ConZero);
     
     continuation := Qbe.Null;
     pc := self.entry;
@@ -64,7 +65,7 @@ fn compile_trace(emu: *Emulator, entry: rawptr) i64 = {
     
     f.lnk.id = m.intern(@tfmt("trace%", fmt_hex(address)));
     f.lnk.no_inline = true;
-    m.set_debug_types("R", true);
+    // m.set_debug_types("R", true);
     Qbe'run_qbe_passes(f);
     jit_addr, _ := m.get_addr(f.lnk.id).expect("compiled trace");
     
@@ -270,7 +271,15 @@ fn decode_instruction(self: *Compile, pc: *u32) Qbe.Ref = {
             return self.inc(self.pc, pc_offset + 4);
         }
         fn amo() => {
-            @panic("TODO: atomic %", fmt_hex(op));
+            funct7 := op.shift_right_logical(32-7);
+            funct3 := op.shift_right_logical(7+5).bit_and(0b111);
+            @if(funct7 != 0b0010111 || funct3.bit_and(0b110) != 0b010) @panic("TODO: amo %", fmt_hex(op));
+            k := @if(funct3.bit_and(1) == 1, Qbe.Cls.Kl, .Kw);
+            
+            @dis(self, "%= amocas.%.aqrl % %", rd, k, rs1, rs2);
+            p, new, old, dest := (self.read(rs1), self.read(rs2), self.read(rd), self.write(rd));
+            push(b, .cas0, .Kw, Qbe.Null, p, Qbe.Null);
+            push(b, .cas1, k, dest, old, new);
         }
         @default => @panic("TODO: opcode % %", op.bit_and(0b1111111), fmt_hex(op));
     };
@@ -297,9 +306,7 @@ fn inc(self: *Compile, r: Qbe.Ref, off: i64) Qbe.Ref = {
 
 // calling self.read before self.write matters because if first reference to a reg in a function is write is never needs to load the old value
 fn read(self: *Compile, r: RvReg) Qbe.Ref = self.read(r, false);
-fn read(self: *Compile, r: RvReg, fake: bool) Qbe.Ref = {
-    @if(r == .Zero) return(Qbe.ConZero);
-    
+fn read(self: *Compile, r: RvReg, fake: bool) Qbe.Ref = {   
     ::?Qbe.Ref;
     self.register_read&.get(r) || {
         dest := self.f.newtmp(r.name_str(), .Kl);  // TODO: floats

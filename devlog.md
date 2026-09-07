@@ -17,7 +17,7 @@
 - ecall. syscall number is 33554436 which is nonsense. 
   - debug print the register values after running each trace. 
   - ohh that's 0x2000004 because my fragile os detecting this its macos because im not doing write_argc_argv_envp
-- mmap, mprotect. (68);
+- mmap, mprotect. (68); cas. (81); write/exit. (96);
 
 > the magic words for producing a disassembler are:
 ```

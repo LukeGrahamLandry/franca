@@ -35,7 +35,7 @@ fn init(emu: *Emulator, gpa: Alloc) void = {
         trace_lookup = init(gpa),
         m = zeroed(Qbe.Module),
         jit_lock = zeroed(Mutex),
-        disassemble = true,
+        disassemble = false,
         syscall_handler = pass_though_syscall,
     );
     Qbe'backend'init_module(emu.m&, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly));
@@ -47,7 +47,7 @@ fn run(emu: *Emulator, cpu: *Cpu, pc: i64) void = {
     trace_i := emu.lookup_trace(pc);
     
     debug := @ref u8.list(temp());
-    debug_log := true;
+    debug_log := false;
     loop {
         trace := emu.traces&.nested_index(trace_i);
         
@@ -94,9 +94,9 @@ fn lookup_trace(emu: *Emulator, pc: i64) i64 = {
         // TODO: if jump target is constant, compile more before make_exec so waste less memory at the end of the page
         //       (will be more impactful when my backend emits fewer calls as jalr)
         emu.m&.make_exec();
+        //@eprintln("compiled trace[%] for %\n", i, fmt_hex(pc));
         i
     };
-    @eprintln("compiled trace[%] for %\n", i, fmt_hex(pc));
     i
 }
 
@@ -104,15 +104,19 @@ pass_though_syscall :: fn(cpu: *Cpu) void = {
     n := cpu.reg&.get(.A7).int_from_rawptr();
     @if(n == 259) @panic("TODO: riscv_flush_icache");
     @if(n == 134) @panic("TODO: rt_sigaction");
+    @if(n == 220) @panic("TODO: clone");  // make a new Cpu 
+    @if(n == 221) @panic("TODO: execve"); // check if the binary is a riscv elf and re-exec the emulator on it
+    // TODO: treat mprotect(exec) as riscv_flush_icache?
+    
     @if(query_current_os() != .linux || !@is(query_current_arch(), .aarch64, .rv64)) @panic("TODO: translate syscall");
     regs := @const_slice(RvReg.A0, .A1, .A2, .A3, .A4, .A5);
     args := @uninitialized Array(i64, 6);
-    range(0, 6) { i |
+    range(0, args&.len()) { i |
         args&[i] = cpu.reg&.get(regs[i]).int_from_rawptr();
     };
     // the idea is to let you do whatever you want but for now while i dont trust it should filter so not just doing random syscalls if i miscompile
-    @eprintln("pass_though_syscall(%, %)", n, args&.items());
-    safe := @const_slice(222, 226);
+    // @eprintln("pass_though_syscall(%, %)", n, args&.items());
+    safe := @const_slice(222, 226, 64, 94);
     @if(!safe.contains(n)) @panic("TODO: allow more syscalls");
     
     result, _ := Syscall'perform_syscall(args&, n);
