@@ -1,0 +1,89 @@
+
+cases_asm :: @const_slice(@as(Ty(i64, i64, []u32))
+    (123, 246, @const_slice(  // writes to zero register are discarded 
+        I(0b1111111111, RvReg.Zero.bits(), @as(u3) OpI.add, RvReg.Zero.bits(), .op_imm),
+        R(0, RvReg.A0.bits(), RvReg.Zero.bits(), @as(u3) OpI.add, RvReg.A0.bits(), .op),
+        R(0, RvReg.A0.bits(), RvReg.A0.bits(), @as(u3) OpI.add, RvReg.A0.bits(), .op),
+        jalr(.RA, 0, .Zero),
+    )),
+    (0, -2048, @const_slice(  // immediates are sign extended
+        I(@as(i12) @as(i64) 0b100000000000, RvReg.A0.bits(), @as(u3) OpI.add, RvReg.A0.bits(), .op_imm),
+        jalr(.RA, 0, .Zero),
+    )),
+    (0, 123, @const_slice(  // jumps are from the start of the instruction and link writes the next instruction.
+        I(0, RvReg.RA.bits(), @as(u3) OpI.add, RvReg.A1.bits(), .op_imm),
+        jal(8, .RA),
+        jalr(.A1, 0, .Zero),
+        I(123, RvReg.Zero.bits(), @as(u3) OpI.add, RvReg.A0.bits(), .op_imm),
+        jalr(.RA, 0, .Zero),
+    )),
+);
+
+cases_fr :: @const_slice(@as(Ty(Str, Str))
+    ("examples/toy/hello.fr", "Hello World\n"),
+);
+
+// TODO: specific tests for a few wierd instructions
+// - jalr with ra as both doesn't stomp the output pc with the old one
+// - generally something that catches write() after read() when same reg used multiple times in the instruction
+// - writing reg as f32 and reading as f64
+// - jalr with odd immediate and odd register value
+// - cas with dest zero so can't call self.read() and use it for the write
+
+main :: fn() void = {
+    @if(query_current_arch() == .rv64) run_native();
+    run_emulated();
+    
+    if !tls(.deny_syscalls)[] && query_current_os() == .linux && @is(query_current_arch(), .aarch64, .rv64) {
+        run_elf();
+    } else {
+        @println("SKIP: syscall translation");
+    };
+}
+
+run_emulated :: fn() void = {
+    emu := zeroed(Emulator);
+    init(emu&, general_allocator(), ());
+    cpu := emu.threads&.push(zeroed(Cpu));
+    i := 0;
+    for cases_asm { input, output, code |
+        cpu.reg&.insert(.RA, rawptr_from_int(-1));  // :TestMarkerBreakLoop
+        cpu.reg&.insert(.A0, input.rawptr_from_int());
+        // TODO: set step limit that breaks early if miscompile and get infinite loop
+        run(emu&, cpu, u32.int_from_ptr(code.ptr));
+        result := cpu.reg&.get(.A0).int_from_rawptr();
+        @assert_eq(output, result, "failed run_emulated cases[%]", i);
+        i += 1;
+    };
+    @println("run_emulated passed all % tests", i);
+}
+
+run_native :: fn() void = {
+    i := 0;
+    for cases_asm { input, output, code |
+        #use("@/tests/fr/inline_asm_jit.fr");
+        result := call_jit(input, code.interpret_as_bytes());
+        @assert_eq(output, result, "failed run_native cases[%]", i);
+        i += 1;
+    };
+    @println("run_native passed all % tests (means tests are valid)", i);
+}
+
+run_elf :: fn() void = {
+    program, expect := ("examples/toy/hello.fr", "Hello World\n");
+    #use("@/lib/sys/subprocess.fr");
+    franca := get_executable_path(temp());  // only works if running jitted
+    path := "target/rv_hello.out";
+    for cases_fr { program, expect | 
+        {ok, o, e := exec_and_catch(franca, @slice("examples/default_driver.fr", "build", program, "-arch", "rv64", "-syscalls", "-os", "linux", "-o", path), temp());
+        @assert(ok, "failed compile %:\n%\n%", program, o.items(), e.items());};
+        ok, o, e := exec_and_catch(franca, @slice("examples/emu/run.fr", path), temp());
+        @assert_eq(expect, o.items(), "%: %", program, e.items());
+        @assert(ok, "% right output but not success", program);
+    };
+    @println("elf: ok");
+}
+
+#use("@/examples/emu/runtime.fr");
+#use("@/backend/rv64/bits.fr");
+#use("@/lib/sys/process.fr");

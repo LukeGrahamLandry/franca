@@ -12,6 +12,8 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
 - riscv
+  - walk_stack_trace for destroy_compiler: `trace trap: compiler inserted break instruction`
+    (in whatever multiarch qemu binfmt_misc situation i have)
   - is there a field in the elf file where i can declare what extensions i use so the disassembler knows and doesn't say `.insn` all the time?
   - why do i have xor(0) in the assembly? somehow too late to be eliminated as copies?
   - load_number(4919430884761293382) is so many instructions lol. 
