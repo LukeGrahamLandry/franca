@@ -1,5 +1,24 @@
 
-## (Sep 6)
+## (Sep 7) rv emu
+
+- (6); typed 31-11 instead of 32-11 for jal so numbers were 2x too big. (symptom was dereferencing a junk register and faulting).
+  convinced me to find a real disassembler and print my addresses relative to base address so i can see whats going on
+- (13); mul. (24); add.uw. (29);
+- hmmmm 0xd503233f looks suspisiously like arm bti
+  - no but its hint #0x19 which is PACIASP which also goes at the start of functions. 
+    the link https://gnu.googlesource.com/binutils-gdb/+/8787d804e1cbbd1946239d6c5e560c87d38bac06 on google is notably purple as though ive been down ive seen this flim before
+  - and yeah the address is too far from the base to be in the binary. 
+    lol my flag is -syscalls not -static. clearly ive compiled a c program too recently. 
+    being able to recognise that immediately is such a win for having so many random projects tho. 
+- now im crashing at (12); auipc is wrong? needs +4 its from the end of the instruction. (37);
+
+> the magic words for producing a disassembler are:
+```
+nix-shell -p pkgsCross.riscv64.buildPackages.binutils
+riscv64-unknown-linux-gnu-objdump
+```
+
+## (Sep 6) rv emu
 
 the subset of riscv i actually use is quite small, could be cool to write 
 an enumator for that. my long term goal is to make a cpu in TuringComplete that 
@@ -12,6 +31,11 @@ means i can't rely on having all code available at the beginning tho.
 
 maybe what i like are projects that have definable steps and a clear end goal. 
 like here i can do run my tests until framebuffer doom and then i win. 
+
+yikes am i seriously using like 20 instructions for load_number(4919430884761293382)??
+that's embarrassing, really hope im somehow decoding this terribly wrong...
+ha! after gvn it does fold away to the same number so i guess not. unfortunate but cute that i can deal with it. 
+but that means doing this emulator was a win already because it gives me incentive to actually look at the code i output for riscv even tho its not a platform i have convient access to. that's satisfying. 
 
 ## (Sep 5) maze2d
 

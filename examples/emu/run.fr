@@ -6,11 +6,15 @@ main :: fn() void = {
     @assert_eq(h.machine, .rv64);
     
     // TODO: for macos deal with "not divisible by page size"
-    entry, stack := load_elf_segments2(input, true, false);
+    // TODO: don't actually map the code as executable
+    // TODO: wasteful to actually map the code at all but technically you might read it as data
+    // TODO: don't allow imports
+    entry, stack, base_address := load_elf_segments2(input, true, false);
     
     ::import("@/backend/lib.fr").Qbe.QbeModule;  // :compilerbug/ordering
     emu := zeroed(Emulator);
     init(emu&, general_allocator());
+    emu.debug_base_address = base_address;
     cpu := emu.threads&.push(zeroed(Cpu));
     cpu.reg&.insert(.SP, bit_cast_unchecked(*u8, rawptr, stack.end_pointer()));
     run(emu&, cpu, u8.int_from_ptr(entry));
@@ -20,3 +24,12 @@ main :: fn() void = {
 #use("@/lib/sys/process.fr");
 #use("@/examples/elf_loader.fr");
 #use("@/examples/emu/runtime.fr");
+
+// TODO: specific tests for a few wierd instructions
+// - write to zero reg then read back (should still be zero)
+// - the thing where jumps ignore the odd bit
+// - immediates get sign extended
+// - jalr with ra as both doesn't stomp the output pc with the old one
+// - generally something that catches write() after read() when same reg used multiple times in the instruction
+// - writing reg as f32 and reading as f64
+// - jalr with odd immediate and odd register value

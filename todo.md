@@ -11,6 +11,13 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
+- riscv
+  - is there a field in the elf file where i can declare what extensions i use so the disassembler knows and doesn't say `.insn` all the time?
+  - why do i have xor(0) in the assembly? somehow too late to be eliminated as copies?
+  - load_number(4919430884761293382) is so many instructions lol. 
+    like shifting one bit at a time and inverting after each step as a way to append each chunk of same bits.
+    detect that case and do 11 at a time at least? probably annoying because im trying not to use an extra register. 
+    give up and just load from memory?
 - nuklear frame buffer rendering and get it to work on my os and do virtio keyboard/mouse input through same api as app and get rid of unfinished usb driver. 
 - tests/gpu.fr reproducible. output
   - stackie: fake time
