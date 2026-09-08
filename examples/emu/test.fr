@@ -20,18 +20,23 @@ cases_asm :: @const_slice(@as(Ty(i64, i64, []u32))
 );
 
 cases_fr :: @const_slice(
-    "examples/toy/hello2.fr", "examples/sudoku.fr",
+    "examples/toy/hello2.fr", 
+    "examples/sudoku.fr",       // ctz,ones,loadb
+    "examples/mandelbrot.fr",   // floats
 );
 
 cases_ssa :: @const_slice(
     "undef", "subtyping", "strspn", "rega1", "mem6", "mem5", "mem4", "mem3", "mem2", "max", "load3", "load1", "ldhoist", "ldbits", "isel4", "call3", "call2", "call1", "asm",  
-    // TODO: "strcmp", "spill1", "prime", "philv", "loop", "load4", "isel2", "cas", 
+    "strcmp", "spill1", "prime", "philv", "loop", "cas", 
+    "load4", "isel2", 
 );
 
 // TODO: specific tests for a few wierd instructions
 // - jalr with ra as both doesn't stomp the output pc with the old one
 // - generally something that catches write() after read() when same reg used multiple times in the instruction
 // - writing reg as f32 and reading as f64
+//   rn probably won't compile. need to check if self.register_small mismatches when reading. 
+//   test in same block and when held through the store to *Cpu. 
 // - jalr with odd immediate and odd register value
 // - cas with dest zero so can't call self.read() and use it for the write
 
@@ -79,6 +84,16 @@ run_elf :: fn() void = {
     #use("@/lib/sys/subprocess.fr");
     franca := get_executable_path(temp());  // only works if running jitted
     path := "target/rv_hello.out";
+    
+    for cases_ssa { program |
+        program := @tfmt("tests/ssa/%.ssa", program);
+        {ok, o, e := exec_and_catch(franca, @slice("backend/meta/qbe_frontend.fr", "-cc", "-nostart", program, "-t", "rv64", "-o", path), temp());
+        @assert(ok, "failed compile %:\n%\n%", program, o.items(), e.items());};
+        ok, o, e := exec_and_catch(franca, @slice("examples/emu/run.fr", path), temp());
+        @assert(ok, "failed run %:\n%\n%", program, o.items(), e.items());
+    };
+    @println("elf(ssa): ok");
+    
     for cases_fr { program | 
         {ok, o, e := exec_and_catch(franca, @slice("examples/default_driver.fr", "build", program, "-arch", "rv64", "-syscalls", "-os", "linux", "-o", path), temp());
         @assert(ok, "failed compile %:\n%\n%", program, o.items(), e.items());};
@@ -92,15 +107,6 @@ run_elf :: fn() void = {
         @assert(ok, "% right output but not success", program);
     };
     @println("elf(fr): ok");
-    
-    for cases_ssa { program |
-        program := @tfmt("tests/ssa/%.ssa", program);
-        {ok, o, e := exec_and_catch(franca, @slice("backend/meta/qbe_frontend.fr", "-cc", "-nostart", program, "-t", "rv64", "-o", path), temp());
-        @assert(ok, "failed compile %:\n%\n%", program, o.items(), e.items());};
-        ok, o, e := exec_and_catch(franca, @slice("examples/emu/run.fr", path), temp());
-        @assert(ok, "failed run %:\n%\n%", program, o.items(), e.items());
-    };
-    @println("elf(ssa): ok");
 }
 
 #use("@/examples/emu/runtime.fr");

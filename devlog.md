@@ -4,6 +4,8 @@
 - easier starting point, the ssa tests that don't use libc. max.ssa fails. 
   i was doing loaduh instead of loadub, oops 4+ instead of 4*. 
   now helloworld needs sar op_imm/opw. munmap. sudoku works. great success. 
+- more 32 bit ops. floats. undoing encode_fcvt is super error prone, should factor out as data that can be shared. mandelbrot works tho.   
+- examples/toy/args.fr reading off the end of the stack looking for auxvec. elf loader put an extra zero there. 
 
 ## (Sep 7) rv emu
 

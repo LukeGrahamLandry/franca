@@ -10,19 +10,35 @@ main :: fn() void = {
     #use("@/lib/args.fr");
     args := parse_args(LogArgs);
 
-    @assert(args.extra.len > 0, "missing elf arg");
-    input := read_entire_file_or_crash(temp(), args.extra[1]);
+    @assert(args.extra.len > 1, "missing elf arg");
+    path := args.extra[1];  // TODO: assumes jitted so first arg was franca compiler
+    input := read_entire_file_or_crash(temp(), path);
     h := input.peek_type(Elf.Header);
     @assert_eq(h.magic, Elf.MAGIC, "invalid magic. expected an elf program");
     @assert_eq(h.machine, .rv64);
     
     // TODO: for macos deal with "not divisible by page size"
+    //       since marking executable doesn't matter its not a big deal
     // TODO: don't actually map the code as executable
     // TODO: wasteful to actually map the code at all but technically you might read it as data
     // TODO: don't allow imports
     entry, stack, base_address := load_elf_segments2(input, true, false);
+    a := {
+        a := CStr.list(temp());
+        a&.push(path.as_cstr());
+        i := 0;
+        while => i < args.extra.len && args.extra[i] != "--" {
+            i += 1;
+        };
+        i += 1;
+        while => i < args.extra.len {
+            a&.push(args.extra[i].as_cstr());  // :SLOW it was already a cstr before
+            i += 1;
+        };
+        a.items()
+    };
     sp := write_argc_argv_envp(stack, (
-        args = @slice(@as(CStr) "a.out"),  // TODO: pass the rest of args
+        args = a,
         env = empty(),  // TODO: inherit
     ));
     
