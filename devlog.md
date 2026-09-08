@@ -6,6 +6,15 @@
   now helloworld needs sar op_imm/opw. munmap. sudoku works. great success. 
 - more 32 bit ops. floats. undoing encode_fcvt is super error prone, should factor out as data that can be shared. mandelbrot works tho.   
 - examples/toy/args.fr reading off the end of the stack looking for auxvec. elf loader put an extra zero there. 
+- kaleidoscope will be exciting because it has a jit 
+  - sar(op,opw), few more fcnv
+  - careful to make new tmp when size of float changes
+  - actually the only hard case is if it wants to (execute code, then modify it, then execute it again). 
+    for just jitting new code in new memory, compiling traces lazily is good enough. 
+  - now i have a program slow enough to measure. qemu: 120ms, mine(unsafe): 220ms. 
+- ugh, deal with being able to run programs that need `-d R` after the dashes so first parse_args can't eat them
+
+todo: count.fr doesn't work
 
 ## (Sep 7) rv emu
 

@@ -1,0 +1,18 @@
+
+main :: fn() void = {
+    @assert_eq(query_current_arch(), .rv64);
+    cases := import("@/examples/emu/test.fr").cases_asm;
+    buf := page_allocator.alloc_uninit(u8, 4096);
+    f := bit_cast_unchecked(*u8, @FnPtr(i64) i64, buf.ptr);
+    #use("@/tests/fr/inline_asm_jit.fr");
+    for cases { input, expect, code |
+        code := code.interpret_as_bytes();
+        buf.slice(0, code.len).copy_from(code);  // write over memory that has been executed before
+        buf := make_exec(buf);
+        clear_icache(buf);
+        result := f(input);
+        @assert_eq(result, expect, "looks like you called the wrong function");
+        make_write(buf);
+    };
+    page_allocator.dealloc(u8, buf);
+}

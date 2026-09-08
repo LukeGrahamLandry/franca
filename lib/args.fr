@@ -20,26 +20,35 @@ fn parse_args($Args: Type) Args #generic = {
 fn parse_args($Args: Type, a: *Args, args: []CStr) void #generic = {
     extra := Str.list(temp());
     
-    is_rest :: fn(it: *Field) => !it.nullable_tag.is_null() && it.nullable_tag.contains(fn(it) => it[].name == (@symbol rest));
+    is_tag :: fn(it: *Field, name: Symbol) => !it.nullable_tag.is_null() && it.nullable_tag.contains(fn(it) => it[].name == name);
     
-    rest_field :: {
+    find_field :: fn(name) => {
         f := Args.get_fields();
-        i := index_of(f, is_rest);
+        i := index_of(f, fn(it) => is_tag(it, name));
         @match(i) {
             fn Some(i) => (Some = f.index(i));
             fn None() => (?*Field).None;
         }
     };
+    rest_field :: find_field(@symbol rest);
+    after_dash_field :: find_field(@symbol after_dashes);
     
     i := 0;
+    dash_index := args.len;
     while => i < args.len {
         continue :: local_return;
         arg := args[i].str();
         i += 1;
         if arg.starts_with("-") {
+            if after_dash_field.is_some() && arg == "--" {
+                dash_index = i;
+                i = args.len;
+                continue();
+            };
             inline_for_enum Fields(Args) { $ff |
                 f :: ff[];
-                @if(:: !is_rest(Args.get_fields().index(f.raw())))
+                @if(:: !is_tag(Args.get_fields().index(f.raw()), @symbol after_dashes))
+                @if(:: !is_tag(Args.get_fields().index(f.raw()), @symbol rest))
                 if arg.rest(1) == f.name_str() {
                     Args.get_field(a, f)[] = parse_from_args(args, i&);
                     continue();
@@ -55,7 +64,11 @@ fn parse_args($Args: Type, a: *Args, args: []CStr) void #generic = {
     };
     
     @if(::rest_field.is_some()) {
-        Args.get_field_ptr(a, ::{ f := rest_field; f.Some })[] = extra.items();
+        Args.get_field_ptr(a, rest_field.unwrap())[] = extra.items();
+    };
+    
+    @if(::after_dash_field.is_some()) {
+        Args.get_field_ptr(a, after_dash_field.unwrap())[] = args.rest(dash_index);
     };
 }
 

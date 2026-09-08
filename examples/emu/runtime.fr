@@ -13,7 +13,7 @@ Emulator :: @rec @struct {
     syscall_handler: @FnPtr(emu: *Emulator, cpu: *Cpu) void;
     log: LogArgs;
 };
-LogArgs :: @struct(d := "", dis := false, etrace := false, strace := false, extra: []Str #rest = empty());
+LogArgs :: @struct(d := "", dis := false, etrace := false, strace := false, extra: []Str #rest = empty(), child_args: []CStr #after_dashes = empty());
 
 Cpu :: @struct {
     reg: EnumMap(RvReg, rawptr);
@@ -102,7 +102,6 @@ fn lookup_trace(emu: *Emulator, pc: i64) i64 = {
         // TODO: if jump target is constant, compile more before make_exec so waste less memory at the end of the page
         //       (will be more impactful when my backend emits fewer calls as jalr)
         emu.m&.make_exec();
-        //@eprintln("compiled trace[%] for %\n", i, fmt_hex(pc));
         i
     };
     i
@@ -110,11 +109,29 @@ fn lookup_trace(emu: *Emulator, pc: i64) i64 = {
 
 pass_though_syscall :: fn(emu: *Emulator, cpu: *Cpu) void = {
     n := cpu.reg&.get(.A7).int_from_rawptr();
-    @if(n == 259) @panic("TODO: riscv_flush_icache");
-    @if(n == 134) @panic("TODO: rt_sigaction");
+    if n == 259 {  // riscv_flush_icache
+        lo, hi := (cpu.reg&.get(.A0), cpu.reg&.get(.A1));
+        mem := u8.ptr_from_raw(lo).slice(ptr_diff(lo, hi));
+        cpu.reg&[.A0] = zeroed(rawptr);
+        
+        // TODO: invalidate traces in that region. 
+        //       for now it works as long as i never need to execute code and then modify it and execute it again. 
+        //       that situation can also happen if memory is recycled after unmapping so its not enough to just declare all my programs should be well behaved. 
+        return();
+    };
+    if n == 134 {  // rt_sigaction
+        // this needs incredibly convoluted translating of MContext structs to do properly. 
+        // sadly don't want to just error because my compiler uses it for crash_report. 
+        // so im probably just going to ignore these like examples/os does. 
+        @panic("TODO: rt_sigaction (but the only place i use this is my compiler and i haven't implemented clone() yet anyway)");
+        cpu.reg&[.A0] = zeroed(rawptr);
+        return();
+    };
+    
     @if(n == 220) @panic("TODO: clone");  // make a new Cpu 
     @if(n == 221) @panic("TODO: execve"); // check if the binary is a riscv elf and re-exec the emulator on it
     // TODO: treat mprotect(exec) as riscv_flush_icache?
+    //       and the inverse, discard compiled traces if you unmap the memory. 
     
     @if(query_current_os() != .linux || !@is(query_current_arch(), .aarch64, .rv64)) @panic("TODO: translate syscall");
     regs := @const_slice(RvReg.A0, .A1, .A2, .A3, .A4, .A5);

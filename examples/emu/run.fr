@@ -10,8 +10,8 @@ main :: fn() void = {
     #use("@/lib/args.fr");
     args := parse_args(LogArgs);
 
-    @assert(args.extra.len > 1, "missing elf arg");
-    path := args.extra[1];  // TODO: assumes jitted so first arg was franca compiler
+    path := (args.extra.find(fn(it) => !it[].ends_with(".fr"))  // hack for when running jitted
+        || @panic("cli arg is path to elf file"))[];
     input := read_entire_file_or_crash(temp(), path);
     h := input.peek_type(Elf.Header);
     @assert_eq(h.magic, Elf.MAGIC, "invalid magic. expected an elf program");
@@ -26,15 +26,7 @@ main :: fn() void = {
     a := {
         a := CStr.list(temp());
         a&.push(path.as_cstr());
-        i := 0;
-        while => i < args.extra.len && args.extra[i] != "--" {
-            i += 1;
-        };
-        i += 1;
-        while => i < args.extra.len {
-            a&.push(args.extra[i].as_cstr());  // :SLOW it was already a cstr before
-            i += 1;
-        };
+        a&.push_all(args.child_args);
         a.items()
     };
     sp := write_argc_argv_envp(stack, (

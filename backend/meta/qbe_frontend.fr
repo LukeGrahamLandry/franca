@@ -24,6 +24,7 @@ Args :: @struct {
     nostart := false;
     HACK_convert_illegal_ret_to_hlt := false;
     wasm_threads := false;
+    child_args: []CStr #after_dashes = empty();
 }
 
 main :: fn() void = { 
@@ -31,17 +32,7 @@ main :: fn() void = {
     
     #use("@/lib/args.fr");
     HELP :: collect_help(Args, "qbe_frontend [OPTIONS] {file.ssa, -}");
-    full_args := cli_args();
-  
-    fn eq(a: *CStr, b: *CStr) bool = a[] == b[].str();
-    end := full_args.len;
-    if full_args.index_of(@as(CStr) "--") { i |
-        end = i;
-    };
-    cli_args: List(CStr) = full_args.rest(min(full_args.len, end+1)).clone(temp());
-    
-    args: Args = ();
-    parse_args(Args, args&, full_args.slice(1, end));
+    args := parse_args(Args);
     
     arch, os := args.t.splat_env();
     if args.h {
@@ -141,7 +132,9 @@ main :: fn() void = {
         f := m.get_addr(m.goal.entry_point) 
             || @panic("couldn't find %", m.goal.entry_point);
         f := assume_types_fn(Arg = Ty(i64, *CStr, *CStr), Ret = i64, ptr = f);
-        cli_args&.insert(0, "thisisjittedcodegoodluckwiththat.exe");
+        cli_args := CStr.list(args.child_args.len + 2, temp());
+        cli_args&.push("thisisjittedcodegoodluckwiththat.exe");
+        cli_args&.push_all(args.child_args);
         cli_args&.push(zeroed(CStr));
         envp := tls(.environment_variables)[];
         status := f(cli_args.len - 1, cli_args.maybe_uninit.ptr, envp);
