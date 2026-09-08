@@ -117,17 +117,38 @@ fn decode_instruction(self: *Compile, pc: *u32) Qbe.Ref = {
             addr, dest := (self.read(rs1), self.write(rd));
             
             sizes := @const_slice(Qbe.O.loadsb, .loadsh, .loadsw, .load, .loadub, .loaduh, .loaduw, .load);
-            o := sizes[size + 4+int(zero_extend)];
+            o := sizes[size + 4*int(zero_extend)];
             addr := self.inc(addr, imm);
             push(b, o, .Kl, dest, addr, Qbe.Null);
         }
         fn op_imm() => {  // I
             imm := imm12;
             funct3 := @as(OpI) @as(i64) op.shift_right_logical(7+5).bit_and(0b111).zext();
+            arg, dest := (self.read(rs1), self.write(rd));
+            // TODO: arith,rot are in high bits of imm
+            if funct3 == .sll && imm >= 64 {  // 0b001
+                o: Qbe.O = @switch(imm) {
+                    @case(0b011000000001) => .ctz;
+                    @case(0b011000000010) => .ones;
+                    @default => @panic("TODO: unary op_imm 0b001 % %", imm, fmt_hex(op));
+                };
+                @dis(self, "%= % %", rd, o, rs1);
+                push(b, o, .Kl, dest, arg, Qbe.Null);
+                return Qbe.Null;
+            };
             o := funct3_to_op(funct3);
+            if funct3 == .srl && imm >= 64 {  // 0b101
+                imm_hi := imm.shift_right_logical(6);
+                if imm_hi == 0b10000 {
+                    imm = imm.bit_and(1.shift_left(6)-1);
+                    o = .sar;
+                } else {
+                    @panic("TODO: unary op_imm 0b101 % %", imm, fmt_hex(op));
+                };
+            };
+            
             @dis(self, "%= % %, %", rd, o, rs1, imm);
             
-            arg, dest := (self.read(rs1), self.write(rd));
             push(b, o, .Kl, dest, arg, self.f.getcon(imm));
         }
         fn op() => {  // R
@@ -140,9 +161,10 @@ fn decode_instruction(self: *Compile, pc: *u32) Qbe.Ref = {
                 @case(1) => {
                     @switch(@as(i64) funct3) {
                         @case(0b000) => .mul;
-                        //fn udiv() => e.simple_op(i, @as(OpI) 0b101, 1);
-                        //fn rem()  => e.simple_op(i, @as(OpI) 0b110, 1);
-                        //fn urem() => e.simple_op(i, @as(OpI) 0b111, 1);
+                        @case(0b100) => .div;
+                        @case(0b101) => .udiv;
+                        @case(0b110) => .rem;
+                        @case(0b111) => .urem;
                         @default => @panic("TODO: op % % %", @as(i64) funct3, funct7, fmt_hex(op));
                     }
                 }
@@ -183,23 +205,40 @@ fn decode_instruction(self: *Compile, pc: *u32) Qbe.Ref = {
         fn op32() => {
             funct3 := op.shift_right_logical(7+5).bit_and(0b111);
             funct12 := op.shift_right_logical(32-12);
-            @if(funct12 != 0b000010000000 || funct3 != 0b000) @panic("TODO: op32 % % %", fmt_hex(op), funct3, funct12);
+            @if(funct12 != 0b000010000000 || (funct3 != 0b000 && funct3 != 0b100)) @panic("TODO: op32 % % %", fmt_hex(op), funct3, funct12);
             
             a0, a1, dest := (self.read(rs1), self.read(rs2), self.write(rd));
             t := self.f.newtmp("w", .Kl);
-            push(b, .extuw, .Kl, t, a0, Qbe.Null);
+            o := @if(funct3 == 0b000, Qbe.O.extuw, .extuh);
+            push(b, o, .Kl, t, a0, Qbe.Null);
             push(b, .add, .Kl, dest, a1, t);
-            @dis(self, "%= % %, %", rd, "add.u32", rs1, rs2);
+            @dis(self, "%= % %, %", rd, o, rs1, rs2);
         }
         fn opw() => {
             funct3 := @as(OpI) @as(i64) op.shift_right_logical(7+5).bit_and(0b111).zext();
-            @if(funct3 != .add) @panic("TODO: opw %", fmt_hex(op));
+            @if(!@is(funct3, .add, .sll, .srl)) @panic("TODO: opw %", fmt_hex(op));
+            o := funct3_to_op(funct3);
+            
+            // TODO: paste of op_imm
+            imm := imm12;
+            if funct3 == .sll && imm >= 64 {  // 0b001
+                @panic("TODO: unary opw 0b001 % %", imm, fmt_hex(op));
+            };
+            if funct3 == .srl && imm >= 64 {  // 0b101
+                imm_hi := imm.shift_right_logical(6);
+                if imm_hi == 0b10000 {
+                    imm = imm.bit_and(1.shift_left(5)-1);
+                    o = .sar;
+                } else {
+                    @panic("TODO: unary op_imm 0b101 % %", imm, fmt_hex(op));
+                };
+            };
             
             arg, dest := (self.read(rs1), self.write(rd));
-            t := self.f.newtmp("w", .Kl);
-            push(b, .add, .Kl, t, arg, self.f.getcon(imm12));
+            t := self.f.newtmp("w", .Kw);
+            push(b, .add, .Kw, t, arg, self.f.getcon(imm));
             push(b, .extsw, .Kl, dest, t, Qbe.Null);
-            @dis(self, "%= % %, %", rd, "add.i32", rs1, imm12);
+            @dis(self, "%= % %, %", rd, "add.i32", rs1, imm);
         }
         fn auipc() => {  // U
             imm, dest := (imm20, self.write(rd));

@@ -1,4 +1,10 @@
 
+## (Sep 8) rv emu
+
+- easier starting point, the ssa tests that don't use libc. max.ssa fails. 
+  i was doing loaduh instead of loadub, oops 4+ instead of 4*. 
+  now helloworld needs sar op_imm/opw. munmap. sudoku works. great success. 
+
 ## (Sep 7) rv emu
 
 - (6); typed 31-11 instead of 32-11 for jal so numbers were 2x too big. (symptom was dereferencing a junk register and faulting).
@@ -18,12 +24,19 @@
   - debug print the register values after running each trace. 
   - ohh that's 0x2000004 because my fragile os detecting this its macos because im not doing write_argc_argv_envp
 - mmap, mprotect. (68); cas. (81); write/exit. (96);
+- now sudoku. add.uh,div. (196); crash. rem,udiv lets me print numbers. 
+  `for values[best_s]` is a bunch of 66978812. im seeing trailing_zeros as something else clearly. 
+  op_imm sll gets to be reused as something else when the immediate is too large. ctz,ones. (210);
 
 > the magic words for producing a disassembler are:
 ```
 nix-shell -p pkgsCross.riscv64.buildPackages.binutils
 riscv64-unknown-linux-gnu-objdump
 ```
+
+backend
+- rv isel cmp_int_zero, if a1==0, don't need to insert an extra nop xor. 
+  self compile bytes of code: 1359644 -> 1335016 (1.8%)
 
 ## (Sep 6) rv emu
 

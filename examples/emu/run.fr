@@ -10,7 +10,8 @@ main :: fn() void = {
     #use("@/lib/args.fr");
     args := parse_args(LogArgs);
 
-    input := read_file_from_last_arg();
+    @assert(args.extra.len > 0, "missing elf arg");
+    input := read_entire_file_or_crash(temp(), args.extra[1]);
     h := input.peek_type(Elf.Header);
     @assert_eq(h.magic, Elf.MAGIC, "invalid magic. expected an elf program");
     @assert_eq(h.machine, .rv64);
@@ -31,7 +32,10 @@ main :: fn() void = {
     emu.debug_base_address = base_address;
     cpu := emu.threads&.push(zeroed(Cpu));
     cpu.reg&.insert(.SP, bit_cast_unchecked(*CStr, rawptr, sp));
+    cpu.reg&.insert(.RA, rawptr_from_int(-1));  // :TestMarkerBreakLoop
     run(emu&, cpu, u8.int_from_ptr(entry));
+    // for the ssa tests that don't call exit
+    @assert_eq(cpu.reg&.get(.A0).int_from_rawptr(), 0, "returned non-zero");
 };
 
 #use("@/lib/sys/fs.fr");

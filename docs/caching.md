@@ -34,6 +34,10 @@ just trust the file system's last modified dates.
 load older versions of the format. Anything with a different version number is rejected. 
 It's just an implementation detail that makes it faster to run larger franca programs directly. 
 - There's too much of a speed hit on a cache miss compared to FRANCA_NO_CACHE=true
+- If you read cli_args()/get_environment_variable() during comptime, that's NOT currently included in cache validation. 
+- Caching only applies to the file directly run by the compiler. 
+  When building for aot with examples/default_driver.fr, the driver code itself is cached but the target program is not. 
+  Ditto for any of the examples using graphics/easy.fr/build_for_graphics.
 
 Generated code (like strings passed to `import()` beginning with `{`) are ignored when 
 deciding if a cached file can be used. The assumption is that they are deterministically 
@@ -73,5 +77,22 @@ more disk space and is slower to load than the post-regalloc-ir, but it colocate
 implementation so you don't have to write seperate bindings and it maintains the ability to be 
 cross compiled (and thus used transparently at comptime). 
 
+The convenient interface for using that with franca code is `import_module()`. 
+It compiles the argument in a seperate CompCtx and then passes the result to import_frc. 
 Currently import caching is only enabled when you set the FRANCA_MORE_CACHE environment
-variable (otherwise import_frc(X) is the same as import(X).exports). 
+variable (otherwise import_module(X) is the same as import(X).exports). 
+
+## example usage from other code
+
+you're not limitted to only what the franca frontend does automatically. 
+you can write programs that use the same serialization format and reuse various parts of the compiler's machinery for working with it. 
+
+- tests/external/wasm4.fr build_example() compiles a wasm module and stores the bytes 
+  in a single data symbol of a .frc file to reuse Ffi'check_cache (from import_c). 
+- backend/meta/precompiled.fr static_memmove and gen_do_fold_impl
+- examples/import_c/ffi.fr include() calls import_frc() and also saves those 
+  bytes to a file so they can be reused next compile if none of the input c files changed.
+- examples/import_c/ffi.fr import_cache_file() is the opposite
+- examples/import_c/preprocess fr_to_header() uses it for a precompiled header of the signetures in string.h 
+  generated from a franca file with their implementations (examples/os/libc/string.fr). 
+- <https://git.sr.ht/~lukegrahamlandry/rustc_codegen_ferb>
