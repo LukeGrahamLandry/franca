@@ -5,15 +5,16 @@ Emulator :: @rec @struct {
     // TODO: stop being afraid of putting pointers in a data structure
     //       then wouldn't have to lock if hit jump_cache
     // TODO: do i know anything about the shape of the keys that can make a more efficient map?
-    trace_lookup: HashMap(i64, i64);  // virtual pc -> index in .traces
+    trace_lookup: HashMap(i64, *Trace);  // [virtual pc]
     m: Qbe.Module;
     jit_lock: Mutex;
     disassemble: bool;
     debug_base_address := 0;
-    syscall_handler: @FnPtr(emu: *Emulator, cpu: *Cpu, pc: i64) void;
+    syscall_handler: @FnPtr(cpu: *Cpu, pc: i64) void;
     log: LogArgs;
     initial_elf: []u8 = empty();  // for find_emulated_symbol
     joinable_threads := 0;
+    worker: *Qbe.CodegenShared;
 };
 
 // TODO: report errors if extra has junk args
@@ -25,7 +26,7 @@ LogArgs :: @struct {
     strace := false;  // show syscalls
     trace_exit := false;  // show stack trace on non-zero exit()
     trace_fault := false; // "                on signal/compiler panic (needs FRANCA_BACKTRACE=1)
-    extra: []Str #rest = empty();  // first .fr is the elf
+    extra: []Str #rest = empty();  // first non-.fr is the elf
     child_args: []CStr #after_dashes = empty();
 };
 
@@ -35,16 +36,17 @@ Cpu :: @struct {
         tid_futex: *u32;
         sys: ?*import("@/lib/sys/threads.fr").Thread = .None;
         joinable := false;
-        emu: *Emulator;
         entry_address: i64;
     }) = .None;
+    emu: *Emulator;
 };
 
-Terminator :: @enum(u8) (Indirect, Syscall, Halt);
-Trace :: @struct {
+Terminator :: @enum(u8) (Direct, Indirect, Syscall, Halt);
+Trace :: @rec @struct {
     callee: @FnPtr(it: *Cpu, pc: i64) i64;
+    symbol: Qbe.Sym;
     terminator: Terminator;
-    jump_cache: Ty(i64, i64);
+    jump_cache: Array(Ty(i64, *Trace), 2);
     
     // TODO: remove these. just for debugging rn
     read: EnumSet(RvReg);
@@ -61,22 +63,23 @@ fn init(emu: *Emulator, gpa: Alloc, log: LogArgs) void = {
         disassemble = log.dis,
         syscall_handler = pass_though_syscall,
         log = log,
+        worker = zeroed(*Qbe.CodegenShared),
     );
-    Qbe'backend'init_module(emu.m&, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly));
+    Qbe'backend'init_module(emu.m&, (
+        arch = query_current_arch(), os = query_current_os(), type = .JitOnly, 
+        expecting_wx = true,
+    ));
     emu.m&.set_debug_types(log.d, true);
+    emu.worker = init_codegen_worker(emu.m&, false);
 }
 
 // TODO: do less locking. its fine for multiple threads to be reading at the same time, just not compiling (which writes). 
 fn run(emu: *Emulator, cpu: *Cpu, pc: i64) void = {
-    emu.jit_lock&.lock();
-    trace_i := emu.lookup_trace(pc);
+    trace := emu.lookup_trace(pc);
     
     debug := @ref u8.list(temp());
     debug_log := emu.log.etrace;
     loop {
-        trace := emu.traces&.nested_index(trace_i);
-        
-        emu.jit_lock&.unlock();
         if debug_log {
             dump_reg(debug, cpu, trace.read);
             address := pc - emu.debug_base_address;
@@ -96,17 +99,19 @@ fn run(emu: *Emulator, cpu: *Cpu, pc: i64) void = {
             @assert(cpu.thread.is_none(), "non-main thread run() returned to ip=-1");
             return();
         };
-        if trace.terminator == .Syscall {
-            emu'syscall_handler(emu, cpu, pc/*for clone()*/);
-        };
-        emu.jit_lock&.lock();
-        
-        predicted_pc, predicted_trace_i := trace.jump_cache;
+        predicted_pc, predicted_trace_i := trace.jump_cache&[0];
         if pc != predicted_pc {
-            trace_i = emu.lookup_trace(pc);
-            trace.jump_cache = (pc, trace_i);
+            predicted_pc, predicted_trace_i := trace.jump_cache&[1];
+            if pc != predicted_pc {
+                old_trace := trace;
+                trace = emu.lookup_trace(pc);
+                old_trace.jump_cache&[1] = old_trace.jump_cache&[0];
+                old_trace.jump_cache&[0] = (pc, trace);
+            } else {
+                trace = predicted_trace_i;
+            };
         } else {
-            trace_i = predicted_trace_i;
+            trace = predicted_trace_i;
         };
     };
 }
@@ -121,18 +126,49 @@ fn dump_reg(out: *List(u8), cpu: *Cpu, reg: EnumSet(RvReg)) void = {
 }
 
 // TODO: on wasm need to jit_sync if another thread made the trace first and this thread hasn't made a new trace since
-fn lookup_trace(emu: *Emulator, pc: i64) i64 = {
+fn lookup_trace(emu: *Emulator, pc: i64) *Trace = {
+    emu.jit_lock&.lock();
     i := emu.trace_lookup&.get(pc) || {
         mark := temp().mark();
+        code_start := emu.m.start_of_writable_code;
+        first_trace := emu.traces&.len();
         i := compile_trace(emu, pc.rawptr_from_int());
-        emu.m&.make_exec();
+        wait_for_make_exec(emu.worker, code_start);
+        range(first_trace, emu.traces&.len()) { trace_i |
+            i := emu.traces&.nested_index(trace_i);
+            jit_addr, _ := emu.m&.get_addr(i.symbol).unwrap();
+            i.callee = bit_cast_unchecked(rawptr, FieldType(Trace, .callee), jit_addr);
+        };
         temp().reset(mark);
         i
     };
+    emu.jit_lock&.unlock();
     i
 }
 
-pass_though_syscall :: fn(emu: *Emulator, cpu: *Cpu, pc: i64) void = {
+// TODO: get rid of this if i can't improve the shape of ir to the point where threaded=true helps
+wait_for_make_exec :: fn(worker: *Qbe.CodegenShared, code_start: *u8) void = {
+    @if(!worker.threaded) return();
+    @debug_assert(!worker.m.goal.expecting_wx, "won't update start_of_writable_code");
+    @assert(query_current_arch() != .wasm32, "TODO: update start_of_writable_code (wasm make_exec updates code.next instead). also need to jitevent.sync on the runner thread tho");
+    // TODO: don't hold the lock while waiting but then need to be able to wait for specifically our MakeExec
+    ring := worker.pipe.done&;
+    i32.atomic_add(ring.waiting&, 1);
+    futex := ring.committed.bouba&;
+    dowhile {
+        tmp := futex[];
+        fence();
+        waiting := identical(worker.m.start_of_writable_code, code_start);
+        if waiting {
+            Futex'wait(futex, tmp);
+        };
+        waiting
+    };
+    i32.atomic_add(ring.waiting&, -1);
+};
+
+pass_though_syscall :: fn(cpu: *Cpu, pc: i64) void = {
+    emu := cpu.emu;
     n := cpu.reg&.get(.A7).int_from_rawptr();
     a0, a1, a2, a3, a4, a5 := (cpu.reg&.get(.A0), cpu.reg&.get(.A1), cpu.reg&.get(.A2), cpu.reg&.get(.A3), cpu.reg&.get(.A4), cpu.reg&.get(.A5));
     
@@ -226,11 +262,11 @@ thread_spawn :: fn(emu: *Emulator, cpu: *Cpu, sp: rawptr, tid_futex: *u32, pc: i
         };
     };
     
-    child := push(emu.threads&, ());
+    child := push(emu.threads&, (emu=emu));
     child.reg = cpu.reg;
     child.reg&[.A0] = zeroed(rawptr);
     child.reg&[.SP] = sp;
-    child.thread = (Some = (tid_futex = tid_futex, emu = emu, entry_address = pc));
+    child.thread = (Some = (tid_futex = tid_futex, entry_address = pc));
     
     t := start_thread_data(Cpu, child, thread_begin);
     //tid: u32 = t.tid.bitcast();  // TODO: this only works if !prefer_pthread
@@ -242,13 +278,13 @@ thread_spawn :: fn(emu: *Emulator, cpu: *Cpu, sp: rawptr, tid_futex: *u32, pc: i
 
 thread_begin :: fn(cpu: *Cpu) void = {
     thread := cpu.thread&.unwrap();
-    run(thread.emu, cpu, thread.entry_address);
+    run(cpu.emu, cpu, thread.entry_address);
     thread_end(cpu);
 };
 
 thread_end :: fn(cpu: *Cpu) void = {
     thread := cpu.thread&.unwrap();
-    emu := thread.emu;
+    emu := cpu.emu;
     with emu.jit_lock& {
         thread.tid_futex[] = 0;
         Futex'wake(thread.tid_futex, MAX_i32);

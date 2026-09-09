@@ -12,6 +12,7 @@ fn convert_to_ssa(f: *Qbe.Fn) void = {
     prev_debug := f.globals.debug;
     f.globals.debug = prev_debug.bit_and(bit_not(1.shift_left(Qbe.DebugKey.Liveness.raw() - "A".char())));
     filldom(f);
+    @if(f.nblk > 1)
     when_debug(f, .Ssa) { out |
         @fmt(out, "\n## Dominators:\n");
         for_blocks f { b1 |
@@ -27,19 +28,21 @@ fn convert_to_ssa(f: *Qbe.Fn) void = {
     };
     fillfron(f);
     fill_liveness(f);
-    insert_phis(f);
-    renumber_block(f.start, stk, f);
+    if insert_phis(f) > 0 {
+        renumber_block(f.start, stk, f);
+    };
     f.globals.debug = prev_debug;
     when_debug_printfn(f, .Ssa, "\n## After SSA construction:\n");
     f.creates(.Ssa);
 }
 
 // :Explain
-fn insert_phis(f: *Qbe.Fn) void = {
+fn insert_phis(f: *Qbe.Fn) i64 = {
     u := init_bitset(f.nblk.zext());
     defs := init_bitset(f.nblk.zext());
     
     blist := list(*Qbe.Blk, f.nblk.zext(), temp());
+    multi_block_changes := 0;
     range(Qbe.Tmp0, f.ntmp.zext()) { t |
         continue :: local_return;
         it := f.tmp.index(t);
@@ -102,6 +105,7 @@ fn insert_phis(f: *Qbe.Fn) void = {
         bscopy(defs&, u&);
         while => blist&.pop() { b |
             f.tmp[t].visit = t.intcast();
+            multi_block_changes += 1;
             bsclr(u&, b.id.zext());
             range(0, b.nfron.zext()) { n | 
                 a := b.fron[n];
@@ -119,6 +123,7 @@ fn insert_phis(f: *Qbe.Fn) void = {
             };
         };
     };
+    multi_block_changes
 }
 
 fn renumber_block(b: *Qbe.Blk, stk: []*QbeName, f: *Qbe.Fn) void = { 

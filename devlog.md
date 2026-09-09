@@ -6,6 +6,24 @@
     shows how fragile treating and-link as a direct jump is. 
   - sadly the direct jumps have found try_fold so now it's going to make me do all the instructions. 
   - jit hello.fr works. jit kaleidoscope (with clean cache) takes 62700ms (vs 5800ms in qemu)... so i've got some work to do. 
+- too slow
+  - for one thing i was writing jump_cache on the new trace instead of the old one. 
+    so actually doing that is 1200ms->900ms on jit kaliedoscope cache hit.
+    put pointers in trace_lookup so don't need to lock if jump_cache hits ->730ms. 
+    now there's approx no samples in that mutex's lock/unlock. 
+  - time's mostly in the backend but there's some before that so maybe CodegenWorker will help a bit (and i need it for MAP_JIT eventually anyway)
+    sadly same speed with threaded or not. there is time when both threads are running, i guess not enough to be worth the overhead. 
+    tiny functions and very little frontend time is the worst case for that i guess. 
+  - wx=true (and no threads) instead of more direct jumps per page is faster. 
+    if i do that i need the threads anyway for macos MAP_JIT. 
+  - convert_to_ssa can be a tiny bit faster if no changes were made
+  - jit kaleidoscope clean is 16000ms (or 15330ms with wx=true and lazy traces) now which is also a much bigger percentage improvement than when the cache hits which is interesting. 
+  - two jump_cache slots so bcmp can always hit -> 8570ms (kalidoscope clean wx=false)
+  - that suggests i should be just linking the traces together directly (which relies on not being lazy so that wasn't a total waste of time)
+    just for jal without link, calling the next trace directly ->7520ms (not fusing them into one function or keeping anything in registers).
+    (or wx=true 7340ms, barely better). which now is faster than if i go back to lazy traces (8320ms).
+  - linking for bcmp too makes it slower: 9420ms. 
+    looking in samply, that ends up with extremely deep callstacks (highest is 492) because i don't have tail calls. 
 
 ## (Sep 8) rv emu
 

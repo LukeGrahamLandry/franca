@@ -21,6 +21,9 @@ Compile :: @struct {
     out: List(u8);  // disassemble
     terminator := Terminator.Indirect;
     direct_jump_targets: Array(?i64, 2) = (.None, .None);
+    // TODO: either get rid of this or implement tail calls so i can do real threaded code. 
+    //       just the subset i need here where the signetures are the same and no args on the stack would be fairly easy. 
+    bcmp_condition: ?Qbe.Ref = .None;  
 };
 
 // when the jump target is constant, follow it and compile a new trace eagerly. 
@@ -32,12 +35,13 @@ Compile :: @struct {
 //       so maybe have this also look at how close m.segments[code] is to the page boundry and stop early. 
 // TODO: technically it's legal to have a constant jump into something that isn't code 
 //       and just never execute it. should track which regions of memory are mapped executable?
-fn compile_trace(emu: *Emulator, entry: rawptr) i64 = {
+fn compile_trace(emu: *Emulator, entry: rawptr) *Trace = {
     work := rawptr.list(temp());
     work&.push(entry);
-    firsts_trace_index: ?i64 = .None;
-    emu.jit_lock&.lock();
+    firsts_trace_index: ?*Trace = .None;
+    @debug_assert(emu.jit_lock&.locked_by_me(), "compile_trace needs lock");
     while => work&.pop() { entry |
+        // TODO: the first lookup is waste because trace_lookup did it before calling
         if emu.trace_lookup&.get(entry.int_from_rawptr()).is_none() {
             // this makes it match the addresses in objdump
             address := int_from_rawptr(entry) - emu.debug_base_address;
@@ -50,21 +54,26 @@ fn compile_trace(emu: *Emulator, entry: rawptr) i64 = {
             };
             for direct_jump_targets& { it |
                 if it { it |
+                    // TODO: this is slower than just using expecting_wx
                     work&.push(entry.offset(it));
                 };
             };
         };
     };
-    emu.jit_lock&.unlock();
+    Qbe'enter_task(emu.worker) { e |
+        e.task = .MakeExec;
+    };
     firsts_trace_index.unwrap()
 }
 
 // only one basic block is compiled at a time. 
 // any brach instruction ends the trace, returning the new pc to the dispatch loop. 
 // register values are read at first use and changed ones sare written at the end of the trace. 
-fn compile_one_trace(emu: *Emulator, entry: rawptr, name: Str) Ty(i64, Array(?i64, 2)) = {
+fn compile_one_trace(emu: *Emulator, entry: rawptr, name: Str) Ty(*Trace, Array(?i64, 2)) = {
+    result := zeroed(Ty(*Trace, Array(?i64, 2)));
+Qbe'enter_task(emu.worker) { codegen_entry | 
     m := emu.m&;
-    f := @ref Qbe.Fn.zeroed();
+    f := temp().box_uninit(Qbe.Fn);
     f.default_init(m);
     b := newblk(); f.nblk += 1;
     f.start = b;
@@ -97,27 +106,66 @@ fn compile_one_trace(emu: *Emulator, entry: rawptr, name: Str) Ty(i64, Array(?i6
         o: Qbe.O = @if((@as(u8) r) >= 32, @if(self.register_small&.get(r), .stores, .stored), .storel);
         push(self.b, o, .Kw, Qbe.Null, value, addr);
     };
-    self.b.jmp = (type = .retl, arg = continuation);
     self.f.ret_cls = .Kl;
-    if self.terminator == .Halt {
-        self.b.jmp = (type = .hlt, arg = Qbe.Null);
+    @match(self.terminator) {
+        fn Halt() => {
+            self.b.jmp = (type = .hlt, arg = Qbe.Null);
+        }
+        fn Syscall() => {
+            // after storing registers
+            syscall_handler := self.f.getcon(bit_cast_unchecked(@type self.emu.syscall_handler, i64, self.emu.syscall_handler));
+            push(b, .arg, .Kl, Qbe.Null, self.cpu_addr, Qbe.Null);                
+            push(b, .arg, .Kl, Qbe.Null, continuation, Qbe.Null); // for clone()
+            push(b, .call, .Kw, Qbe.Null, syscall_handler, Qbe.Null);
+            self.b.jmp = (type = .retl, arg = continuation);
+        }
+        // TODO: this also means you need to keep track of dependencies so flush_icache can go backwards and recompile everything
+        // TODO: this is going to be a problem because i don't have tail calls. works out for now because i do it for so few jumps. 
+        // also this means -etrace wont show everything
+        fn Direct() => {
+            new_pc := self.pc_symbol(self.direct_jump_targets&[0].unwrap());
+            if self.bcmp_condition { cond |
+                // THIS IS DISABLED RN
+                unreachable();
+                choice := self.f.newtmp("cmp_pc", .Kl);
+                new_pc2 := self.pc_symbol(self.direct_jump_targets&[1].unwrap());
+                other_pc_off := self.direct_jump_targets&[0].unwrap();
+                push(b, .sel0, .Kw, Qbe.Null, cond, Qbe.Null);
+                push(b, .sel1, .Kl, choice, new_pc, new_pc2);
+                new_pc = choice;
+            };
+            next_pc := self.f.newtmp("next_pc", .Kl);
+            push(b, .arg, .Kl, Qbe.Null, self.cpu_addr, Qbe.Null);                
+            push(b, .arg, .Kl, Qbe.Null, continuation, Qbe.Null);
+            push(b, .call, .Kl, next_pc, new_pc, Qbe.Null);
+            self.b.jmp = (type = .retl, arg = next_pc);
+        }
+        fn Indirect() => {
+            self.b.jmp = (type = .retl, arg = continuation);
+        }
     };
     
     f.lnk.id = m.intern(name);
     f.lnk.no_inline = true;
-    Qbe'run_qbe_passes(f);
-    jit_addr, _ := m.get_addr(f.lnk.id).expect("compiled trace");
-    
-    trace_index := emu.traces&.len();
-    emu.traces&.push(
-        callee = bit_cast_unchecked(rawptr, FieldType(Trace, .callee), jit_addr),
+    codegen_entry.task = (Func = f);
+    trace := emu.traces&.push(
+        callee = zeroed(FieldType(Trace, .callee)),  // compiling on the other thread, need to wait for it
+        symbol = f.lnk.id,
         terminator = self.terminator,
-        jump_cache = (0, 0),
+        jump_cache = ((0, zeroed(*Trace)), (0, zeroed(*Trace))),
         read = self.register_read_real, // self.register_read.valid,
         write = self.register_write,
     );
-    emu.trace_lookup&.insert(entry.int_from_rawptr(), trace_index);
-    (trace_index, self.direct_jump_targets)
+    result = (trace, self.direct_jump_targets);    
+    emu.trace_lookup&.insert(entry.int_from_rawptr(), trace);
+};
+    result
+}
+
+fn pc_symbol(self: *Compile, new_pc_off: i64) Qbe.Ref = {
+    new_pc := u32.raw_from_ptr(self.entry).offset(new_pc_off - self.emu.debug_base_address);
+    new_pc := self.emu.m&.intern(@tfmt("trace%", fmt_hex(new_pc)));  // :AddressInMangledName
+    self.f.symcon(new_pc)
 }
 
 fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref = {
@@ -359,7 +407,7 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
                     };
                     
                     @dis(self, "%= % % 0?0: %", rd, o, rs2, rs1);
-                    inspect, value, dest := (self.read(rs2), self.read(rs1), self.write(rd));
+                    inspect, value := (a1, a0);
                     cond := self.f.newtmp("r", .Kw);
                     push(b, o, .Kw, cond, inspect, Qbe.ConZero);
                     push(b, .sel0, .Kw, Qbe.Null, cond, Qbe.Null);
@@ -448,8 +496,10 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
             push(b, .sel0, .Kw, Qbe.Null, cond, Qbe.Null);
             push(b, .sel1, .Kl, new_pc, jump_pc, fallthrough_pc);
             
-            self.direct_jump_targets&[0] = (Some = pc_offset + 4);
-            self.direct_jump_targets&[1] = (Some = pc_offset + imm);
+            self.direct_jump_targets = ((Some = pc_offset + imm), (Some = pc_offset + 4));
+            self.bcmp_condition = (Some = cond);
+            // TODO: i think this would help if i had tail calls but right now it makes it worse
+            // self.terminator = .Direct;
             return new_pc;
         }
         fn jal() => {
@@ -467,6 +517,9 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
             self.direct_jump_targets&[0] = (Some = pc_offset + imm);
             if rd != .Zero {
                 self.direct_jump_targets&[1] = (Some = pc_offset + 4);
+            } else {
+                // TODO: when i stop always using jalr in the backend, profile again if it helps to always do this. 
+                self.terminator = .Direct;
             };
             return self.inc(self.pc, pc_offset + imm);
         }
@@ -474,8 +527,9 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
             @case(ecall) => {
                 @dis(self, "ecall");
                 self.terminator = .Syscall;
-                self.direct_jump_targets&[1] = (Some = pc_offset + 4);  // TODO: wrong for exit()/exit_group()
-                return self.inc(self.pc, pc_offset + 4);
+                new_pc := self.inc(self.pc, pc_offset + 4);
+                self.direct_jump_targets&[0] = (Some = pc_offset + 4);  // TODO: wrong for exit()/exit_group()
+                return new_pc;
             };
             @case(ebreak) => {
                 self.terminator = .Halt;
@@ -569,10 +623,7 @@ fn write(self: *Compile, r: RvReg, k: Qbe.Cls) Qbe.Ref = {
         r = r.as_float();
     };
     
-    if k.is_float() && self.register_read&.get(r).is_some() && (k == .Ks) != self.register_small&.get(r) {
-        // ex. last used for f32 and now stomping it with an f64, that's fine just need to make a new tmp for it. 
-        self.register_read&.remove(r);
-    };
+    self.register_read&.remove(r);  // ssa
     
     @if(k == .Ks) self.register_small&.set(r);
     @if(k == .Kd) self.register_small&.unset(r);
