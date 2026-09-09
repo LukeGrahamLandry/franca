@@ -1,15 +1,21 @@
 // input is a riscv64 linux static-pie executable. 
 // THIS IS NOT A SANDBOX
 // syscalls are translated to host syscalls and memory accesses are not bounds checked. 
+// some syscalls need special treatment: riscv_flush_icache, clone
 // (WIP) limitations: 
 // - syscalls only work on arm where translation is trivial because they use the same numbers as riscv
 // - only a subset of instructions are implemented
-// - no jit or threads or exec
+// - no exec
 
 main :: fn() void = {
     #use("@/lib/args.fr");
     args := parse_args(LogArgs);
-
+    // TODO: as usual, so annoying that you don't inherit the symbol names from the compiler. 
+    //       even if jit and would inherit for the franca code, it has a different RESOLVERS so push won't work. 
+    if args.trace_fault {
+        Crash'hook_backtrace();
+    };
+    
     path := (args.extra.find(fn(it) => !it[].ends_with(".fr"))  // hack for when running jitted
         || @panic("cli arg is path to elf file"))[];
     input := read_entire_file_or_crash(temp(), path);
@@ -37,11 +43,14 @@ main :: fn() void = {
     ::import("@/backend/lib.fr").Qbe.QbeModule;  // :compilerbug/ordering
     emu := zeroed(Emulator);
     init(emu&, general_allocator(), args);
+    emu.initial_elf = input;
     emu.debug_base_address = base_address;
-    cpu := emu.threads&.push(zeroed(Cpu));
+    cpu := push(emu.threads&, ());
     cpu.reg&.insert(.SP, bit_cast_unchecked(*CStr, rawptr, sp));
     cpu.reg&.insert(.RA, rawptr_from_int(-1));  // :TestMarkerBreakLoop
+    hook := Crash'push_resolver(Emulator, emu&, find_emulated_symbol);
     run(emu&, cpu, u8.int_from_ptr(entry));
+    pop_resolver(hook);
     // for the ssa tests that don't call exit
     @assert_eq(cpu.reg&.get(.A0).int_from_rawptr(), 0, "returned non-zero");
 };
@@ -50,3 +59,9 @@ main :: fn() void = {
 #use("@/lib/sys/process.fr");
 #use("@/examples/elf_loader.fr");
 #use("@/examples/emu/runtime.fr");
+
+// TODO: to make it run in examples/os (which include the wasm playground), need to do syscall->libc translation. 
+//       some of which i already have in examples/os/user/init.fr/get_libc_syscall_callee, should factor that out. 
+// TODO: have an examples/os/host/ that uses this. need an easy option to have syscalls not pass through
+//       that might just mean compiling host/user.fr to riscv and running that in the emulator. 
+//       then that thing could run riscv binaries that dynamically link libc. 

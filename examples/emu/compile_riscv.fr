@@ -29,7 +29,7 @@ Compile :: @struct {
 fn compile_trace(emu: *Emulator, entry: rawptr) i64 = {
     // this makes it match the addresses in objdump
     address := int_from_rawptr(entry) - emu.debug_base_address;
-    @if(emu.log.dis) @eprintln("=== compiling trace[%] from % ===", emu.traces&.len(), fmt_hex(address));
+    @if(emu.log.dis) @eprintln("[%] === compiling trace[%] from % ===", tls(.thread_index)[], emu.traces&.len(), fmt_hex(address));
     emu.jit_lock&.lock();
     m := emu.m&;
     f := @ref Qbe.Fn.zeroed();
@@ -224,7 +224,7 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
             imm := imm12;
             funct3 := @as(OpI) @as(i64) op.shift_right_logical(7+5).bit_and(0b111).zext();
             a0, dest := (self.read(rs1), self.write(rd));
-            // TODO: arith,rot are in high bits of imm
+            // TODO: rot are in high bits of imm
             if funct3 == .sll && imm >= 64 {  // 0b001
                 @if(opcode_class != .Kl) @panic("TODO: count kw 0b001 % %", imm, fmt_hex(op));
                 o: Qbe.O = @switch(imm) {
@@ -319,6 +319,10 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
                     push(b, .add, .Kl, dest, a1, t);
                     @dis(self, "%= % %, %", rd, o, rs1, rs2);
                     return Qbe.Null;
+                };
+                @case(48) => @match(funct3) {
+                    fn sll() => .rotl;
+                    @default => @panic("TODO: op % % %", @as(i64) funct3, funct7, fmt_hex(op));
                 };
                 @default => @panic("TODO: op % % %", @as(i64) funct3, funct7, fmt_hex(op));
             };

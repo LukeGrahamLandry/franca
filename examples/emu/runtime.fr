@@ -10,13 +10,34 @@ Emulator :: @rec @struct {
     jit_lock: Mutex;
     disassemble: bool;
     debug_base_address := 0;
-    syscall_handler: @FnPtr(emu: *Emulator, cpu: *Cpu) void;
+    syscall_handler: @FnPtr(emu: *Emulator, cpu: *Cpu, pc: i64) void;
     log: LogArgs;
+    initial_elf: []u8 = empty();  // for find_emulated_symbol
+    joinable_threads := 0;
 };
-LogArgs :: @struct(d := "", dis := false, etrace := false, strace := false, extra: []Str #rest = empty(), child_args: []CStr #after_dashes = empty());
+
+// TODO: report errors if extra has junk args
+// many of these are done in run.fr/main() not init(*Emulator)
+LogArgs :: @struct {
+    d := "";          // show compilied ir
+    dis := false;     // show disassembled riscv instructions
+    etrace := false;  // show registers after executing each trace
+    strace := false;  // show syscalls
+    trace_exit := false;  // show stack trace on non-zero exit()
+    trace_fault := false; // "                on signal/compiler panic (needs FRANCA_BACKTRACE=1)
+    extra: []Str #rest = empty();  // first .fr is the elf
+    child_args: []CStr #after_dashes = empty();
+};
 
 Cpu :: @struct {
-    reg: EnumMap(RvReg, rawptr);
+    reg := zeroed(EnumMap(RvReg, rawptr));
+    thread: (?@struct {
+        tid_futex: *u32;
+        sys: ?*import("@/lib/sys/threads.fr").Thread = .None;
+        joinable := false;
+        emu: *Emulator;
+        entry_address: i64;
+    }) = .None;
 };
 
 Terminator :: @enum(Direct, Indirect, Syscall);
@@ -64,6 +85,7 @@ fn run(emu: *Emulator, cpu: *Cpu, pc: i64) void = {
         };
         pc = trace'callee(cpu, pc);
         if debug_log {
+            // TODO: expecting to continue that last line which won't work if there are multiple threads
             address := pc - emu.debug_base_address;
             @fmtln(debug, "%", fmt_hex(address));
             dump_reg(debug, cpu, trace.write);
@@ -71,12 +93,13 @@ fn run(emu: *Emulator, cpu: *Cpu, pc: i64) void = {
         };
         if pc == -1 {
             // :TestMarkerBreakLoop
+            @assert(cpu.thread.is_none(), "non-main thread run() returned to ip=-1");
             return();
         };
-        emu.jit_lock&.lock();
         if trace.terminator == .Syscall {
-            emu'syscall_handler(emu, cpu);
+            emu'syscall_handler(emu, cpu, pc/*for clone()*/);
         };
+        emu.jit_lock&.lock();
         
         predicted_pc, predicted_trace_i := trace.jump_cache;
         if pc != predicted_pc {
@@ -89,6 +112,7 @@ fn run(emu: *Emulator, cpu: *Cpu, pc: i64) void = {
 }
 
 fn dump_reg(out: *List(u8), cpu: *Cpu, reg: EnumSet(RvReg)) void = {
+    @if(cpu.thread.is_some()) @fmt(out, "[%] ", tls(.thread_index)[]);
     for reg& { r |
         v := cpu.reg&.get(r);
         @fmt(out, "(%=%), ", r, fmt_hex(v));
@@ -96,6 +120,7 @@ fn dump_reg(out: *List(u8), cpu: *Cpu, reg: EnumSet(RvReg)) void = {
     @fmt(out, "\n");
 }
 
+// TODO: on wasm need to jit_sync if another thread made the trace first and this thread hasn't made a new trace since
 fn lookup_trace(emu: *Emulator, pc: i64) i64 = {
     i := emu.trace_lookup&.get(pc) || {
         i := compile_trace(emu, pc.rawptr_from_int());
@@ -107,11 +132,12 @@ fn lookup_trace(emu: *Emulator, pc: i64) i64 = {
     i
 }
 
-pass_though_syscall :: fn(emu: *Emulator, cpu: *Cpu) void = {
+pass_though_syscall :: fn(emu: *Emulator, cpu: *Cpu, pc: i64) void = {
     n := cpu.reg&.get(.A7).int_from_rawptr();
+    a0, a1, a2, a3, a4, a5 := (cpu.reg&.get(.A0), cpu.reg&.get(.A1), cpu.reg&.get(.A2), cpu.reg&.get(.A3), cpu.reg&.get(.A4), cpu.reg&.get(.A5));
+    
     if n == 259 {  // riscv_flush_icache
-        lo, hi := (cpu.reg&.get(.A0), cpu.reg&.get(.A1));
-        mem := u8.ptr_from_raw(lo).slice(ptr_diff(lo, hi));
+        mem := u8.ptr_from_raw(a0).slice(ptr_diff(a0, a1));
         cpu.reg&[.A0] = zeroed(rawptr);
         
         // TODO: invalidate traces in that region. 
@@ -128,10 +154,38 @@ pass_though_syscall :: fn(emu: *Emulator, cpu: *Cpu) void = {
         return();
     };
     
-    @if(n == 220) @panic("TODO: clone");  // make a new Cpu 
+    @if(n == 93) thread_end(cpu);
+    if n == 220 {  // clone
+        expect_thread_flags := FuncId.scope_of(import("@/lib/sys/linux.fr").sys_clone).clone_flags;  // :SNEAK
+        flags, sp, parent_tid, tls, tid_futex := (a0.int_from_rawptr(), a1, a2, a3, u32.ptr_from_raw(a4));
+        @assert_eq(expect_thread_flags, flags.trunc(), "TODO: more clone() flags"); 
+        @assert(!tid_futex.is_null() && parent_tid.is_null() && tls.is_null(), "TODO: parent_tid,tls");
+        return with(emu.jit_lock&, => thread_spawn(emu, cpu, sp, tid_futex, pc));
+    };
+    
     @if(n == 221) @panic("TODO: execve"); // check if the binary is a riscv elf and re-exec the emulator on it
     // TODO: treat mprotect(exec) as riscv_flush_icache?
     //       and the inverse, discard compiled traces if you unmap the memory. 
+
+    
+    // TODO: this is wrong because ip will be in the middle of a function so it wont be in the elf
+    //       need to find start. will need that info when i do flush_icache properly so just going to wait. 
+    @if(false)
+    if emu.log.trace_exit && n == 94 && !a0.is_null() {  // exit_group 
+        ip := rawptr_from_int(pc - 4);
+        fp := Crash.Frame.ptr_from_raw(cpu.reg&.get(.FP));
+        i := 0;
+        ::ptr_utils(@type fp[]);
+        // TODO: this misses one
+        while => i < 30 && !fp.is_null() {
+            if find_emulated_symbol_from_fake_ip(emu, ip.int_from_rawptr()) { name |
+                @println("%: %", i, name);
+            };
+            ip = fp.ip;
+            fp = fp.prev;
+            i += 1;
+        };
+    };
     
     @if(query_current_os() != .linux || !@is(query_current_arch(), .aarch64, .rv64)) @panic("TODO: translate syscall");
     regs := @const_slice(RvReg.A0, .A1, .A2, .A3, .A4, .A5);
@@ -140,10 +194,10 @@ pass_though_syscall :: fn(emu: *Emulator, cpu: *Cpu) void = {
         args&[i] = cpu.reg&.get(regs[i]).int_from_rawptr();
     };
     // the idea is to let you do whatever you want but for now while i dont trust it should filter so not just doing random syscalls if i miscompile
-    @if(emu.log.strace) @eprintln("syscall(%, %)", n, args&.items());
+    @if(emu.log.strace) @eprintln("[%] syscall(%, %)", tls(.thread_index)[], n, args&.items());
     safe := @const_slice(
-        222, 226, 64, 94, 215,
-        56, 61, 57, 
+        222, 226, 64, 94, 215, 113, 101, 93,
+        56, 61, 57, 98, 
     );
     @if(!safe.contains(n)) @panic("TODO: allow more syscalls %", n);
     
@@ -151,6 +205,85 @@ pass_though_syscall :: fn(emu: *Emulator, cpu: *Cpu) void = {
     cpu.reg&[.A0] = result.rawptr_from_int();
 }
 
+// bit wasteful that my *Thread doesn't let you choose the fid_futex so there needs to be a chain but not worth changing it just for this. 
+thread_spawn :: fn(emu: *Emulator, cpu: *Cpu, sp: rawptr, tid_futex: *u32, pc: i64) void = {
+    // gc native stacks of old threads. TODO: reuse the slots
+    i := emu.threads&.len();
+    while => emu.joinable_threads > 0 {
+        @debug_assert_gt(i, 0);
+        i -= 1;
+        it := emu.threads&.nested_index(i);
+        if it.thread& { it |
+            if it.joinable {
+                join(it.sys.unwrap());
+                it.joinable = false;
+                it.sys = .None;
+                emu.joinable_threads -= 1;
+            };
+        };
+    };
+    
+    child := push(emu.threads&, ());
+    child.reg = cpu.reg;
+    child.reg&[.A0] = zeroed(rawptr);
+    child.reg&[.SP] = sp;
+    child.thread = (Some = (tid_futex = tid_futex, emu = emu, entry_address = pc));
+    
+    t := start_thread_data(Cpu, child, thread_begin);
+    //tid: u32 = t.tid.bitcast();  // TODO: this only works if !prefer_pthread
+    tid: u32 = t.first_environment.thread_index.trunc();  // TODO: this means gettid will be wrong
+    child.thread.Some.sys = (Some = t);
+    tid_futex[] = tid;
+    cpu.reg&[.A0] = rawptr_from_int(tid.zext());
+};
+
+thread_begin :: fn(cpu: *Cpu) void = {
+    thread := cpu.thread&.unwrap();
+    run(thread.emu, cpu, thread.entry_address);
+    thread_end(cpu);
+};
+
+thread_end :: fn(cpu: *Cpu) void = {
+    thread := cpu.thread&.unwrap();
+    emu := thread.emu;
+    with emu.jit_lock& {
+        thread.tid_futex[] = 0;
+        Futex'wake(thread.tid_futex, MAX_i32);
+        thread.joinable = true; 
+        emu.joinable_threads += 1;
+    };
+};
+
+find_emulated_symbol :: fn(emu: *Emulator, native_ip: rawptr) ?Str = {
+    result: ?Str = .None;
+    @if(emu.log.trace_fault)
+    with emu.jit_lock& {
+        if Qbe'find_ip_in_module(emu.m&, native_ip) { trace_name |
+            result = (Some = trace_name);
+            
+            // TODO: needing to parse the string like this is silly. give back the information in a more structured way somehow. 
+            if trace_name.index_of_slice("0x") { i |
+                emulated_rel_ip, _ := convert_number(trace_name.rest(i+2), 16, hex_digit);
+                result = find_emulated_symbol_from_fake_ip(emu, emulated_rel_ip);
+            };
+        };
+    };
+    result
+};
+
+find_emulated_symbol_from_fake_ip :: fn(emu: *Emulator, emulated_rel_ip: i64) ?Str = {
+    // :SLOW store this so don't reparse for each symbol.
+    //    its in temp() but only do this when crashing so doesn't matter
+    debug_info := import("@/examples/disassemble.fr")'find_code_in_elf(emu.initial_elf);
+    if debug_info { code |
+        if code.symtab&.get(emulated_rel_ip) { debug_name |
+            return(Some = @tfmt("% (%)", debug_name, fmt_hex(emulated_rel_ip)));
+        };
+    };
+    .None
+}
+
+Futex :: import("@/lib/sys/sync/futex.fr");
 Qbe :: import("@/backend/lib.fr").Qbe;
 #use("@/lib/sys/sync/mutex.fr");
 #use("@/lib/collections/bucket_array.fr");
@@ -158,3 +291,4 @@ Qbe :: import("@/backend/lib.fr").Qbe;
 #use("@/lib/collections/map.fr");
 #use("@/backend/rv64/bits.fr");
 #use("@/examples/emu/compile_riscv.fr");
+Crash :: import("@/lib/crash_report.fr");

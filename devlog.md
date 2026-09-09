@@ -13,6 +13,14 @@
     for just jitting new code in new memory, compiling traces lazily is good enough. 
   - now i have a program slow enough to measure. qemu: 120ms, mine(unsafe): 220ms. 
 - ugh, deal with being able to run programs that need `-d R` after the dashes so first parse_args can't eat them
+- trying for threads. 
+  - started doing it with the signture of perform_clone because i forgot about the returning twice thing. 
+  - classic blunder forgetting to set the child's sp to the new value
+  - race in test_preempt.fr, my println() does an extra syscall for the \n. @println instead is smarter about merging the strings. 
+- need to take a detour before this drives me crazy. 
+  the traces are unfortunate because even with PERFMAP=1 i don't get a stack trace for free.
+  already have a thing for getting the symbols out of an elf for disassemble.fr
+
 
 todo: count.fr doesn't work
 
