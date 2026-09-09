@@ -19,18 +19,50 @@ Compile :: @struct {
     entry: *u32;
     emu: *Emulator;
     out: List(u8);  // disassemble
-    terminator_is_syscall := false;
+    terminator := Terminator.Indirect;
+    direct_jump_targets: Array(?i64, 2) = (.None, .None);
 };
+
+// when the jump target is constant, follow it and compile a new trace eagerly. 
+// that packs more traces into one make_exec call so less space in the page is wasted. 
+// TODO: this will help even more when my backend/rv64/emit.fr uses direct calls instead of always jalr
+// TODO: do this on another thread?
+// TODO: will have to use CodegenWorker when want to support macos because of MAP_JIT. 
+// TODO: lazy is a bit nicer because it means you don't compile traces that aren't actually run. 
+//       so maybe have this also look at how close m.segments[code] is to the page boundry and stop early. 
+// TODO: technically it's legal to have a constant jump into something that isn't code 
+//       and just never execute it. should track which regions of memory are mapped executable?
+fn compile_trace(emu: *Emulator, entry: rawptr) i64 = {
+    work := rawptr.list(temp());
+    work&.push(entry);
+    firsts_trace_index: ?i64 = .None;
+    emu.jit_lock&.lock();
+    while => work&.pop() { entry |
+        if emu.trace_lookup&.get(entry.int_from_rawptr()).is_none() {
+            // this makes it match the addresses in objdump
+            address := int_from_rawptr(entry) - emu.debug_base_address;
+            @if(emu.log.dis) @eprintln("[%]% === compiling trace[%] from % ===", 
+                tls(.thread_index)[], @if(firsts_trace_index.is_none(), "!", "?"), emu.traces&.len(), fmt_hex(address));
+            name := @tfmt("trace%", fmt_hex(address));  // :AddressInMangledName
+            trace_index, direct_jump_targets := compile_one_trace(emu, entry, name);
+            if firsts_trace_index.is_none() {
+                firsts_trace_index = (Some = trace_index);
+            };
+            for direct_jump_targets& { it |
+                if it { it |
+                    work&.push(entry.offset(it));
+                };
+            };
+        };
+    };
+    emu.jit_lock&.unlock();
+    firsts_trace_index.unwrap()
+}
 
 // only one basic block is compiled at a time. 
 // any brach instruction ends the trace, returning the new pc to the dispatch loop. 
 // register values are read at first use and changed ones sare written at the end of the trace. 
-// TODO: rn traces are compiled lazily so make_exec wastes a whole page per basic block :SLOW :SLOW :SLOW :SLOW
-fn compile_trace(emu: *Emulator, entry: rawptr) i64 = {
-    // this makes it match the addresses in objdump
-    address := int_from_rawptr(entry) - emu.debug_base_address;
-    @if(emu.log.dis) @eprintln("[%] === compiling trace[%] from % ===", tls(.thread_index)[], emu.traces&.len(), fmt_hex(address));
-    emu.jit_lock&.lock();
+fn compile_one_trace(emu: *Emulator, entry: rawptr, name: Str) Ty(i64, Array(?i64, 2)) = {
     m := emu.m&;
     f := @ref Qbe.Fn.zeroed();
     f.default_init(m);
@@ -67,8 +99,11 @@ fn compile_trace(emu: *Emulator, entry: rawptr) i64 = {
     };
     self.b.jmp = (type = .retl, arg = continuation);
     self.f.ret_cls = .Kl;
+    if self.terminator == .Halt {
+        self.b.jmp = (type = .hlt, arg = Qbe.Null);
+    };
     
-    f.lnk.id = m.intern(@tfmt("trace%", fmt_hex(address)));
+    f.lnk.id = m.intern(name);
     f.lnk.no_inline = true;
     Qbe'run_qbe_passes(f);
     jit_addr, _ := m.get_addr(f.lnk.id).expect("compiled trace");
@@ -76,14 +111,13 @@ fn compile_trace(emu: *Emulator, entry: rawptr) i64 = {
     trace_index := emu.traces&.len();
     emu.traces&.push(
         callee = bit_cast_unchecked(rawptr, FieldType(Trace, .callee), jit_addr),
-        terminator = @if(self.terminator_is_syscall, .Syscall, .Indirect),
+        terminator = self.terminator,
         jump_cache = (0, 0),
         read = self.register_read_real, // self.register_read.valid,
         write = self.register_write,
     );
     emu.trace_lookup&.insert(entry.int_from_rawptr(), trace_index);
-    emu.jit_lock&.unlock();
-    trace_index
+    (trace_index, self.direct_jump_targets)
 }
 
 fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref = {
@@ -128,21 +162,26 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
                 // TODO: this is insane, factor out a table to share with encoding
                 B :: fn(x) => op.shift_right_logical(31-x).bit_and(1) == 1;
                 have_ints, is_cast, from_int, double, long, unsigned := (B(0), B(2), B(3), B(6), B(10), B(11));
+                (kf: Qbe.Cls, ki: Qbe.Cls) := (@if(double, .Kd, .Ks), @if(long, .Kl, .Kw));
                 (o: Qbe.O, k: Qbe.Cls) := @if_else {
-                    @if(is_cast && from_int && !long && !long && !unsigned) => (.cast, @if(double, .Kd, .Ks));
-                    @if(is_cast && !from_int && !long && !long && !unsigned) => (.cast, @if(double, .Kl, .Kw));
-                    @if(have_ints && from_int && double && !long && !unsigned) => (.swtof, .Kd);
-                    @if(have_ints && !from_int && !double && !unsigned) => (.stosi, @if(long, .Kl, .Kw));
-                    @if(have_ints && !from_int && double && !unsigned) => (.dtosi, @if(long, .Kl, .Kw));
-                    @if(have_ints && from_int && long && !unsigned) => (.sltof, @if(double, .Kd, .Ks));
-                    @if(have_ints && from_int && double && !long && unsigned) => (.uwtof, .Kd);
+                    @if(is_cast && from_int && !long && !unsigned) => (.cast, kf);
+                    @if(is_cast && !from_int && !long && !unsigned) => (.cast, @if(double, .Kl, .Kw));
+                    @if(have_ints && from_int && !long && !unsigned) => (.swtof, kf);
+                    @if(have_ints && from_int && long && unsigned) => (.ultof, kf);
+                    @if(have_ints && !from_int && !double && !unsigned) => (.stosi, ki);
+                    @if(have_ints && !from_int && !double && unsigned) => (.stoui, ki);
+                    @if(have_ints && !from_int && double && !unsigned) => (.dtosi, ki);
+                    @if(have_ints && !from_int && double && unsigned) => (.dtoui, ki);
+                    @if(have_ints && from_int && long && !unsigned) => (.sltof, kf);
+                    @if(have_ints && from_int && !long && unsigned) => (.uwtof, kf);
                     @if(!have_ints && !from_int && !double && !long && unsigned) => (.truncd, .Ks);
+                    @if(!have_ints && !from_int && double && !long && !unsigned) => (.exts, .Kd);
                     @else => @panic("TODO: op_fp % % % % % %", have_ints, from_int, double, long, unsigned, fmt_hex(op));
                 };
                 rd = @if(k.is_float(), rd.as_float(), rd);
                 rs1 = @if(!from_int, rs1.as_float(), rs1);
                 @dis(self, "%= %.% %", rd, o, k, rs1);
-                k_in: Qbe.Cls = @if(from_int, .Kl, @if(double||o==.truncd, .Kd, .Ks));
+                k_in: Qbe.Cls = @if(from_int, .Kl, @if((double||o==.truncd)&&o!=.exts, .Kd, .Ks));
                 a, r := (self.read(rs1, k_in), self.write(rd, k));
                 t := @if(k == .Kw, self.f.newtmp("w", .Kw), r);
                 push(b, o, k, t, a, Qbe.Null);
@@ -160,8 +199,14 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
                     fn sub() => .sub;
                     fn mul() => .mul;
                     fn div() => .div;
-                    fn sqrt() => @panic("tODO: sqrt");
-                    fn min_max() => @panic("tODO: min_max");
+                    fn sqrt() => .sqrt;
+                    fn min_max() => {
+                        c := @as(OpF_min_max) @as(i64) rm.zext();
+                        @match(c) {
+                            fn min() => .min;
+                            fn max() => .max;
+                        }
+                    }
                     fn cmp() => {
                         c := @as(OpF_cmp) @as(i64) rm.zext();
                         @match(c) {
@@ -184,7 +229,7 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
                 };
                 rs1 = rs1.as_float(); rs2 = rs2.as_float();
                 a0, a1 := (self.read(rs1, k), self.read(rs2, k));
-                if @is(o, .copy, .neg) {
+                if @is(o, .copy, .neg, .sqrt) {
                     a1 = Qbe.Null;
                 };
                 @dis(self, "%= %.% % %", rd, o, k, rs1, rs2);
@@ -226,15 +271,23 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
             a0, dest := (self.read(rs1), self.write(rd));
             // TODO: rot are in high bits of imm
             if funct3 == .sll && imm >= 64 {  // 0b001
-                @if(opcode_class != .Kl) @panic("TODO: count kw 0b001 % %", imm, fmt_hex(op));
                 o: Qbe.O = @switch(imm) {
                     @case(0b011000000001) => .ctz;
+                    @case(0b011000000000) => .clz;
                     @case(0b011000000010) => .ones;
                     @case(0b011000000100) => .extsb;
+                    @case(0b011000000101) => .extsh;
                     @default => @panic("TODO: unary op_imm 0b001 % %", imm, fmt_hex(op));
                 };
                 @dis(self, "%= % %", rd, o, rs1);
-                push(b, o, .Kl, dest, a0, Qbe.Null);
+                if opcode_class == .Kw && !@is(o, .extsb, .extsh) {
+                    // ugh, i use the cls for both input and output size
+                    t := self.f.newtmp("w", .Kw);
+                    push(b, o, .Kw, t, a0, Qbe.Null);
+                    push(b, .extsw, .Kl, dest, t, Qbe.Null);
+                } else {
+                    push(b, o, .Kl, dest, a0, Qbe.Null);
+                };
                 return Qbe.Null;
             };
             o := funct3_to_op(funct3);
@@ -244,6 +297,12 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
                     imm = imm.bit_and(1.shift_left(6 - int(opcode_class == .Kw))-1);
                     o = .sar;
                 } else {
+                    if imm == 0b011010111000 {
+                        o := Qbe.O.byteswap;
+                        @dis(self, "%= % %", rd, o, rs1);
+                        push(b, o, .Kl, dest, a0, Qbe.Null);
+                        return Qbe.Null;
+                    };
                     @panic("TODO: unary op_imm 0b101 % %", imm, fmt_hex(op));
                 };
             };
@@ -322,6 +381,7 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
                 };
                 @case(48) => @match(funct3) {
                     fn sll() => .rotl;
+                    fn srl() => .rotr;
                     @default => @panic("TODO: op % % %", @as(i64) funct3, funct7, fmt_hex(op));
                 };
                 @default => @panic("TODO: op % % %", @as(i64) funct3, funct7, fmt_hex(op));
@@ -359,6 +419,9 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
             push(b, .add, .Kl, new_pc_out, new_pc, self.f.getcon(imm));
             
             push(b, .add, .Kl, link, self.pc, self.f.getcon(pc_offset + 4));
+            if rd != .Zero {
+                self.direct_jump_targets&[0] = (Some = pc_offset + 4);
+            };
             return new_pc_out;
         }
         // bcmp,jal: imm always even, no low bit
@@ -384,6 +447,9 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
             push(b, o, .Kw, cond, a0, a1);
             push(b, .sel0, .Kw, Qbe.Null, cond, Qbe.Null);
             push(b, .sel1, .Kl, new_pc, jump_pc, fallthrough_pc);
+            
+            self.direct_jump_targets&[0] = (Some = pc_offset + 4);
+            self.direct_jump_targets&[1] = (Some = pc_offset + imm);
             return new_pc;
         }
         fn jal() => {
@@ -397,14 +463,26 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
             
             push(b, .add, .Kl, self.write(rd), self.pc, self.f.getcon(pc_offset + 4));
             @dis(self, "%= jal pc%%", rd, @if(imm < 0, "", "+"), imm);
+            
+            self.direct_jump_targets&[0] = (Some = pc_offset + imm);
+            if rd != .Zero {
+                self.direct_jump_targets&[1] = (Some = pc_offset + 4);
+            };
             return self.inc(self.pc, pc_offset + imm);
         }
-        fn system() => {
-            @if(op != ecall) @panic("TODO: system %", fmt_hex(op));
-            @dis(self, "ecall");
-            self.terminator_is_syscall = true;
-            return self.inc(self.pc, pc_offset + 4);
-        }
+        fn system() => @switch(op) {
+            @case(ecall) => {
+                @dis(self, "ecall");
+                self.terminator = .Syscall;
+                self.direct_jump_targets&[1] = (Some = pc_offset + 4);  // TODO: wrong for exit()/exit_group()
+                return self.inc(self.pc, pc_offset + 4);
+            };
+            @case(ebreak) => {
+                self.terminator = .Halt;
+                return Qbe.ConZero;
+            };
+            @default =>@panic("TODO: system %", fmt_hex(op));
+        };
         fn amo() => {
             funct7 := op.shift_right_logical(32-7);
             funct3 := op.shift_right_logical(7+5).bit_and(0b111);
@@ -464,7 +542,8 @@ fn read(self: *Compile, r: RvReg, fake: bool, k: Qbe.Cls) Qbe.Ref = {
     if k.is_float() && self.register_read&.get(r).is_some() && (k == .Ks) != self.register_small&.get(r) {
         @debug_assert(!fake);
         // last read/write of the reg in this block was a different size than this instruction needs. 
-        @panic("TODO: reinterpret float size % new=%", r, k);
+        address := u32.int_from_ptr(self.entry) - self.emu.debug_base_address;
+        @panic("TODO: reinterpret float size % new=% entry=%", r, k, fmt_hex(address));
     };
     @if(k == .Kd) self.register_small&.unset(r);
     @if(k == .Ks) self.register_small&.set(r);

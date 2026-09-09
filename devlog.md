@@ -1,4 +1,12 @@
 
+## (Sep 9) rv emu
+
+- doing it on compiler/main.fr runs out of space in the jit segment using one page per trace. 
+  - breaks asm.ssa because i was assembling "ret" to jalr(ra,0,ra) so it thought it was a call that would return. 
+    shows how fragile treating and-link as a direct jump is. 
+  - sadly the direct jumps have found try_fold so now it's going to make me do all the instructions. 
+  - jit hello.fr works. jit kaleidoscope (with clean cache) takes 62700ms (vs 5800ms in qemu)... so i've got some work to do. 
+
 ## (Sep 8) rv emu
 
 - easier starting point, the ssa tests that don't use libc. max.ssa fails. 
@@ -20,9 +28,6 @@
 - need to take a detour before this drives me crazy. 
   the traces are unfortunate because even with PERFMAP=1 i don't get a stack trace for free.
   already have a thing for getting the symbols out of an elf for disassemble.fr
-
-
-todo: count.fr doesn't work
 
 ## (Sep 7) rv emu
 
