@@ -10,7 +10,38 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
-
+- with all the different emulators that can run most of the tests but i don't run them because its too slow to redo everything over and over:
+  choose a few randomly to run so over time i get good coverage? random is bad tho. 
+- os/user/libc uname should probably use the normal arch strings (riscv64 instead of rv64)
+- i think it's rude that seal_debug_info shits random `__franca_` strings in your binary. 
+  - also `__franca_builtin_static_memmove`, `__franca_base_address`, `__franca_wasm_import_names`
+  - less bad but still: franca_runtime_init, franca_runtime_init_thread, "franca_sapp", "note: run with `FRANCA_BACKTRACE=1` ..."
+- examples/emu 
+  - translate syscall numbers so it can run on x86_64
+    - some of which i already have in examples/os/user/init.fr/get_libc_syscall_callee, should factor that out. 
+  - remap to syscalls to libc so it can run on examples/os/kernel
+  - macos also has to deal with MAP_JIT
+  - do JitEvent.Sync so it can run in wasm
+  - need to be able to deallocate old code. ex. examples/os/host/user.fr does processes as threads in the same address space. 
+    alternatively, hash map to deduplicate traces by code bytes (i pass pc around so that doesn't matter). 
+    still leaking *Trace-s until the end of time is bad. 
+    ex. `./target/release/franca-linux-arm64 examples/os/build.fr -rv -append "tests/backend.fr all -jit -cc"`: panic! too much code. 
+    an escpecially easy case to invalidate is when flush_icache makes a bunch of traces unreachable. 
+  - easy way to disallow some syscalls. ex. when using os/host/user make sure to not accidently jit a syscall instruction. 
+    tho in that case specifically it would be nice to be able to intercept them instead and remap back to the os/user/libc calls. 
+  - flush_icache needs to invalidate the linked O.call for Terminator.Direct
+  - backend tail calls for Terminator.Direct? and then try it for bcmp too. 
+  - backend/rv64 use jal direct calls instead of always putting it in a register first. 
+  - use register_small for Kw to insert fewer sign extensions
+  - get rid of register_read_real and the register sets on *Trace.
+    it was for debugging at the beginning but now all the interesting programs are so big that it's useless. 
+  - keep track of what memory is marked executable so don't follow jumps into fucking narnia. 
+    especially because sometimes the speculative jump target is wrong. 
+    like the and-link part for a function returning Never (similarly syscall exit). 
+  - similarly it shouldn't crash if code that hasn't been called yet has an invalid instruction
+  - factor out the immediate encoding bit positions and the fcnvt flags to share with the compiler
+  - be able to use it as a disassembler without compiling anything and add it to backend/meta/dis.fr
+- examples/os/host/user.fr -share to access cached dependencies
 - get_executable_path() that returns a @tagged(Aot: Str, Jit: @struct(franca_exe: Str, source_file: Str)); 
   so the programs that depend on re-execing the compiler can give a sane error message. 
 - riscv

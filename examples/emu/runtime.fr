@@ -189,6 +189,11 @@ pass_though_syscall :: fn(cpu: *Cpu, pc: i64) void = {
         clear_instruction_cache(emu, mem);
         return();
     };
+    if n == 215 {  // munmap
+        mem := u8.ptr_from_raw(a0).slice(int_from_rawptr(a1));
+        clear_instruction_cache(emu, mem);
+        // fallthrough
+    };
     if n == 134 {  // rt_sigaction
         // this needs incredibly convoluted translating of MContext structs to do properly. 
         // sadly don't want to just error because my compiler uses it for crash_report. 
@@ -280,12 +285,22 @@ pass_though_syscall :: fn(cpu: *Cpu, pc: i64) void = {
     @if(emu.log.strace) @eprintln("[%] syscall(%, %)", tls(.thread_index)[], n, args&.items());
     safe := @const_slice(
         222, 226, 64, 94, 215, 113, 101, 93,
-        56, 61, 57, 98, 79, 62, 67, 276, 78,
+        56, 61, 57, 98, 79, 62, 67, 276, 78, 63, 
         172, 260,  // getpid,wait4 are fine because clone(fork) returns the real pid. 
         // TODO: 178=gettid i need to be more careful about what clone(thread) returns
         160, // uname
     );
     @if(!safe.contains(n)) @panic("TODO: allow more syscalls %", n);
+    
+    if n == 56 && query_current_arch() == .aarch64 {  // openat 
+        #use(Syscall.Linux);
+        x := args&[2];
+        a, b := (x.bit_and(O_amd.DIRECTORY) != 0, x.bit_and(O_amd.NOFOLLOW) != 0);
+        x := x.bit_and(bit_not(bit_or(O_amd.DIRECTORY, O_amd.NOFOLLOW)));
+        x := x.bit_or(@if(a, O_arm.DIRECTORY, 0));
+        x := x.bit_or(@if(b, O_arm.NOFOLLOW, 0));
+        args&[2] = x;
+    };
     
     result, _ := Syscall'perform_syscall(args&, n);
     cpu.reg&[.A0] = result.rawptr_from_int();
@@ -343,7 +358,6 @@ thread_end :: fn(cpu: *Cpu) void = {
     };
 };
 
-// TODO: emulator cli arg to disallow executing non-riscv binaries
 adjust_execve_args :: fn(emu: *Emulator, path: *CStr, argv: **CStr, envp: **CStr) bool = {
     Elf :: import("@/backend/elf/bits.fr");
     f := open_read(path[]) || return(false);

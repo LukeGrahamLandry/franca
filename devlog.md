@@ -15,6 +15,17 @@
 - somehow tests/run_tests.fr is cheating.
   get_executable_path is wrong because it uses /proc/self not argv0, if the emulator is jitted it gets the native compiler. 
   now it correctly doesn't work. it needs a mode where it defaults to not trying to link libc. 
+- walk_dir didn't work because riscv has different open() flags than arm
+- os/host/user kinda works in it but dies on impossible compiler error pretty fast. 
+  what crashes is erratic. works in qemu. its not Terminator.Direct flush. 
+  `user_platform.munmap=(fn(a, b) = (0));` seems to fix it. 
+  as does treating munmap as a flush_icache. 
+  so i was right before about expecting you to flush fresh memory being fishy but wrong that my code always does it.
+  oh duh elf_loader probably. also backend.init_common(expecting_wx). the latter i don't understand, i should be calling it after writing each function. 
+  for sanity purposes fixing it for munmap is the right thing to do but i think its technically wrong to not flush even if you never executed from that mapping. 
+- tests/run_tests.fr on examples/os has `franca` prepended to cli_args twice which confuses the new default_driver arg parsing. 
+  because run_command is pushing it again. 
+- now it runs until it uses up the whole jit code segment
 
 ## (Sep 9) rv emu
 

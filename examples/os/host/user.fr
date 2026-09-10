@@ -25,16 +25,17 @@ driver :: fn(vtable: *ImportVTable) void = {
     start := timestamp();
     m := @ref @uninitialized Qbe.Module;
     // TODO: args for arch/os/syscalls
-    use_syscalls := false;
+    use_emu := cli_args().contains(fn(it) => it[] == "-emu");
+    use_syscalls := cli_args().contains(fn(it) => it[] == "-syscalls");
     out := "target/os.out";
     init_default_module(m, (
         os = .linux,  // TODO
-        arch = query_current_arch(),  // edit to cross compile 
+        arch = @if(use_emu, .rv64, query_current_arch()),  // edit to cross compile 
         type = .Exe,
         exe_debug_symbol_table = true,
     ));
     @assert_ne(m.goal.arch, .wasm32, "use host/web.fr instead");
-    can_run := query_current_arch() == m.goal.arch && query_current_os() == .linux;
+    can_run := (use_emu || query_current_arch() == m.goal.arch) && query_current_os() == .linux;
     opts := vtable.default_build_options();
     opts.retain_function_names = true;
     src := @tfmt("""#include_std("lib/core.fr"); #include_std("%"); """, @source_file_name());
@@ -56,7 +57,15 @@ driver :: fn(vtable: *ImportVTable) void = {
     
     if can_run || bootargs.len != 0 {
         @if(!can_run) eprintln("had -append so will try exec but host != target so this probably won't work unless you have multiarch setup");
-        args := make_args_for_exec(out, @slice(bootargs.items()), temp());
+        
+        bootargs := bootargs.items();
+        args := make_args_for_exec(out, @slice(bootargs), temp());
+        if use_emu {
+            a := @slice("examples/emu/run.fr", out, "-no_native_exec", "--", bootargs);
+            out = get_executable_path(temp());
+            args = make_args_for_exec(out, a, temp());
+        };
+        
         exec(out.as_cstr(), args);  // better than run_cmd_blocking because debuggers can follow this way
         unreachable();
     };
@@ -168,6 +177,8 @@ pass_through_syscalls :: @const_slice("mmap", "munmap", "mprotect", "sys_futex",
 real_perform_syscall :: AsmFunction(fn(args: *Array(i64, 6), n: i64) Ty(i64, u8) = (), 
     empty(), fn(out) = (), fn(out) = (), empty());
 
+// this replaces perform_syscall in the compilation unit that has os/user/* 
+// so they can do Syscall'whatever without checking tls(.deny_syscalls)[] all the time. 
 // TODO: have to route user jitted code through this as well. 
 user_handle_syscall :: fn(args: *Array(i64, 6), n: i64) Ty(i64, u8) = {
     if !host_syscalls.intercept {
@@ -219,6 +230,7 @@ user_handle_syscall :: fn(args: *Array(i64, 6), n: i64) Ty(i64, u8) = {
     (result, 0)
 }
 
+// TODO: explain why some of these are with_syscalls(whatever) and some do choose_syscall directly (because i dont remember)
 user_platform : (@type host_platform[]) : (
     create_thread = fn(t) = {
         with_syscalls {| raw_create_thread(t); 0 };  // perform_clone doesn't go through perform_syscall so won't get intercepted

@@ -31,7 +31,6 @@ Compile :: @struct {
 // when the jump target is constant, follow it and compile a new trace eagerly. 
 // that packs more traces into one make_exec call so less space in the page is wasted. 
 // TODO: this will help even more when my backend/rv64/emit.fr uses direct calls instead of always jalr
-// TODO: do this on another thread?
 // TODO: will have to use CodegenWorker when want to support macos because of MAP_JIT. 
 // TODO: lazy is a bit nicer because it means you don't compile traces that aren't actually run. 
 //       so maybe have this also look at how close m.segments[code] is to the page boundry and stop early. 
@@ -55,7 +54,6 @@ fn compile_trace(emu: *Emulator, entry: rawptr) *Trace = {
             };
             for direct_jump_targets& { it |
                 if it { it |
-                    // TODO: this is slower than just using expecting_wx
                     work&.push(entry.offset(it));
                 };
             };
@@ -486,8 +484,6 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
         // bcmp,jal: imm always even, no low bit
         fn bcmp() => {
             funct3 := @as(Bcmp) @as(i64) op.shift_right_logical(7+5).bit_and(0b111).zext();
-            // TODO: not confident i typed this right
-            //@bits(i.imm(12), i.imm(10, 5), rs2, rs1, funct3, i.imm(4, 1), i.imm(11), opcode);
             imm := op.shift_right_logical(7).bit_and(1).shift_left(11)
                 .bit_or(op.shift_right_logical(31).shift_left(12))
                 .bit_or(op.shift_right_logical(32-1-6).bit_and(0b111111).shift_left(5))
@@ -514,8 +510,6 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
             return new_pc;
         }
         fn jal() => {
-            // TODO: not confident
-            //@bits(i.imm(20), i.imm(10, 1), i.imm(11), i.imm(19, 12), rd, opcode);
             imm := op.shift_right_logical(31).shift_left(20)
                 .bit_or(op.shift_right_logical(32-11).bit_and(1.shift_left(10)-1).shift_left(1))
                 .bit_or(op.shift_right_logical(7+5+8).bit_and(1).shift_left(11))
