@@ -1,8 +1,10 @@
 // TODO: be able to compile this with the emit disabled to just use it as a disassembler
 // TODO: name_str doesn't work on enums backed by the fake ints
 
-// franca examples/default_driver.fr build examples/toy/hello.fr -arch rv64 -syscalls -os linux -keep-names
-// orb ./target/release/franca-linux-arm64 examples/emu/run.fr a.out
+// TODO: i stick in the address for handle_syscall and fence 
+//       which means its not pic so can't save it. 
+//       might want to change that when i do exec so can reuse 
+//       the compiled code if you exec the same binary many times.  
 
 Compile :: @struct {
     f: *Qbe.Fn;
@@ -47,8 +49,7 @@ fn compile_trace(emu: *Emulator, entry: rawptr) *Trace = {
             address := int_from_rawptr(entry) - emu.debug_base_address;
             @if(emu.log.dis) @eprintln("[%]% === compiling trace[%] from % ===", 
                 tls(.thread_index)[], @if(firsts_trace_index.is_none(), "!", "?"), emu.traces&.len(), fmt_hex(address));
-            name := @tfmt("trace%", fmt_hex(address));  // :AddressInMangledName
-            trace_index, direct_jump_targets := compile_one_trace(emu, entry, name);
+            trace_index, direct_jump_targets := compile_one_trace(emu, entry);
             if firsts_trace_index.is_none() {
                 firsts_trace_index = (Some = trace_index);
             };
@@ -69,7 +70,7 @@ fn compile_trace(emu: *Emulator, entry: rawptr) *Trace = {
 // only one basic block is compiled at a time. 
 // any brach instruction ends the trace, returning the new pc to the dispatch loop. 
 // register values are read at first use and changed ones sare written at the end of the trace. 
-fn compile_one_trace(emu: *Emulator, entry: rawptr, name: Str) Ty(*Trace, Array(?i64, 2)) = {
+fn compile_one_trace(emu: *Emulator, entry: rawptr) Ty(*Trace, Array(?i64, 2)) = {
     result := zeroed(Ty(*Trace, Array(?i64, 2)));
 Qbe'enter_task(emu.worker) { codegen_entry | 
     m := emu.m&;
@@ -145,7 +146,7 @@ Qbe'enter_task(emu.worker) { codegen_entry |
         }
     };
     
-    f.lnk.id = m.intern(name);
+    f.lnk.id = emu.mangle(int_from_rawptr(entry));
     f.lnk.no_inline = true;
     codegen_entry.task = (Func = f);
     trace := emu.traces&.push(
@@ -158,14 +159,24 @@ Qbe'enter_task(emu.worker) { codegen_entry |
     );
     result = (trace, self.direct_jump_targets);    
     emu.trace_lookup&.insert(entry.int_from_rawptr(), trace);
+    code := u8.ptr_from_raw(entry).slice(ptr_diff(self.entry, pc) * 4);
+    emu.trace_map&.insert(code, trace);
 };
     result
 }
 
 fn pc_symbol(self: *Compile, new_pc_off: i64) Qbe.Ref = {
-    new_pc := u32.raw_from_ptr(self.entry).offset(new_pc_off - self.emu.debug_base_address);
-    new_pc := self.emu.m&.intern(@tfmt("trace%", fmt_hex(new_pc)));  // :AddressInMangledName
-    self.f.symcon(new_pc)
+    new_pc := u32.int_from_ptr(self.entry) + new_pc_off;
+    // re-intern with the new icache_generation would be wrong if new_pc was already compiled before flush but wasn't in the flushed range. 
+    if self.emu.trace_lookup&.get(new_pc) { t |
+        return self.f.symcon(t.symbol);
+    };
+    self.f.symcon(self.emu.mangle(new_pc))
+}
+
+fn mangle(emu: *Emulator, pc: i64) Qbe.Sym = {
+    pc -= emu.debug_base_address;
+    emu.m&.intern(@tfmt("%trace%", emu.icache_generation, fmt_hex(pc)))  // :AddressInMangledName
 }
 
 fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref = {

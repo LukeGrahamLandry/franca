@@ -1,0 +1,121 @@
+
+fn PageMap2($T: Type) Type = {
+    Self :: @struct(items: RawList(Entry));
+    Entry :: @struct(key: []u8, value: T);
+    
+    fn insert(self: *Self, k: []u8, v: T, a: Alloc) void = {
+        if self.items.len == 0 {
+            self.items&.push((key = k, value = v), a);
+            return();
+        };
+        n := self.items.len;
+        base := 0;
+        i := n / 2;
+        done := false;
+        while => !done && n > 0 && base+i < self.items.len {
+            key := self.items[base+i].key;
+            d := ptr_diff(key.ptr, k.ptr);
+            if d < 0 {
+                n /= 2;                
+                i = n/2;
+            } else {
+                d2 := ptr_diff(key.end_pointer(), k.ptr);
+                if d2 > 0 {                
+                    n /= 2;
+                    base += n;
+                    i /= 2;
+                } else {
+                    i += 1;
+                    done = true;
+                }
+            }
+        };
+        i += base;
+        while => i < self.items.len && ptr_diff(self.items[i].key.ptr, k.ptr) > 0 {
+            i += 1;
+        };
+        self.items&.insert(i, (key = k, value = v), a);
+    }
+    
+    fn get_exact_start(self: *Self, k: i64) ?T = {
+        k := u8.ptr_from_int(k);
+        n := self.items.len;
+        base := 0;
+        loop {
+            @if(n == 0) return(.None);
+            delta := n.udiv(2);
+            i := base + delta;
+            e := self.items.index(i);
+            d := ptr_diff(e.key.ptr, k);
+            @if(d == 0) return(Some = e.value);
+            if d > 0 {
+                base += delta+1;
+                n -= delta+1;
+            } else {
+                n = delta;
+            };
+        };
+    }
+    
+    fn iter_overlap(self: *Self, k: []u8, drain: bool, $body: @Fn(k: []u8, v: T) void) void = {
+        overlaps :: fn(self: []u8, other: []u8) bool =
+            !(ptr_diff(self.ptr, other.end_pointer()) <= 0 || ptr_diff(self.end_pointer(), other.ptr) >= 0);
+        // TODO: binary search for start point
+        i := 0;
+        while => i < self.items.len {
+            it := self.items[i];
+            if overlaps(it.key, k) {
+                body(it.key, it.value);
+                if drain {  // :SLOW
+                    self.items&.ordered_remove(i);
+                    i -= 1;
+                };
+            } else {
+                if ptr_diff(it.key.ptr, k.end_pointer()) >= 0 {
+                    return();
+                };
+            };
+            
+            i += 1;
+        };
+    };
+    
+    Self
+}
+
+fn PageMap3($T: Type) Type = {
+    // TODO: could fit the key of the inner map in one usize because you know the high bits from context
+    Self :: @struct(pages: RawHashMap(i64, PageMap2(T)), gpa: Alloc);
+    SHIFT :: 14;
+    
+    fn init(a: Alloc) Self = (pages = init(), gpa = a);
+    
+    fn insert(self: *Self, k: []u8, v: T) void = 
+        self.get_page(k.ptr).insert(k, v, self.gpa);
+    
+    fn get_exact_start(self: *Self, k: i64) ?T = {
+        page := self.get_page(u8.ptr_from_int(k));
+        page.get_exact_start(k)
+    }
+    
+    fn iter_overlap(self: *Self, k: []u8, drain: bool, $body: @Fn(k: []u8, v: T) void) void = {
+        range(0, k.len.shift_right_logical(SHIFT)+1) { i |
+            start := k.ptr.offset(i*1.shift_left(SHIFT));
+            if self.try_get_page(start) { page |
+                page.iter_overlap(k, drain, body);
+            };
+        };
+    };
+    
+    fn get_page(self: *Self, i: *u8) *PageMap2(T) = {
+        i := u8.int_from_ptr(i).shift_right_logical(SHIFT);
+        self.pages&.get_or_insert(i, self.gpa, => zeroed(PageMap2(T)))
+    }
+    
+    fn try_get_page(self: *Self, i: *u8) ?*PageMap2(T) = {
+        i := u8.int_from_ptr(i).shift_right_logical(SHIFT);
+        self.pages&.get_ptr(i)
+    }
+    
+    Self
+}

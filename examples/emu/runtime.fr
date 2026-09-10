@@ -2,10 +2,14 @@
 Emulator :: @rec @struct {
     threads: BucketArray(Cpu);
     traces: BucketArray(Trace);
-    // TODO: stop being afraid of putting pointers in a data structure
-    //       then wouldn't have to lock if hit jump_cache
     // TODO: do i know anything about the shape of the keys that can make a more efficient map?
     trace_lookup: HashMap(i64, *Trace);  // [virtual pc]
+    // TODO: it would be great if i had a data structure that could do efficient iteration like this 
+    //       and also replace trace_lookup for individual lookup_trace without being slow. 
+    //       could revisit the binary tree attempt someday. 
+    trace_map: PageMap3(*Trace);  // [virtual pc] for flush_icache
+    icache_generation := 0;  // avoids "Assertion Failed: (do_jit_fixups) redeclared symbol"
+    
     m: Qbe.Module;
     jit_lock: Mutex;
     disassemble: bool;
@@ -15,6 +19,7 @@ Emulator :: @rec @struct {
     initial_elf: []u8 = empty();  // for find_emulated_symbol
     joinable_threads := 0;
     worker: *Qbe.CodegenShared;
+    gpa: Alloc;
 };
 
 // TODO: report errors if extra has junk args
@@ -58,12 +63,14 @@ fn init(emu: *Emulator, gpa: Alloc, log: LogArgs) void = {
         threads = init(10, gpa), 
         traces = init(10, gpa), 
         trace_lookup = init(gpa),
+        trace_map = init(gpa),
         m = zeroed(Qbe.Module),
         jit_lock = zeroed(Mutex),
         disassemble = log.dis,
         syscall_handler = pass_though_syscall,
         log = log,
         worker = zeroed(*Qbe.CodegenShared),
+        gpa = gpa,
     );
     Qbe'backend'init_module(emu.m&, (
         arch = query_current_arch(), os = query_current_os(), type = .JitOnly, 
@@ -175,10 +182,7 @@ pass_though_syscall :: fn(cpu: *Cpu, pc: i64) void = {
     if n == 259 {  // riscv_flush_icache
         mem := u8.ptr_from_raw(a0).slice(ptr_diff(a0, a1));
         cpu.reg&[.A0] = zeroed(rawptr);
-        
-        // TODO: invalidate traces in that region. 
-        //       for now it works as long as i never need to execute code and then modify it and execute it again. 
-        //       that situation can also happen if memory is recycled after unmapping so its not enough to just declare all my programs should be well behaved. 
+        clear_instruction_cache(emu, mem);
         return();
     };
     if n == 134 {  // rt_sigaction
@@ -293,6 +297,29 @@ thread_end :: fn(cpu: *Cpu) void = {
     };
 };
 
+// if the memory has been executed before and then modified, correct programs make the riscv_flush_icache syscall.  
+// notably freshly mmapped memory can already have traces if the address range was reused after being unmapped. 
+// TODO: should mprotect(exec) do this automatically? 
+//       my make_exec always flushes even if not expecting_wx so the memory's fresh but im not sure if that's the rules. 
+// TODO: i should probably support when the trace's start address isn't in the flushed range (but some other part of it is).
+// TODO: wrong for the directly linked traces for Terminator.Direct. 
+//       should keep trace of dependencies so can work backwards. 
+fn clear_instruction_cache(emu: *Emulator, mem: []u8) void = {
+    with emu.jit_lock& {
+        emu.icache_generation += 1;
+        iter_overlap(emu.trace_map&, mem, true) { code, trace |
+            emu.trace_lookup&.remove(u8.int_from_ptr(code.ptr));
+            // sad to leak these forever but they can still be in other's jump_cache slots. 
+            // TODO: make a test that hits this situation
+            trace.callee = recompile_flushed_trace;  
+            recompile_flushed_trace :: fn(cpu: *Cpu, pc: i64) i64 = {
+                t := cpu.emu.lookup_trace(pc);
+                t'callee(cpu, pc)
+            };
+        };
+    };
+}
+
 find_emulated_symbol :: fn(emu: *Emulator, native_ip: rawptr) ?Str = {
     result: ?Str = .None;
     @if(emu.log.trace_fault)
@@ -328,6 +355,7 @@ Qbe :: import("@/backend/lib.fr").Qbe;
 #use("@/lib/collections/bucket_array.fr");
 #use("@/lib/collections/enum_map.fr");
 #use("@/lib/collections/map.fr");
+#use("@/examples/emu/page_map.fr");
 #use("@/backend/rv64/bits.fr");
 #use("@/examples/emu/compile_riscv.fr");
 Crash :: import("@/lib/crash_report.fr");

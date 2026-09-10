@@ -1,4 +1,17 @@
 
+## (Sep 10) rv emu
+
+- continuing flush_icache
+  - can rebalance the tree occasionally. its super slow tho. the sane thing is to rebalance part when you notice its too lopsided. 
+  - other option is just sorted list of all the (slice,trace) pairs. 
+    that works and is simple but its quite slow because you end up inserting in the middle a lot (1.5s of copy_bytes on jit-kal-clean). 
+    hash map of the high bits of the pointer and then one of those sorted lists for each page so it can't get too big. 
+    that's actually surprisingly ok. not good enough to replace trace_lookup but just inserting isn't too bad and iterating for clear cache will be sane unlike the hashmap. 
+  - there's a few places in the compiler where im only clear_instruction_cache on arm which is wrong, 
+    it only worked because the scary place was for fixups with pending_immediate_fixup_got which i don't do on rv yet. 
+  - the current way only works if the start of all the traces is in the range you flush. 
+    i think that's probably a reasonable requirement? 
+
 ## (Sep 9) rv emu
 
 - doing it on compiler/main.fr runs out of space in the jit segment using one page per trace. 
@@ -24,6 +37,13 @@
     (or wx=true 7340ms, barely better). which now is faster than if i go back to lazy traces (8320ms).
   - linking for bcmp too makes it slower: 9420ms. 
     looking in samply, that ends up with extremely deep callstacks (highest is 492) because i don't have tail calls. 
+- should do clear_icache properly so i can stop thinking about it. need to be able to find all the traces in a block of memory. 
+  hmmm, one instruction can be in multiple traces because you can fallthrough. which PageMap can't do. 
+  - did new interval map thing with a tree. slow as fuck but that's just because 
+    im not balancing it so its actually a linked list with extra steps.
+    trace tree depth 28066, trace count 57121. also my insert doesn't work anyway. 
+
+> i fear my terminal has some sort of race where i get the exit status before the last output text and then don't check it. 
 
 ## (Sep 8) rv emu
 
@@ -75,6 +95,7 @@
 nix-shell -p pkgsCross.riscv64.buildPackages.binutils
 riscv64-unknown-linux-gnu-objdump
 ```
+> there's also https://www.aboutrv.com/en/tools/disassembler which is nice because you can just type in one hex instruction at a time if you want
 
 backend
 - rv isel cmp_int_zero, if a1==0, don't need to insert an extra nop xor. 
