@@ -11,6 +11,10 @@
     it only worked because the scary place was for fixups with pending_immediate_fixup_got which i don't do on rv yet. 
   - the current way only works if the start of all the traces is in the range you flush. 
     i think that's probably a reasonable requirement? 
+- fork/exec was suspiciously easy. 
+- somehow tests/run_tests.fr is cheating.
+  get_executable_path is wrong because it uses /proc/self not argv0, if the emulator is jitted it gets the native compiler. 
+  now it correctly doesn't work. it needs a mode where it defaults to not trying to link libc. 
 
 ## (Sep 9) rv emu
 

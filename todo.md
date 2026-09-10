@@ -11,6 +11,8 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 
+- get_executable_path() that returns a @tagged(Aot: Str, Jit: @struct(franca_exe: Str, source_file: Str)); 
+  so the programs that depend on re-execing the compiler can give a sane error message. 
 - riscv
   - useless sel lowering when one of the options is already zero
   ```

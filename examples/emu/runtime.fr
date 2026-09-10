@@ -20,6 +20,7 @@ Emulator :: @rec @struct {
     joinable_threads := 0;
     worker: *Qbe.CodegenShared;
     gpa: Alloc;
+    self_exe_path := "";  // if non-empty, will replace readlinkat(FDCWD, /proc/self/exe) so my get_executable_path works
 };
 
 // TODO: report errors if extra has junk args
@@ -33,6 +34,9 @@ LogArgs :: @struct {
     trace_fault := false; // "                on signal/compiler panic (needs FRANCA_BACKTRACE=1)
     extra: []Str #rest = empty();  // first non-.fr is the elf
     child_args: []CStr #after_dashes = empty();
+    env_count := 0;  // the first `env_count` of `child_arg` will go in envp instead of argv. 
+    no_arv0 := false;  // child_args already contains the self path of the executable
+    no_native_exec := false;  // true means only allow execve on a riscv elf. false allows running native programs (and #! scripts) as well. 
 };
 
 Cpu :: @struct {
@@ -197,16 +201,55 @@ pass_though_syscall :: fn(cpu: *Cpu, pc: i64) void = {
     @if(n == 93) thread_end(cpu);
     if n == 220 {  // clone
         expect_thread_flags := FuncId.scope_of(import("@/lib/sys/linux.fr").sys_clone).clone_flags;  // :SNEAK
+        expect_fork_flags := FuncId.scope_of(Syscall.fork).SIGCHLD;  // :SNEAK
         flags, sp, parent_tid, tls, tid_futex := (a0.int_from_rawptr(), a1, a2, a3, u32.ptr_from_raw(a4));
+        if flags == expect_fork_flags {
+            // TODO: need to fake this somehow if i want it to work in wasm
+            pid := Syscall'fork();
+            cpu.reg&[.A0] = pid.intcast().rawptr_from_int();
+            if pid == 0 {
+                // you don't take your threads with you
+                @assert(!cpu.emu.worker.threaded, "TODO: deal with fork when there's a worker thread");
+                // TODO: clear out all the other emu.threads?
+            };
+            return();
+        };
+        
         @assert_eq(expect_thread_flags, flags.trunc(), "TODO: more clone() flags"); 
         @assert(!tid_futex.is_null() && parent_tid.is_null() && tls.is_null(), "TODO: parent_tid,tls");
         return with(emu.jit_lock&, => thread_spawn(emu, cpu, sp, tid_futex, pc));
     };
+
+    if n == 221 {  // execve
+        path, argv, envp := (bit_cast_unchecked(rawptr, CStr, a0), CStr.ptr_from_raw(a1), CStr.ptr_from_raw(a2));
+        guest := adjust_execve_args(emu, path&, argv&, envp&);
+        if !guest && emu.log.no_native_exec {
+            cpu.reg&[.A0] = rawptr_from_int(-1);
+            return();
+        };
+        error := Syscall'execve(path, argv, envp);
+        cpu.reg&[.A0] = error.intcast().rawptr_from_int();
+        return();
+    };
     
-    @if(n == 221) @panic("TODO: execve"); // check if the binary is a riscv elf and re-exec the emulator on it
+    // TODO: /proc is an infinite well of problems like this. ex. /proc/self/cmdline
+    // HACK for get_executable_path
+    if n == 78 {  // readlinkat
+        break :: local_return;
+        parent, path, ptr, len := (a0.int_from_rawptr().intcast(), bit_cast_unchecked(rawptr, CStr, a1), u8.ptr_from_raw(a2), a3.int_from_rawptr());
+        @if(parent != (@static Syscall.Linux.AT_FDCWD).fd) break();
+        @if(emu.self_exe_path.len == 0) break();  // if not using the Emulator from ./run.fr: good luck.
+        @if(!(path == Foreign.PATH.proc_self_exe)) break();
+        exe := emu.self_exe_path;
+        dest := ptr.slice(len.min(exe.len));
+        src := exe.slice(0, dest.len);
+        dest.copy_from(src);
+        cpu.reg&[.A0] = dest.len.rawptr_from_int();
+        return();
+    };
+    
     // TODO: treat mprotect(exec) as riscv_flush_icache?
     //       and the inverse, discard compiled traces if you unmap the memory. 
-
     
     // TODO: this is wrong because ip will be in the middle of a function so it wont be in the elf
     //       need to find start. will need that info when i do flush_icache properly so just going to wait. 
@@ -237,13 +280,16 @@ pass_though_syscall :: fn(cpu: *Cpu, pc: i64) void = {
     @if(emu.log.strace) @eprintln("[%] syscall(%, %)", tls(.thread_index)[], n, args&.items());
     safe := @const_slice(
         222, 226, 64, 94, 215, 113, 101, 93,
-        56, 61, 57, 98, 79, 62, 67, 276, 
-        172, 
+        56, 61, 57, 98, 79, 62, 67, 276, 78,
+        172, 260,  // getpid,wait4 are fine because clone(fork) returns the real pid. 
+        // TODO: 178=gettid i need to be more careful about what clone(thread) returns
+        160, // uname
     );
     @if(!safe.contains(n)) @panic("TODO: allow more syscalls %", n);
     
     result, _ := Syscall'perform_syscall(args&, n);
     cpu.reg&[.A0] = result.rawptr_from_int();
+    @if(n == 160 && result == 0) adjust_uname_machine(u8.ptr_from_raw(a0));
 }
 
 // bit wasteful that my *Thread doesn't let you choose the fid_futex so there needs to be a chain but not worth changing it just for this. 
@@ -295,6 +341,53 @@ thread_end :: fn(cpu: *Cpu) void = {
         thread.joinable = true; 
         emu.joinable_threads += 1;
     };
+};
+
+// TODO: emulator cli arg to disallow executing non-riscv binaries
+adjust_execve_args :: fn(emu: *Emulator, path: *CStr, argv: **CStr, envp: **CStr) bool = {
+    Elf :: import("@/backend/elf/bits.fr");
+    f := open_read(path[]) || return(false);
+    h := @ref zeroed(Elf.Header);
+    in := h.slice(1).interpret_as_bytes();
+    n := Syscall'pread(f, in.ptr, in.len, 0) || -1;
+    Syscall'close(f);
+    @if(n < in.len) return(false);
+    @if(h.magic != Elf.MAGIC || h.machine != .rv64) return(false);
+    // `path` looks like a riscv elf, so re-exec the emulator on it instead of trying to run it natively
+    
+    slice_strings :: import("@/examples/os/user/group.fr").slice_strings;
+    args := @ref CStr.list(temp());
+    argv2, envp2 := (slice_strings(argv[]), slice_strings(envp[]));
+    emulator_path := get_executable_path(temp()).as_cstr();
+    args.push(emulator_path);
+    
+    // hack for when the emulator is jitted
+    if cli_args().len() > 2 && cli_args()[1].str().ends_with(".fr") {
+        args.push(cli_args()[1]);
+    };
+    // TODO: preserve more emulator arguments? tho anything that logs is bad because will confuse the guest program. 
+    @if(emu.log.no_native_exec) args.push("-no_native_exec");
+    
+    args.push("-no_arv0");
+    args.push("-env_count");
+    args.push(@fmt_cstr("%", envp2.len));
+    args.push(path[]);
+    args.push("--");
+    args.push_all(envp2);
+    args.push_all(argv2);
+    args.push(zeroed(CStr));
+    
+    path[] = emulator_path;
+    argv[] = args.as_ptr();
+    envp[] = tls(.environment_variables)[];
+    true
+};
+
+adjust_uname_machine :: fn(buf: *u8) void = {
+    field_size, machine_index, machine := (65, 4, "riscv64");
+    buf := buf.offset(field_size * machine_index).slice(field_size);
+    buf.set_zeroed();
+    buf.slice(0, machine.len).copy_from(machine);
 };
 
 // if the memory has been executed before and then modified, correct programs make the riscv_flush_icache syscall.  

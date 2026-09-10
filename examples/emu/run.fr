@@ -1,11 +1,11 @@
 // input is a riscv64 linux static-pie executable. 
 // THIS IS NOT A SANDBOX
 // syscalls are translated to host syscalls and memory accesses are not bounds checked. 
-// some syscalls need special treatment: riscv_flush_icache, clone
+// some syscalls need special treatment: riscv_flush_icache, clone, execve, uname
 // (WIP) limitations: 
 // - syscalls only work on arm where translation is trivial because they use the same numbers as riscv
 // - only a subset of instructions are implemented
-// - no exec
+// - /proc will be misleading, i hack around readlinkat(/proc/self/exe) because my code does that.
 
 main :: fn() void = {
     #use("@/lib/args.fr");
@@ -31,18 +31,20 @@ main :: fn() void = {
     entry, stack, base_address := load_elf_segments2(input, true, false);
     a := {
         a := CStr.list(temp());
-        a&.push(path.as_cstr());
-        a&.push_all(args.child_args);
+        @if(!args.no_arv0) a&.push(path.as_cstr());
+        a&.push_all(args.child_args.rest(args.env_count));
         a.items()
     };
     sp := write_argc_argv_envp(stack, (
         args = a,
-        env = empty(),  // TODO: inherit
+        // TODO: flag to inherit instead
+        env = args.child_args.slice(0, args.env_count),
     ));
     
     ::import("@/backend/lib.fr").Qbe.QbeModule;  // :compilerbug/ordering
     emu := zeroed(Emulator);
     init(emu&, general_allocator(), args);
+    emu.self_exe_path = path;
     emu.initial_elf = input;
     emu.debug_base_address = base_address;
     cpu := push(emu.threads&, (emu=emu&));
