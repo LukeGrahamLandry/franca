@@ -27,15 +27,14 @@ main :: fn() void = {
     //       since marking executable doesn't matter its not a big deal
     // TODO: don't actually map the code as executable
     // TODO: wasteful to actually map the code at all but technically you might read it as data
-    // TODO: don't allow imports
-    entry, stack, base_address, executable := load_elf_segments2(input, true, false);
+    elf := load_elf_segments(elf = input, inherit_stack = false, check_arch = false, allow_imports = false);
     a := {
         a := CStr.list(temp());
         @if(!args.no_arv0) a&.push(path.as_cstr());
         a&.push_all(args.child_args.rest(args.env_count));
         a.items()
     };
-    sp := write_argc_argv_envp(stack, (
+    sp := write_argc_argv_envp(elf.stack, (
         args = a,
         // TODO: flag to inherit instead
         env = args.child_args.slice(0, args.env_count),
@@ -46,16 +45,23 @@ main :: fn() void = {
     init(emu&, general_allocator(), args);
     emu.self_exe_path = path;
     emu.initial_elf = input;
-    emu.debug_base_address = base_address;
-    for(executable, fn(it) => emu&.add_mapping(it));
+    emu.debug_base_address = elf.base_address;
+    for(elf.executable, fn(it) => emu&.add_mapping(it));
     cpu := push(emu.threads&, (emu=emu&));
     cpu.reg&.insert(.SP, bit_cast_unchecked(*CStr, rawptr, sp));
     cpu.reg&.insert(.RA, rawptr_from_int(-1));  // :TestMarkerBreakLoop
     hook := Crash'push_resolver(Emulator, emu&, find_emulated_symbol);
-    run(emu&, cpu, u8.int_from_ptr(entry));
+    run(emu&, cpu, u8.int_from_ptr(elf.entry));
     pop_resolver(hook);
     // for the ssa tests that don't call exit
     @assert_eq(cpu.reg&.get(.A0).int_from_rawptr(), 0, "returned non-zero");
+    
+    // this won't happen if the child program calls exit() but it doesn't 
+    // matter except on examples/os which won't work yet anyway (because of syscalls). 
+    // also there's more stuff in Emulator to drop. 
+    for(elf.executable, fn(it) => emu&.remove_mapping(it));
+    page_allocator.dealloc(u8, elf.virtual);
+    page_allocator.dealloc(u8, elf.stack);
 };
 
 #use("@/lib/sys/fs.fr");

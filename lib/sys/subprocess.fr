@@ -132,7 +132,24 @@ sys_capture_exec :: fn(args: []CStr) Result(RunningProcess, Str) = {
 // replace the current process with a newly exec-ed one (never to return). 
 // same intuition as a tail call. if the last thing you do would be [spawn something, wait for it, exit], 
 // this is slightly more efficient (also might allow a debugger to move to the new one more seamlessly). 
-become :: exec;
+become :: fn(exe: CStr, args: []CStr) Never = 
+    @if(tls(.deny_syscalls)[], exec_via_spawn_and_wait(exe, args), exec(exe, args));
+
+// examples/os needs you to use posix_spawn 
+// TODO: there's no reason i couldn't just implement exec by running exec_worker on the calling thread. fork is the hard one. 
+// TODO: no path lookup
+exec_via_spawn_and_wait :: fn(exe: CStr, cargs: []CStr) Never #use(Syscall) = {
+    envp := tls(.environment_variables)[];
+    pid: i32 = -1;
+    posix_spawnp(pid&, cargs[0], zeroed(*PosixSpawnActions), zeroed(*PosixSpawnAttr), cargs.ptr, envp) || panic("failed to spawn");
+    status: i32 = 0;
+    dowhile {
+        done := Posix'waitpid(pid, status&, 0) || panic("failed to wait");
+        done <= 0
+    };
+    exit(status.shift_right_logical(/*WEXITSTATUS*/8));
+};
+
 exec :: fn(resolved_exe_path: CStr, args: []CStr) Never = {
     // execvpe is a glibc thing. macos doesn't have it. 
     envp := tls(.environment_variables)[];

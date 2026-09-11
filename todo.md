@@ -10,6 +10,8 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
+- can't examples/web/build.fr in examples/os without -share because of graphics/web/webgpu_api.fr
+- running host/web inside host/vzf crashes at the end in cleanup_thread_group
 - with all the different emulators that can run most of the tests but i don't run them because its too slow to redo everything over and over:
   choose a few randomly to run so over time i get good coverage? random is bad tho. 
 - os/user/libc uname should probably use the normal arch strings (riscv64 instead of rv64)
@@ -35,9 +37,9 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
   - similarly it shouldn't crash if code that hasn't been called yet has an invalid instruction
   - factor out the immediate encoding bit positions and the fcnvt flags to share with the compiler
   - be able to use it as a disassembler without compiling anything and add it to backend/meta/dis.fr
-  - `orb ./host.out examples/os/build.fr -rv -append "tests/run_tests.fr core;exit"`
-    it prints "panic! some sort of corruption is going on. munmap(281473110758400) can't fail" 
-    but doesn't say a test fails. stops after just tests/compiler.fr so i guess the crash is in the thing that exec-ed that. 
+  - allow direct jump between different JitMapping-s
+  - since i pass pc around, cache compiled code and reuse it if you keep exec-ing the same thing over and over. 
+    ex. tests/backend.fr has to recompile the qbe_frontend -bin 75 times which is really slow. 
 - examples/os/host/user.fr -share to access cached dependencies
 - get_executable_path() that returns a @tagged(Aot: Str, Jit: @struct(franca_exe: Str, source_file: Str)); 
   so the programs that depend on re-execing the compiler can give a sane error message. 

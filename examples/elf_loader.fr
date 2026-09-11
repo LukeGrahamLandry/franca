@@ -25,12 +25,23 @@ main :: fn() void = {
     ));
 }
 
-load_elf_segments :: fn(bytes: []u8, allow_new_stack: bool) Ty(*u8, []u8) = {
-    a, b, _, _ := load_elf_segments2(bytes, allow_new_stack, true);
-    (a, b)
-}
+LoadElfIn :: @struct {
+    elf: []u8;
+    inherit_stack: bool;
+    check_arch := true;
+    allow_imports := true;
+};
 
-load_elf_segments2 :: fn(bytes: []u8, allow_new_stack: bool, check_arch: bool) Ty(*u8, []u8, i64, [][]u8) = {
+LoadElfOut :: @struct {
+    entry: *u8;
+    stack: []u8;
+    base_address: i64;
+    executable: [][]u8;
+    virtual: []u8;
+};
+
+load_elf_segments :: fn(arg: LoadElfIn) LoadElfOut = {
+    bytes, allow_new_stack, check_arch := (arg.elf, !arg.inherit_stack, arg.check_arch);
     h := bytes.peek_type(Elf.Header);
     @assert_eq(h.magic, Elf.MAGIC, "invalid magic. expected an elf program");
     @assert(h.program_header_num != 0, "no program headers. expected an executable");
@@ -135,6 +146,7 @@ load_elf_segments2 :: fn(bytes: []u8, allow_new_stack: bool, check_arch: bool) T
                 break :: local_return;
                 @debug_assert(type == Elf.STB_GLOBAL || type == Elf.STB_WEAK, "unknown symbol type");
                 name: CStr = (ptr = unpacked.strings.index(sym.name.zext()));
+                @assert(arg.allow_imports, "load_elf(allow_imports=false) wants to import '%'", name);
                 for libs { lib |
                     if lib.get(name.str()) { value |
                         dest[] = value.offset(it.addend);
@@ -157,11 +169,12 @@ load_elf_segments2 :: fn(bytes: []u8, allow_new_stack: bool, check_arch: bool) T
         @assert(ok, "entry point is not in executable memory");
     };
     base_address := u8.int_from_ptr(virtual.ptr) - lo;
-    (entry, stack, base_address, executable.items())
+    (entry=entry, stack=stack, base_address=base_address, executable=executable.items(), virtual=virtual)
 }
 
 load_elf_file :: fn(bytes: []u8, init: InitArgs) void = {
-    entry, stack := load_elf_segments(bytes, true);
+    elf := load_elf_segments(elf = bytes, inherit_stack = false);
+    entry, stack := (elf.entry, elf.stack);
     // TODO: don't waste our old stack's memory
     sp := write_argc_argv_envp(stack, init);
     //@eprintln(">>> calling entry point: %", u8.int_from_ptr(entry));

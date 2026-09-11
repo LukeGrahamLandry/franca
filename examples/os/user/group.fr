@@ -14,6 +14,7 @@ ThreadGroup :: @rec @struct {
     //       so it will reuse memory between all groups so can't free. 
     // TODO: unmap all in cleanup_thread_group
     mapped: PageSet;
+    initial_elf_virtual: []u8;
 };
 
 setup_root_thread_group :: fn() void = {
@@ -118,8 +119,10 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
                 @if(bytes.peek_type(u32)[] != Loader.Elf.MAGIC) break();
                 @assert_ne(query_current_arch(), .wasm32, msg);
                 Loader :: import("@/examples/elf_loader.fr");
-                entry, _ := Loader'load_elf_segments(bytes, false);
-                entry := bit_cast_unchecked(@type entry, @FnPtr(u64, u64, u64) void, entry);
+                elf := Loader'load_elf_segments(elf = bytes, inherit_stack = true);
+                get_current_tls()[].thread_group.initial_elf_virtual = elf.virtual;
+                @debug_assert_eq(elf.stack.len, 0, "inherit instead");
+                entry := bit_cast_unchecked(@type elf.entry, @FnPtr(u64, u64, u64) void, elf.entry);
                 temp().reset(mark);
                 // ask franca_runtime_init to inherit our tls. 
                 // TODO: allow non-franca binaries
@@ -140,6 +143,7 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
             parts := temp().alloc_init(Str, args.len(), fn(i) => args[i].str());
             cmd := general_allocator().boxed(Command, (command = path, parts = parts));
             run_command(cmd);
+            // TODO: if it calls exit instead of falling through, cleanup_thread_group doesn't have the CompCtx to drop so it leaks
         };
         
         cleanup_thread_group("returned from main", 0);
@@ -208,6 +212,9 @@ posix_spawn :: fn(out: *pid_t, path: CStr, f: *FileActions, a: *Attr, argv: *CSt
     0
 };
 
+// this is called from inside the thread group (on fallthrough or exit). 
+// more cleanup happens in the parent when it calls wait4() on us. 
+// ex. the main thread's stack/code can't be deallocated while it's running, etc. 
 cleanup_thread_group :: fn(debug_why: Str, status: i32) void = {
     @trace("cleanup_thread_group(%, %)", status, debug_why);
     
@@ -326,6 +333,9 @@ wait4 :: fn(pid: pid_t, status: *i32, flags: i64, usage: *Posix.rusage) i32 = {
         // because sys_join-ed main
         t.first_temporary_allocator&.deinit();
         page_allocator.dealloc(u8, t.stack.padded);
+        if child.initial_elf_virtual.len > 0 {
+             page_allocator.dealloc(u8, child.initial_elf_virtual);
+        };  // else: exec was passed franca source file
         parent.children&.unordered_retain(fn(it) => !identical(it[], child));
         a.dealloc_one(ThreadGroup, child);
     };

@@ -13,7 +13,13 @@ one module per mmapped region so it can goa way when unmapped.
   oh shit it dies if i make Trace 8 bytes bigger. that's very unfortunate. its not the elide_abi_slots bug. 
   such a fucking waste of time. that's gotta be a compiler bug. 
 - anyway it works now. can run `-rv -append "tests/backend.fr all -jit -cc"` without running out of space. 
-  231 ADD but only 227 REMOVE. also it crashes without the `-jit`. 
+  231 ADD but only 227 REMOVE.
+- my posix_spawn never deallocates the elf segments 
+- also ssa crashes without the `-jit`. but that doesn't work in -vzf either.
+  problem is echo.ssa expects main(argc,argv) but i pass them in StaticTls instead so just skip that test for now.
+  that aot has (ADD=228,REMOVE=227) vs (REMOVE=152) if i don't unmap LoadElfOut.virtual. 
+  - oh the one extra ADD is just the first elf in emu/run.fr/main()
+- subprocess.fr/become() support examples/os by just spawn+wait since can't exec
 
 TODO: im guessing posix_spawn never deallocating the elf segments is the problem. 
 TODO: module init mode that doesn't allocate big data segments, just a tiny bit for got. 
