@@ -21,7 +21,6 @@ one module per mmapped region so it can goa way when unmapped.
   - oh the one extra ADD is just the first elf in emu/run.fr/main()
 - subprocess.fr/become() support examples/os by just spawn+wait since can't exec
 
-TODO: im guessing posix_spawn never deallocating the elf segments is the problem. 
 TODO: module init mode that doesn't allocate big data segments, just a tiny bit for got. 
 
 ## (Sep 10) rv emu

@@ -1,0 +1,47 @@
+// no args will autodetect how many iterations to run based on how fast you are. 
+// can give args to make crcfinal output reproducible. ex. 0x0 0x0 0x66 100000 7 1 2000
+//
+// on my machine rn (Iterations/Sec): import_c=18461, clang-O0=8119, clang-O2=31648. 
+// note that compiling this franca program is slower than putting SRC in its own c file 
+// and using import_c/cc.fr directly (they'll run the same speed tho).
+// compile time (ms): (import_c(aot-unsafe)=13, clang-00=65, clang-O2=254)
+
+SRC :: """
+#add_include_path "%"
+#add_include_path "%/posix"
+
+#define FLAGS_STR ""
+#define USE_CLOCK 1
+#define PRINT_ARGS 1
+#define SEED_METHOD SEED_ARG
+#include "core_portme.h"
+#include "core_portme.c"
+#include "core_list_join.c"
+#include "core_main.c"
+#include "core_matrix.c"
+#include "core_state.c"
+#include "core_util.c"
+""";
+
+coremark :: ({
+    root := import("@/examples/fetch.fr")'group(
+        url = "https://github.com/eembc/coremark/archive/1f483d5b8316753a742cbf5590caf5bd0a4e4777.zip", 
+        legacy = "acc21470160d85e078c015f9bb1878166bfe9bf2971d8de37455556b098f4676",
+        discard = @const_slice("docs"),
+    );
+    
+    {// ugh :discard_static_scope
+        path := @tfmt("%/coremark.h", root);
+        src := read_entire_file_or_crash(temp(), path);
+        s := "#pragma once\n";
+        @if(!src.starts_with(s)) write_entire_file_or_crash(path, @tfmt("%%", s, src));
+    };
+    
+    import("@/examples/import_c/ffi.fr")'include(@tfmt(SRC, root, root))
+}).main;
+
+main :: fn() void = {
+    args := cli_args();
+    args = args.slice(int(args[1].str().ends_with(".fr")), args.len);  // :hack
+    Syscall'exit(coremark(args.len().intcast(), bit_cast_unchecked(*CStr, **i8, args.as_ptr())));
+}

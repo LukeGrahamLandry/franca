@@ -758,7 +758,7 @@ cset	w0, eq
     - raylib amd
     - wasm_spec
     - todo/musl
-    - todo/coremark
+    - coremark
   - the different variations of prospero. !FEAT_JIT, FEAT_PNG
 - examples/web/(serve, get).fr on macos (rn i do it as part of curl test which i only run on linux)
 - anything on riscv
@@ -884,6 +884,38 @@ as different types even when they're the same size.
 // and i can't just define the guard macro to make the headers do nothing 
 // because then it doesn't get the macros either. 
 ```
+
+found someone's c compiler on srht browse projects with a treasure trove of tests.
+a few fails are boring but there's one crash which is exciting. 
+```
+https://git.sr.ht/~lsof/antcc/tree/190caf073d9ed55d8e4f5f33bed8726966e57ee8/item/test/c/
+05-sort.c: unnammed function pointer. void qsort(void *, size_t nmemb, size_t size, int (const void *, const void *));
+07-pp.c: i say "unclosed string literal" where they have a \\ treated as new line splice instead of escaped backspace
+08-bit.c: __builtin_bswap16
+09-init.c: 
+     const char strs[][2] = {"ax", {'c','x'}, 'd',"?x"[1], "bx"};   
+     PRIxPTR     
+     !! then i fault on desgn2 ??
+17-misc.c: mine says its dereferencing a void pointer but clang allows it
+22-decl.c: static-ness must match forward declaration
+23-attr.c:
+      __has_attribute    
+      __attribute without the second __       
+       __attribute__((aligned(8))) x; on a field
+24-pack.c: #pragma pack
+25-setjmp-volatile.c: i've known about that problem before back when i was emitting c
+27-builtins.c: block @5 is used undefined
+     #define min(a,b) ((a)<(b) ? (a) : (b))
+     assert(__builtin_constant_p(min(sizeof(int), sizeof(long))));
+     also __builtin_unreachable
+14-old.c, 21-complex.c: intentional
+and from a blog: !!!!! what the fuck i did not know vlas let you do that (clang agrees) 
+#include <stdio.h>
+int main(int argc, char *argv[printf("Hello")]) {
+    printf(" world!\n");
+}
+```
+huh their code sure is qbe tho
 
 ### !! BROKEN !!
 
