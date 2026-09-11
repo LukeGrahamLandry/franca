@@ -10,7 +10,6 @@ Emulator :: @rec @struct {
     trace_map: PageMap3(*Trace);  // [virtual pc] for flush_icache
     icache_generation := 0;  // avoids "Assertion Failed: (do_jit_fixups) redeclared symbol"
     
-    m: Qbe.Module;
     jit_lock: Mutex;
     disassemble: bool;
     debug_base_address := 0;
@@ -18,9 +17,9 @@ Emulator :: @rec @struct {
     log: LogArgs;
     initial_elf: []u8 = empty();  // for find_emulated_symbol
     joinable_threads := 0;
-    worker: *Qbe.CodegenShared;
     gpa: Alloc;
     self_exe_path := "";  // if non-empty, will replace readlinkat(FDCWD, /proc/self/exe) so my get_executable_path works
+    mappings: BucketArray(JitMapping);
 };
 
 // TODO: report errors if extra has junk args
@@ -28,7 +27,6 @@ Emulator :: @rec @struct {
 LogArgs :: @struct {
     d := "";          // show compilied ir
     dis := false;     // show disassembled riscv instructions
-    etrace := false;  // show registers after executing each trace
     strace := false;  // show syscalls
     trace_exit := false;  // show stack trace on non-zero exit()
     trace_fault := false; // "                on signal/compiler panic (needs FRANCA_BACKTRACE=1)
@@ -57,9 +55,18 @@ Trace :: @rec @struct {
     terminator: Terminator;
     jump_cache: Array(Ty(i64, *Trace), 2);
     
-    // TODO: remove these. just for debugging rn
-    read: EnumSet(RvReg);
-    write: EnumSet(RvReg);
+    mapping: *JitMapping;
+    FUCKEDFUCKEDFUCKEDFUCKED := 0;
+    
+    // TODO: it shits itself if this struct is 8 bytes smaller or 8 bytes bigger. compiler bug? allocator bug? alignment something somehow? 
+    ////     it would seem that it dies when this struct's size is not a multiple of 16 bytes
+};
+
+JitMapping :: @struct {
+    mem: []u8;
+    module_valid: bool;
+    m: Qbe.Module;
+    worker: *Qbe.CodegenShared;
 };
 
 fn init(emu: *Emulator, gpa: Alloc, log: LogArgs) void = {
@@ -68,43 +75,32 @@ fn init(emu: *Emulator, gpa: Alloc, log: LogArgs) void = {
         traces = init(10, gpa), 
         trace_lookup = init(gpa),
         trace_map = init(gpa),
-        m = zeroed(Qbe.Module),
         jit_lock = zeroed(Mutex),
         disassemble = log.dis,
         syscall_handler = pass_though_syscall,
         log = log,
-        worker = zeroed(*Qbe.CodegenShared),
         gpa = gpa,
+        mappings = init(10, gpa),
     );
-    Qbe'backend'init_module(emu.m&, (
+}
+
+fn init_jit(emu: *Emulator, it: *JitMapping) void = {
+    m := it.m&;
+    Qbe'backend'init_module(m, (
         arch = query_current_arch(), os = query_current_os(), type = .JitOnly, 
         expecting_wx = true,
     ));
-    emu.m&.set_debug_types(log.d, true);
-    emu.worker = init_codegen_worker(emu.m&, false);
+    m.set_debug_types(emu.log.d, true);
+    it.worker = init_codegen_worker(m, false);
+    it.module_valid = true;
 }
 
 // TODO: do less locking. its fine for multiple threads to be reading at the same time, just not compiling (which writes). 
 fn run(emu: *Emulator, cpu: *Cpu, pc: i64) void = {
     trace := emu.lookup_trace(pc);
     
-    debug := @ref u8.list(temp());
-    debug_log := emu.log.etrace;
     loop {
-        if debug_log {
-            dump_reg(debug, cpu, trace.read);
-            address := pc - emu.debug_base_address;
-            @fmt(debug, "run trace % to ", fmt_hex(address));
-            eprint(debug.items()); debug.clear();
-        };
         pc = trace'callee(cpu, pc);
-        if debug_log {
-            // TODO: expecting to continue that last line which won't work if there are multiple threads
-            address := pc - emu.debug_base_address;
-            @fmtln(debug, "%", fmt_hex(address));
-            dump_reg(debug, cpu, trace.write);
-            eprint(debug.items()); debug.clear();
-        };
         if pc == -1 {
             // :TestMarkerBreakLoop
             @assert(cpu.thread.is_none(), "non-main thread run() returned to ip=-1");
@@ -141,13 +137,14 @@ fn lookup_trace(emu: *Emulator, pc: i64) *Trace = {
     emu.jit_lock&.lock();
     i := emu.trace_lookup&.get(pc) || {
         mark := temp().mark();
-        code_start := emu.m.start_of_writable_code;
+        it := emu.find_mapping(pc);  // TODO: fucked if follows direct to other mappings
+        code_start := it.m.start_of_writable_code;
         first_trace := emu.traces&.len();
         i := compile_trace(emu, pc.rawptr_from_int());
-        wait_for_make_exec(emu.worker, code_start);
+        wait_for_make_exec(it.worker, code_start);
         range(first_trace, emu.traces&.len()) { trace_i |
             i := emu.traces&.nested_index(trace_i);
-            jit_addr, _ := emu.m&.get_addr(i.symbol).unwrap();
+            jit_addr, _ := i.mapping.m&.get_addr(i.symbol).unwrap();
             i.callee = bit_cast_unchecked(rawptr, FieldType(Trace, .callee), jit_addr);
         };
         temp().reset(mark);
@@ -191,9 +188,21 @@ pass_though_syscall :: fn(cpu: *Cpu, pc: i64) void = {
     };
     if n == 215 {  // munmap
         mem := u8.ptr_from_raw(a0).slice(int_from_rawptr(a1));
-        clear_instruction_cache(emu, mem);
+        emu.remove_mapping(mem);
         // fallthrough
     };
+    if n == 226 {  // mprotect
+        mem, prot := (u8.ptr_from_raw(a0).slice(int_from_rawptr(a1)), int_from_rawptr(a2));
+        if prot.bit_and(Posix.PROT.EXEC) != 0 {
+            emu.add_mapping(mem);
+        };  // fallthrough
+    };
+    
+    if n == 222 {  // mprotect
+        mem, prot := (u8.ptr_from_raw(a0).slice(int_from_rawptr(a1)), int_from_rawptr(a2));
+        @assert(!(prot.bit_and(Posix.PROT.EXEC) != 0), "TODO: support direct mmap(exec)");
+    };
+    
     if n == 134 {  // rt_sigaction
         // this needs incredibly convoluted translating of MContext structs to do properly. 
         // sadly don't want to just error because my compiler uses it for crash_report. 
@@ -214,7 +223,8 @@ pass_though_syscall :: fn(cpu: *Cpu, pc: i64) void = {
             cpu.reg&[.A0] = pid.intcast().rawptr_from_int();
             if pid == 0 {
                 // you don't take your threads with you
-                @assert(!cpu.emu.worker.threaded, "TODO: deal with fork when there's a worker thread");
+                // TODO: assert this
+                //@assert(!cpu.emu.worker.threaded, "TODO: deal with fork when there's a worker thread");
                 // TODO: clear out all the other emu.threads?
             };
             return();
@@ -427,11 +437,79 @@ fn clear_instruction_cache(emu: *Emulator, mem: []u8) void = {
     };
 }
 
+fn add_mapping(emu: *Emulator, mem: []u8) void = {
+    @if(mem.len == 0) return();
+    @debug_assert(u8.int_from_ptr(mem.ptr) > 0, "for good luck, dont cross zero");
+    
+    emu.jit_lock&.lock();
+    free: ?*JitMapping = .None;
+    // @eprintln("ADD %..+%", fmt_hex(mem.ptr), fmt_hex(mem.len));
+    each emu.mappings& { it |
+        if it.mem.len != 0 && address_overlaps(it.mem, mem) {
+            @assert(address_contains(it.mem, mem), "TODO: allow partial mprotect");
+            emu.jit_lock&.unlock();
+            return();
+        };
+        // TODO: don't pessimize gradually mprotecting sequential regions of one mmap (like make_exec(expecting_wx=false))
+        
+        if it.mem.len == 0 {
+            free = (Some = it);
+        };
+    };
+    it := free || emu.mappings&.push_uninit();
+    ::[]@type it[];
+    it.mem = mem;
+    init_jit(emu, it);
+    
+    emu.jit_lock&.unlock();
+}
+
+// only for unmap so the code is never needed again (not just mprotecting away the X)
+fn remove_mapping(emu: *Emulator, mem: []u8) void = {
+    clear_instruction_cache(emu, mem);  // TODO: do this just for the used part of the individual module's code segments
+
+    emu.jit_lock&.lock();
+    each emu.mappings& { it |
+        if address_overlaps(it.mem, mem) {
+            // @eprintln("REMOVE %..+%", fmt_hex(mem.ptr), fmt_hex(mem.len));
+            @assert(address_contains(mem, it.mem), "TODO: allow partial unmap");
+            
+            it_mem := it.mem;
+            it.mem = empty();
+            it.worker.join_codegen_thread();
+            drop(it.m&);
+            
+            if address_identical(it_mem, mem) {
+                emu.jit_lock&.unlock();
+                return();
+            };  // else might be unmapping multiple at once (if they were made in one mmap but multiple mprotects)
+        };
+    };
+    
+    emu.jit_lock&.unlock();
+}
+
+fn find_mapping(emu: *Emulator, pc: i64) *JitMapping = {
+    @debug_assert(emu.jit_lock&.locked_by_me());
+    mem := u8.ptr_from_int(pc).slice(1);
+    each emu.mappings& { it |
+        if address_contains(it.mem, mem) {
+            return(it);
+        }
+    };
+    @panic("pc=% is not mapped", fmt_hex(pc));
+}
+
+address_overlaps :: fn(self: []u8, other: []u8) bool = !(ptr_diff(self.ptr, other.end_pointer()) <= 0 || ptr_diff(self.end_pointer(), other.ptr) >= 0);
+address_identical :: fn(self: []u8, other: []u8) bool = identical(self.ptr, other.ptr) && self.len == other.len;
+address_contains :: fn(self: []u8, other: []u8) bool = ptr_diff(self.ptr, other.ptr) >= 0 && ptr_diff(other.end_pointer(), self.end_pointer()) >= 0;
+
 find_emulated_symbol :: fn(emu: *Emulator, native_ip: rawptr) ?Str = {
     result: ?Str = .None;
     @if(emu.log.trace_fault)
     with emu.jit_lock& {
-        if Qbe'find_ip_in_module(emu.m&, native_ip) { trace_name |
+        each emu.mappings& { it |
+        if Qbe'find_ip_in_module(it.m&, native_ip) { trace_name |
             result = (Some = trace_name);
             // :AddressInMangledName
             // TODO: needing to parse the string like this is silly. give back the information in a more structured way somehow. 
@@ -439,6 +517,7 @@ find_emulated_symbol :: fn(emu: *Emulator, native_ip: rawptr) ?Str = {
                 emulated_rel_ip, _ := convert_number(trace_name.rest(i+2), 16, hex_digit);
                 result = find_emulated_symbol_from_fake_ip(emu, emulated_rel_ip);
             };
+        };
         };
     };
     result

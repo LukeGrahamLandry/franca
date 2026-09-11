@@ -15,7 +15,6 @@ Compile :: @struct {
     // TODO: do the same thing for Kw so don't have to insert as many sign extensions?
     register_small := zeroed(EnumSet(RvReg));
     register_write := zeroed(EnumSet(RvReg));
-    register_read_real := zeroed(EnumSet(RvReg));  // TODO: remove
     cpu_addr: Qbe.Ref;
     pc: Qbe.Ref;
     entry: *u32;
@@ -26,6 +25,7 @@ Compile :: @struct {
     // TODO: either get rid of this or implement tail calls so i can do real threaded code. 
     //       just the subset i need here where the signetures are the same and no args on the stack would be fairly easy. 
     bcmp_condition: ?Qbe.Ref = .None;  
+    mapping: *JitMapping;
 };
 
 // when the jump target is constant, follow it and compile a new trace eagerly. 
@@ -59,7 +59,9 @@ fn compile_trace(emu: *Emulator, entry: rawptr) *Trace = {
             };
         };
     };
-    Qbe'enter_task(emu.worker) { e |
+    // TODO: fucked if followed direct to multiple regions
+    mapping := emu.find_mapping(entry.int_from_rawptr());
+    Qbe'enter_task(mapping.worker) { e |
         e.task = .MakeExec;
     };
     firsts_trace_index.unwrap()
@@ -70,8 +72,9 @@ fn compile_trace(emu: *Emulator, entry: rawptr) *Trace = {
 // register values are read at first use and changed ones sare written at the end of the trace. 
 fn compile_one_trace(emu: *Emulator, entry: rawptr) Ty(*Trace, Array(?i64, 2)) = {
     result := zeroed(Ty(*Trace, Array(?i64, 2)));
-Qbe'enter_task(emu.worker) { codegen_entry | 
-    m := emu.m&;
+    mapping := emu.find_mapping(entry.int_from_rawptr());
+Qbe'enter_task(mapping.worker) { codegen_entry | 
+    m := mapping.m&;
     f := temp().box_uninit(Qbe.Fn);
     f.default_init(m);
     b := newblk(); f.nblk += 1;
@@ -83,6 +86,7 @@ Qbe'enter_task(emu.worker) { codegen_entry |
         pc = f.newtmp("pc", .Kl),
         entry = u32.ptr_from_raw(entry),
         out = list(temp()),
+        mapping = mapping,
     ); self := self&;
     push(b, .par, .Kl, self.cpu_addr, Qbe.Null, Qbe.Null);
     // TODO: since jitting initial pc is actually constant
@@ -120,7 +124,6 @@ Qbe'enter_task(emu.worker) { codegen_entry |
         }
         // TODO: this also means you need to keep track of dependencies so flush_icache can go backwards and recompile everything
         // TODO: this is going to be a problem because i don't have tail calls. works out for now because i do it for so few jumps. 
-        // also this means -etrace wont show everything
         fn Direct() => {
             new_pc := self.pc_symbol(self.direct_jump_targets&[0].unwrap());
             if self.bcmp_condition { cond |
@@ -144,7 +147,7 @@ Qbe'enter_task(emu.worker) { codegen_entry |
         }
     };
     
-    f.lnk.id = emu.mangle(int_from_rawptr(entry));
+    f.lnk.id = self.mangle(int_from_rawptr(entry));
     f.lnk.no_inline = true;
     codegen_entry.task = (Func = f);
     trace := emu.traces&.push(
@@ -152,8 +155,7 @@ Qbe'enter_task(emu.worker) { codegen_entry |
         symbol = f.lnk.id,
         terminator = self.terminator,
         jump_cache = ((0, zeroed(*Trace)), (0, zeroed(*Trace))),
-        read = self.register_read_real, // self.register_read.valid,
-        write = self.register_write,
+        mapping = self.mapping,
     );
     result = (trace, self.direct_jump_targets);    
     emu.trace_lookup&.insert(entry.int_from_rawptr(), trace);
@@ -167,14 +169,16 @@ fn pc_symbol(self: *Compile, new_pc_off: i64) Qbe.Ref = {
     new_pc := u32.int_from_ptr(self.entry) + new_pc_off;
     // re-intern with the new icache_generation would be wrong if new_pc was already compiled before flush but wasn't in the flushed range. 
     if self.emu.trace_lookup&.get(new_pc) { t |
+        @assert(identical(t.mapping, self.mapping), "TODO: allow direct jump to another mapping");
         return self.f.symcon(t.symbol);
     };
-    self.f.symcon(self.emu.mangle(new_pc))
+    self.f.symcon(self.mangle(new_pc))
 }
 
-fn mangle(emu: *Emulator, pc: i64) Qbe.Sym = {
-    pc -= emu.debug_base_address;
-    emu.m&.intern(@tfmt("%trace%", emu.icache_generation, fmt_hex(pc)))  // :AddressInMangledName
+fn mangle(self: *Compile, pc: i64) Qbe.Sym = {
+    @assert(identical(self.emu.find_mapping(pc), self.mapping), "TODO: allow direct jump to another mapping");
+    pc -= self.emu.debug_base_address;
+    self.mapping.m&.intern(@tfmt("%trace%", self.emu.icache_generation, fmt_hex(pc)))  // :AddressInMangledName
 }
 
 fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref = {
@@ -611,7 +615,6 @@ fn read(self: *Compile, r: RvReg, fake: bool, k: Qbe.Cls) Qbe.Ref = {
         dest := self.f.newtmp(r.name_str(), k);
         self.register_read&.insert(r, dest);
         if !fake { 
-            self.register_read_real&.set(r);
             addr := self.compute_reg_addr(r);
             push(self.b, .load, k, dest, addr, Qbe.Null);
         };

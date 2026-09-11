@@ -22,25 +22,22 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
   - remap to syscalls to libc so it can run on examples/os/kernel
   - macos also has to deal with MAP_JIT
   - do JitEvent.Sync so it can run in wasm
-  - need to be able to deallocate old code. ex. examples/os/host/user.fr does processes as threads in the same address space. 
-    alternatively, hash map to deduplicate traces by code bytes (i pass pc around so that doesn't matter). 
-    still leaking *Trace-s until the end of time is bad. 
-    ex. `./target/release/franca-linux-arm64 examples/os/build.fr -rv -append "tests/backend.fr all -jit -cc"`: panic! too much code. 
-    an escpecially easy case to invalidate is when flush_icache makes a bunch of traces unreachable. 
+  - leaking *Trace-s until the end of time is bad. (i cleanup the module when it's unmapped but not the trace structs themselves)
   - easy way to disallow some syscalls. ex. when using os/host/user make sure to not accidently jit a syscall instruction. 
     tho in that case specifically it would be nice to be able to intercept them instead and remap back to the os/user/libc calls. 
   - flush_icache needs to invalidate the linked O.call for Terminator.Direct
   - backend tail calls for Terminator.Direct? and then try it for bcmp too. 
   - backend/rv64 use jal direct calls instead of always putting it in a register first. 
   - use register_small for Kw to insert fewer sign extensions
-  - get rid of register_read_real and the register sets on *Trace.
-    it was for debugging at the beginning but now all the interesting programs are so big that it's useless. 
   - keep track of what memory is marked executable so don't follow jumps into fucking narnia. 
     especially because sometimes the speculative jump target is wrong. 
     like the and-link part for a function returning Never (similarly syscall exit). 
   - similarly it shouldn't crash if code that hasn't been called yet has an invalid instruction
   - factor out the immediate encoding bit positions and the fcnvt flags to share with the compiler
   - be able to use it as a disassembler without compiling anything and add it to backend/meta/dis.fr
+  - `orb ./host.out examples/os/build.fr -rv -append "tests/run_tests.fr core;exit"`
+    it prints "panic! some sort of corruption is going on. munmap(281473110758400) can't fail" 
+    but doesn't say a test fails. stops after just tests/compiler.fr so i guess the crash is in the thing that exec-ed that. 
 - examples/os/host/user.fr -share to access cached dependencies
 - get_executable_path() that returns a @tagged(Aot: Str, Jit: @struct(franca_exe: Str, source_file: Str)); 
   so the programs that depend on re-execing the compiler can give a sane error message. 

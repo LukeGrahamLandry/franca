@@ -1,4 +1,23 @@
 
+## (Sep 11) rv emu
+
+one module per mmapped region so it can goa way when unmapped. 
+- wasn't being careful about which module the symbol is looked up in for pc_symbol. 
+  just adding regions on mprotect(exec) doesn't seem good enough because those speculative 
+  traces are getting into something that's supposed to be marked executable later? 
+  i don't quite understand why my compiler would hit that situation but i should support it 
+  regardless so lets see if that actually fixes the problem. 
+  hmm actually the address it's seeing is... 12 so that's a much stranger problem. 
+  aa i wonder if part way through when it looked like it was working it was because i already had the right kaleidoscope cache file so it was just doing the easy part and that's why it specifically didn't work in os/host/user. 
+- ok this is insane im changing too much at once clearly. doesn't even work if i strictly have one region?   
+  oh shit it dies if i make Trace 8 bytes bigger. that's very unfortunate. its not the elide_abi_slots bug. 
+  such a fucking waste of time. that's gotta be a compiler bug. 
+- anyway it works now. can run `-rv -append "tests/backend.fr all -jit -cc"` without running out of space. 
+  231 ADD but only 227 REMOVE. also it crashes without the `-jit`. 
+
+TODO: im guessing posix_spawn never deallocating the elf segments is the problem. 
+TODO: module init mode that doesn't allocate big data segments, just a tiny bit for got. 
+
 ## (Sep 10) rv emu
 
 - continuing flush_icache
