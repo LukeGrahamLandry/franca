@@ -184,22 +184,22 @@ fn mangle(self: *Compile, pc: i64) Qbe.Sym = {
 fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref = {
     b := self.b;
     op := pc[];
-    opcode := @as(Opcode) @as(i64) op.bit_and(0b1111111).zext();
-    rs1 := @as(RvReg) @as(u8) op.shift_right_logical(7+5+3).bit_and(0b11111).trunc();
-    rs2 := @as(RvReg) @as(u8) op.shift_right_logical(7+5+3+5).bit_and(0b11111).trunc();
-    rd := @as(RvReg) @as(u8) op.shift_right_logical(7).bit_and(0b11111).trunc();
-    imm12 := op.shift_right_logical(32-12).zext().sign_extend(11);
-    imm20 := op.bit_and(bit_not(1.shift_left(7+5) - 1)).zext().sign_extend(31);
+    I :: fn(left: i64, right: i64, off: i64) u32 => 
+        op.shift_right_logical(right).bit_and(@as(u32) 1.shift_left(left - right + 1) - 1).shift_left(off);
+    opcode := @as(Opcode) @as(i64) I(6, 0, 0).zext();
+    rs1 := @as(RvReg) @as(u8) I(19, 15, 0).trunc();
+    rs2 := @as(RvReg) @as(u8) I(24, 20, 0).trunc();
+    rd := @as(RvReg) @as(u8) I(11, 7, 0).trunc();
+    
+    imm12 := I(31, 20, 0).zext().sign_extend(11);
+    imm20 := I(31, 12, 0).shift_left(12).zext().sign_extend(31);
     pc_offset := ptr_diff(self.entry, pc) * 4;
-    // @bits(i.imm(11, 5), rs2, rs1, funct3, i.imm(4, 0), opcode);
-    imm_S := op.shift_right_logical(32-7).shift_left(5)
-        .bit_or(op.shift_right_logical(7).bit_and(0b11111))
-        .zext().sign_extend(11);
+    imm_S := I(31, 25, 5).bit_or(I(11, 7, 0)).zext().sign_extend(11);
     
     @match(opcode) {
         fn storef() => {  // S
             imm := imm_S; rs2 = rs2.as_float();
-            k := @if(op.shift_right_logical(7+5).bit_and(0b11) == 2, Qbe.Cls.Ks, .Kd);
+            k := @if(I(13, 12, 0) == 2, Qbe.Cls.Ks, .Kd);
             @dis(self, "[%%%]= str.% %", rs1, @if(imm < 0, "", "+"), imm, k, rs2);
         
             o := @if(k == .Ks, Qbe.O.stores, .stored);
@@ -209,14 +209,14 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
         }
         fn loadf() => {  // I
             imm := imm12; rd = rd.as_float();
-            k := @if(op.shift_right_logical(7+5).bit_and(0b11) == 2, Qbe.Cls.Ks, .Kd);
+            k := @if(I(13, 12, 0) == 2, Qbe.Cls.Ks, .Kd);
             @dis(self, "%= ldr.% [%%%]", rd, k, rs1, @if(imm < 0, "", "+"), imm);
             addr, dest := (self.read(rs1), self.write(rd, k));
             addr := self.inc(addr, imm);
             push(b, .load, k, dest, addr, Qbe.Null);
         }
         fn op_fp() => {
-            rm := op.shift_right_logical(5+7).bit_and(0b111);
+            rm := I(14, 12, 0);
             
             if op.bit_and(0b01001101110000000000000001111111) == 0b01000000000000000000000001010011 {
                 // encode_fcnvt and also cast
@@ -248,8 +248,8 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
                 push(b, o, k, t, a, Qbe.Null);
                 @if(k == .Kw) push(b, .extsw, .Kl, r, t, Qbe.Null);
             } else {
-                opf := @as(OpF) @as(i64) op.shift_right_logical(32-5).zext();
-                size := op.shift_right_logical(32-5-2).bit_and(0b11);
+                opf := @as(OpF) @as(i64) I(31, 27, 0).zext();
+                size := I(26, 25, 0);
                 k: Qbe.Cls = @switch(size) {
                     @case(0) => .Ks;
                     @case(1) => .Kd;
@@ -303,7 +303,7 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
         }
         fn store() => {  // S
             imm := imm_S;
-            size := op.shift_right_logical(7+5).bit_and(0b11).zext();
+            size := I(13, 12, 0).zext();
             size_bytes := 1.shift_left(size)*8;
             @dis(self, "[%%%]= str.% %", rs1, @if(imm < 0, "", "+"), imm, size_bytes, rs2);
         
@@ -315,8 +315,8 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
         }
         fn load() => {  // I
             imm := imm12;
-            zero_extend := op.shift_right_logical(7+5+2).bit_and(1) == 1;
-            size := op.shift_right_logical(7+5).bit_and(0b11).zext();
+            zero_extend := I(14, 14, 0) == 1;
+            size := I(13, 12, 0).zext();
             size_bytes := 1.shift_left(size)*8;
             @dis(self, "%= ldr.%% [%%%]", rd, @if(zero_extend, "u", "i"), size_bytes, rs1, @if(imm < 0, "", "+"), imm);
             addr, dest := (self.read(rs1), self.write(rd));
@@ -328,7 +328,7 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
         }
         fn op_imm() => {  // I
             imm := imm12;
-            funct3 := @as(OpI) @as(i64) op.shift_right_logical(7+5).bit_and(0b111).zext();
+            funct3 := @as(OpI) @as(i64) I(14, 12, 0).zext();
             a0, dest := (self.read(rs1), self.write(rd));
             // TODO: rot are in high bits of imm
             if funct3 == .sll && imm >= 64 {  // 0b001
@@ -379,8 +379,8 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
             };
         }
         fn op() => {  // R
-            funct3 := @as(OpI) @as(i64) op.shift_right_logical(7+5).bit_and(0b111).zext();
-            funct7 := op.shift_right_logical(32-7);
+            funct3 := @as(OpI) @as(i64) I(14, 12, 0).zext();
+            funct7 := I(31, 25, 0);
             a0, a1, dest := (self.read(rs1), self.read(rs2), self.write(rd));
             already_dis := false;
             o: Qbe.O = @switch(funct7) {
@@ -487,11 +487,11 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
         }
         // bcmp,jal: imm always even, no low bit
         fn bcmp() => {
-            funct3 := @as(Bcmp) @as(i64) op.shift_right_logical(7+5).bit_and(0b111).zext();
-            imm := op.shift_right_logical(7).bit_and(1).shift_left(11)
-                .bit_or(op.shift_right_logical(31).shift_left(12))
-                .bit_or(op.shift_right_logical(32-1-6).bit_and(0b111111).shift_left(5))
-                .bit_or(op.shift_right_logical(7+1).bit_and(0b1111).shift_left(1))
+            funct3 := @as(Bcmp) @as(i64) I(14, 12, 0).zext();
+            imm := I(31, 31, 12)
+                .bit_or(I(30, 25, 5))
+                .bit_or(I(11, 8, 1))
+                .bit_or(I(7, 7, 11))
                 .zext().sign_extend(12);
             a0, a1 := (self.read(rs1), self.read(rs2));
             o: Qbe.O = @match(funct3) {
@@ -514,10 +514,10 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
             return new_pc;
         }
         fn jal() => {
-            imm := op.shift_right_logical(31).shift_left(20)
-                .bit_or(op.shift_right_logical(32-11).bit_and(1.shift_left(10)-1).shift_left(1))
-                .bit_or(op.shift_right_logical(7+5+8).bit_and(1).shift_left(11))
-                .bit_or(op.shift_right_logical(7+5).bit_and(1.shift_left(8)-1).shift_left(12))
+            imm := I(31, 31, 20)
+                .bit_or(I(30, 21, 1))
+                .bit_or(I(20, 20, 11))
+                .bit_or(I(19, 12, 12))
                 .zext().sign_extend(20);
             
             push(b, .add, .Kl, self.write(rd), self.pc, self.f.getcon(pc_offset + 4));
@@ -547,8 +547,8 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
             @default =>@panic("TODO: system %", fmt_hex(op));
         };
         fn amo() => {
-            funct7 := op.shift_right_logical(32-7);
-            funct3 := op.shift_right_logical(7+5).bit_and(0b111);
+            funct7 := I(31, 25, 0);
+            funct3 := I(14, 12, 0);
             @if(funct7 != 0b0010111 || funct3.bit_and(0b110) != 0b010) @panic("TODO: amo %", fmt_hex(op));
             k := @if(funct3.bit_and(1) == 1, Qbe.Cls.Kl, .Kw);
             
