@@ -94,7 +94,7 @@ fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                     };
                     
                     new_got_reloc[] = ensure_got_slot(self, symbol, address).or_else(=> new_got_reloc[]);
-                    got_addr := self.segment_address(.ConstantData, symbol.got_lookup_offset);
+                    got_addr := self.got_address(symbol);
                     distance = ptr_diff(fixup.patch_at.addr, got_addr);
                 } else {
                     if(self.goal.type == .Relocatable, => return());  // that's not my department
@@ -103,7 +103,7 @@ fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                         size_of_jmp_encoding :: 6;
                         trampoline := reserve_stub(self, symbol, Array(u8, size_of_jmp_encoding));
                         new_got_reloc[] = ensure_got_slot(self, symbol, address).or_else(=> new_got_reloc[]);
-                        distance := self.distance_between(.Code, symbol.offset + size_of_jmp_encoding, .ConstantData, symbol.got_lookup_offset);
+                        distance := self.distance_between(.Code, symbol.offset + size_of_jmp_encoding, self.got_segment(), symbol.got_lookup_offset);
                         trampoline := fixed_list(trampoline.items());
                         if self.goal.exe_debug_symbol_table {  // :ShowSymbolNamesForStubs
                             self.local_needs_reloc&.push(symbol.id);
@@ -512,7 +512,7 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                             push_fixup(e.m, symbol, it);
                         };
                         if e.m.goal.jit_via_dlopen { // see immediate_fixup_got in arm
-                            got := e.m.segment_address(.ConstantData, symbol.got_lookup_offset);  // :GotAtConstantDataBase 
+                            got := e.m.got_address(symbol);
                             encode_imm64(e.a&, i.to.int_reg_d(), got.int_from_rawptr().bitcast());
                             r := e.f.new_mem(i.to, QbeNull, 0, 0);  // wasteful allocation :(
                             emitins(make_ins(.load, .Kl, i.to, r, QbeNull), e);
@@ -522,7 +522,7 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                         // TODO: very copy paste 
                         size_of_load_encoding :: 7;
                         current_offset := e.start_of_function + e.a.len();
-                        distance := e.m.distance_between(.Code, current_offset + size_of_load_encoding, .ConstantData, symbol.got_lookup_offset);
+                        distance := e.m.distance_between(.Code, current_offset + size_of_load_encoding, e.m.got_segment(), symbol.got_lookup_offset);
                         
                         dest := int_reg_d(i.to);
                         e.a&.push(pack_rex_si(true, dest, DONT_CARE_REG, DONT_CARE_REG)); 
@@ -721,7 +721,7 @@ fn call_symbol(e: *AmdState, sym: Qbe.Sym) void #once = {
                         push_fixup(e.m, symbol, it);
                     };
                     encoded_size :: 6;
-                    off += e.m.distance_between(.Code, current_offset + encoded_size, .ConstantData, symbol.got_lookup_offset);
+                    off += e.m.distance_between(.Code, current_offset + encoded_size, e.m.got_segment(), symbol.got_lookup_offset);
                     encode_indirect_call(e.a&, off.trunc(), true);
                 } else {
                     // Otherwise this will get patched to a local or __stub call later. 

@@ -142,6 +142,7 @@ QbeModule :: @rec @struct(
     elf_interp_path := "",
     
     wasm_need_tag_section_exception_zero: bool,
+    segment_allocation: []u8,
 );
 
 // TODO: clearly this has to go in @/lib somewhere
@@ -182,7 +183,8 @@ QbeTargetEnv :: @struct(
     
     blink_smc := true,
     
-    _1 := false,
+    // TODO: it would be great if comptime jit could use this too but importing frc import_baked_var need_reify=true so it won't work.
+    no_data_segment := false,
     
     // call __libc_start_main and then call the entry point. 
     wrap_entry_for_linux_libc := false,
@@ -336,9 +338,13 @@ fn init_common(m: *QbeModule, gpa: Alloc, goal: QbeTargetEnv) void = {
     need_segments := !@is(goal.type, .Cached, .CachedEarly);
     
 if need_segments {
+    @assert(!goal.no_data_segment || goal.type == .JitOnly, "TODO: make sure elf/macho emit can cope with no_data_segment");
+    big_page := 1.shift_left(16);
+    small := segment_size + big_page + @if(goal.arch != .wasm32, 0, (goal.wasm.global_base + goal.wasm.types_size_guess).ualign_to(big_page));
+    total_size := @if(goal.no_data_segment, small, segment_size * @if(goal.no_constant_data(), 2, 3));
     mem := if !m.use_map_jit_on_apple_silicon {
         // relies on page allocator always giving zeroed memory
-        page_allocator.alloc_uninit(u8, segment_size * 3)
+        page_allocator.alloc_uninit(u8, total_size)
     } else {
         // only apple makes us the MAP_JIT shenanigans. 
         fd: Fd = (fd = -1);
@@ -348,7 +354,7 @@ if need_segments {
         // It seems that MAP_JIT and then MAP_FIXED over it is fine, but the reverse is not. 
         prot_WX :i64= bit_or(Posix'PROT'WRITE, Posix'PROT'EXEC);
         flag_WX :i64= bit_or(flag, Posix'MAP'JIT);  // :JitMemProtect .Jit means one thread will be able to write and one will be able to execute. 
-        ptr := Posix'mmap(zeroed(rawptr), segment_size * 3, prot_WX, flag_WX, fd, 0) || {
+        ptr := Posix'mmap(zeroed(rawptr), total_size, prot_WX, flag_WX, fd, 0) || {
             @panic("mmap Jit failed")
         };
         
@@ -356,15 +362,16 @@ if need_segments {
         prot_RW :i64= bit_or(Posix'PROT'READ, Posix'PROT'WRITE);
         flag_RW := bit_or(flag, Posix'MAP'FIXED); // .Fixed means the address hint will not be ignored. 
         ptr_rw := ptr.offset(segment_size);
-        res := or Posix'mmap(ptr_rw, segment_size * 2, prot_RW, flag_RW, fd, 0) {
+        res := or Posix'mmap(ptr_rw, total_size - segment_size, prot_RW, flag_RW, fd, 0) {
             @panic("mmap Fixed failed")
         };
         
         // So now we have a contigous chunk where the first third is MAP_JIT and the rest is normal.
-        mem: []u8 = (ptr = u8.ptr_from_raw(ptr), len = segment_size * 3);
+        mem: []u8 = (ptr = u8.ptr_from_raw(ptr), len = total_size);
         // TODO: if we wanted to allow jit and then emit macho from the same module, you'd have to remap the `commands: SegmentCursor` as well. 
         mem
     };
+    m.segment_allocation = mem;
     
     if !m.use_map_jit_on_apple_silicon && goal.expecting_wx {
         // Only the code segment needs to be executable. 
@@ -376,11 +383,19 @@ if need_segments {
     // :SegmentsAreTheSameSize 
     // order matters!
     make_segment(mem, .Code, 0, segment_size);  // :CodeIsFirst
-    make_segment(mem, .ConstantData, segment_size, segment_size*2);
-    make_segment(mem, .MutableData, segment_size*2, segment_size*3);
+    if goal.no_constant_data() {
+        make_segment(mem, .MutableData, segment_size, total_size);
+    } else {
+        if goal.no_data_segment {
+            make_segment(mem, .ConstantData, segment_size, total_size);
+        } else {
+            make_segment(mem, .ConstantData, segment_size, segment_size*2);
+            make_segment(mem, .MutableData, segment_size*2, segment_size*3);
+        };
+    }
     
     // No backing allocation. It's just for aot for now. 
-    m.segments&[.ZeroInitData].mmapped.ptr = mem.ptr.offset(segment_size * 3);
+    m.segments&[.ZeroInitData].mmapped.ptr = mem.ptr.offset(total_size);
     m.segments&[.ZeroInitData].next = m.segments&[.ZeroInitData].mmapped.ptr;
     
     make_segment :: fn(mem: []u8, s: SegmentType, start: i64, end: i64) void => {
@@ -411,6 +426,7 @@ if need_segments {
         
         if m.goal.arch == .wasm32 {
             goal.wasm = forever.boxed(WasmLayout, goal.wasm[]);
+            // TODO: don't actually waste `global_base` bytes in the compiler (just apply the offset and waste it at runtime) especially when jitting this does nothing. 
             next := m.segments&[.MutableData].next&;
             next[] = next[].offset(goal.wasm.global_base); 
             mem := forever.alloc_uninit(u8, goal.wasm.types_size_guess);
@@ -558,7 +574,8 @@ fn drop(m: *QbeModule) void = {
 
     @run assert_eq(enum_count(SegmentType), 4);
     fst := m.segments.data&[0].mmapped;
-    mem := fst.ptr.slice(fst.len * 3);  // ZeroInitData has no allocation
+    mem := m.segment_allocation;
+    @if(mem.len != 0)
     if m.permap_enabled() {
         // :LEAK
         // if i free the memory it can be reused for a new module which makes the profile completely useless. 

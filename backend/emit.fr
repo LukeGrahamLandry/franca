@@ -266,6 +266,7 @@ fn emit_data(self: *QbeModule, dat: Dat2) void = {
         save.push(self, dat&);
         return();
     };
+    @debug_assert(!self.goal.no_data_segment, "emit_data but no_data_segment");
     
     if dat.template&.is(.Zeroes) && dat.relocations.len == 0 {
         // TODO: i want to remvoe this limitation so you can use this function
@@ -277,7 +278,7 @@ fn emit_data(self: *QbeModule, dat: Dat2) void = {
             dat.seg = .ZeroInitData;
         }
     };
-    if self.goal.arch == .wasm32 && dat.seg == .ConstantData {
+    if self.goal&.no_constant_data() && dat.seg == .ConstantData {
         dat.seg = .MutableData;
     };
     
@@ -636,12 +637,21 @@ fn do_fixups_impl(self: *QbeModule, symbol: *SymbolInfo) void = {
     };
 }
 
+fn no_constant_data(goal: *QbeTargetEnv) bool #inline = goal.arch == .wasm32 || goal.type == .JitOnly;
+fn got_segment(m: *QbeModule) SegmentType #inline = @if(m.goal&.no_constant_data(), .MutableData, .ConstantData);
+
+// on wasm everything is in MutableData because there's no memory protection anyway so putting the got slots there lets it compile in less memory. 
+fn got_address(m: *QbeModule, s: *SymbolInfo) rawptr #inline = {
+    @debug_assert(s.got_lookup_offset >= 0 && s.got_lookup_offset.mod(8) == 0, "missing got slot for %", s.name);
+    m.segment_address(m.got_segment(), s.got_lookup_offset)
+}
+
 fn ensure_got_slot(self: *QbeModule, symbol: *SymbolInfo, jit_address: rawptr) ?Fixup = {
     @debug_assert(!self.fixups_locked);
     new_got_reloc: ?Fixup = .None;
     if symbol.got_lookup_offset == -1 {
-        // need to reserve a new __got entry.  :GotAtConstantDataBase 
-        segment := self.segments&[.ConstantData]&;
+        // need to reserve a new __got entry. 
+        segment := self.segments&[self.got_segment()]&;
         segment.align_to(8);
         symbol.got_lookup_offset = segment.len();
         got := segment.reserve(rawptr);
@@ -653,7 +663,7 @@ fn ensure_got_slot(self: *QbeModule, symbol: *SymbolInfo, jit_address: rawptr) ?
             got[] = jit_address; // because we don't loop again to handle `new_got_reloc`
         }
     };
-    got := self.segment_address(.ConstantData, symbol.got_lookup_offset);  // :GotAtConstantDataBase 
+    got := self.got_address(symbol);
     got := rawptr.ptr_from_raw(got);
     if self.goal.got_indirection_instead_of_patches {
         // TODO: having a nice error message is good but it fucks you up if the code 

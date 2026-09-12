@@ -1,4 +1,18 @@
 
+## (Sep 12)
+
+be less wasteful with allocating QbeModule.segments. 
+- for emu translating riscv instructions never needs to emit_data. so just a tiny bit of ConstantData for got slots i guess.
+- it shouldn't really matter because its just virtual memory but it makes me feel a bit better. 
+  especially on my os where vmap_reserve alllocates page tables a bit wastefully.
+- for emitting wasm i don't use ConstantData at all (except for ensure_got_slot but that can move). 
+  - which is good because wasm32 is starved for address space.
+  - in firefox about:processes memory to jit gpu/mandelbrot.fr: old=370, new=300. 
+    differences is about 2 of my 33mb segments. which makes sense for one comptime and one runtime. 
+- actually any jitonly doesn't need to seperate constantdata for the same reason. 
+  when i wrote the backend emit originally i wanted to be able to jit and run and then emit that same machine code aot 
+  but i've given up on that because the situation i'd use it you don't want the comptime code in your binary anyway so there's no point. 
+
 ## (Sep 11) rv emu
 
 one module per mmapped region so it can goa way when unmapped. 
@@ -20,8 +34,6 @@ one module per mmapped region so it can goa way when unmapped.
   that aot has (ADD=228,REMOVE=227) vs (REMOVE=152) if i don't unmap LoadElfOut.virtual. 
   - oh the one extra ADD is just the first elf in emu/run.fr/main()
 - subprocess.fr/become() support examples/os by just spawn+wait since can't exec
-
-TODO: module init mode that doesn't allocate big data segments, just a tiny bit for got. 
 
 ## (Sep 10) rv emu
 
