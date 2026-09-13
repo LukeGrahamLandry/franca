@@ -285,6 +285,10 @@ int main() {
 
   ASSERT(1, ({ int x[1001] = { 0, 0, }; x[0] == 0 && 0 == memcmp(&x[0], &x[1], sizeof(x) - sizeof(x[0])); }));  
   
+  // TODO: specifying field of anon struct should advance the cursor for the implicit items in the parent
+  // struct n { int a; struct { int b, c; }; int d;} x = { .b=0xbb, 0xcc, 0xdd, 0xff };
+  // ASSERT(0xddccbb00, x.a | x.b<<8 | x.c<<16 | x.d<<24);
+  
   printf("OK\n");
   return 0;
 }

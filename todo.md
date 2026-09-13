@@ -54,10 +54,6 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
   - walk_stack_trace for destroy_compiler: `trace trap: compiler inserted break instruction`
     (in whatever multiarch qemu binfmt_misc situation i have)
   - is there a field in the elf file where i can declare what extensions i use so the disassembler knows and doesn't say `.insn` all the time?
-  - load_number(4919430884761293382) is so many instructions lol. 
-    like shifting one bit at a time and inverting after each step as a way to append each chunk of same bits.
-    detect that case and do 11 at a time at least? probably annoying because im trying not to use an extra register. 
-    give up and just load from memory?
 - nuklear frame buffer rendering and get it to work on my os and do virtio keyboard/mouse input through same api as app and get rid of unfinished usb driver. 
 - tests/gpu.fr reproducible. output
   - stackie: fake time
@@ -886,16 +882,16 @@ as different types even when they're the same size.
 ```
 
 found someone's c compiler on srht browse projects with a treasure trove of tests.
-a few fails are boring but there's one crash which is exciting. 
 ```
 https://git.sr.ht/~lsof/antcc/tree/190caf073d9ed55d8e4f5f33bed8726966e57ee8/item/test/c/
 05-sort.c: unnammed function pointer. void qsort(void *, size_t nmemb, size_t size, int (const void *, const void *));
 07-pp.c: i say "unclosed string literal" where they have a \\ treated as new line splice instead of escaped backspace
+         . for #define PUTS, do i not cope with multiple \ new lines in an identifier?
+         has_include_next, elifndef, _Pragma. 
+         countertest; undefined variable: 'ww1'
+         i have missing spaces. my join has extra hashes. 
 08-bit.c: __builtin_bswap16
-09-init.c: 
-     const char strs[][2] = {"ax", {'c','x'}, 'd',"?x"[1], "bx"};   
-     PRIxPTR     
-     !! then i fault on desgn2 ??
+09-init.c: for desgn2 see 0xddccbb00 in initializer.c, make sure desgn3 is the same problem
 17-misc.c: mine says its dereferencing a void pointer but clang allows it
 22-decl.c: static-ness must match forward declaration
 23-attr.c:
@@ -904,16 +900,13 @@ https://git.sr.ht/~lsof/antcc/tree/190caf073d9ed55d8e4f5f33bed8726966e57ee8/item
        __attribute__((aligned(8))) x; on a field
 24-pack.c: #pragma pack
 25-setjmp-volatile.c: i've known about that problem before back when i was emitting c
-27-builtins.c: block @5 is used undefined
-     #define min(a,b) ((a)<(b) ? (a) : (b))
-     assert(__builtin_constant_p(min(sizeof(int), sizeof(long))));
-     also __builtin_unreachable
-14-old.c, 21-complex.c: intentional
+27-builtins.c: assert(!__builtin_constant_p(main));
 and from a blog: !!!!! what the fuck i did not know vlas let you do that (clang agrees) 
 #include <stdio.h>
 int main(int argc, char *argv[printf("Hello")]) {
     printf(" world!\n");
 }
+- chances are high i have this bug https://git.sr.ht/~lsof/antcc/commit/be76767c8dcaafc2c0bc55c5b877e4f1c8b636e1 implicit_zero_extend_kw
 ```
 huh their code sure is qbe tho
 

@@ -431,16 +431,18 @@ fn load_number(e: *EmitRv, off: i64, to: Qbe.Ref) void = {
             e.inst(R(0b0100000, r, 0b00000, 0b110, r, .op));  // orn. r = 0 | ~r
         }
         @else => {
-            // TODO: prove this always works (it probably doesn't). 
-            //       the intuition is just it's easier to do when the bits are more to the right. 
-            shift := off.trailing_zeros();
-            if off.bit_not().trailing_zeros() > shift {
-                e.load_number(off.bit_not(), to);
-                e.inst(R(0b0100000, r, 0b00000, 0b110, r, .op));  // orn. r = 0 | ~r
-                return();
-            };
-            e.load_number(off.shift_right_arithmetic(shift), to);
-            e.emit(.shl, .Kl, to, to, e.f.getcon(shift));
+            // TODO: do this in a better way. maybe i should give up and just load from memory. 
+            //       tho computing it is cute because it means examples/emu can fold it back to the constant. 
+            n := 64-30;
+            load_number(e, off.shift_right_logical(n), to);
+            range(0, 4) { i |
+                off = off.bit_and(1.shift_left(n)-1);
+                bits := @if(i==3,1,11);
+                encode_shift(e, @ref make_ins(.shl, .Kl, to, to, e.f.getcon(bits)));
+                n -= bits;
+                val := off.shift_right_logical(n);
+                @if(val != 0) e.emit_add_off(to, to, val);  
+            };  
         };
     };
 }

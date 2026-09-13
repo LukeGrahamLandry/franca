@@ -116,6 +116,8 @@ int main() {
   ASSERT(8, sizeof(foo));
   ASSERT(8, sizeof(bar));
   ASSERT(8, sizeof(struct Bar));
+  
+  ASSERT(4, sizeof (struct { int a; }) { .a = 123 });  // precedence
 
   printf("OK\n");
   return 0;

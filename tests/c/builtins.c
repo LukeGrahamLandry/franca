@@ -5,11 +5,14 @@ int f(int a) { return a; }
 
 int main(void) {
     _Static_assert(1, "unreachable");
+    if (0) __builtin_unreachable();
     
     ASSERT(1, __builtin_constant_p(1 + 2 * 3 >> 4 / 5));
     ASSERT(0, __builtin_constant_p(f(1)));
     ASSERT(0, __builtin_constant_p((f(1), 123)));
     ASSERT(1, __builtin_constant_p((1, 123)));
+    ASSERT(1, __builtin_constant_p(0 < 0 ? 1 : 0));
+    ASSERT(1, __builtin_constant_p(""));
     
     ASSERT(1, __builtin_expect(1, 2));
     ASSERT(1, __builtin_ctz(2));

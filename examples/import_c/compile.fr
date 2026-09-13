@@ -3309,23 +3309,27 @@ generic_selection :: fn(c, rest, tok) #prefix(._Generic) = {
     
     // Now choose one of the branches to use based on that type. 
     ret: ?*Node = .None;
-    use_default := false; 
+    default_branch: ?*Qbe.Blk = .None;
     while => !consume(tok&, tok, ")") {
         tok = c.skip(tok, ",");
 
         if consume(tok&, tok, "default") {
             tok = c.skip(tok, ":");
-            node := c.speculate(tok&, tok, .Assign, false);
+            b := c.b;
+            c.b = c.new_block();
             if ret.is_none() {
+                node := c.parse_expr(tok&, tok, .Assign);
                 ret = (Some = node);
-                use_default = true;
+                default_branch = (Some = c.b);
+            } else {
+                _ := c.speculate(tok&, tok, .Assign, false);
             };
+            c.b = b;
         } else {
             t2 := c.typename(tok&, tok);
             tok = c.skip(tok, ":");
-            done := ret.is_some() && !use_default;
-            if is_compatible(t1, t2) && /* wrong */ !done {
-                if done {
+            if is_compatible(t1, t2) {
+                if ret.is_some() && default_branch.is_none() {
                     // :BrokenCGeneric
                     // TODO: this should be an error but cosmo wants to do `signed long` and `signed long long` in stdchdint.h
                     //       and i don't track those as seperate types currently. 
@@ -3333,44 +3337,54 @@ generic_selection :: fn(c, rest, tok) #prefix(._Generic) = {
                 };
                 node := c.parse_expr(tok&, tok, .Assign);
                 ret = (Some = node);
-                use_default = false;
+                default_branch = .None;
             } else {
                 _ := c.speculate(tok&, tok, .Assign, false);
             };
         };
     };
     node := ret || @error_tok(c, start, "controlling expression type not compatible with any generic association type");
-    if use_default {
-        // HACK: because default might not be the last case. 
-        // this relies on gen_expr recursing. better would be to 
-        // emit default into a different branch and discard the other one
-        c.gen_expr(node);
+    if default_branch { b |  // might not be the last case
+        c.jmp_if_unterminated(b);
+        c.b = b;
     };
     rest[] = tok;
     node
 };
 
-sizeof :: fn(c, rest, tok) #prefix(.sizeof) = {
+type_for_layout_query :: fn(c: *Ctx, rest: **Token, tok: *Token, $tag: Str) *CType = {
     start := tok;
+    expr := false;
     ty := c.paren_typename(rest, tok) || {
-        c.eat(tok&, "sizeof");
+        c.eat(tok&, tag);
+        expr = true;
         node := c.speculate(rest, tok, .Unary, false);
-        if(node.kind == .ND_MEMBER && node.member.is_bitfield, => @error_tok(c, tok, "sizeof(bitfield) is illegal"));
+        if(node.kind == .ND_MEMBER && node.member.is_bitfield, => @error_tok(c, start, "%(bitfield) is illegal", tag));
         node.ty
     };
-    if ty.kind != .TY_VLA && ty.size < 0 {
-        @error_tok(c, start, "sizeof(incomplete type)");
+    if !expr && equal(rest[], "{") {
+        // compound_literal, already know the type, just skip over the value. 
+        b, nblk := (c.b, c.f.nblk);   // TODO: really this should use speculate()
+        c.b = c.discard_block;
+        _ := c.lvar_initializer(rest, rest[], c.new_lvar(c.new_unique_name(), ty, rest[]));
+        c.b = b; c.f.nblk = nblk;
     };
+    if ty.kind != .TY_VLA && ty.size < 0 {
+        @error_tok(c, start, "%(incomplete type)", tag);
+    };
+    ty
+};
+
+sizeof :: fn(c, rest, tok) #prefix(.sizeof) = {
+    start := tok;
+    ty := type_for_layout_query(c, rest, tok, "sizeof");
     r := if(ty.kind == .TY_VLA, => c.compute_vla_size(ty), => c.getcon(ty.size.intcast()));
     c.ir_node(c.ty_ulong, r, QbeNull, start)
 };
 
 alignof :: fn(c, rest, tok) #prefix(._Alignof) = {
     start := tok;
-    ty := c.paren_typename(rest, tok) || {
-        c.eat(tok&, "_Alignof");
-        c.speculate(rest, tok, .Unary, false)[].ty
-    };
+    ty := type_for_layout_query(c, rest, tok, "_Alignof");
     c.new_ulong(ty.align.intcast(), start)
 };
 
@@ -3444,6 +3458,7 @@ funcall :: fn(c, rest, tok, f) #infix(.@"(", .PostFix) = {
 };
 
 square :: fn(c, rest, tok, node) #infix(.@"[", .PostFix) = {
+    var := node.var;
     // x[y] is short for *(x+y)
     start := tok;
     c.eat(tok&, "[");
@@ -3452,6 +3467,17 @@ square :: fn(c, rest, tok, node) #infix(.@"[", .PostFix) = {
     node := c.new_binary2(.ND_ADD, node, idx, start);
     c.gen_expr(node);
     node := c.new_deref(node, start);
+    
+    // this allows indexing string literals in constant expressions.
+    // TODO: maybe should be more general. like allow indexing a `const char foo[] = "abc";` and wide string literals and const arrays of other types. 
+    if !var.is_null() && var.is_const && var.ty.base.size == 1 && c.is_const_expr(idx) {
+        i := c.eval(idx);
+        n := var.ty.array_len.intcast();
+        if i.ult(n) && var.init_data.len == n {
+            node.r = c.f.getcon(var.init_data[i].zext());
+        };
+    };
+    
     set_rest_and_gen(c, rest, c.skip(tok, "]"), node)
 };
 dot :: fn(c, rest, tok, node) #infix(.@".", .PostFix) = {
@@ -3843,6 +3869,7 @@ BuiltinName :: @enum(u32) (
     cas, expect, constant_p, alloca, __clear_cache,
     va_start, va_arg, types_compatible_p, 
     va_end, va_copy,
+    unreachable,
     _,
 );
 
@@ -3895,6 +3922,7 @@ fn parse_builtin(c: *Ctx, name: Str, rest: **Token) ?*Node = {
             c.b = b;
             const := c.is_const_expr(args&[0]) && !blocks_in_range_have_side_effect(c.f, nblk, c.f.nblk);
             const := c.getcon(int(const));
+            c.f.nblk = nblk;
             return(Some = c.ir_node(c.ty_uint, const, QbeNull, tok));
         };
         fn alloca() => {
@@ -3956,6 +3984,13 @@ fn parse_builtin(c: *Ctx, name: Str, rest: **Token) ?*Node = {
             rest[] = c.skip(tok, ")");
             return(Some = c.new_num(is_compatible(t1, t2).int(), start));
         };
+        fn unreachable() => {
+            c.b.jmp.type = .hlt;
+            c.b = c.discard_block;
+            tok = c.skip(tok, "(");
+            rest[] = c.skip(tok, ")");
+            return(Some = c.nd_stmt);
+        }
         fn _() => unreachable();
     };
     

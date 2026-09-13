@@ -199,11 +199,6 @@ pass_though_syscall :: fn(cpu: *Cpu, pc: i64) void = {
         };  // fallthrough
     };
     
-    if n == 222 {  // mprotect
-        mem, prot := (u8.ptr_from_raw(a0).slice(int_from_rawptr(a1)), int_from_rawptr(a2));
-        @assert(!(prot.bit_and(Posix.PROT.EXEC) != 0), "TODO: support direct mmap(exec)");
-    };
-    
     if n == 134 {  // rt_sigaction
         // this needs incredibly convoluted translating of MContext structs to do properly. 
         // sadly don't want to just error because my compiler uses it for crash_report. 
@@ -212,7 +207,6 @@ pass_though_syscall :: fn(cpu: *Cpu, pc: i64) void = {
         return();
     };
     
-    // TODO: if it faults it should signal the futex too
     @if(n == 93) thread_end(cpu);
     if n == 220 {  // clone
         expect_thread_flags := FuncId.scope_of(import("@/lib/sys/linux.fr").sys_clone).clone_flags;  // :SNEAK
@@ -316,6 +310,13 @@ pass_though_syscall :: fn(cpu: *Cpu, pc: i64) void = {
     result, _ := Syscall'perform_syscall(args&, n);
     cpu.reg&[.A0] = result.rawptr_from_int();
     @if(n == 160 && result == 0) adjust_uname_machine(u8.ptr_from_raw(a0));
+    
+    if n == 222 && result > 0 {  // mmap
+        mem, prot := (u8.ptr_from_int(result).slice(int_from_rawptr(a1)), int_from_rawptr(a2));
+        if prot.bit_and(Posix.PROT.EXEC) != 0 {
+            emu.add_mapping(mem);
+        };
+    };
 }
 
 // bit wasteful that my *Thread doesn't let you choose the fid_futex so there needs to be a chain but not worth changing it just for this. 

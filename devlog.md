@@ -1,4 +1,15 @@
 
+## (Sep 13)
+
+- rv: slightly less sad load_number
+
+c
+- i was doing _Generic's default: in a sketchy way (using speculate() and emitting later) and never testing it. 
+- the initializer crash i was afraid was something insane was just that since i parsed the field order wrong a pointer had a junk value instead of null. 
+  which is still bad to be clear but not as concerning as if the backend was miscompling relocations somehow. 
+- allow sizeof compound literal expression
+- constant_p wasn't cleaning up its junk blocks so backend was confused by half invalid ir
+
 ## (Sep 12)
 
 be less wasteful with allocating QbeModule.segments. 

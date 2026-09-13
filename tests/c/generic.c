@@ -26,6 +26,9 @@ int main() {
   ASSERT(2, ({ enum foo { a = 0 }; _Generic(a, enum foo: 1, int: 2); }));
   ASSERT(1, ({ enum foo { a = 0 }; enum foo b = a; _Generic(b, enum foo: 1, int: 2); }));
   
-  printf("OK\n");
+  ASSERT(2, _Generic("", default: 1, char*: (printf("O"), 2)));
+  ASSERT(1, _Generic("", default: (printf("K"), 1), int: 2));
+  ASSERT(2, _Generic("", int: 1, default: (printf("\n"), 2)));
+  
   return 0;
 }
