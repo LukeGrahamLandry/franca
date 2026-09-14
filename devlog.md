@@ -1,4 +1,23 @@
 
+## (Sep 14) rv emu
+
+did a very hacky thing for the subset of tail calls i need (arm only for now). 
+- jit kaleidoscope: 6030ms -> 5575ms (-8%) which is about the same as qemu. 
+  gets rid of most of the samples that are just in run().
+- its super super crashy tho so im doing something wrong. 
+  i know im not following dependencies for flush_cache correctly but it shouldn't matter for this program. 
+  expecting_wx=false is 100ms slower but doesn't crash. 
+  so like by the symptoms i must be missing a clear_instruction_cache in the host. 
+  shame i haven't done tail on x86 yet cause that's an easy way to check that mistake.
+  wrapping an extra clear around lookup_trace's slow path seems to fix it. 
+  oh its the relocations because im not using got_indirection_instead_of_patches but that unfortunately also makes it 50ms slower 
+  and doesn't work with no_data_segment because there's like a billion tiny traces so 1 page of got isn't enough. 
+  know any forward direct jumps will be emitted at the same time tho so not as hard to deal with as the comptime jit. 
+  this is a bug regardless of the tail calls, shows up more because can use direct for bcmp without it being unusably slow?
+- is_wrongly_illegal_instruction only helps when the previous memory was 0,
+  not when its a valid brk because that's sigtrap instead of sigill. 
+  questionable choice to add that to the signal handler. 
+
 ## (Sep 13)
 
 - rv: slightly less sad load_number

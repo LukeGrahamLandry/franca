@@ -10,6 +10,9 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
+- unsafe_tail_call emit for amd/rv/wasm
+- make unsafe_tail_call good enough to use for hctarcs
+- test that uses import_c/assemble.fr with call.link=false and emits arm macho aot because i was doing that wrong
 - can't examples/web/build.fr in examples/os without -share because of graphics/web/webgpu_api.fr
 - running host/web inside host/vzf crashes at the end in cleanup_thread_group
 - with all the different emulators that can run most of the tests but i don't run them because its too slow to redo everything over and over:

@@ -13,7 +13,7 @@ Emulator :: @rec @struct {
     jit_lock: Mutex;
     disassemble: bool;
     debug_base_address := 0;
-    syscall_handler: @FnPtr(cpu: *Cpu, pc: i64) void;
+    syscall_handler: @FnPtr(cpu: *Cpu, pc: i64) i64;
     log: LogArgs;
     initial_elf: []u8 = empty();  // for find_emulated_symbol
     joinable_threads := 0;
@@ -77,7 +77,7 @@ fn init(emu: *Emulator, gpa: Alloc, log: LogArgs) void = {
         trace_map = init(gpa),
         jit_lock = zeroed(Mutex),
         disassemble = log.dis,
-        syscall_handler = pass_though_syscall,
+        syscall_handler = wrap_forward_pc(pass_though_syscall),
         log = log,
         gpa = gpa,
         mappings = init(10, gpa),
@@ -140,6 +140,7 @@ fn lookup_trace(emu: *Emulator, pc: i64) *Trace = {
         mark := temp().mark();
         it := emu.find_mapping(pc);  // TODO: fucked if follows direct to other mappings
         code_start := it.m.start_of_writable_code;
+        start := it.m.segments&[.Code].next;
         first_trace := emu.traces&.len();
         i := compile_trace(emu, pc.rawptr_from_int());
         wait_for_make_exec(it.worker, code_start);
@@ -148,6 +149,14 @@ fn lookup_trace(emu: *Emulator, pc: i64) *Trace = {
             jit_addr, _ := i.mapping.m&.get_addr(i.symbol).unwrap();
             i.callee = bit_cast_unchecked(rawptr, FieldType(Trace, .callee), jit_addr);
         };
+        // this is instead of got_indirection_instead_of_patches. 
+        // TODO: wrong if threaded and wrong if multiple JitMappings. 
+        //       the later is broken anyway in compile_riscv/mangle() so can fix them together. 
+        if it.m.goal.expecting_wx {
+            @debug_assert(!it.worker.threaded, "TODO: threaded jit");
+            clear_instruction_cache(u8.raw_from_ptr(start), u8.raw_from_ptr(it.m.segments&[.Code].next));
+        };
+        
         temp().reset(mark);
         i
     };
@@ -175,6 +184,8 @@ wait_for_make_exec :: fn(worker: *Qbe.CodegenShared, code_start: *u8) void = {
     };
     i32.atomic_add(ring.waiting&, -1);
 };
+
+wrap_forward_pc :: fn($fid: @Fn(*Cpu, i64) void) = fn(cpu: *Cpu, pc: i64) i64 = { fid(cpu, pc); pc };  // for tail
 
 pass_though_syscall :: fn(cpu: *Cpu, pc: i64) void = {
     emu := cpu.emu;

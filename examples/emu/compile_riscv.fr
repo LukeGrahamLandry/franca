@@ -116,19 +116,19 @@ Qbe'enter_task(mapping.worker) { codegen_entry |
         }
         fn Syscall() => {
             // after storing registers
+            next_pc := self.f.newtmp("next_pc", .Kl);
             syscall_handler := self.f.getcon(bit_cast_unchecked(@type self.emu.syscall_handler, i64, self.emu.syscall_handler));
             push(b, .arg, .Kl, Qbe.Null, self.cpu_addr, Qbe.Null);                
             push(b, .arg, .Kl, Qbe.Null, continuation, Qbe.Null); // for clone()
-            push(b, .call, .Kw, Qbe.Null, syscall_handler, Qbe.Null);
-            self.b.jmp = (type = .retl, arg = continuation);
+            push(b, .call, .Kl, next_pc, syscall_handler, Qbe.Null);
+            self.b.jmp = (type = .retl, arg = next_pc);
+            self.b.unsafe_tail_call = true;
         }
         // TODO: this also means you need to keep track of dependencies so flush_icache can go backwards and recompile everything
         // TODO: this is going to be a problem because i don't have tail calls. works out for now because i do it for so few jumps. 
         fn Direct() => {
             new_pc := self.pc_symbol(self.direct_jump_targets&[0].unwrap());
             if self.bcmp_condition { cond |
-                // THIS IS DISABLED RN
-                unreachable();
                 choice := self.f.newtmp("cmp_pc", .Kl);
                 new_pc2 := self.pc_symbol(self.direct_jump_targets&[1].unwrap());
                 other_pc_off := self.direct_jump_targets&[0].unwrap();
@@ -141,6 +141,7 @@ Qbe'enter_task(mapping.worker) { codegen_entry |
             push(b, .arg, .Kl, Qbe.Null, continuation, Qbe.Null);
             push(b, .call, .Kl, next_pc, new_pc, Qbe.Null);
             self.b.jmp = (type = .retl, arg = next_pc);
+            self.b.unsafe_tail_call = true;
         }
         fn Indirect() => {
             self.b.jmp = (type = .retl, arg = continuation);
@@ -510,7 +511,9 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
             self.direct_jump_targets = ((Some = pc_offset + imm), (Some = pc_offset + 4));
             self.bcmp_condition = (Some = cond);
             // TODO: i think this would help if i had tail calls but right now it makes it worse
-            // self.terminator = .Direct;
+            if self.f.globals.goal.arch == .aarch64 { // supports unsafe_tail_call
+                self.terminator = .Direct;
+            };
             return new_pc;
         }
         fn jal() => {
