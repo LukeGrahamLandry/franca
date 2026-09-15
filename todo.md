@@ -18,7 +18,6 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 - running host/web inside host/vzf crashes at the end in cleanup_thread_group
 - with all the different emulators that can run most of the tests but i don't run them because its too slow to redo everything over and over:
   choose a few randomly to run so over time i get good coverage? random is bad tho. 
-- os/user/libc uname should probably use the normal arch strings (riscv64 instead of rv64)
 - i think it's rude that seal_debug_info shits random `__franca_` strings in your binary. 
   - also `__franca_builtin_static_memmove`, `__franca_base_address`, `__franca_wasm_import_names`
   - less bad but still: franca_runtime_init, franca_runtime_init_thread, "franca_sapp", "note: run with `FRANCA_BACKTRACE=1` ..."

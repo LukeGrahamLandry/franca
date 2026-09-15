@@ -219,13 +219,14 @@ pass_though_syscall :: fn(cpu: *Cpu, pc: i64) void = {
         expect_fork_flags := FuncId.scope_of(Syscall.fork).SIGCHLD;  // :SNEAK
         flags, sp, parent_tid, tls, tid_futex := (a0.int_from_rawptr(), a1, a2, a3, u32.ptr_from_raw(a4));
         if flags == expect_fork_flags {
+            @assert(sp.is_null() && tid_futex.is_null() && parent_tid.is_null() && tls.is_null(), "TODO: sp,tid_futex,parent_tid,tls");
+        
             // TODO: need to fake this somehow if i want it to work in wasm
             pid := Syscall'fork();
             cpu.reg&[.A0] = pid.intcast().rawptr_from_int();
             if pid == 0 {
                 // you don't take your threads with you
-                // TODO: assert this
-                //@assert(!cpu.emu.worker.threaded, "TODO: deal with fork when there's a worker thread");
+                @assert(!cpu.emu.lookup_trace(pc)[].mapping.worker.threaded, "TODO: deal with fork when there's a worker thread");
                 // TODO: clear out all the other emu.threads?
             };
             return();
@@ -265,7 +266,6 @@ pass_though_syscall :: fn(cpu: *Cpu, pc: i64) void = {
     };
     
     // TODO: treat mprotect(exec) as riscv_flush_icache?
-    //       and the inverse, discard compiled traces if you unmap the memory. 
     
     // TODO: this is wrong because ip will be in the middle of a function so it wont be in the elf
     //       need to find start. will need that info when i do flush_icache properly so just going to wait. 
@@ -286,7 +286,7 @@ pass_though_syscall :: fn(cpu: *Cpu, pc: i64) void = {
         };
     };
     
-    @if(query_current_os() != .linux || !@is(query_current_arch(), .aarch64, .rv64)) @panic("TODO: translate syscall");
+    @if(query_current_os() != .linux || tls(.deny_syscalls)[]) @panic("TODO: translate syscall");
     regs := @const_slice(RvReg.A0, .A1, .A2, .A3, .A4, .A5);
     args := @uninitialized Array(i64, 6);
     range(0, args&.len()) { i |
@@ -294,14 +294,13 @@ pass_though_syscall :: fn(cpu: *Cpu, pc: i64) void = {
     };
     // the idea is to let you do whatever you want but for now while i dont trust it should filter so not just doing random syscalls if i miscompile
     @if(emu.log.strace) @eprintln("[%] syscall(%, %)", tls(.thread_index)[], n, args&.items());
-    safe := @const_slice(
+    allow := @const_slice(
         222, 226, 64, 94, 215, 113, 101, 93,
         56, 61, 57, 98, 79, 62, 67, 276, 78, 63, 59, 24, 73, 35, 
         172, 260,  // getpid,wait4 are fine because clone(fork) returns the real pid. 
-        // TODO: 178=gettid i need to be more careful about what clone(thread) returns
+        178,       // ditto gettid
         160, // uname
     );
-    @if(!safe.contains(n)) @panic("TODO: allow more syscalls %", n);
     
     if n == 56 && query_current_arch() == .aarch64 {  // openat 
         #use(Syscall.Linux);
@@ -311,6 +310,17 @@ pass_though_syscall :: fn(cpu: *Cpu, pc: i64) void = {
         x := x.bit_or(@if(a, O_arm.DIRECTORY, 0));
         x := x.bit_or(@if(b, O_arm.NOFOLLOW, 0));
         args&[2] = x;
+    };
+    
+    if query_current_arch() == .x86_64 {
+        n = remap_syscall_number_rv_to_amd(n);
+    } else {
+        @if(!allow.contains(n)) @panic("TODO: allow more syscalls %", n);
+    };
+    
+    if n == 222 || n == 226 {
+        // mmap/mprotect the native memory being executable is pointless
+        cpu.reg&[.A2] = cpu.reg&[.A2].int_from_rawptr().bit_and(Posix.PROT.EXEC.bit_not()).rawptr_from_int();
     };
     
     result, _ := Syscall'perform_syscall(args&, n);
@@ -325,9 +335,19 @@ pass_though_syscall :: fn(cpu: *Cpu, pc: i64) void = {
     };
 }
 
+remap_syscall_number_rv_to_amd :: fn(n: i64) i64 = {
+    known := @const_slice(
+        (222, 9), (215, 11), (226, 10), (94, 231), (101, 35), (63, 0), (64, 1), (98, 202), (113, 228), (93, 60),
+        // don't forget fstatat layout when adding more
+    );
+    for known { rv, amd |
+        @if(n == rv) return(amd);
+    };
+    @panic("TODO: remap more rv->amd syscall numbers (%). for now this is just enough to run examples/os/host/user.fr", n);
+}
+
 // bit wasteful that my *Thread doesn't let you choose the fid_futex so there needs to be a chain but not worth changing it just for this. 
 // TODO: is there a syscall for getting the tid futex? 
-// TODO: tid matching the real one means you can use /proc which is cool
 thread_spawn :: fn(emu: *Emulator, cpu: *Cpu, sp: rawptr, tid_futex: *u32, pc: i64) void = {
     // gc native stacks of old threads. TODO: reuse the slots
     i := emu.threads&.len();
@@ -351,9 +371,14 @@ thread_spawn :: fn(emu: *Emulator, cpu: *Cpu, sp: rawptr, tid_futex: *u32, pc: i
     child.reg&[.SP] = sp;
     child.thread = (Some = (tid_futex = tid_futex, entry_address = pc));
     
+    @assert(!prefer_pthread() || tid_futex[] == MAX_u32, "i always call it this way (but todo: shouldn't rely on it)");
     t := start_thread_data(Cpu, child, thread_begin);
-    //tid: u32 = t.tid.bitcast();  // TODO: this only works if !prefer_pthread
-    tid: u32 = t.first_environment.thread_index.trunc();  // TODO: this means gettid will be wrong
+    tid: u32 = t.tid.bitcast(); 
+    if prefer_pthread() {
+        Futex'wait_while(tid_futex, fn(tmp) => tmp == MAX_u32);
+        tid = tid_futex[];
+    };
+    
     child.thread.Some.sys = (Some = t);
     tid_futex[] = tid;
     cpu.reg&[.A0] = rawptr_from_int(tid.zext());
@@ -361,6 +386,9 @@ thread_spawn :: fn(emu: *Emulator, cpu: *Cpu, sp: rawptr, tid_futex: *u32, pc: i
 
 thread_begin :: fn(cpu: *Cpu) void = {
     thread := cpu.thread&.unwrap();
+    thread.tid_futex[] = Syscall'gettid().bitcast();   // must be set before child starts running
+    Futex'wake(thread.tid_futex, MAX_i32);  // hack to make it work when prefer_pthread
+    
     run(cpu.emu, cpu, thread.entry_address);
     thread_end(cpu);
 };

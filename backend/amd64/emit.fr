@@ -200,9 +200,36 @@ fn emit_the_code(e: *AmdState) void = {
     local_labels := temp().alloc_zeroed(i64, e.f.nblk.zext());
     for_blocks_rpo_forward f { b | 
         local_labels[b.id.zext()] = e.next_inst_offset();
-        for_insts_forward b { i |
+        ins := b.ins.items();
+        if b.unsafe_tail_call {
+            @assert(ins.len > 0 && ins[ins.len - 1]&.op() == .call, "unsafe_tail_call");
+            ins.len -= 1;
+        };
+        each ins { i |
             emitins(i[], e);
         };
+        
+        if b.unsafe_tail_call {
+            i := b.ins[b.ins.len - 1];
+            if rtype(i.arg&[0]) == .RTmp && 1.shift_left(i.arg&[0].val()).bit_and(to_save) != 0 {
+                r := TMP(Amd64Reg.R10);  // not an argument and caller saved so can't be live here. 
+                emitins(make_ins(.copy, .Kl, r, i.arg&[0], Qbe.Null), e);
+                i.arg&[0] = r;
+            };
+            i.arg&[1] = INT(0);
+            emit_jmp(e, b, local_labels, to_save);
+            emitins(i, e);
+        } else {
+            emit_jmp(e, b, local_labels, to_save);
+        };
+    };
+    each e.patches { p |
+        e.apply_patch(local_labels, p);
+    };
+};
+
+emit_jmp :: fn(e: *AmdState, b: *Qbe.Blk, local_labels: []i64, to_save: u64) void = {
+    f := e.f;
         @match(b.jmp.type) { 
             fn hlt() => e.a&.push(@as(u8) PrimaryOp.Int3);
             fn ret0() => {
@@ -222,7 +249,9 @@ fn emit_the_code(e: *AmdState) void = {
                     };
                     @default => unreachable();
                 };
-                e.a&.push(@as(u8) PrimaryOp.Ret);
+                if !b.unsafe_tail_call {
+                    e.a&.push(@as(u8) PrimaryOp.Ret);
+                };
             }
             fn switch() => unreachable();
             fn jmp() => if b.s1.id != b.id + 1 {
@@ -243,11 +272,6 @@ fn emit_the_code(e: *AmdState) void = {
                 };
             };
         };
-    };
-    
-    each e.patches { p |
-        e.apply_patch(local_labels, p);
-    };
 }
 
 // cond: -1 == Always
@@ -544,13 +568,17 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             assemble(e, i&);
         }
         fn call() => {
+            set_link := rtype(i.arg&[1]) == .RCall;
             @match(rtype(i.arg&[0])) {
                 fn RCon() => {
                     c := e.f.get_constant(i.arg&[0]);
                     @debug_assert(c.type() == .CAddr && c.bits() == 0, "isel");
-                    call_symbol(e, c.sym);
+                    call_symbol(e, c.sym, set_link);
                 }
-                fn RTmp() => encode_call_reg(e.a&, ModrmMode.Direct, int_reg_d(i.arg&[0]));  
+                fn RTmp() => {
+                    code, mode, f_ptr := (e.a&, ModrmMode.Direct, int_reg_d(i.arg&[0]));
+                    encode_extended_op(code, mode, 0xff, @if(set_link, 0b0010, 0b0100), f_ptr);
+                }
                 // TODO: we could allow memory argument? 
                 @default => panic("invalid call argument");
             }
@@ -693,7 +721,7 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
     }; // early returns
 }
 
-fn call_symbol(e: *AmdState, sym: Qbe.Sym) void #once = {
+fn call_symbol(e: *AmdState, sym: Qbe.Sym, set_link: bool) void #once = {
     use_symbol(e.m, sym) { symbol |
         kind := symbol.kind;
         
@@ -706,7 +734,7 @@ fn call_symbol(e: *AmdState, sym: Qbe.Sym) void #once = {
                 when_debug(e.f, .Patch) { out |
                     @fmt(out, "# call offset % for '%' %[%]\n", off, symbol.name, symbol.segment, symbol.offset);
                 };
-                encode_direct_call(e.a&, off.trunc(), true);
+                encode_direct_call(e.a&, off.trunc(), set_link);
                 // TODO: on arm we do a patch if goal==Relocatable, should be same here? or remove there? 
             }
             @default => {
@@ -722,7 +750,7 @@ fn call_symbol(e: *AmdState, sym: Qbe.Sym) void #once = {
                     };
                     encoded_size :: 6;
                     off += e.m.distance_between(.Code, current_offset + encoded_size, e.m.got_segment(), symbol.got_lookup_offset);
-                    encode_indirect_call(e.a&, off.trunc(), true);
+                    encode_indirect_call(e.a&, off.trunc(), set_link);
                 } else {
                     // Otherwise this will get patched to a local or __stub call later. 
                     patch_at := e.next_no_write().offset(1);
@@ -731,7 +759,7 @@ fn call_symbol(e: *AmdState, sym: Qbe.Sym) void #once = {
                         type = (RipDisp32 = (increment = 0, call = true)),
                     );
                     push_fixup(e.m, symbol, fix);
-                    encode_direct_call(e.a&, 0, true);
+                    encode_direct_call(e.a&, 0, set_link);
                 };
             };
         };

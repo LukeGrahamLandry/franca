@@ -25,6 +25,8 @@
   or "word" means 8 bytes but that seems unlikely. `orb getconf -a` says 64 bytes too so someones lying i guess. 
   `franca examples/os/build.fr -vzf -append "examples/toy/arm_cache_line.fr;exit;"` also says 64.
   clearly being too small doesn't matter.
+- translate a few syscall numbers to amd to run os/host/user. doesn't need any of the hard ones (cough fstat cough)
+- amd/emit support unsafe_tail_call. jit kaleidoscope in os/host/user (in rosetta): 16500ms -> 13430ms (-18%)
 
 ## (Sep 14) rv emu
 
