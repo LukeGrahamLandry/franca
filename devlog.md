@@ -1,4 +1,31 @@
 
+## (Sep 15) rv emu
+
+- compiling the emu with -unsafe: 5570ms -> 4820ms is solidly better than qemu's 5320ms. 
+- syscall can also tail to the next trace instead of just to syscall_handler
+- jump_cache can definitely tear if two threads are executing the same trace and jump to different places
+  but i can't make it happen even in a contrived program (that spawns a bunch of threads that cycle through a jump table). 
+  - if i split it up and flush dcache in between i can make it break. 
+    ```
+    // old_trace.jump_cache&[0] = (pc, trace);  // old
+    old_trace.jump_cache&[0]._0 = pc;
+    clear_instruction_cache(old_trace.jump_cache&.items().interpret_as_bytes());
+    old_trace.jump_cache&[0]._1 = trace;
+    ```
+  - i hope so much that this is what broken when Trace wasn't 16 byte aligned (made it cross cache lines enough to tear). 
+    i assume cache line size is a multiple of 16. the jump_cache field is 16 bytes into Trace so 
+    if the base of the BucketArray is 16 byte aligned, jump_cache can only cross cachelines if size_of(Trace)%16!=0. 
+    im compiling with libc which means gpa is malloc which always gives 16 byte aligned. 
+    that's almost too good to be true. 
+    i moved the key pc to the Trace struct and now there's no size of it that makes it die. 
+- now that im looking at aarch64_clear_instruction_cache, i did it wrong. 
+  my indices were off by one but also the value is log2 so i was stepping in much too small parts. 
+  https://arm.jonpalmisc.com/latest_sysreg/AArch64-ctr_el0
+  but now what im getting is 64 bytes which disagrees with running `sysctl -a`, maybe orb just doesn't know? 
+  or "word" means 8 bytes but that seems unlikely. `orb getconf -a` says 64 bytes too so someones lying i guess. 
+  `franca examples/os/build.fr -vzf -append "examples/toy/arm_cache_line.fr;exit;"` also says 64.
+  clearly being too small doesn't matter.
+
 ## (Sep 14) rv emu
 
 did a very hacky thing for the subset of tail calls i need (arm only for now). 
@@ -17,6 +44,9 @@ did a very hacky thing for the subset of tail calls i need (arm only for now).
 - is_wrongly_illegal_instruction only helps when the previous memory was 0,
   not when its a valid brk because that's sigtrap instead of sigill. 
   questionable choice to add that to the signal handler. 
+
+rv
+- only forward jal replaces 9670/11971 of the `jalr ra` in the compiler. ->bytes of code: 1258372
 
 ## (Sep 13)
 

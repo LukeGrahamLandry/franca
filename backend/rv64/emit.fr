@@ -106,7 +106,7 @@ emit_the_code :: fn(e: *EmitRv) void = {
                 src := e.next_inst_offset();
                 bid := b.s2.id;
                 dest := local_labels[bid.intcast()];
-                far := dest == 0 || src - dest >= 1.shift_left(12);
+                far := dest == 0 || !fits_sign_ext(dest - src, 12);
                 if far {
                     cond := @if(!swap, Qbe.Cmp.Cine, .Cieq);
                     e.inst(cond_jmp(8, cond, b.jmp.arg));
@@ -247,8 +247,27 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
             @match(rtype(i.arg&[0])) {
                 fn RCon() => {
                     c := f.get_constant(a0);
-                    // TODO: use jal instead of wasting an extra instruction
+                    
+                    // TODO: do this with patches for forward references too like arm instead of wasting extra instructions
                     //       (don't forget to fix jit_via_dlopen too)
+                    done := false;
+                    use_symbol(e.m, c.sym) { symbol |
+                        patch_addr := e.m.segment_address(.Code, e.m.current_offset(.Code));
+                        patch: Fixup = (patch_at = (addr = patch_addr), type = (Call = (link = true)));
+                        kind := @if(e.m.goal.jit_via_dlopen, SymbolKind.Pending, symbol.kind);
+                        if kind == .Local {
+                            distance := e.m.distance_between(.Code, e.m.current_offset(.Code), symbol.segment, symbol.offset);
+                            if fits_sign_ext(distance, 20) {
+                                e.inst(jal(s_trunc(distance, 21), .RA));
+                                if e.m.goal.type == .Relocatable {
+                                    push_fixup(e.m, symbol, patch);
+                                };
+                                done = true;
+                            }
+                        };
+                    };
+                    @if(done) return();
+                    
                     // RA is stomped by the call instruction anyway so it's fine to use it as scratch. 
                     e.emit(.copy, .Kl, TMP(RvReg.RA), a0, Qbe.Null);
                     e.inst(jalr(.RA, 0, .RA));

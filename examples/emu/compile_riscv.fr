@@ -22,15 +22,14 @@ Compile :: @struct {
     out: List(u8);  // disassemble
     terminator := Terminator.Indirect;
     direct_jump_targets: Array(?i64, 2) = (.None, .None);
-    // TODO: either get rid of this or implement tail calls so i can do real threaded code. 
-    //       just the subset i need here where the signetures are the same and no args on the stack would be fairly easy. 
     bcmp_condition: ?Qbe.Ref = .None;  
     mapping: *JitMapping;
 };
+Terminator :: @enum(u8) (Direct, Indirect, Syscall, Halt);
 
 // when the jump target is constant, follow it and compile a new trace eagerly. 
-// that packs more traces into one make_exec call so less space in the page is wasted. 
-// TODO: this will help even more when my backend/rv64/emit.fr uses direct calls instead of always jalr
+// that packs more traces into one make_exec call so less space in the page is wasted (if !expecting_wx). 
+// also allows direct jumps to be fixed tail calls without going through lookup again. 
 // TODO: will have to use CodegenWorker when want to support macos because of MAP_JIT. 
 // TODO: lazy is a bit nicer because it means you don't compile traces that aren't actually run. 
 //       so maybe have this also look at how close m.segments[code] is to the page boundry and stop early. 
@@ -72,6 +71,7 @@ fn compile_trace(emu: *Emulator, entry: rawptr) *Trace = {
 // register values are read at first use and changed ones sare written at the end of the trace. 
 fn compile_one_trace(emu: *Emulator, entry: rawptr) Ty(*Trace, Array(?i64, 2)) = {
     result := zeroed(Ty(*Trace, Array(?i64, 2)));
+    @debug_assert(entry.int_from_rawptr() > 0, "mmap is never going to return something with the high bit set so i reserve them for trace.pc that shouldn't match anything");
     mapping := emu.find_mapping(entry.int_from_rawptr());
 Qbe'enter_task(mapping.worker) { codegen_entry | 
     m := mapping.m&;
@@ -116,16 +116,23 @@ Qbe'enter_task(mapping.worker) { codegen_entry |
         }
         fn Syscall() => {
             // after storing registers
-            next_pc := self.f.newtmp("next_pc", .Kl);
             syscall_handler := self.f.getcon(bit_cast_unchecked(@type self.emu.syscall_handler, i64, self.emu.syscall_handler));
             push(b, .arg, .Kl, Qbe.Null, self.cpu_addr, Qbe.Null);                
             push(b, .arg, .Kl, Qbe.Null, continuation, Qbe.Null); // for clone()
-            push(b, .call, .Kl, next_pc, syscall_handler, Qbe.Null);
+            push(b, .call, .Kw, Qbe.Null, syscall_handler, Qbe.Null);
+            
+            // now .Direct to where the syscall returns to. 
+            // can't continue emitting into the same trace because clone returns twice. 
+            new_pc := self.pc_symbol(self.direct_jump_targets&[0].unwrap());
+            next_pc := self.f.newtmp("next_pc", .Kl);
+            push(b, .arg, .Kl, Qbe.Null, self.cpu_addr, Qbe.Null);                
+            push(b, .arg, .Kl, Qbe.Null, continuation, Qbe.Null);
+            push(b, .call, .Kl, next_pc, new_pc, Qbe.Null);
             self.b.jmp = (type = .retl, arg = next_pc);
             self.b.unsafe_tail_call = true;
         }
         // TODO: this also means you need to keep track of dependencies so flush_icache can go backwards and recompile everything
-        // TODO: this is going to be a problem because i don't have tail calls. works out for now because i do it for so few jumps. 
+        //       add a test for that to rv_icache.fr
         fn Direct() => {
             new_pc := self.pc_symbol(self.direct_jump_targets&[0].unwrap());
             if self.bcmp_condition { cond |
@@ -151,12 +158,13 @@ Qbe'enter_task(mapping.worker) { codegen_entry |
     f.lnk.id = self.mangle(int_from_rawptr(entry));
     f.lnk.no_inline = true;
     codegen_entry.task = (Func = f);
+    junk_trace :: @static { t := zeroed(Trace); t.pc = -2; t };
     trace := emu.traces&.push(
-        callee = zeroed(FieldType(Trace, .callee)),  // compiling on the other thread, need to wait for it
+        callee = zeroed(FieldType(Trace, .callee)),  // patched in lookup_trace
         symbol = f.lnk.id,
-        terminator = self.terminator,
-        jump_cache = ((0, zeroed(*Trace)), (0, zeroed(*Trace))),
+        jump_cache = (junk_trace, junk_trace),
         mapping = self.mapping,
+        pc = u32.int_from_ptr(self.entry),
     );
     result = (trace, self.direct_jump_targets);    
     emu.trace_lookup&.insert(entry.int_from_rawptr(), trace);
@@ -510,7 +518,6 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
             
             self.direct_jump_targets = ((Some = pc_offset + imm), (Some = pc_offset + 4));
             self.bcmp_condition = (Some = cond);
-            // TODO: i think this would help if i had tail calls but right now it makes it worse
             if self.f.globals.goal.arch == .aarch64 { // supports unsafe_tail_call
                 self.terminator = .Direct;
             };
@@ -529,8 +536,8 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
             self.direct_jump_targets&[0] = (Some = pc_offset + imm);
             if rd != .Zero {
                 self.direct_jump_targets&[1] = (Some = pc_offset + 4);
-            } else {
-                // TODO: when i stop always using jalr in the backend, profile again if it helps to always do this. 
+            };
+            if rd == .Zero || self.f.globals.goal.arch == .aarch64 { // supports unsafe_tail_call
                 self.terminator = .Direct;
             };
             return self.inc(self.pc, pc_offset + imm);
@@ -544,6 +551,7 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
                 return new_pc;
             };
             @case(ebreak) => {
+                @dis(self, "ebreak");
                 self.terminator = .Halt;
                 return Qbe.ConZero;
             };
@@ -567,6 +575,7 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
         fn misc_mem() => {
             fence := @bits(0b0000, 0b11111111, 0b00000, 0b000, 0b00000, 0b0001111);
             @if(op != fence) @panic("TODO: misc_mem %", fmt_hex(op));
+            @dis(self, "fence");
             callee := self.f.getcon(int_from_rawptr(import("@/lib/sys/sync/atomics.fr").fence_impl));
             push(b, .call, .Kw, Qbe.Null, callee, Qbe.Null);
         }

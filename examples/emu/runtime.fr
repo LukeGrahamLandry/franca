@@ -13,7 +13,7 @@ Emulator :: @rec @struct {
     jit_lock: Mutex;
     disassemble: bool;
     debug_base_address := 0;
-    syscall_handler: @FnPtr(cpu: *Cpu, pc: i64) i64;
+    syscall_handler: @FnPtr(cpu: *Cpu, pc: i64) void;
     log: LogArgs;
     initial_elf: []u8 = empty();  // for find_emulated_symbol
     joinable_threads := 0;
@@ -48,23 +48,21 @@ Cpu :: @struct {
     emu: *Emulator;
 };
 
-Terminator :: @enum(u8) (Direct, Indirect, Syscall, Halt);
 Trace :: @rec @struct {
     callee: @FnPtr(it: *Cpu, pc: i64) i64;
     symbol: Qbe.Sym;
-    terminator: Terminator;
-    jump_cache: Array(Ty(i64, *Trace), 2);
+    
+    // TODO: only 7741/64952, 12%, are indirect (jit kaleidoscope) so its tempting to put this in data 
+    //       and have the end of the trace call lookup_pc(*Emulator, i64, *JumpCache). 
+    // jump_cache is concurrently so the key being on the *Trace avoids tearing.
+    jump_cache: Array(*Trace, 2);
+    pc: i64;   
     
     mapping: *JitMapping;
-    FUCKEDFUCKEDFUCKEDFUCKED := 0;
-    
-    // TODO: it shits itself if this struct is 8 bytes smaller or 8 bytes bigger. compiler bug? allocator bug? alignment something somehow? 
-    ////     it would seem that it dies when this struct's size is not a multiple of 16 bytes
 };
 
 JitMapping :: @struct {
     mem: []u8;
-    module_valid: bool;
     m: Qbe.Module;
     worker: *Qbe.CodegenShared;
 };
@@ -77,7 +75,7 @@ fn init(emu: *Emulator, gpa: Alloc, log: LogArgs) void = {
         trace_map = init(gpa),
         jit_lock = zeroed(Mutex),
         disassemble = log.dis,
-        syscall_handler = wrap_forward_pc(pass_though_syscall),
+        syscall_handler = pass_though_syscall,
         log = log,
         gpa = gpa,
         mappings = init(10, gpa),
@@ -93,7 +91,6 @@ fn init_jit(emu: *Emulator, it: *JitMapping) void = {
     ));
     m.set_debug_types(emu.log.d, true);
     it.worker = init_codegen_worker(m, false);
-    it.module_valid = true;
 }
 
 // TODO: do less locking. its fine for multiple threads to be reading at the same time, just not compiling (which writes). 
@@ -107,19 +104,19 @@ fn run(emu: *Emulator, cpu: *Cpu, pc: i64) void = {
             @assert(cpu.thread.is_none(), "non-main thread run() returned to ip=-1");
             return();
         };
-        predicted_pc, predicted_trace_i := trace.jump_cache&[0];
-        if pc != predicted_pc {
-            predicted_pc, predicted_trace_i := trace.jump_cache&[1];
-            if pc != predicted_pc {
+        predict := trace.jump_cache&[0];
+        if pc != predict.pc {
+            predict := trace.jump_cache&[1];
+            if pc != predict.pc {
                 old_trace := trace;
                 trace = emu.lookup_trace(pc);
                 old_trace.jump_cache&[1] = old_trace.jump_cache&[0];
-                old_trace.jump_cache&[0] = (pc, trace);
+                old_trace.jump_cache&[0] = trace;
             } else {
-                trace = predicted_trace_i;
+                trace = predict;
             };
         } else {
-            trace = predicted_trace_i;
+            trace = predict;
         };
     };
 }
@@ -184,8 +181,6 @@ wait_for_make_exec :: fn(worker: *Qbe.CodegenShared, code_start: *u8) void = {
     };
     i32.atomic_add(ring.waiting&, -1);
 };
-
-wrap_forward_pc :: fn($fid: @Fn(*Cpu, i64) void) = fn(cpu: *Cpu, pc: i64) i64 = { fid(cpu, pc); pc };  // for tail
 
 pass_though_syscall :: fn(cpu: *Cpu, pc: i64) void = {
     emu := cpu.emu;
@@ -440,12 +435,7 @@ fn clear_instruction_cache(emu: *Emulator, mem: []u8) void = {
         iter_overlap(emu.trace_map&, mem, true) { code, trace |
             emu.trace_lookup&.remove(u8.int_from_ptr(code.ptr));
             // sad to leak these forever but they can still be in other's jump_cache slots. 
-            // TODO: make a test that hits this situation
-            trace.callee = recompile_flushed_trace;  
-            recompile_flushed_trace :: fn(cpu: *Cpu, pc: i64) i64 = {
-                t := cpu.emu.lookup_trace(pc);
-                t'callee(cpu, pc)
-            };
+            trace.pc = -2;
         };
     };
 }

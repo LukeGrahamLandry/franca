@@ -126,15 +126,18 @@ aarch64_clear_instruction_cache_f :: AsmFunction(fn(beg: rawptr, end: rawptr) vo
 
 aarch64_clear_instruction_cache :: { 
     #use("@/backend/arm64/bits.fr"); 
-    start :: x0; end :: x1; p :: x2; step :: x3; info :: x4;
+    start :: x0; end :: x1; p :: x2; step :: x3; info :: x4; word_size :: x5;
 @const_slice(
+    movz(.X64, word_size, 4, .Left0),
+
     // get size of a cache line (can be different for data and instructions)
     mrs(info, .CTR_EL0),
-    // DminLine = info[19..=16]; IminLine = info[3..=0]
+    // DminLine = info[19..=16]; IminLine = info[3..=0] ("log2 of the number of words")
     
     // loop over the range and flush one d-cache line at a time
     add_sr(.X64, step, xzr, info, .LSL, @as(u6) @as(i64) 63-19),
-    add_sr(.X64, step, xzr, step, .LSR, @as(u6) @as(i64) 63-(19-16+1)),
+    add_sr(.X64, step, xzr, step, .LSR, @as(u6) @as(i64) 63-(19-16)),
+    lslv(.X64, step, word_size, step),
     mov(.X64, p, start),
     // a:
     SYS(0b0, 0b01, 0b011, 0b0111, 0b1011, 0b001, p), // dc cvau
@@ -145,7 +148,9 @@ aarch64_clear_instruction_cache :: {
     
     // loop over the range and flush one i-cache line at a time
     add_sr(.X64, step, xzr, info, .LSL, @as(u6) @as(i64) 63-3),
-    add_sr(.X64, step, xzr, step, .LSR, @as(u6) @as(i64) 63-(3-0+1)),
+    add_sr(.X64, step, xzr, step, .LSR, @as(u6) @as(i64) 63-(3-0)),
+    lslv(.X64, step, word_size, step),
+
     mov(.X64, p, start),
     // b:
     SYS(0b0, 0b01, 0b011, 0b0111, 0b0101, 0b001, p), // ic ivau
@@ -159,6 +164,7 @@ aarch64_clear_instruction_cache :: {
 )
 };
 
+fn clear_instruction_cache(mem: []u8) void = clear_instruction_cache(u8.raw_from_ptr(mem.ptr), mem.len);
 fn clear_instruction_cache(beg: rawptr, len: i64) void = 
     clear_instruction_cache(beg, beg.offset(len));
 
