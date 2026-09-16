@@ -10,8 +10,10 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
+- `franca examples/os/build.fr -web -append "-file examples/os/bin/test_preempt.fr -lang franca"`
+  "panic! TODO(import_wasm): atomic.wait with timeout"
 - get a riscv linker to test R_RISCV_JAL
-- unsafe_tail_call emit for amd/rv/wasm
+- unsafe_tail_call emit for rv/wasm
 - make unsafe_tail_call good enough to use for hctarcs
 - test that uses import_c/assemble.fr with call.link=false and emits arm macho aot because i was doing that wrong
 - can't examples/web/build.fr in examples/os without -share because of graphics/web/webgpu_api.fr
@@ -22,19 +24,15 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
   - also `__franca_builtin_static_memmove`, `__franca_base_address`, `__franca_wasm_import_names`
   - less bad but still: franca_runtime_init, franca_runtime_init_thread, "franca_sapp", "note: run with `FRANCA_BACKTRACE=1` ..."
 - examples/emu 
-  - translate syscall numbers so it can run on x86_64
+  - more syscall translation (x86_64, libc) so i can run more than just os/host/user. 
     - some of which i already have in examples/os/user/init.fr/get_libc_syscall_callee, should factor that out. 
-  - remap to syscalls to libc so it can run on examples/os/kernel
-  - macos also has to deal with MAP_JIT
   - do JitEvent.Sync so it can run in wasm
   - leaking *Trace-s until the end of time is bad. (i cleanup the module when it's unmapped but not the trace structs themselves)
   - easy way to disallow some syscalls. ex. when using os/host/user make sure to not accidently jit a syscall instruction. 
     tho in that case specifically it would be nice to be able to intercept them instead and remap back to the os/user/libc calls. 
   - flush_icache needs to invalidate the linked O.call for Terminator.Direct
-  - backend tail calls for Terminator.Direct? and then try it for bcmp too. 
-  - backend/rv64 use jal direct calls instead of always putting it in a register first. 
   - use register_small for Kw to insert fewer sign extensions
-  - keep track of what memory is marked executable so don't follow jumps into fucking narnia. 
+  - stop gracefully if decode_instruction wanders into junk.  
     especially because sometimes the speculative jump target is wrong. 
     like the and-link part for a function returning Never (similarly syscall exit). 
   - similarly it shouldn't crash if code that hasn't been called yet has an invalid instruction

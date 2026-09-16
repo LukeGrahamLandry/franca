@@ -27,6 +27,9 @@
   clearly being too small doesn't matter.
 - translate a few syscall numbers to amd to run os/host/user. doesn't need any of the hard ones (cough fstat cough)
 - amd/emit support unsafe_tail_call. jit kaleidoscope in os/host/user (in rosetta): 16500ms -> 13430ms (-18%)
+- translate enough to libc for os/host/user on macos and os/kernel. 
+  - macos no gettid or exit_thread
+  - for now can have extra padding in elf to avoid page unalign like i do for blink
 
 ## (Sep 14) rv emu
 

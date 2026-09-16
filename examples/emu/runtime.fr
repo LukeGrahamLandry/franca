@@ -83,6 +83,7 @@ fn init(emu: *Emulator, gpa: Alloc, log: LogArgs) void = {
 }
 
 fn init_jit(emu: *Emulator, it: *JitMapping) void = {
+    @assert(query_current_os() != .macos || tls(.comptime)[].is_null(), "TODO: making expecting_wx work at comptime on macos is more involved because the compiler wants to use MAP_JIT so can't just call pthread_jit_write_protect_np");
     m := it.m&;
     Qbe'backend'init_module(m, (
         arch = query_current_arch(), os = query_current_os(), type = .JitOnly, 
@@ -213,27 +214,28 @@ pass_though_syscall :: fn(cpu: *Cpu, pc: i64) void = {
         return();
     };
     
-    @if(n == 93) thread_end(cpu);
+    @if(n == 93) thread_end(cpu, false);
     if n == 220 {  // clone
         expect_thread_flags := FuncId.scope_of(import("@/lib/sys/linux.fr").sys_clone).clone_flags;  // :SNEAK
         expect_fork_flags := FuncId.scope_of(Syscall.fork).SIGCHLD;  // :SNEAK
-        flags, sp, parent_tid, tls, tid_futex := (a0.int_from_rawptr(), a1, a2, a3, u32.ptr_from_raw(a4));
+        flags, sp, parent_tid, tls_p, tid_futex := (a0.int_from_rawptr(), a1, a2, a3, u32.ptr_from_raw(a4));
         if flags == expect_fork_flags {
-            @assert(sp.is_null() && tid_futex.is_null() && parent_tid.is_null() && tls.is_null(), "TODO: sp,tid_futex,parent_tid,tls");
+            @assert(sp.is_null() && tid_futex.is_null() && parent_tid.is_null() && tls_p.is_null(), "TODO: sp,tid_futex,parent_tid,tls");
         
-            // TODO: need to fake this somehow if i want it to work in wasm
+            @assert(!tls(.deny_syscalls)[], "TODO: need to fake this somehow if i want it to work in wasm");
             pid := Syscall'fork();
             cpu.reg&[.A0] = pid.intcast().rawptr_from_int();
             if pid == 0 {
                 // you don't take your threads with you
                 @assert(!cpu.emu.lookup_trace(pc)[].mapping.worker.threaded, "TODO: deal with fork when there's a worker thread");
                 // TODO: clear out all the other emu.threads?
+                //       but if it's just to call exec don't want to write cow pages. 
             };
             return();
         };
         
         @assert_eq(expect_thread_flags, flags.trunc(), "TODO: more clone() flags"); 
-        @assert(!tid_futex.is_null() && parent_tid.is_null() && tls.is_null(), "TODO: parent_tid,tls");
+        @assert(!tid_futex.is_null() && parent_tid.is_null() && tls_p.is_null(), "TODO: parent_tid,tls");
         return with(emu.jit_lock&, => thread_spawn(emu, cpu, sp, tid_futex, pc));
     };
 
@@ -286,7 +288,11 @@ pass_though_syscall :: fn(cpu: *Cpu, pc: i64) void = {
         };
     };
     
-    @if(query_current_os() != .linux || tls(.deny_syscalls)[]) @panic("TODO: translate syscall");
+    if n == 222 || n == 226 {
+        // mmap/mprotect the native memory being executable is pointless
+        cpu.reg&[.A2] = cpu.reg&[.A2].int_from_rawptr().bit_and(Posix.PROT.EXEC.bit_not()).rawptr_from_int();
+    };
+    
     regs := @const_slice(RvReg.A0, .A1, .A2, .A3, .A4, .A5);
     args := @uninitialized Array(i64, 6);
     range(0, args&.len()) { i |
@@ -312,18 +318,19 @@ pass_though_syscall :: fn(cpu: *Cpu, pc: i64) void = {
         args&[2] = x;
     };
     
-    if query_current_arch() == .x86_64 {
-        n = remap_syscall_number_rv_to_amd(n);
+    result := if query_current_os() != .linux || tls(.deny_syscalls)[] {
+        dispatch_to_libc(args&, n)
     } else {
-        @if(!allow.contains(n)) @panic("TODO: allow more syscalls %", n);
+        n := n;  // still need to compare the rv number after
+        if query_current_arch() == .x86_64 {
+            n = remap_syscall_number_rv_to_amd(n);
+        } else {
+            @if(!allow.contains(n)) @panic("TODO: allow more syscalls %", n);
+        };
+        result, _ := Syscall'perform_syscall(args&, n);
+        result
     };
     
-    if n == 222 || n == 226 {
-        // mmap/mprotect the native memory being executable is pointless
-        cpu.reg&[.A2] = cpu.reg&[.A2].int_from_rawptr().bit_and(Posix.PROT.EXEC.bit_not()).rawptr_from_int();
-    };
-    
-    result, _ := Syscall'perform_syscall(args&, n);
     cpu.reg&[.A0] = result.rawptr_from_int();
     @if(n == 160 && result == 0) adjust_uname_machine(u8.ptr_from_raw(a0));
     
@@ -386,21 +393,27 @@ thread_spawn :: fn(emu: *Emulator, cpu: *Cpu, sp: rawptr, tid_futex: *u32, pc: i
 
 thread_begin :: fn(cpu: *Cpu) void = {
     thread := cpu.thread&.unwrap();
-    thread.tid_futex[] = Syscall'gettid().bitcast();   // must be set before child starts running
+    // must be set before child starts running
+    thread.tid_futex[] = @match(query_current_os()) {
+        fn linux() => Syscall'gettid().bitcast();   
+        fn macos() => tls(.thread_index)[].trunc();
+    };
     Futex'wake(thread.tid_futex, MAX_i32);  // hack to make it work when prefer_pthread
     
     run(cpu.emu, cpu, thread.entry_address);
-    thread_end(cpu);
+    thread_end(cpu, true);
 };
 
-thread_end :: fn(cpu: *Cpu) void = {
+thread_end :: fn(cpu: *Cpu, fallthrough: bool) void = {
     thread := cpu.thread&.unwrap();
     emu := cpu.emu;
     with emu.jit_lock& {
         thread.tid_futex[] = 0;
         Futex'wake(thread.tid_futex, MAX_i32);
-        thread.joinable = true; 
-        emu.joinable_threads += 1;
+        if fallthrough || query_current_os() == .linux {
+            thread.joinable = true; 
+            emu.joinable_threads += 1;
+        };  // TODO: macos can't exit_thread so currently i just leak the thread hanging on a futex that will never end. 
     };
 };
 
@@ -564,6 +577,44 @@ find_emulated_symbol_from_fake_ip :: fn(emu: *Emulator, emulated_rel_ip: i64) ?S
         };
     };
     .None
+}
+
+// can't use choose_syscall because i want it to work on wasm which cares about arity
+dispatch_to_libc :: fn(a: *Array(i64, 6), n: i64) i64 = {
+    @switch(n) {
+        @case(222) => { 
+            if query_current_os() == .macos && a[3].bit_and(LinuxLibc.MAP.ANON) != 0 {
+                a[3] = a[3].bit_and(LinuxLibc.MAP.ANON.bit_not()).bit_or(MacosLibc.MAP.ANON);
+            };
+            mmap :: fn(a:i64,b:i64,c:i64,d:i64,e:i32,f:i64) i64 #weak #libc; 
+            mmap(a[0],a[1],a[2],a[3],a[4].intcast(),a[5]) 
+        };
+        @case(98) => {
+            @assert_eq(a[3], 0, "TODO: futex timespec");
+            @switch(a[1]) {
+                @case(0) => Futex'wait(u32.ptr_from_int(a[0]), a[2].trunc());
+                @case(1) => Futex'wake(u32.ptr_from_int(a[0]), a[2].trunc());
+                @default => @panic("invalid futex argument");
+            };
+            0  // TODO
+        };
+        @case(93) => @match(query_current_os()) {
+            fn linux() => Syscall'exit_thread(a[0].intcast());
+            fn macos() => {
+                // TODO: do something sane. could just add to thread pool?
+                Futex'wait_while(@ref @as(u32) 0, fn(_) => true);
+                unreachable();
+            }
+        };
+        @case(215) => { munmap :: fn(a:i64,b:i64) i64 #weak #libc; munmap(a[0],a[1]) }
+        @case(226) => { mprotect :: fn(a:i64,b:i64,c:i64) i64 #weak #libc; mprotect(a[0],a[1],a[2]) }
+        @case(94) => { exit :: fn(a:i32) i64 #weak #libc; exit(a[0].intcast()) }
+        @case(101) => { nanosleep :: fn(a:i64,b:i64) i64 #weak #libc; nanosleep(a[0],a[1]) }
+        @case(63) => { read :: fn(a:i32,b:i64,c:i64) i64 #weak #libc; read(a[0].intcast(),a[1],a[2]) }
+        @case(64) => { write :: fn(a:i32,b:i64,c:i64) i64 #weak #libc; write(a[0].intcast(),a[1],a[2]) }
+        @case(113) => { clock_gettime :: fn(a:i64,b:i64) i64 #weak #libc; clock_gettime(a[0],a[1]) }
+        @default => @panic("TODO: remap more rv->libc syscall numbers (%). for now this is just enough to run examples/os/host/user.fr", n);
+    }
 }
 
 Futex :: import("@/lib/sys/sync/futex.fr");
