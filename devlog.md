@@ -4,6 +4,8 @@
 - don't die on unknown instruction. end the trace and die if it's actually executed. 
 - don't die on direct jump between JitMappings. lookup again, not worth dealing with the fast path for something that never happens. 
 - ditto for falling off the end of the mapping. i track exec regions for unmap anyway so its easy to not fault on pc stepping too far. 
+- multiple levels of emulating itself is a funny way to exadurate differences. 
+  adding tail on rv then doing two levels (host emu emu kal): 89320ms -> 40380ms
 
 ## (Sep 15) rv emu
 

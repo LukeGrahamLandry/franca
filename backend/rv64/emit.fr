@@ -63,10 +63,33 @@ emit_the_code :: fn(e: *EmitRv) void = {
     local_labels := temp().alloc_zeroed(i64, e.f.nblk.zext());
     for_blocks_rpo_forward f { b | 
         local_labels[b.id.zext()] = e.next_inst_offset();
-        for_insts_forward b { i |
+        ins := b.ins.items();
+        if b.unsafe_tail_call {
+            @assert(ins.len > 0 && ins[ins.len - 1]&.op() == .call, "unsafe_tail_call");
+            ins.len -= 1;
+        };
+        each ins { i |
             e.emit(i);
         };
-        
+        if b.unsafe_tail_call {
+            i := b.ins[b.ins.len - 1];
+            if rtype(i.arg&[0]) == .RTmp && 1.shift_left(i.arg&[0].val()).bit_and(to_save) != 0 {
+                t6 := rv_scratch_int;
+                e.emit(@ref make_ins(.copy, .Kl, t6, i.arg&[0], Qbe.Null));
+                i.arg&[0] = t6;
+            };
+            i.arg&[1] = INT(0);
+            emit_jmp(e, b, local_labels, frame, to_save);
+            e.emit(i&);
+        } else {
+            emit_jmp(e, b, local_labels, frame, to_save);
+        };
+    };
+    finish_patches(e, local_labels);
+}
+
+emit_jmp :: fn(e: *EmitRv, b: *Qbe.Blk, local_labels: []i64, frame: i64, to_save: u64) void = {
+    f := e.f;
         @match(b.jmp.type) {
             fn hlt() => e.inst(ebreak);
             fn ret0() => {
@@ -89,7 +112,9 @@ emit_the_code :: fn(e: *EmitRv) void = {
                 e.emit_add_off(TMP(RvReg.SP), TMP(RvReg.FP), 16 + f.vararg.int() * 64);
                 e.emit_load_off(TMP(RvReg.RA), TMP(RvReg.FP), 8);
                 e.emit_load_off(TMP(RvReg.FP), TMP(RvReg.FP), 0);
-                e.inst(jalr(.RA, 0, .Zero)); // ret
+                if !b.unsafe_tail_call {
+                    e.inst(jalr(.RA, 0, .Zero)); // ret
+                };
             }
             fn jmp() => if b.s1.id != b.id + 1 {
                 e.jmp(b.s1.id, -1, Qbe.Null);
@@ -122,8 +147,9 @@ emit_the_code :: fn(e: *EmitRv) void = {
             };
             @default => unreachable();
         }
-    };
-    
+}
+
+finish_patches :: fn(e: *EmitRv, local_labels: []i64) void = {
     each e.patches& { p |
         target := local_labels[p.target_bid.zext()];
         @debug_assert(target != 0);  
@@ -244,6 +270,8 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
             }
         }
         fn call() => {
+            set_link := i.arg&[1].rtype() == .RCall;
+            link: RvReg = @if(set_link, .RA, .Zero);
             @match(rtype(i.arg&[0])) {
                 fn RCon() => {
                     c := f.get_constant(a0);
@@ -253,12 +281,12 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
                     done := false;
                     use_symbol(e.m, c.sym) { symbol |
                         patch_addr := e.m.segment_address(.Code, e.m.current_offset(.Code));
-                        patch: Fixup = (patch_at = (addr = patch_addr), type = (Call = (link = true)));
+                        patch: Fixup = (patch_at = (addr = patch_addr), type = (Call = (link = set_link)));
                         kind := @if(e.m.goal.jit_via_dlopen, SymbolKind.Pending, symbol.kind);
                         if kind == .Local {
                             distance := e.m.distance_between(.Code, e.m.current_offset(.Code), symbol.segment, symbol.offset);
                             if fits_sign_ext(distance, 20) {
-                                e.inst(jal(s_trunc(distance, 21), .RA));
+                                e.inst(jal(s_trunc(distance, 21), link));
                                 if e.m.goal.type == .Relocatable {
                                     push_fixup(e.m, symbol, patch);
                                 };
@@ -268,12 +296,12 @@ fn emit(e: *EmitRv, i: *Qbe.Ins) void = {
                     };
                     @if(done) return();
                     
-                    // RA is stomped by the call instruction anyway so it's fine to use it as scratch. 
-                    e.emit(.copy, .Kl, TMP(RvReg.RA), a0, Qbe.Null);
-                    e.inst(jalr(.RA, 0, .RA));
+                    r := rv_scratch_int;
+                    e.emit(.copy, .Kl, r, a0, Qbe.Null);
+                    e.inst(jalr(r.rv(), 0, link));
                 }
                 fn RTmp() => {
-                    e.inst(jalr(a0.rv(), 0, .RA));
+                    e.inst(jalr(a0.rv(), 0, link));
                 }
                 @default => unreachable();
             }
@@ -642,10 +670,8 @@ fixup_rv64 :: fn(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_r
     local  := symbol.kind == .Local;
     @match(fixup.type&) {
         fn Call(it) => {
-            // currently this is only used for examples/import_c/assemble.fr which is only used for tests/external/hare.fr _start
-            // TODO: do direct calls from emit() like the other arches do, then this would be needed more. 
             distance := ptr_diff(fixup.patch_at.addr, address);
-            in_range := distance.abs() < 1.shift_left(21);
+            in_range := distance.fits_sign_ext(20);
             @assert(local && in_range, "TODO: rv fixup Call %", symbol.name);
             inst := fixup.patch_at.u32;
             inst[] = jal(s_trunc(distance, 21), @if(it.link, .RA, .Zero));
