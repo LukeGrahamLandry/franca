@@ -14,6 +14,7 @@ Emulator :: @rec @struct {
     disassemble: bool;
     debug_base_address := 0;
     syscall_handler: @FnPtr(cpu: *Cpu, pc: i64) void;
+    invalid_instruction_handler: @FnPtr(cpu: *Cpu, pc: i64) void;
     log: LogArgs;
     initial_elf: []u8 = empty();  // for find_emulated_symbol
     joinable_threads := 0;
@@ -28,6 +29,7 @@ LogArgs :: @struct {
     d := "";          // show compilied ir
     dis := false;     // show disassembled riscv instructions
     strace := false;  // show syscalls
+    // TODO: broken! fix it or take it out
     trace_exit := false;  // show stack trace on non-zero exit()
     trace_fault := false; // "                on signal/compiler panic (needs FRANCA_BACKTRACE=1)
     extra: []Str #rest = empty();  // first non-.fr is the elf
@@ -76,6 +78,7 @@ fn init(emu: *Emulator, gpa: Alloc, log: LogArgs) void = {
         jit_lock = zeroed(Mutex),
         disassemble = log.dis,
         syscall_handler = pass_though_syscall,
+        invalid_instruction_handler = invalid_instruction_handler,
         log = log,
         gpa = gpa,
         mappings = init(10, gpa),
@@ -136,11 +139,12 @@ fn lookup_trace(emu: *Emulator, pc: i64) *Trace = {
     emu.jit_lock&.lock();
     i := emu.trace_lookup&.get(pc) || {
         mark := temp().mark();
-        it := emu.find_mapping(pc);  // TODO: fucked if follows direct to other mappings
+        it := emu.find_mapping(pc);  // for now compile_trace only follows jumps within the one mapping
         code_start := it.m.start_of_writable_code;
-        start := it.m.segments&[.Code].next;
+        start := it.m.segments&[.Code].next;  // different rn expecting_wx never updates start_of_writable_code
         first_trace := emu.traces&.len();
-        i := compile_trace(emu, pc.rawptr_from_int());
+        i := compile_trace(emu, pc.rawptr_from_int(), it);
+        // TODO: either get rid of this or fix everywhere else that doesn't work with threaded codegen 
         wait_for_make_exec(it.worker, code_start);
         range(first_trace, emu.traces&.len()) { trace_i |
             i := emu.traces&.nested_index(trace_i);
@@ -148,10 +152,7 @@ fn lookup_trace(emu: *Emulator, pc: i64) *Trace = {
             i.callee = bit_cast_unchecked(rawptr, FieldType(Trace, .callee), jit_addr);
         };
         // this is instead of got_indirection_instead_of_patches. 
-        // TODO: wrong if threaded and wrong if multiple JitMappings. 
-        //       the later is broken anyway in compile_riscv/mangle() so can fix them together. 
         if it.m.goal.expecting_wx {
-            @debug_assert(!it.worker.threaded, "TODO: threaded jit");
             clear_instruction_cache(u8.raw_from_ptr(start), u8.raw_from_ptr(it.m.segments&[.Code].next));
         };
         
@@ -535,9 +536,8 @@ fn remove_mapping(emu: *Emulator, mem: []u8) void = {
 
 fn find_mapping(emu: *Emulator, pc: i64) *JitMapping = {
     @debug_assert(emu.jit_lock&.locked_by_me());
-    mem := u8.ptr_from_int(pc).slice(1);
     each emu.mappings& { it |
-        if address_contains(it.mem, mem) {
+        if address_contains_pc(it.mem, u32.ptr_from_int(pc)) {
             return(it);
         }
     };
@@ -547,6 +547,7 @@ fn find_mapping(emu: *Emulator, pc: i64) *JitMapping = {
 address_overlaps :: fn(self: []u8, other: []u8) bool = !(ptr_diff(self.ptr, other.end_pointer()) <= 0 || ptr_diff(self.end_pointer(), other.ptr) >= 0);
 address_identical :: fn(self: []u8, other: []u8) bool = identical(self.ptr, other.ptr) && self.len == other.len;
 address_contains :: fn(self: []u8, other: []u8) bool = ptr_diff(self.ptr, other.ptr) >= 0 && ptr_diff(other.end_pointer(), self.end_pointer()) >= 0;
+address_contains_pc :: fn(self: []u8, pc: *u32) bool = ptr_diff(self.ptr, bit_cast_unchecked(*u32, *u8, pc)).ult(self.len);
 
 find_emulated_symbol :: fn(emu: *Emulator, native_ip: rawptr) ?Str = {
     result: ?Str = .None;
@@ -577,6 +578,19 @@ find_emulated_symbol_from_fake_ip :: fn(emu: *Emulator, emulated_rel_ip: i64) ?S
         };
     };
     .None
+}
+
+// TODO: could lookup again to see if the code in memory changed after it was speculatively decoded. 
+//       i think any situation that would hit that they should have called flush_cache anyway. 
+//       or its a real error in the guest program
+invalid_instruction_handler :: fn(cpu: *Cpu, pc: i64) void = {
+    // TODO: the right thing would be to raise a SIGILL here. 
+    //       this is the one case where it's trivial to reconstruct the guest registers for the mcontext 
+    //       because the illegal instruction is known while compiling the trace. 
+    // TODO: save the more detailed error message? 
+    address := pc - cpu.emu.debug_base_address;
+    pc := u32.ptr_from_int(pc);
+    @panic("executed an unknown instruction: % pc=% rel=%", fmt_hex(pc[]), fmt_hex(pc), fmt_hex(address));
 }
 
 // can't use choose_syscall because i want it to work on wasm which cares about arity

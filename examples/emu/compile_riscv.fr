@@ -24,31 +24,30 @@ Compile :: @struct {
     direct_jump_targets: Array(?i64, 2) = (.None, .None);
     bcmp_condition: ?Qbe.Ref = .None;  
     mapping: *JitMapping;
+    error := "";
 };
-Terminator :: @enum(u8) (Direct, Indirect, Syscall, Halt);
+Terminator :: @enum(u8) (Direct, Indirect, Syscall, Halt, Error);
 
 // when the jump target is constant, follow it and compile a new trace eagerly. 
-// that packs more traces into one make_exec call so less space in the page is wasted (if !expecting_wx). 
-// also allows direct jumps to be fixed tail calls without going through lookup again. 
-// TODO: lazy is a bit nicer because it means you don't compile traces that aren't actually run. 
-//       so maybe have this also look at how close m.segments[code] is to the page boundry and stop early. 
-// TODO: technically it's legal to have a constant jump into something that isn't code 
-//       and just never execute it. should track which regions of memory are mapped executable?
-fn compile_trace(emu: *Emulator, entry: rawptr) *Trace = {
+// which allows direct jumps to be fixed tail calls without going through lookup again 
+// (also packs more traces into fewer make_exec calls which matters if !expecting_wx or wasm). 
+// this means that decode_instruction can't panic on invalid/unknown/unmapped instructions. 
+// technically it's legal to have a constant jump into something that isn't code and just never execute it.
+// so instead decode errors make valid traces ending with a invalid_instruction_handler call.  
+fn compile_trace(emu: *Emulator, entry: rawptr, mapping: *JitMapping) *Trace = {
     work := rawptr.list(temp());
     work&.push(entry);
-    firsts_trace_index: ?*Trace = .None;
+    first: ?*Trace = .None;
     @debug_assert(emu.jit_lock&.locked_by_me(), "compile_trace needs lock");
     while => work&.pop() { entry |
-        // TODO: the first lookup is waste because trace_lookup did it before calling
-        if emu.trace_lookup&.get(entry.int_from_rawptr()).is_none() {
+        if first.is_none() || emu.trace_lookup&.get(entry.int_from_rawptr()).is_none() {
             // this makes it match the addresses in objdump
             address := int_from_rawptr(entry) - emu.debug_base_address;
             @if(emu.log.dis) @eprintln("[%]% === compiling trace[%] from % ===", 
-                tls(.thread_index)[], @if(firsts_trace_index.is_none(), "!", "?"), emu.traces&.len(), fmt_hex(address));
-            trace_index, direct_jump_targets := compile_one_trace(emu, entry);
-            if firsts_trace_index.is_none() {
-                firsts_trace_index = (Some = trace_index);
+                tls(.thread_index)[], @if(first.is_none(), "!", "?"), emu.traces&.len(), fmt_hex(address));
+            t, direct_jump_targets := compile_one_trace(emu, entry, mapping);
+            if first.is_none() {
+                first = (Some = t);
             };
             for direct_jump_targets& { it |
                 if it { it |
@@ -57,21 +56,18 @@ fn compile_trace(emu: *Emulator, entry: rawptr) *Trace = {
             };
         };
     };
-    // TODO: fucked if followed direct to multiple regions
-    mapping := emu.find_mapping(entry.int_from_rawptr());
     Qbe'enter_task(mapping.worker) { e |
         e.task = .MakeExec;
     };
-    firsts_trace_index.unwrap()
+    first.unwrap()
 }
 
 // only one basic block is compiled at a time. 
 // any brach instruction ends the trace, returning the new pc to the dispatch loop. 
 // register values are read at first use and changed ones sare written at the end of the trace. 
-fn compile_one_trace(emu: *Emulator, entry: rawptr) Ty(*Trace, Array(?i64, 2)) = {
+fn compile_one_trace(emu: *Emulator, entry: rawptr, mapping: *JitMapping) Ty(*Trace, Array(?i64, 2)) = {
     result := zeroed(Ty(*Trace, Array(?i64, 2)));
     @debug_assert(entry.int_from_rawptr() > 0, "mmap is never going to return something with the high bit set so i reserve them for trace.pc that shouldn't match anything");
-    mapping := emu.find_mapping(entry.int_from_rawptr());
 Qbe'enter_task(mapping.worker) { codegen_entry | 
     m := mapping.m&;
     f := temp().box_uninit(Qbe.Fn);
@@ -94,13 +90,18 @@ Qbe'enter_task(mapping.worker) { codegen_entry |
     
     continuation := Qbe.Null;
     pc := self.entry;
-    // TODO: bounds / make sure the pc is mapped as executable
     while => continuation == Qbe.Null {
-        @if(pc[] == 0xd503233f || pc[] == 0xd503245f) @eprintln("i predict we've stumbled into arm code");  // TODO: just don't do elf imports at all. this is just for debug while im being lazy about it
-        
         continuation = decode_instruction(self, pc, .Kl);
         pc = pc.offset(1);
+        
+        oob := !mapping.mem.address_contains_pc(pc);
+        if oob && continuation == Qbe.Null {
+            // fall back to the run() loop calling lookup_trace again so don't have to deal with multiple modules here
+            continuation = self.inc(self.pc, ptr_diff(self.entry, pc) * 4);
+        };
     };
+    self.remove_cross_mapping_direct_jumps();
+    
     @debug_assert(!self.register_write&.get(.Zero), "always reads zero");
     for self.register_write& { r |
         addr := self.compute_reg_addr(r);
@@ -122,13 +123,15 @@ Qbe'enter_task(mapping.worker) { codegen_entry |
             
             // now .Direct to where the syscall returns to. 
             // can't continue emitting into the same trace because clone returns twice. 
-            new_pc := self.pc_symbol(self.direct_jump_targets&[0].unwrap());
+            if self.direct_jump_targets&[0] { new_pc_off |
+            new_pc := self.pc_symbol(new_pc_off);
             next_pc := self.f.newtmp("next_pc", .Kl);
             push(b, .arg, .Kl, Qbe.Null, self.cpu_addr, Qbe.Null);                
             push(b, .arg, .Kl, Qbe.Null, continuation, Qbe.Null);
             push(b, .call, .Kl, next_pc, new_pc, Qbe.Null);
-            self.b.jmp = (type = .retl, arg = next_pc);
             self.b.unsafe_tail_call = true;
+            continuation = next_pc;
+            };  // else: remove_cross_mapping_direct_jumps killed it for being at the end of the mapping 
         }
         // TODO: this also means you need to keep track of dependencies so flush_icache can go backwards and recompile everything
         //       add a test for that to rv_icache.fr
@@ -146,12 +149,22 @@ Qbe'enter_task(mapping.worker) { codegen_entry |
             push(b, .arg, .Kl, Qbe.Null, self.cpu_addr, Qbe.Null);                
             push(b, .arg, .Kl, Qbe.Null, continuation, Qbe.Null);
             push(b, .call, .Kl, next_pc, new_pc, Qbe.Null);
-            self.b.jmp = (type = .retl, arg = next_pc);
             self.b.unsafe_tail_call = true;
+            continuation = next_pc;
         }
-        fn Indirect() => {
-            self.b.jmp = (type = .retl, arg = continuation);
+        fn Indirect() => ();
+        fn Error() => {
+            @dis(self, "unknown %; %", fmt_hex(pc[]), self.error);
+            
+            error_handler := self.f.getcon(bit_cast_unchecked(@type self.emu.invalid_instruction_handler, i64, self.emu.invalid_instruction_handler));
+            continuation = self.inc(self.pc, ptr_diff(self.entry, pc) * 4);
+            push(b, .arg, .Kl, Qbe.Null, self.cpu_addr, Qbe.Null);                
+            push(b, .arg, .Kl, Qbe.Null, continuation, Qbe.Null);
+            push(b, .call, .Kw, Qbe.Null, error_handler, Qbe.Null);
         }
+    };
+    if self.terminator != .Halt {
+        self.b.jmp = (type = .retl, arg = continuation);
     };
     
     f.lnk.id = self.mangle(int_from_rawptr(entry));
@@ -173,18 +186,36 @@ Qbe'enter_task(mapping.worker) { codegen_entry |
     result
 }
 
+// TODO: could allow this and have pc_symbol,mangle get the address from the other mapping's module 
+//       but then have to deal with the trace won't be created yet and the mapping might not 
+//       even be created yet and might flush_cache before it executes, etc. etc. etc. 
+//       for now this doesn't actually happen in my programs so being a tiny bit slower is fine. 
+remove_cross_mapping_direct_jumps :: fn(self: *Compile) void #once = {
+    each self.direct_jump_targets& { it |
+        if it { dest |
+            oob := !self.mapping.mem.address_contains_pc(self.entry.offset(dest[].udiv(4)));
+            if oob {
+                it[] = .None;
+                if self.terminator == .Direct {
+                    self.terminator = .Indirect;
+                };
+            };
+        };
+    };
+};
+
 fn pc_symbol(self: *Compile, new_pc_off: i64) Qbe.Ref = {
     new_pc := u32.int_from_ptr(self.entry) + new_pc_off;
     // re-intern with the new icache_generation would be wrong if new_pc was already compiled before flush but wasn't in the flushed range. 
     if self.emu.trace_lookup&.get(new_pc) { t |
-        @assert(identical(t.mapping, self.mapping), "TODO: allow direct jump to another mapping");
+        @debug_assert(identical(t.mapping, self.mapping), "can't jump between mappings");
         return self.f.symcon(t.symbol);
     };
     self.f.symcon(self.mangle(new_pc))
 }
 
 fn mangle(self: *Compile, pc: i64) Qbe.Sym = {
-    @assert(identical(self.emu.find_mapping(pc), self.mapping), "TODO: allow direct jump to another mapping");
+    @debug_assert(identical(self.emu.find_mapping(pc), self.mapping), "can't jump between mappings");
     pc -= self.emu.debug_base_address;
     self.mapping.m&.intern(@tfmt("%trace%", self.emu.icache_generation, fmt_hex(pc)))  // :AddressInMangledName
 }
@@ -203,7 +234,9 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
     imm20 := I(31, 12, 0).shift_left(12).zext().sign_extend(31);
     pc_offset := ptr_diff(self.entry, pc) * 4;
     imm_S := I(31, 25, 5).bit_or(I(11, 7, 0)).zext().sign_extend(11);
-    
+
+    slow_check_enum(Opcode, opcode) || return(self.error("bad opcode"));
+
     @match(opcode) {
         fn storef() => {  // S
             imm := imm_S; rs2 = rs2.as_float();
@@ -245,7 +278,7 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
                     @if(have_ints && from_int && !long && unsigned) => (.uwtof, kf);
                     @if(!have_ints && !from_int && !double && !long && unsigned) => (.truncd, .Ks);
                     @if(!have_ints && !from_int && double && !long && !unsigned) => (.exts, .Kd);
-                    @else => @panic("TODO: op_fp % % % % % %", have_ints, from_int, double, long, unsigned, fmt_hex(op));
+                    @else => return(self.error(@tfmt("op_fp % % % % %", have_ints, from_int, double, long, unsigned)));
                 };
                 rd = @if(k.is_float(), rd.as_float(), rd);
                 rs1 = @if(!from_int, rs1.as_float(), rs1);
@@ -261,8 +294,9 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
                 k: Qbe.Cls = @switch(size) {
                     @case(0) => .Ks;
                     @case(1) => .Kd;
-                    @default => @panic("TODO: other float size");
+                    @default => return(self.error("other float size"));
                 };
+                slow_check_enum(OpF, opf) || return(self.error("opf"));
                 o: Qbe.O = @match(opf) {
                     fn add() => .add;
                     fn sub() => .sub;
@@ -271,6 +305,7 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
                     fn sqrt() => .sqrt;
                     fn min_max() => {
                         c := @as(OpF_min_max) @as(i64) rm.zext();
+                        slow_check_enum(OpF_min_max, c) || return(self.error("OpF_min_max"));
                         @match(c) {
                             fn min() => .min;
                             fn max() => .max;
@@ -278,6 +313,7 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
                     }
                     fn cmp() => {
                         c := @as(OpF_cmp) @as(i64) rm.zext();
+                        slow_check_enum(OpF_cmp, c) || return(self.error("OpF_cmp"));
                         @match(c) {
                             fn eq() => @if(k == .Ks, .ceqs, .ceqd);
                             fn lt() => @if(k == .Ks, .clts, .cltd);
@@ -285,11 +321,11 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
                         }
                     }
                     fn sgnj() => {
-                        @if(rs1 != rs2) @panic("TODO: non-unary sgnj");
+                        @if(rs1 != rs2) return(self.error("non-unary sgnj"));
                         @switch(rm) {
                             @case(0b000) => .copy;
                             @case(0b001) => .neg;
-                            @default => @panic("TODO: sgnj %", rm);
+                            @default => return(self.error(@tfmt("sgnj %", rm)));
                         }
                     }
                 };
@@ -346,7 +382,7 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
                     @case(0b011000000010) => .ones;
                     @case(0b011000000100) => .extsb;
                     @case(0b011000000101) => .extsh;
-                    @default => @panic("TODO: unary op_imm 0b001 % %", imm, fmt_hex(op));
+                    @default => return(self.error(@tfmt("unary op_imm 0b001 %", imm)));
                 };
                 @dis(self, "%= % %", rd, o, rs1);
                 if opcode_class == .Kw && !@is(o, .extsb, .extsh) {
@@ -372,7 +408,7 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
                         push(b, o, .Kl, dest, a0, Qbe.Null);
                         return Qbe.Null;
                     };
-                    @panic("TODO: unary op_imm 0b101 % %", imm, fmt_hex(op));
+                    return(self.error(@tfmt("unary op_imm 0b101 %", imm)));
                 };
             };
             
@@ -400,14 +436,14 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
                         @case(0b101) => .udiv;
                         @case(0b110) => .rem;
                         @case(0b111) => .urem;
-                        @default => @panic("TODO: op % % %", @as(i64) funct3, funct7, fmt_hex(op));
+                        @default => return(self.error(@tfmt("op % %", @as(i64) funct3, funct7)));
                     }
                 }
                 @case(0b0100000) => {
                     @match(funct3) {
                         fn add() => .sub;
                         fn or() => {  // orn
-                            @if(opcode_class != .Kl) @panic("TODO: opw % % %", @as(i64) funct3, funct7, fmt_hex(op));
+                            @if(opcode_class != .Kl) return(self.error(@tfmt("opw % %", @as(i64) funct3, funct7)));
                             t := self.f.newtmp("r", .Kl);
                             push(b, .xor, .Kl, t, a1, self.f.getcon(-1));
                             a1 = t;
@@ -416,15 +452,15 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
                             .or
                         }
                         fn srl() => .sar;
-                        @default => @panic("TODO: op % % %", @as(i64) funct3, funct7, fmt_hex(op));
+                        @default => return(self.error(@tfmt("op % %", @as(i64) funct3, funct7)));
                     }
                 };
                 @case(0b0000111) => {
-                    @if(opcode_class != .Kl) @panic("TODO: opw % % %", @as(i64) funct3, funct7, fmt_hex(op));
+                    @if(opcode_class != .Kl) return(self.error(@tfmt("opw % %", @as(i64) funct3, funct7)));
                     o: Qbe.O = @switch(@as(i64) funct3) {
                         @case(0b101) => .ceql;
                         @case(0b111) => .cnel;
-                        @default => @panic("TODO: op % % %", @as(i64) funct3, funct7, fmt_hex(op));
+                        @default => return(self.error(@tfmt("op % %", @as(i64) funct3, funct7)));
                     };
                     
                     @dis(self, "%= % % 0?0: %", rd, o, rs2, rs1);
@@ -436,11 +472,11 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
                     return Qbe.Null;
                 }
                 @case(0b0000100) => {
-                    @if(opcode_class != .Kw) @panic("TODO: op % % %", @as(i64) funct3, funct7, fmt_hex(op));
+                    @if(opcode_class != .Kw) return(self.error(@tfmt("op % %", @as(i64) funct3, funct7)));
                     o: Qbe.O = @switch(@as(i64) funct3) {
                         @case(0b000) => .extuw;
                         @case(0b100) => .extuh;
-                        @default => @panic("TODO: op % % %", @as(i64) funct3, funct7, fmt_hex(op));
+                        @default => @panic("TODO: op % %", @as(i64) funct3, funct7);
                     };
                     t := self.f.newtmp("w", .Kl);
                     push(b, o, .Kl, t, a0, Qbe.Null);
@@ -451,9 +487,9 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
                 @case(48) => @match(funct3) {
                     fn sll() => .rotl;
                     fn srl() => .rotr;
-                    @default => @panic("TODO: op % % %", @as(i64) funct3, funct7, fmt_hex(op));
+                    @default => return(self.error(@tfmt("op % %", @as(i64) funct3, funct7)));
                 };
-                @default => @panic("TODO: op % % %", @as(i64) funct3, funct7, fmt_hex(op));
+                @default => return(self.error(@tfmt("op % %", @as(i64) funct3, funct7)));
             };
             @if(!already_dis) @dis(self, "%= %% %, %", rd, o, @if(opcode_class == .Kl, "", ".w"), rs1, rs2);
             if opcode_class == .Kl {
@@ -502,10 +538,11 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
                 .bit_or(I(7, 7, 11))
                 .zext().sign_extend(12);
             a0, a1 := (self.read(rs1), self.read(rs2));
+            slow_check_enum(Bcmp, funct3) || return(self.error("bcmp"));
             o: Qbe.O = @match(funct3) {
                 fn beq() => .ceql;
                 fn bne() => .cnel;
-                @default => @panic("TODO: bcmp %", fmt_hex(op));
+                @default => return(self.error("bcmp"));
             };
             @dis(self, "b.% %, %, pc%%", o, rs1, rs2, @if(imm < 0, "", "+"), imm);
             cond, new_pc := (self.f.newtmp("cond", .Kw), self.f.newtmp("new_pc", .Kl));
@@ -554,12 +591,12 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
                 self.terminator = .Halt;
                 return Qbe.ConZero;
             };
-            @default =>@panic("TODO: system %", fmt_hex(op));
+            @default => return(self.error("system"));
         };
         fn amo() => {
             funct7 := I(31, 25, 0);
             funct3 := I(14, 12, 0);
-            @if(funct7 != 0b0010111 || funct3.bit_and(0b110) != 0b010) @panic("TODO: amo %", fmt_hex(op));
+            @if(funct7 != 0b0010111 || funct3.bit_and(0b110) != 0b010) return(self.error("amo"));
             k := @if(funct3.bit_and(1) == 1, Qbe.Cls.Kl, .Kw);
             
             @dis(self, "%= amocas.%.aqrl % %", rd, k, rs1, rs2);
@@ -573,7 +610,7 @@ fn decode_instruction(self: *Compile, pc: *u32, opcode_class: Qbe.Cls) Qbe.Ref =
         }
         fn misc_mem() => {
             fence := @bits(0b0000, 0b11111111, 0b00000, 0b000, 0b00000, 0b0001111);
-            @if(op != fence) @panic("TODO: misc_mem %", fmt_hex(op));
+            @if(op != fence) return(self.error("misc_mem"));
             @dis(self, "fence");
             callee := self.f.getcon(int_from_rawptr(import("@/lib/sys/sync/atomics.fr").fence_impl));
             push(b, .call, .Kw, Qbe.Null, callee, Qbe.Null);
@@ -661,6 +698,12 @@ fn compute_reg_addr(self: *Compile, r: RvReg) Qbe.Ref = {
     addr
 }
 
+fn error(self: *Compile, msg: Str) Qbe.Ref = {
+    self.error = msg;
+    self.terminator = .Error;
+    Qbe.ConZero
+}
+
 #use("@/backend/rv64/bits.fr");
 fn dis(e: FatExpr) FatExpr #macro = {
     e := e&.items();
@@ -674,3 +717,11 @@ fn dis(e: FatExpr) FatExpr #macro = {
         }
     }
 }
+
+// TODO: have a less annoying way to do incomplete enums (@match will panic on invalid values)
+slow_check_enum :: fn($E: Type, it: E) bool #generic = {  
+    for_enum E { check |
+        @if(it == check) return(true);
+    };
+    false
+};

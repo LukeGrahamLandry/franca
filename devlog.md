@@ -1,4 +1,10 @@
 
+## (Sep 16) rv emu
+
+- don't die on unknown instruction. end the trace and die if it's actually executed. 
+- don't die on direct jump between JitMappings. lookup again, not worth dealing with the fast path for something that never happens. 
+- ditto for falling off the end of the mapping. i track exec regions for unmap anyway so its easy to not fault on pc stepping too far. 
+
 ## (Sep 15) rv emu
 
 - compiling the emu with -unsafe: 5570ms -> 4820ms is solidly better than qemu's 5320ms. 

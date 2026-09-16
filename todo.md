@@ -24,6 +24,9 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
   - also `__franca_builtin_static_memmove`, `__franca_base_address`, `__franca_wasm_import_names`
   - less bad but still: franca_runtime_init, franca_runtime_init_thread, "franca_sapp", "note: run with `FRANCA_BACKTRACE=1` ..."
 - examples/emu 
+  - still haven't done all the instructions i can emit. at the very least: rot with immediate. 
+  - document exactly which extensions i support (several are partial, might be worth finishing them just so it's easy to describe)
+  - test with other people's binaries
   - more syscall translation (x86_64, libc) so i can run more than just os/host/user. 
     - some of which i already have in examples/os/user/init.fr/get_libc_syscall_callee, should factor that out. 
   - do JitEvent.Sync so it can run in wasm
@@ -32,15 +35,11 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
     tho in that case specifically it would be nice to be able to intercept them instead and remap back to the os/user/libc calls. 
   - flush_icache needs to invalidate the linked O.call for Terminator.Direct
   - use register_small for Kw to insert fewer sign extensions
-  - stop gracefully if decode_instruction wanders into junk.  
-    especially because sometimes the speculative jump target is wrong. 
-    like the and-link part for a function returning Never (similarly syscall exit). 
-  - similarly it shouldn't crash if code that hasn't been called yet has an invalid instruction
   - factor out the immediate encoding bit positions and the fcnvt flags to share with the compiler
   - be able to use it as a disassembler without compiling anything and add it to backend/meta/dis.fr
-  - allow direct jump between different JitMapping-s
   - since i pass pc around, cache compiled code and reuse it if you keep exec-ing the same thing over and over. 
     ex. tests/backend.fr has to recompile the qbe_frontend -bin 75 times which is really slow. 
+  - partial mprotect/munmap
 - examples/os/host/user.fr -share to access cached dependencies
 - get_executable_path() that returns a @tagged(Aot: Str, Jit: @struct(franca_exe: Str, source_file: Str)); 
   so the programs that depend on re-execing the compiler can give a sane error message. 
