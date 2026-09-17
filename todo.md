@@ -63,8 +63,7 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
     rn what is shown on the screen depends if you build with -keep-names which is silly.
 - hctarcs generated file main use gui instead of temporary_main
 - hctarcs: one of the builtin ones has floatunrepresentableinintegerrange in wasm when printing in literal_node to check if the string is floaty because my display does .int()
-- circuit: clock shematic shows the wrong time in web
-- circuit: collect_schematics should sort them (instead of walk_directory_unordered) 
+- os/kernel real time device 
   so when you press `l` the order they're shown in the ui is consistant (rn different on macos and web)
 - don't die if linked against a libc that isn't compiled with frame pointers. 
   walk_stack_trace should try to stop if it doesn't like the pointer somehow. 

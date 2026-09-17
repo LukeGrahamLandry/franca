@@ -1,4 +1,10 @@
 
+## (Sep 17)
+
+- web: expose real time
+  - circuit: clock shematic can show the right time now
+- circuit: sort after collect_schematics so ui isn't showing output of walk_directory_unordered
+
 ## (Sep 16) rv emu
 
 - don't die on unknown instruction. end the trace and die if it's actually executed. 

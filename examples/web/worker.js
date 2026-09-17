@@ -214,7 +214,14 @@ export const imports = {
                 }
             }
         },
-        js_performace_now: () => performance.now(),
+        
+        js_performace_now: (clock) => { 
+            switch (clock) {
+                case 0: return Date.now();
+                case 1: return performance.now();
+                default: return -1;
+            }
+        },
         js_worker_spawn: (userdata, stack, exit_futex) => {
             postMessage({ tag: "spawn", child: [userdata, stack, exit_futex], memory: imports.main.memory });
         },
