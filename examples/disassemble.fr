@@ -84,7 +84,11 @@ dump :: fn(out: *List(u8), input: []u8) void = {
     };
     it := it || panic("didn't find any code to disassemble");
     
-    if !FEAT_LUA || it.arch == .rv64 {
+    if it.arch == .rv64 {
+        rv_dis(it.code, out, it.base_address, it.symtab&);
+        return();
+    };
+    if !FEAT_LUA {
         hex_dump(out, it.code, it.base_address);
         return();
     };
@@ -604,3 +608,48 @@ find_extnames :: fn(luajit: Str) []Str = {
 }
 
 Qbe :: import("@/backend/lib.fr").Qbe;
+
+// its convenient to reuse the decoding from examples/emu/ without the compiling part. 
+// so needs some convoluted faking the global state of the emulator.  
+rv_dis :: fn(code: []u8, out: *List(u8), base_address: i64, symtab: *RawHashMap(i64, Str)) void = {
+    #use("@/examples/emu/compile_riscv.fr");
+    #use("@/examples/emu/runtime.fr");
+    emu := zeroed(Emulator); emu := emu&;
+    init(emu, temp(), (dis=true));
+    mapping := emu.mappings&.push(mem=code, m=zeroed(Qbe.Module), worker=zeroed(*Qbe.CodegenShared));
+    init_empty_for_template_only(mapping.m&, temp());
+    f := temp().box_uninit(Qbe.Fn);
+    f.default_init(mapping.m&);
+    b := newblk(); f.nblk += 1;
+    f.start = b;
+    code := u32.reinterpret_bytes(code);
+    self: Compile = (
+        f=f,b=b,emu=emu,out=out,mapping=mapping,
+        cpu_addr = Qbe.Null,pc = Qbe.Null,
+        entry = code.ptr,
+    ); self := self&;
+    each code { pc |
+        a := base_address + ptr_diff(code.ptr, pc)*4;
+        if symtab.get(a) { name |
+            @fmt(self.out, "\n->%:\n", name);
+        };
+        @fmt(self.out, "% % ", fmt_hex(a), fmt_hex(pc[]));
+        r := decode_instruction(self, pc, .Kl);
+        @match(self.terminator) {
+            fn Error() => @fmt(self.out, "unknown; %\n", self.error);
+            fn Direct() => {
+                if self.direct_jump_targets&[0] { it |
+                    if symtab.get(base_address + it) { name |
+                        self.out.len -= 1;
+                        @fmt(self.out, "; ->%\n", name);
+                    };
+                };
+            };
+            @default => ();
+        };
+        self.direct_jump_targets&[0] = .None;
+        self.terminator = .Indirect;
+        b.ins.len = 0; f.ncon = 2; f.ntmp = 64;  // not actually emitting code so don't grow the arrays
+        self.register_read.valid.data.bits&[0] = 0;
+    };
+}

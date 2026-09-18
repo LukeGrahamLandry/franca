@@ -7,7 +7,7 @@ FEAT_LLVM :: true;  // exec llvm-mc to disassemble.
 dis :: fn(out: *List(u8), code: []u8, arch: Arch) void = {
     @if(!FEAT_DIS) return();
     @if(!FEAT_LAZY) return(main(out, code, arch));
-    @if(!(FEAT_LUA || FEAT_LLVM || arch == .wasm32)) return();
+    @if(!(FEAT_LUA || FEAT_LLVM || @is(arch, .wasm32, .rv64))) return();
     // TODO: dlopen on wasm and static linux
     @if(!is_linking_libc() || query_current_arch() == .wasm32) return();
     
@@ -45,6 +45,9 @@ main: DisassemblerFunc : fn(out, code, arch) void #export = {
         import("@/examples/dump_wasm.fr")'dump(out, code);
         return();
     };
+    
+    @if(arch == .rv64) return(rv_dis(out, code, arch));
+    
     // TODO: puclua needs longjmp so i need to do exceptions to make it run on wasm
     @if(query_current_arch() == .wasm32) return();
     
@@ -91,4 +94,10 @@ luajit_dis: DisassemblerFunc : fn(out, code, arch) void = {
     dis.run(arch, code, out, base, @ref zeroed(RawHashMap(i64, Str)))
         .or(fn(msg) => @fmt(out, "%", msg));
     Lua'lua_close(L);
+}
+
+rv_dis: DisassemblerFunc : fn(out, code, _) void = {
+    #use("@/examples/disassemble.fr");
+    base := u8.int_from_ptr(code.ptr);
+    rv_dis(code, out, base, @ref zeroed(RawHashMap(i64, Str)));
 }

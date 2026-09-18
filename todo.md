@@ -36,7 +36,6 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
   - flush_icache needs to invalidate the linked O.call for Terminator.Direct
   - use register_small for Kw to insert fewer sign extensions
   - factor out the immediate encoding bit positions and the fcnvt flags to share with the compiler
-  - be able to use it as a disassembler without compiling anything and add it to backend/meta/dis.fr
   - since i pass pc around, cache compiled code and reuse it if you keep exec-ing the same thing over and over. 
     ex. tests/backend.fr has to recompile the qbe_frontend -bin 75 times which is really slow. 
   - partial mprotect/munmap
@@ -52,7 +51,7 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
   T1= or T1, T2
   ```
   - walk_stack_trace for destroy_compiler: `trace trap: compiler inserted break instruction`
-    (in whatever multiarch qemu binfmt_misc situation i have)
+    (implement trace_start for rv)
   - is there a field in the elf file where i can declare what extensions i use so the disassembler knows and doesn't say `.insn` all the time?
 - nuklear frame buffer rendering and get it to work on my os and do virtio keyboard/mouse input through same api as app and get rid of unfinished usb driver. 
 - tests/gpu.fr reproducible. output

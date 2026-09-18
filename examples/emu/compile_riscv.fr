@@ -19,7 +19,7 @@ Compile :: @struct {
     pc: Qbe.Ref;
     entry: *u32;
     emu: *Emulator;
-    out: List(u8);  // disassemble
+    out: *List(u8);  // disassemble
     terminator := Terminator.Indirect;
     direct_jump_targets: Array(?i64, 2) = (.None, .None);
     bcmp_condition: ?Qbe.Ref = .None;  
@@ -80,7 +80,7 @@ Qbe'enter_task(mapping.worker) { codegen_entry |
         cpu_addr = f.newtmp("cpu", .Kl),
         pc = f.newtmp("pc", .Kl),
         entry = u32.ptr_from_raw(entry),
-        out = list(temp()),
+        out = @ref u8.list(temp()),
         mapping = mapping,
     ); self := self&;
     push(b, .par, .Kl, self.cpu_addr, Qbe.Null, Qbe.Null);
@@ -182,6 +182,10 @@ Qbe'enter_task(mapping.worker) { codegen_entry |
     emu.trace_lookup&.insert(entry.int_from_rawptr(), trace);
     code := u8.ptr_from_raw(entry).slice(ptr_diff(self.entry, pc) * 4);
     emu.trace_map&.insert(code, trace);
+    
+    if self.emu.disassemble {
+        eprint(self.out.items());
+    }
 };
     result
 }
@@ -705,15 +709,13 @@ fn error(self: *Compile, msg: Str) Qbe.Ref = {
 }
 
 #use("@/backend/rv64/bits.fr");
-fn dis(e: FatExpr) FatExpr #macro = {
+dis :: fn(e: FatExpr) FatExpr #macro = {
     e := e&.items();
     @{
         self := @[e[0]];
         if self.emu.disassemble {
-            self.out&.clear();
-            @[format_into(@{ self.out& }, e.rest(1), e[0].loc)];
-            self.out&.push_all("\n");
-            eprint(self.out.items());
+            @[format_into(@{ self.out }, e.rest(1), e[0].loc)];
+            self.out.push_all("\n");
         }
     }
 }
@@ -725,3 +727,5 @@ slow_check_enum :: fn($E: Type, it: E) bool #generic = {
     };
     false
 };
+
+#use("@/examples/emu/runtime.fr");
