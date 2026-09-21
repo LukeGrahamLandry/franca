@@ -30,7 +30,10 @@ trace_start :: AsmFunction(fn() *Frame = (), { #use("@/backend/arm64/bits.fr"); 
 ) out), (fn(out) = {
     // harvard: no accessable linked list of stack frames
     out.push_all(@slice(0x00, 0x42, 0x00, 0x0B)); // wasm { 0 locals. i64.const(0). end.
-}));
+}), { #use("@/backend/rv64/bits.fr"); @const_slice(
+    I(0, RvReg.FP.bits(), @as(u3) OpI.add, RvReg.A0.bits(), .op_imm),
+    jalr(.RA, 0, .Zero),
+)});
 
 // same on arm64 and amd64
 trace_prev :: fn(frame: *Frame) *Frame = 
@@ -122,7 +125,7 @@ show_trace_and_exit :: fn(s: i64, info: *SigInfo, ctx: *UContext) void = {
 LocationResolver :: @FnPtr(userdata: rawptr, ip: rawptr) ?Str; 
 
 LocationResolverNode :: @rec @struct(next: *LocationResolverNode, data: rawptr, func: LocationResolver);
-RESOLVERS :: @static_mut zeroed(*LocationResolverNode);
+RESOLVERS :: fn() **LocationResolverNode = bit_cast_unchecked(*rawptr, **LocationResolverNode, tls(.global)[].crash_symbol_resolvers&);
 
 // TODO: generate shitty code like this 
 fn push_resolver($T: Type, data: *T, func: @FnPtr(userdata: *T, ip: rawptr) ?Str) *LocationResolverNode #generic = {
@@ -141,13 +144,13 @@ fn push_resolver(data: rawptr, func: LocationResolver) *LocationResolverNode = {
     node.func = func;
     // There's a moment here where the node is in the slot but with next=0, 
     // which just means if someone looks at it, they'll miss the rest of the list. 
-    node.next = atomic_set(*LocationResolverNode, RESOLVERS, node);
+    node.next = atomic_set(*LocationResolverNode, RESOLVERS(), node);
     node
 }
 
 fn pop_resolver(it: *LocationResolverNode) void = {
     ::ptr_utils(LocationResolverNode);
-    prev := RESOLVERS;
+    prev := RESOLVERS();
     node := prev[];
     while => !node.is_null() {
         if identical(node, it) {
@@ -176,7 +179,7 @@ fn report_backtrace(start: FpIp) void = {
             return();
         };
         if !identical(ip, last_ip) {
-            if name_from_ip(RESOLVERS[], ip) { s, resolver_i | 
+            if name_from_ip(RESOLVERS()[], ip) { s, resolver_i | 
                 @fmt(out, "  %: %", i, s);
                 if prev_resolver != resolver_i {
                     @fmt(out, "<(%)v", resolver_i);

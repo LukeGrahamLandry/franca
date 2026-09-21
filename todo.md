@@ -13,7 +13,7 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 - `franca examples/os/build.fr -web -append "-file examples/os/bin/test_preempt.fr -lang franca"`
   "panic! TODO(import_wasm): atomic.wait with timeout"
 - get a riscv linker to test R_RISCV_JAL
-- unsafe_tail_call emit for rv/wasm
+- unsafe_tail_call emit for wasm
 - make unsafe_tail_call good enough to use for hctarcs
 - test that uses import_c/assemble.fr with call.link=false and emits arm macho aot because i was doing that wrong
 - can't examples/web/build.fr in examples/os without -share because of graphics/web/webgpu_api.fr
@@ -50,8 +50,6 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
   T1= cnel S1 0?0: T1    # 
   T1= or T1, T2
   ```
-  - walk_stack_trace for destroy_compiler: `trace trap: compiler inserted break instruction`
-    (implement trace_start for rv)
   - is there a field in the elf file where i can declare what extensions i use so the disassembler knows and doesn't say `.insn` all the time?
 - nuklear frame buffer rendering and get it to work on my os and do virtio keyboard/mouse input through same api as app and get rid of unfinished usb driver. 
 - tests/gpu.fr reproducible. output
