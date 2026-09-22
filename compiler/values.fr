@@ -401,10 +401,11 @@ fn to_value(bytes: Slice(u8), a: Alloc) Values = {
 fn chop_prefix(self: *SelfHosted, prefix: Type, t: *ReadBytes) ?Values #once = {
     info := self.get_info(prefix);
     @debug_assert_eq(0, t.i.mod(info.align_bytes.zext()));
-    if t.take(info.stride_bytes.zext()) { bytes | 
-        return(Some = bytes.to_value(self.get_alloc()));
-    };
-    .None
+    n: i64 = info.stride_bytes.zext();
+    @if(t.bytes.len - t.i < n) return(.None);
+    value := t.bytes.subslice(t.i, n).to_value(self.get_alloc());
+    t.i += n;
+    (Some = value)
 }
 
 // You need this for reproducible builds!
@@ -430,7 +431,8 @@ fn zero_padding(program: *SelfHosted, ty: Type, bytes: *ReadBytes) PRes = {
     @match(program.get_type(ty)) {
         fn Tagged(f) => {
             start := bytes.i;
-            tag := bytes.read_next(i64);
+            tag := bytes.bytes.rest(bytes.i).peek_type(i64)[];  // :tag_is_i64
+            bytes.i += size_of(i64);
             @err_assert(tag.ult(f.cases.len), "Invalid tag % in constant", tag) return;
             case := f.cases.index(tag);
             @try(zero_padding(program, case._1, bytes)) return;
@@ -483,6 +485,8 @@ fn zero_padding(program: *SelfHosted, ty: Type, bytes: *ReadBytes) PRes = {
     };
     .Ok
 }
+
+ReadBytes :: @struct(bytes: [] u8, i: i64);
 
 any_padding_bytes :: fn(self: *SelfHosted, ty: Type) bool = {
     ty := self.raw_type(ty);

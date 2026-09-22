@@ -10,6 +10,8 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
+- test #log_ir from the outside like tests/exe/errors_comptime.fr
+  test that log_ir works. and with complex expression argument. and does it twice on things with const args. and for AsmFunction. 
 - `franca examples/os/build.fr -web -append "-file examples/os/bin/test_preempt.fr -lang franca"`
   "panic! TODO(import_wasm): atomic.wait with timeout"
 - get a riscv linker to test R_RISCV_JAL
@@ -66,7 +68,6 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
   walk_stack_trace should try to stop if it doesn't like the pointer somehow. 
   maybe just look at StaticTls.Thread.stack, bit sad to not be able to do 
   it across stack switching tho (like examples/elf_loader.fr)
-- remove #log_asm. it's redundant with #log_ir("D"). make sure it works with AsmFunction too. 
 - hctarcs 549996194 in wasm has runtime error integer overflow when you win the first level
 - doom input in the web demo at least. also use the upcoming import_c redirects to do it on native without the os/user/libc thing.
 - tests/gui.fr -wgpu: crashes sometimes
@@ -344,7 +345,6 @@ woes found when working on emit_c
   at what point do i throw in the towel and write everything in lean or whatever? 
 - emit_c+clang self compile doesn't work on all targets
 - move the repro tests to the beginning of run_tests.fr so its less time you have to spend not editing the source while it runs
-- log_ast/log_ir should do something in emit_c?
 - emit_c jit hello world doesn't work with clang on rv if pass -target so i think it was cheating before because the multiarch thing is confusing
 - emit_c decide what to do about the non-overlap between the two ways of collecting pending functions. 
   maybe want to move emitting constants into the first loop so ordering matches,
@@ -972,10 +972,8 @@ TODO: end of loop. still too many options for 'index'
 
 ## 
 
-- test #log_ir from the outside like tests/exe/errors_comptime.fr
 - put more stuff in read only data. 
   - maybe have @static and @mut_static. same for @const_slice. track that in PageMap? 
-- #log_ir should fire multiple times for functions with $const parameters (ie. native_isel)
 - shouldn't be able to typo a name as easily. like S :: import_module{enqueue :: enqueue_task}); then S.enqueue_task will get you the wrong one and be slow. 
 - why was the quicksort wrapper trying to be emitted for import_module (when not marked #fold)
 - get compilation order dependence under control!!

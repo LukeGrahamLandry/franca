@@ -1,4 +1,11 @@
 
+## (Sep 21)
+
+- simplify lex hex and ReadBytes
+- #log_ir non-string-literal
+- why do i have #once places if it doesn't do anything. shame i didn't write down why i took it out. did i really never port it to the self hosted compiler? 
+- remove #log_asm. it's redundant with #log_ir("D"). make sure it works with AsmFunction too. 
+
 ## (Sep 17)
 
 - web: expose real time

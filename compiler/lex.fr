@@ -2,10 +2,9 @@
 
 Token :: @struct(type: TokenType, span: Span);
 
-BinNum :: @struct(bit_count: u8, value: u64); // TODO: use this struct in the FromBitLiteral ast node? 
+BinNum :: @struct(bit_count: u8, value: u64);
 TokenType :: @tagged(
     Number: i64,
-    // TODO: if this is below, it gets shadowed by the varient
     Quoted: @struct(s: Symbol, escapes: bool),
     Symbol: Symbol,
     Op: Operator, 
@@ -40,14 +39,11 @@ Lexer :: @struct(
     src: Str,
     start := 0,
     current := 0,
-    // TODO: can't put `()!uninitialized` here as default value because c backend sees its an enum and thinks it might have a pointer in there and can't deal with it. 
-    //       need to be smarter about how constants get emitted. 
     token: Token,
     line := 0,
     old_line := 0,
 );
 
-// TODO: need be be able to find the ResAddr cause it might not be on top of the stack. (early return from flat_call: big ret/arg value )
 fn peek(self: *Lexer) *Token = self.token&;
 
 fn pop(self: *Lexer) *Token = {
@@ -55,7 +51,6 @@ fn pop(self: *Lexer) *Token = {
     if(self.eat_white_space_hit_end(), => return(self.token&));
     self.start = self.current;
     
-    // TODO: fancier switch statements. 
     @switch(self.peek_c()) {
         @inclusive("a".ascii(), "z".ascii()) => self.lex_ident();
         @inclusive("A".ascii(), "Z".ascii()) => self.lex_ident();
@@ -142,7 +137,11 @@ fn pop(self: *Lexer) *Token = {
             };
         };
         @inclusive("1".ascii(), "9".ascii()) => self.lex_num();
-        @case(0) => self.put_token(.Eof);  // TODO: check that we're actually at the end
+        @case(0) => if self.current < self.src.len {
+            self.error(Unexpected = 0);
+        } else {
+            self.put_token(.Eof);
+        };
         @default fn(c: u8) => { 
             if c >= 128 {
                 self.error(.IdentifiersCannotUseUnicodeSorry);
@@ -240,7 +239,6 @@ fn skip_string(self: *Lexer) Ty(Str, bool, bool) = {
 }
 
 fn lex_string(self: *Lexer) bool = {
-    // TODO: destructuring 
     text, escapes, success := self.skip_string();
     if success {
         self.put_token((Quoted = (s = self.pool.insert_owned(text), escapes = escapes)));
@@ -284,51 +282,34 @@ fn lex_hex(self: *Lexer) void #once = {
     self.current += 2;
     total := 0;
     
-    if !self.peek_c().is_hex_digit() {
-        self.error((Unexpected = self.peek_c().zext()));
-        return();
-    };
-    
     bits := 0;
-    dowhile {
+    while => self.peek_c().hex_digit() { new |
         total *= 16;
         bits += 4;
         if bits > 64 {
             self.error(.TooManyBits);
             return();
         };
-        total += self.peek_c().hex_digit().unwrap(); // TODO: dumb that i do an extra switch here when i just did one at the end of the loop, but nothing matters. 
+        total += new;
         self.current += 1;
         while => self.peek_c() == "_".ascii() {
             self.current += 1;
         };
-        self.peek_c().is_hex_digit()
     };
+    if bits == 0 {
+        return self.error((Unexpected = self.peek_c().zext()));
+    };
+    
     self.put_token((BinaryNum = (bit_count = bits.trunc(), value = total.bitcast())));
-}
-
-fn is_hex_digit(c: u8) bool = {
-     @switch(c) {
-        @inclusive("0".ascii(), "9".ascii()) => true;
-        @inclusive("a".ascii(), "f".ascii()) => true;
-        @inclusive("A".ascii(), "F".ascii()) => true;
-        @default => false;
-    }
 }
 
 fn lex_bin(self: *Lexer) void #once = {
     self.current += 2;
     total := 0;
     
-    c := self.peek_c();
-    if c.ne("0".ascii()).and(c.ne("1".ascii())) {
-        self.error((Unexpected = self.peek_c().zext()));
-        return();
-    };
-    
     bits := 0;
     dowhile {
-        more := @switch(self.peek_c()){
+        @switch(self.peek_c()){
             @case("0".ascii()) => {
                 total *= 2;
                 bits += 1;
@@ -347,10 +328,12 @@ fn lex_bin(self: *Lexer) void #once = {
                 true
             };
             @default => false;
-        };
-        more
+        }
     };
-    if bits.gt(64) {
+    if bits == 0 {
+        return self.error((Unexpected = self.peek_c().zext()));
+    };
+    if bits > 64 {
         self.error(.TooManyBits);
         return();
     };

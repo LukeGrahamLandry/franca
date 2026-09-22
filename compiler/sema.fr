@@ -316,7 +316,7 @@ fn deref_depth(self: *SelfHosted, type: Type) Ty(Type, i64) = {
 }
 
 // :PlaceExpr
-fn field_access_get_type(self: *SelfHosted, container_input_type: Type, name: Symbol) Res(Ty(i64, Type, i64)) #once = {  // (off, field_type, ptr_depth)
+fn field_access_get_type(self: *SelfHosted, container_input_type: Type, name: Symbol) Res(Ty(i64, Type, i64)) = {  // (off, field_type, ptr_depth)
     // Pointers never have fields, so the thing behind the pointer, shouldn't be a pointer.
     // This lets you write `self: *Self; self.name` instead of `self: *Self; self[].name`.
     inner, depth := self.deref_depth(container_input_type);
@@ -542,6 +542,14 @@ fn get_runtime_string_type(self: *SelfHosted) Type = {
     inner_str
 }
 
+    fn eval_str(self: *SelfHosted, e: *FatExpr) Maybe(Symbol) = {
+        @if_let(e.expr&) fn String(it) => return(Ok = it[]);
+        str := self.get_runtime_string_type();
+        ir := @check(self.immediate_eval_expr(e, str)) return;
+        ir := Str.assume_cast(ir&)[];
+        (Ok = self.pool.insert_owned(ir)) 
+    }
+
 fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
     @check(self.infer_return(fid)) return;
     func := self.get_function(fid);
@@ -550,14 +558,6 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
     };
     @err_assert(!func.get_flag(.Inline), "cannot be both inline and special") return;
     good := false;
-    fn eval_str(self: *SelfHosted, e: *FatExpr) Maybe(Symbol) = {
-        @if_let(e.expr&) fn String(it) => return(Ok = it[]);
-        str := self.get_runtime_string_type();
-        ir := @check(self.immediate_eval_expr(e, str)) return;
-        ir := Str.assume_cast(ir&)[];
-        (Ok = self.pool.insert_owned(ir)) 
-    }
-    
     did_import := false;
     is_weak_import := false;
     find_import :: fn(lib_name: Symbol) void => {
@@ -1513,7 +1513,7 @@ fn compile_call_overload_set(self: *SelfHosted, expr: *FatExpr, requested: Resul
 }
 
 ::if(ResultType);
-fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) #once = {
+fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) = {
     @debug_assert(expr.expr&.is(.Call));
     call := expr.expr.Call&;
     f, arg := (call.f, call.arg);
@@ -1765,7 +1765,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         // TODO: better error message. should show the previous usage. 
         if(func.get_flag(.OnceConsumed), => return(@err("tried to call once function again")));
         func.set_flag(.OnceConsumed);
-        @debug_assert(expr.done, "ICE: if we applied #once, the expression really needs to be .done");
+        @debug_assert(expr.done, "ICE: if we applied #once, the expression really needs to be .done %", fmt_func(self, fid));
     };
     
     if self.dispatch.enclosing_function.is_some() {
@@ -2129,7 +2129,7 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
     self.curry_const_args_inner(original_f, new_fid, f_expr, arg_expr, 0)
 }
 
-fn renumber_func(self: *SelfHosted, new_func: *Func, mapping: *RenumberResults) void #once = {
+fn renumber_func(self: *SelfHosted, new_func: *Func, mapping: *RenumberResults) void = {
     renumber: RenumberVars = (scope = self.scopes, mapping = mapping, compiler = self);
     renumber&.walk_func(new_func);
 }
@@ -3243,7 +3243,7 @@ fn compute_new_overloads(self: *SelfHosted, overloads: *OverloadSetData) void = 
 // - for now constants are always stored globally and restricted visibility is just handled by scope resolution.
 // So we delay taking constants until you try to compile the expression that contains them.
 // Also, to be order independent, we don't actually evaluate or type-check them yet, that's done lazily the first time they're referenced. 
-fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
+fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) = {
     each body { stmt |
         @match(stmt.stmt&) {
             fn DeclFunc(func) => {
@@ -3333,7 +3333,6 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
             };
             @case(Flag.noinline.ident()) => func.set_flag(.NoInline);
             @case(Flag.generic.ident())  => func.set_flag(.Generic);
-            @case(Flag.log_asm.ident())  => func.set_flag(.LogAsm);
             @case(Flag.log_ir.ident())     => func.set_flag(.LogIr);
             @case(Flag.log_ast.ident())    => func.set_flag(.LogAst);
             @case(Flag.duplicated.ident()) => func.set_flag(.AllowDuplicated);
@@ -3372,6 +3371,7 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
             };
             @case(Flag.avoid_shim.ident()) => func.set_flag(.AvoidJitShim);
             @case(Flag.no_trace.ident())  => func.set_flag(.NoTrace);
+            @case(Flag.once.ident())  => func.set_flag(.Once);
             @default => ();
         };
     };
@@ -3379,7 +3379,7 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
     .Ok
 }
 
-fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType, old: bool) Maybe(void) #once = {
+fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType, old: bool) Maybe(void) = {
     @debug_assert(expr.expr&.is(.GetVar));
     var := expr.expr.GetVar;
     if var.kind == .Const {
@@ -4139,7 +4139,7 @@ fn invoke(self: *SelfHosted, callee: FuncId, argument: *FatExpr, return_type: Ty
     s_ty  := synthetic_ty((Call = (f = self.box(f), arg = argument)), loc, Type);
     s_ty  := self.box(s_ty);
     value := self.poll_in_place(Values, => self.immediate_eval_expr(s_ty, return_type));
-    value := @try(value) return;  // TODO: miscompilation if you inline this ^ :fucked
+    value := @try(value) return;
     (Ok = value)
 } 
 
@@ -4240,9 +4240,6 @@ fn early_builtin_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
             @err_assert(invocation.target.is_raw_unit(), "@tagged expected single arg") return;
             expr[] = @check(self.tagged_macro(invocation.arg)) return;
         };
-        @case(Flag.late.ident()) => {
-            expr.set(unit_value, self.get_or_create_type(void));
-        };
         @default => {
             return(@err("tried to call non-builtin macro '%' while bootstrapping.", self.pool.get(name)));
         };
@@ -4289,7 +4286,7 @@ fn builtin_macro(self: *SelfHosted, builtin_name: Symbol) Result(Ty(Values, Type
     }
 }
 
-fn struct_type(self: *SelfHosted, pattern: *Pattern, is_union: bool) Maybe(Type) #once = {
+fn struct_type(self: *SelfHosted, pattern: *Pattern, is_union: bool) Maybe(Type) = {
     fields: List(Field) = list(pattern.bindings.len, self.get_alloc());
     scope := NOSCOPE;
     each pattern.bindings { b | 

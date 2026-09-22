@@ -163,7 +163,7 @@ This is very error prone because it relies on knowing that the calling conventio
 for both sets of types. It is considered disrespectful if you make a mistake. 
 This should probably be removed, it just felt cute before i had an optimiser. 
 
-### log_asm, log_ir, log_ast 
+### log_ir, log_ast 
 
 print out some information about the compiler's internal representation 
 of a function. The argument of log_ir can be a string with different letters corrisponding to 
@@ -172,7 +172,9 @@ different phases of the backend to inspect. See `backend/ir.fr/Qbe'DebugKey` for
 This is mostly useful for debugging the compiler. Using on large functions
 will probably just be a lot of useless spam. If it was less painful to compose 
 driver programs and the compiler gave them a little more information, 
-you could replace `log_asm`, `log_ir`, and `log_ast` with something in "userspace"
+you could replace `log_ir`, and `log_ast` with something in "userspace"
+
+the old #log_asm is now #log_ir("D"). 
 
 ### inline
 
