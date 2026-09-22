@@ -1,0 +1,255 @@
+main :: fn() void = {
+    // TODO: have this be a cli arg and default to using index.txt
+    path := "/Users/luke/Downloads/Subscriptions-OnMyiPhone.opml";
+    in := read_entire_file_or_crash(temp(), path);
+    it := parse_xml(in, temp()).or(fn(msg) => @panic("failed to parse feeds %%", path, msg));
+    @println("%", it);
+    feeds := parse_opml(it, temp()).or(fn(msg) => @panic("failed to parse feeds %\n%", path, msg));
+    cache_dir := "target/rss";
+    make_dirs_or_crash(cache_dir);
+
+    // TODO: don't be sequential
+    // TODO: save the time and refetch once a day or something
+    now := { t := zeroed(TimeSpec); Posix'clock_gettime(Posix.CLOCK.REALTIME, t&); t.seconds };
+    index := u8.list(temp());
+    html := u8.list(temp());
+    for feeds { url |
+        continue :: local_return;
+        key := Sha256'hex(url);
+        cache_path := @tfmt("%/%", cache_dir, key);
+        @fmt(index&, "%\n", url);
+        text := read_entire_file(temp(), cache_path) || {
+            @println("fetching '%'", url);
+            text := @match(import("@/examples/gpu/hctarcs/main.fr")'http_get(url)) {
+                fn Ok(it) => it;
+                fn Err(msg) => {
+                    @eprintln("failed to fetch '%': %", url, msg);
+                    continue()
+                };
+            };
+            write_entire_file(cache_path, text);
+            text
+        };
+        
+        it := parse_xml(text, temp()).or(fn(msg) => {
+            @eprintln("failed to parse feeds %%", cache_path, msg);
+            continue();
+        });
+        
+        it.tag == "rss" || continue(@eprintln("missing rss tag"));
+        it := it.body&.find(fn(it) => it.tag == "channel") 
+            || continue(@eprintln("missing channel tag"));
+        @fmt(html&, "<details><summary><a href='%'>%</a></summary>\n<ul>\n", url, url);
+        each it.body& { it |
+            if it.tag == "item" {
+                link, title := ("", "");
+                if it[].find_tag("link") { it |
+                    if it[].find_tag("") { it |
+                        link = it.text;
+                    };
+                };
+                if it[].find_tag("title") { it |
+                    if it[].find_tag("") { it |
+                        title = it.text;
+                    };
+                };
+                @fmt(html&, "<li><a href='%'>%</a></li>\n", link, title);
+            };
+        };
+        @fmt(html&, "</ul>\n</details>\n");
+        // TODO: emphasise new ones somehow
+        // TODO: put errors on the page
+    };
+    @fmt(html&, "\n<!--\n%-->\n", index&.items());
+    write_entire_file_or_crash(@tfmt("%/index.txt", cache_dir), index.items());
+    path := @tfmt("%/index.html", cache_dir);
+    write_entire_file_or_crash(path, html.items());
+    println(path);
+}
+
+fn parse_opml(it: *Xml, arena: Alloc) Result([]Str, Str) = {
+    it := it.find_tag("body") || return(Err = "missing body tag");
+    out := Str.list(it.body.len, temp());
+    each it.body& { it |
+        if it.tag == "outline" {
+            if it.attributes&.get("xmlUrl") { it |
+                out&.push(it);
+            };
+        }
+    };
+    (Ok = out.items())
+}
+
+#use("@/lib/sys/fs.fr");
+#use("@/lib/collections/map.fr");
+
+// TODO: ![CDATA
+// TODO: move this elsewhere if i think of another program that would use it. 
+
+Xml :: @rec @struct {
+    tag: Str;
+    attributes: RawHashMap(Str, Str);
+    body: RawList(*Xml);
+    text: Str;
+};
+
+Parse :: @struct(in: []u8, i := 0, arena: Alloc, line := 1);
+parse_xml :: fn(in: Str, arena: Alloc) Result(*Xml, Str) = {
+    self: Parse = (in=in,arena=arena); self := self&;
+    self.skip_blank();
+    if self.in.rest(self.i).starts_with("<?xml") {
+        while => self.i < self.in.len && !self.in.rest(self.i).starts_with("?>") {
+            self.i += 1;
+        };
+        self.i += 2;
+    };
+    self.skip_blank();
+    @match(self.parse_tag()) {
+        fn Ok(it) => (Ok = it);
+        fn Err(msg) => (Err = @tfmt(":%\n%", self.line, msg));
+    }
+    
+}
+
+fn parse_tag(self: *Parse) Result(*Xml, Str) = {
+    @try(self.eat("<")) return;
+    out := self.arena.box_zeroed(Xml);
+    out.tag = @try(self.ident()) return;
+    closed := @try(self.parse_attributes(out.attributes&)) return;
+    if closed {
+        return(Ok = out);
+    };
+    loop {
+        self.skip_blank();
+        if self.in.rest(self.i).starts_with("</") {
+            self.i += 2;
+            tag := @try(self.ident()) return;
+            if tag != out.tag {
+                return(Err = @tfmt("closed wrong tag '%' but expected '%'", tag, out.tag));
+            };
+            @try(self.eat(">")) return;
+            return(Ok = out);
+        };
+        if self.in.rest(self.i).starts_with("<") {
+            inner := @try(self.parse_tag()) return;
+            self.skip_blank();
+            out.body&.push(inner, self.arena);
+        } else {
+            start := self.i;
+            // TODO: &___; escapes
+            while => self.i < self.in.len && self.in[self.i] != "<".ascii() {
+                if self.in[self.i] == "\n".ascii() {
+                    self.line += 1;
+                };
+                self.i += 1;
+            };
+            s := self.in.slice(start, self.i);
+            inner := self.arena.box_zeroed(Xml);
+            inner.text = s;
+            out.body&.push(inner, self.arena);
+        };
+    };
+}
+
+fn parse_attributes(self: *Parse, attrs: *RawHashMap(Str, Str)) Result(bool, Str) = {
+    loop {
+        if self.in.rest(self.i).starts_with(">") {
+            self.i += 1;
+            return(Ok = false);
+        };
+        if self.in.rest(self.i).starts_with("/>") {
+            self.i += 2;
+            return(Ok = true);
+        };
+        key := @try(self.ident()) return;
+        @try(self.eat("=")) return;
+        value := @try(self.string()) return;
+        attrs.insert(key, value, self.arena);
+    };
+}
+
+// TODO: \ escapes?
+fn string(self: *Parse) Result(Str, Str) = {
+    self.skip_blank();
+    @try(self.eat("\"")) return;
+    start := self.i;
+    loop {
+        if self.i >= self.in.len || self.in[self.i] == "\n".ascii() {
+            return(Err = "unterminated string");
+        };
+        if self.in[self.i] == "\"".ascii() {
+            s := self.in.slice(start, self.i);
+            self.i += 1;
+            self.skip_blank();
+            return(Ok = s);
+        };
+        self.i += 1;
+    };
+}
+
+fn eat(self: *Parse, s: Str) Result(void, Str) = {
+    if !self.in.rest(self.i).starts_with(s) {
+        return(Err = @tfmt("expected '%'", s));
+    };
+    self.i += s.len;
+    .Ok
+}
+
+fn ident(self: *Parse) Result(Str, Str) = {
+    self.skip_blank();
+    start := self.i;
+    while => self.i < self.in.len && (self.in[self.i].is_ascii_alpha() || self.in[self.i] == ":".ascii()) {
+        self.i += 1;
+    };
+    s := self.in.slice(start, self.i);
+    if s.len <= 0 {
+        return(Err = "expected tag/attribute name");
+    };
+    self.skip_blank();
+    (Ok = s)
+}
+
+fn skip_blank(self: *Parse) void = {
+    while => self.i < self.in.len && self.in[self.i].is_ascii_whitespace() {
+        if self.in[self.i] == "\n".ascii() {
+            self.line += 1;
+        };
+        self.i += 1;
+    };
+    if self.in.rest(self.i).starts_with("<!--") {
+        while => self.i < self.in.len && !self.in.rest(self.i).starts_with("-->") {
+            if self.in[self.i] == "\n".ascii() {
+                self.line += 1;
+            };
+            self.i += 1;
+        };
+        self.i += 3;
+        self.skip_blank();
+    };
+}
+
+fn find_tag(it: *Xml, name: Str) ?**Xml =
+    it.body&.find(fn(it) => it.tag == name);
+
+fn display(self: *Xml, out: *List(u8)) void = display(self, out, 0);
+fn display(self: *Xml, out: *List(u8), depth: i64) void = {
+    out.push_repeated(depth, " ".ascii());
+    if self.tag.len == 0 {
+        return @fmt(out, "%\n", self.text);
+    };
+
+    @fmt(out, "%(", self.tag);
+    each self.attributes& { key, value |
+        @fmt(out, "%=\"%\", ", key, value);
+    };
+    @fmt(out, ")");
+    if self.body.len != 0 || self.text.len != 0 {
+        @fmt(out, " {\n");
+        for self.body& { it |
+            display(it, out, depth + 1);
+        };
+        out.push_repeated(depth, " ".ascii());
+        @fmt(out, "}");
+    };
+    @fmt(out, ";\n");
+}
