@@ -2,8 +2,10 @@
 // "a multimedia platform for creating and sharing interactive documents, with sound, images, hypertext, and scripted behavior". 
 // it uses most of Native-Decker (so serves as a test of my c compiler) 
 // but reimplements the io part (io_sdl2.h) with my @/graphics (instead of sdl). 
-// not implemented: sound/recording, transparent window, 
-// TODO: key modifiers, clipboard, open_url, base_path, embed resources, cursor, drop file, readimage, fullscreen
+// not implemented: sound/recording, transparent window, window_set_size
+// TODO: clipboard, open_url, base_path, embed resources, cursor, readimage, fullscreen, -DDANGER_ZONE
+// TODO: don't send CHAR event when holding a modifier key that means copy or whatever
+// TODO: cope if the window is too small
 // TODO: make it work in web playground. examples/os/user/libc needs (stat.st_size, gmtime). 
 // TODO: add this to tests/gpu.fr
 // TODO: deck that is a gallary of the example decks 
@@ -18,7 +20,7 @@ decker_src :: => import("@/examples/fetch.fr")'group(
 driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
 main :: fn() void = {
     io := Decker.io_vtable;
-    io.run = fn() = { Easy'start(State); };
+    io.run = fn() = Easy'start(State);
     io.get_texture = io_get_texture;
     io.process_events = io_process_events;
     
@@ -27,11 +29,11 @@ main :: fn() void = {
     Syscall'exit(Decker'main(args.len().intcast(), bit_cast_unchecked(*CStr, **i8, args.as_ptr())));
 };
 
-io_get_texture :: fn(i, w, h, stride_out) = {
+io_get_texture :: fn(i, w, h) = {
     state := the_state[];
-    it := @if(i == 0, state.gfx&, state.gtool&);
+    it := state.textures&[i]&;
     n := intcast(w*h);
-    if n > it.buf.len {
+    if n != it.buf.len {
         state.sg.destroy(it.img);
         general_allocator().dealloc(u32, it.buf);
         it.img = state.sg.make(
@@ -42,14 +44,15 @@ io_get_texture :: fn(i, w, h, stride_out) = {
             usage = .DYNAMIC,
         );
         it.buf = general_allocator().alloc_zeroed(u32, n);
-        it.w = w;
     };
-    stride_out[] = it.w;
     it.buf.ptr
 };
 
 io_process_events :: fn(disp, size, scale) = {
     state := the_state[];
+    S :: fn(x) => bit_cast_unchecked(@type x, *i8, x);
+    B :: fn(x) => x.int().intcast();
+    I :: fn(x) => x.cast().int().intcast();
     each state.events& { event |
         @match(event.type) {
             fn QUIT_REQUESTED() => {
@@ -58,29 +61,35 @@ io_process_events :: fn(disp, size, scale) = {
                     Decker'event_quit();
                 };
             }
-            fn CHAR() => {
-                // field_input(lmutf8(e.text.text)->sv);
+            fn CHAR() => if event.char_code != 127 && event.char_code != 27 {
+                buf := Arena'stack_alloc(16).alloc_zeroed(u8, 16);
+                Utf8 :: import("@/examples/import_c/unicode.fr");
+                Utf8'encode_utf8(buf, event.char_code);
+                s := Decker'lmutf8(S(buf.ptr));
+                Decker'field_input(s.sv);
             }
             fn MOUSE_MOVE() => {
+                // TODO: this is fucked. presumably because im always drawing it in top left and big instead of using framebuffer_dest
                 b: Decker.pair = (x = (disp.x-(size.x*scale))/2, y = (disp.y-(size.y*scale))/2);
-                raw: Decker.pair = (x = event.mouse_x.cast().int().intcast(), y = event.mouse_y.cast().int().intcast());
+                raw: Decker.pair = (x = I(event.mouse_x), y = I(event.mouse_y));
                 scaled: Decker.pair = (x = (raw.x-b.x)/scale, y = (raw.y-b.y)/scale);
-                @println("% % % % %", raw.x, raw.y, scaled.x, scaled.y, scale);
                 Decker'event_pointer_move(raw, scaled);
             }
             fn MOUSE_SCROLL() => {
-                // event_scroll((pair){e.wheel.x,e.wheel.y});
+                Decker'event_scroll(x = I(event.scroll_x), y = I(event.scroll_y));
             }
             fn FILES_DROPPED() => for event.drop { path |
                 x := path.as_cstr();
-                Decker'event_file(bit_cast_unchecked(CStr, *i8, x));
+                Decker'event_file(S(path.as_cstr()));
             };
             @default => {
                 if @is(event.type, .MOUSE_DOWN, .MOUSE_UP) {
-                    Decker'event_pointer_button(@if(event.mouse_button == .LEFT, 1, 0),@if(event.mouse_button == .MIDDLE, 1, 0), @if(event.type == .MOUSE_UP, 1, 0));
+                    Decker'event_pointer_button(B(event.mouse_button == .LEFT), B(event.mouse_button == .MIDDLE), B(event.type == .MOUSE_DOWN));
                 };
                 if @is(event.type, .KEY_DOWN, .KEY_UP) {
-                    //if(e.type==SDL_KEYDOWN  )event_key(e.key.keysym.sym,e.key.keysym.mod,1,SDL_GetKeyName(e.key.keysym.sym));
+                    name := S(event.key_code.name_str().as_cstr());
+                    (k: i32, m: i32) := (event.key_code.raw().int().intcast(), event.modifiers.repr.bitcast());
+                    Decker'event_key(k, m, B(event.type == .KEY_DOWN), name);
                 };
             };
         };
@@ -98,12 +107,11 @@ State :: @struct {
     sg: *Sg.Self;
     sapp: *Sapp.Self;
     
-    gfx: Texture;
-    gtool: Texture;
+    textures: Array(Texture, 3);
     events: List(Sapp.Event);
 };
 
-Texture :: @struct(img: Sg.Image, w: i32, buf: []u32);
+Texture :: @struct(img: Sg.Image, buf: []u32);
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sapp.desc.enable_clipboard = true;
@@ -125,9 +133,54 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     Decker'tick(Decker.io_vtable[].env);
     Decker'sync();
-
-    aspect := cast(Decker.io_vtable.framebuffer_src_size.x.intcast().float() / Decker.io_vtable.framebuffer_src_size.y.intcast().float());
-    Easy'commit_screen_fit_image(sg, sapp, state.draw&, state.gfx.img, state.gfx.buf, aspect);
+    
+    sgl := state.draw&;
+    
+    sgl.defaults();
+    sgl.viewport(0.intcast(), 0.intcast(), sapp.width().intcast(), sapp.height().intcast(), true);
+    
+    // ughhh
+    range(0, Decker.io_vtable.image_i) { i |
+        it := state.textures&[i]&;
+        sg.update_image(it.img, @ref SubImage(it.buf.interpret_as_bytes()));
+        
+        sgl.texturing_enabled = true;
+        sgl.texture(it.img, (id = Sg.INVALID_ID));
+        sgl.begin(.QUADS);
+        sgl.load_identity();
+        sgl.translate(-1, 1, 0.0);
+        sgl.scale(2, 2, 0.0);
+        sgl.rotate(PI, 1.0, 0.0, 0.0);
+        
+        ::Array(Decker.ImageX, 3);
+        t := Decker.io_vtable[].images&[i]&;
+        src_w := t.src_size.x.intcast().float().cast();
+        src_h := t.src_size.y.intcast().float().cast();
+        dst_x := t.dest.x.intcast().float().cast();
+        dst_y := t.dest.y.intcast().float().cast();
+        dst_w := t.dest.w.intcast().float().cast();
+        dst_h := t.dest.h.intcast().float().cast();
+        dsp_w := sapp.width().float().cast();
+        dsp_h := sapp.height().float().cast();
+        
+        x1 := dst_x/dsp_w;
+        x2 := x1 + dst_w/dsp_w;
+        y1 := dst_y/dsp_h;
+        y2 := y1 + dst_h/dsp_h;
+        
+        sgl.v2f_t2f(x1, y1, 0, 0);
+        sgl.v2f_t2f(x2, y1, 1, 0);
+        sgl.v2f_t2f(x2, y2, 1, 1);
+        sgl.v2f_t2f(x1, y2, 0, 1);
+        
+        sgl.end();
+    };
+    Decker.io_vtable[].image_i = 0;
+    
+    Easy'glue_begin_pass(sapp, sg, zeroed(Sg.PassAction));
+    sgl.draw_layer(sg, 0);
+    sg.end_pass();
+    sg.commit();
 };
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
@@ -171,44 +224,57 @@ SRC :: """
 
 io_src :: """
 
+typedef struct {
+    rect dest;
+    pair src_size;
+} ImageX;
+
 struct {
     void (*run)();
-    unsigned int *(*get_texture)(int i, int w, int h, int *stride);
+    unsigned int *(*get_texture)(long i, int w, int h);
     void (*process_events)(pair disp, pair size, int scale); 
-    
     pair display_size;
-    
     lv *env;
-    struct { int x,y,w,h; } framebuffer_dest;
-    pair framebuffer_src_size;
+    ImageX images[3];
+    long image_i;
 } io_vtable;
 
-int gil;
+#include "assert.h"
+int gil;  // TODO: no threads so doesn't matter?
 void interpreter_lock() { gil = 1; }
 void interpreter_unlock() { gil = 0; }
 void window_set_title(char *title) {}
 lv* readwav(char* name, int rawsamples) { return sound_make(lms(0)); }
 
-lv* readimage(char*path, int grayscale) { return image_empty(); }
+lv* readimage(char*path, int grayscale) { 
+    printf("TODO: readimage %s %d\n", path, grayscale);
+    return image_empty(); 
+}
 
-pair window_get_size(void) { return io_vtable.framebuffer_src_size; }
+// TODO: what's the difference? is get_display_size asking for my actual screen?
+pair window_get_size(void) { return io_vtable.display_size; }
 pair get_display_size(){ return io_vtable.display_size; }
 
 void window_set_size(pair wsize, pair size, int scale) {
-    printf("window_set_size %d %d %d %d %d\n", wsize.x, wsize.y, size.x, size.y, scale);
 }
 
 int framebuffer_flip(pair disp,pair size,int scale,int mask,int frame,char*pal,lv*buffer) {
-    int pitch;
-    void *p = io_vtable.get_texture(0, size.x, size.y, &pitch);
-	draw_frame(pal,buffer,p,pitch*4,frame,mask);
-    io_vtable.framebuffer_dest = (struct { int x,y,w,h; }) {(disp.x-scale*size.x)/2,(disp.y-scale*size.y)/2,scale*size.x,scale*size.y};
-    io_vtable.framebuffer_src_size = size;  // TODO: *scale?
+    void *p = io_vtable.get_texture(io_vtable.image_i, size.x, size.y);
+	draw_frame(pal,buffer,p,size.x*4,frame,mask);
+    io_vtable.images[io_vtable.image_i] = (ImageX) {
+        .dest = (rect) {(disp.x-scale*size.x)/2,(disp.y-scale*size.y)/2,scale*size.x,scale*size.y},
+        .src_size = size,  // TODO: *scale?
+    };
+    io_vtable.image_i += 1;
     return 1;
 }
 
 void toolbar_flip(lv*buffer,int frame,char*pal,rect dest) {
-
+    pair size=buff_size(buffer);
+    void *p = io_vtable.get_texture(io_vtable.image_i, size.x, size.y);
+    draw_frame(pal,buffer,p,size.x*4,frame,0);
+    io_vtable.images[io_vtable.image_i] = (ImageX) { .dest = dest, .src_size = size };
+    io_vtable.image_i += 1;
 }
 
 void finish_flip(void) {}
@@ -263,7 +329,7 @@ void event_padbutton(int b,int down);  // decker.c needs this forward declaratio
 #define KEY_BACKSPACE    259
 #define KEY_DELETE       261
 #define KEY_ESCAPE       256
-#define KEY_RETURN       0  // ?
+#define KEY_RETURN       257
 #define KEY_TAB          258
 #define KEY_CAPSLOCK     280
 #define KEY_LSHIFT       340
@@ -306,13 +372,13 @@ void event_padbutton(int b,int down);  // decker.c needs this forward declaratio
 #define KEYPAD_OK        321
 #define KEYPAD_CANCEL    323
 
-// TODO
+// they always use L|R so its fine that @/graphics/app.fr/Modifers tracks them together
 #define KEYM_LSHIFT      1
-#define KEYM_RSHIFT      2
-#define KEYM_LCTRL       4
-#define KEYM_RCTRL       8
-#define KEYM_LALT        16
-#define KEYM_RALT        32
-#define KEYM_LGUI        64
-#define KEYM_RGUI        128
+#define KEYM_RSHIFT      0
+#define KEYM_LCTRL       2
+#define KEYM_RCTRL       0
+#define KEYM_LALT        4
+#define KEYM_RALT        0
+#define KEYM_LGUI        8
+#define KEYM_RGUI        0
 """;

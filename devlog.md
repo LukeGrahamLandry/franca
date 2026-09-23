@@ -6,6 +6,8 @@ im too young for hypercard but this is still charming. i also like that their co
 conveniently the sdl part is just on the edges so "easy" to swap out. 
 found something import_c chokes on, someday i aspire to be able to write a program without finding bugs :). 
 got it to draw on the screen which is a win. positioning is skewed tho. 
+hateful vertices to draw it at the right size which might not be the full screen so the mouse positions work.  
+fix toolbar, i was using the wrong window_get_size so it always thought there wasn't enough space.  
 
 ## (Sep 22)
 
