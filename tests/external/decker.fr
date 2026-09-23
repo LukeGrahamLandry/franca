@@ -2,8 +2,9 @@
 // "a multimedia platform for creating and sharing interactive documents, with sound, images, hypertext, and scripted behavior". 
 // it uses most of Native-Decker (so serves as a test of my c compiler) 
 // but reimplements the io part (io_sdl2.h) with my @/graphics (instead of sdl). 
+//
 // not implemented: sound/recording, transparent window, window_set_size
-// TODO: clipboard, open_url, base_path, embed resources, cursor, readimage, fullscreen, -DDANGER_ZONE
+// TODO: clipboard, open_url, base_path, cursor, fullscreen, -DDANGER_ZONE, set_title,
 // TODO: don't send CHAR event when holding a modifier key that means copy or whatever
 // TODO: cope if the window is too small
 // TODO: make it work in web playground. examples/os/user/libc needs (stat.st_size, gmtime). 
@@ -11,6 +12,7 @@
 // TODO: deck that is a gallary of the example decks 
 //       and one for the lilt examples like http://beyondloom.com/tools/trylil.html
 // TODO: run their tests/*.lil in autotest (because the point of this whole thing is to test my c compiler)
+// TODO: it feels weird to type in somehow. is that my fault? am i just going crazy? who can say
 
 decker_src :: => import("@/examples/fetch.fr")'group(
     url = "https://github.com/JohnEarnest/Decker/archive/54c46bb0e596b1f12d92f99a75c1b8fc331e08c9.tar.gz",
@@ -23,6 +25,7 @@ main :: fn() void = {
     io.run = fn() = Easy'start(State);
     io.get_texture = io_get_texture;
     io.process_events = io_process_events;
+    io.read_image = io_read_image;
     
     args := cli_args();
     args = args.slice(int(args[1].str().ends_with(".fr")), args.len);  // :hack
@@ -69,7 +72,6 @@ io_process_events :: fn(disp, size, scale) = {
                 Decker'field_input(s.sv);
             }
             fn MOUSE_MOVE() => {
-                // TODO: this is fucked. presumably because im always drawing it in top left and big instead of using framebuffer_dest
                 b: Decker.pair = (x = (disp.x-(size.x*scale))/2, y = (disp.y-(size.y*scale))/2);
                 raw: Decker.pair = (x = I(event.mouse_x), y = I(event.mouse_y));
                 scaled: Decker.pair = (x = (raw.x-b.x)/scale, y = (raw.y-b.y)/scale);
@@ -79,7 +81,6 @@ io_process_events :: fn(disp, size, scale) = {
                 Decker'event_scroll(x = I(event.scroll_x), y = I(event.scroll_y));
             }
             fn FILES_DROPPED() => for event.drop { path |
-                x := path.as_cstr();
                 Decker'event_file(S(path.as_cstr()));
             };
             @default => {
@@ -96,6 +97,18 @@ io_process_events :: fn(disp, size, scale) = {
     };
     state.events&.clear();
 };
+
+// this is only used for importing images. the %%IMG... strings in decks are already a format it understands.
+io_read_image :: fn(path_cstr: *u8, grayscale: i32) = {
+    path: CStr = (ptr = path_cstr);
+    img := read_entire_file(temp(), path.str()) 
+        || return(Decker'image_empty());
+    Viewer :: import("@/examples/gpu/viewer.fr");
+    pixels, w, h := Viewer'stbi_load(img).or(fn(err) => {
+        return(Decker'image_empty());
+    });
+    return Decker'convert_image(pixels.ptr, w, h, grayscale);
+}
 
 the_state :: @static_mut zeroed(*State);
 
@@ -118,7 +131,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sapp.desc.enable_dragndrop = true;
     the_state[] = state;
     state.sg = sg; state.sapp = sapp;
-    Decker.io_vtable[].display_size = (x = sapp.width().intcast(), y = sapp.height().intcast());
+    Decker.io_vtable[].window_size = (x = sapp.width().intcast(), y = sapp.height().intcast());
     state.draw&.setup(
         allocator = general_allocator(),
         sg = sg,
@@ -139,7 +152,6 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sgl.defaults();
     sgl.viewport(0.intcast(), 0.intcast(), sapp.width().intcast(), sapp.height().intcast(), true);
     
-    // ughhh
     range(0, Decker.io_vtable.image_i) { i |
         it := state.textures&[i]&;
         sg.update_image(it.img, @ref SubImage(it.buf.interpret_as_bytes()));
@@ -152,10 +164,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sgl.scale(2, 2, 0.0);
         sgl.rotate(PI, 1.0, 0.0, 0.0);
         
-        ::Array(Decker.ImageX, 3);
-        t := Decker.io_vtable[].images&[i]&;
-        src_w := t.src_size.x.intcast().float().cast();
-        src_h := t.src_size.y.intcast().float().cast();
+        ::Array(Decker.rect, 3);
+        t := @anon_literal(dest := Decker.io_vtable[].images&[i]&);
         dst_x := t.dest.x.intcast().float().cast();
         dst_y := t.dest.y.intcast().float().cast();
         dst_w := t.dest.w.intcast().float().cast();
@@ -186,26 +196,13 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     state.events&.push(event[]);  // TODO: this is silly, they're already collected. should have a flag to not call on_event. 
     if event.type == .RESIZED {
-        Decker.io_vtable[].display_size = (x = sapp.width().intcast(), y = sapp.height().intcast());
+        Decker.io_vtable[].window_size = (x = sapp.width().intcast(), y = sapp.height().intcast());
     };
 }
 
 Decker :: {
     root := decker_src();
-    
-    resources := """
-        char *js_decker_html = "";
-        int js_decker_html_len = 0;
-        char *js_lil_js = "";
-        int js_lil_js_len = 0;
-        char *js_danger_js = "";
-        int js_danger_js_len = 0;
-        char *js_decker_js = "";
-        int js_decker_js_len = 0;
-        char *examples_decks_tour_deck = "";
-        int examples_decks_tour_deck_len = 0;
-        
-    """;  // TODO: generated
+    resources := ra(root, @const_slice("js/decker.html", "js/lil.js", "js/danger.js", "js/decker.js", "examples/decks/tour.deck"));
     write_entire_file_or_crash(@tfmt("%/c/resources.h", root), resources);
     write_entire_file_or_crash(@tfmt("%/c/SDL_version.h", root), "#define SDL_VERSION_ATLEAST(...) 1\n");
     write_entire_file_or_crash(@tfmt("%/c/io_sdl2.h", root), io_src);
@@ -223,19 +220,14 @@ SRC :: """
 """;
 
 io_src :: """
-
-typedef struct {
-    rect dest;
-    pair src_size;
-} ImageX;
-
 struct {
     void (*run)();
     unsigned int *(*get_texture)(long i, int w, int h);
     void (*process_events)(pair disp, pair size, int scale); 
-    pair display_size;
+    lv *(*read_image)(unsigned char* path, int grayscale);
+    pair window_size;
     lv *env;
-    ImageX images[3];
+    rect images[3];
     long image_i;
 } io_vtable;
 
@@ -244,16 +236,14 @@ int gil;  // TODO: no threads so doesn't matter?
 void interpreter_lock() { gil = 1; }
 void interpreter_unlock() { gil = 0; }
 void window_set_title(char *title) {}
+// TODO: at least use lilt.c/n_readwav
 lv* readwav(char* name, int rawsamples) { return sound_make(lms(0)); }
 
-lv* readimage(char*path, int grayscale) { 
-    printf("TODO: readimage %s %d\n", path, grayscale);
-    return image_empty(); 
-}
+lv* readimage(char*path, int grayscale) { return io_vtable.read_image(path, grayscale); }
 
-// TODO: what's the difference? is get_display_size asking for my actual screen?
-pair window_get_size(void) { return io_vtable.display_size; }
-pair get_display_size(){ return io_vtable.display_size; }
+// TODO: get_display_size asking for my actual screen? why?
+pair window_get_size(void) { return io_vtable.window_size; }
+pair get_display_size(){ return io_vtable.window_size; }
 
 void window_set_size(pair wsize, pair size, int scale) {
 }
@@ -261,10 +251,9 @@ void window_set_size(pair wsize, pair size, int scale) {
 int framebuffer_flip(pair disp,pair size,int scale,int mask,int frame,char*pal,lv*buffer) {
     void *p = io_vtable.get_texture(io_vtable.image_i, size.x, size.y);
 	draw_frame(pal,buffer,p,size.x*4,frame,mask);
-    io_vtable.images[io_vtable.image_i] = (ImageX) {
-        .dest = (rect) {(disp.x-scale*size.x)/2,(disp.y-scale*size.y)/2,scale*size.x,scale*size.y},
-        .src_size = size,  // TODO: *scale?
-    };
+	frame_count++;
+    io_vtable.images[io_vtable.image_i] =
+        (rect) {(disp.x-scale*size.x)/2,(disp.y-scale*size.y)/2,scale*size.x,scale*size.y};
     io_vtable.image_i += 1;
     return 1;
 }
@@ -273,16 +262,15 @@ void toolbar_flip(lv*buffer,int frame,char*pal,rect dest) {
     pair size=buff_size(buffer);
     void *p = io_vtable.get_texture(io_vtable.image_i, size.x, size.y);
     draw_frame(pal,buffer,p,size.x*4,frame,0);
-    io_vtable.images[io_vtable.image_i] = (ImageX) { .dest = dest, .src_size = size };
+    io_vtable.images[io_vtable.image_i] = dest;
     io_vtable.image_i += 1;
 }
-
-void finish_flip(void) {}
 
 void process_events(pair disp, pair size, int scale) { 
     io_vtable.process_events(disp, size, scale);
 }
 
+void finish_flip(void) {}
 void window_set_fullscreen(int) {}
 void window_set_opacity(float) {}
 void window_set_cursor(int) {}
@@ -296,6 +284,7 @@ void io_run(lv*env) {
 int nosound = 1;
 
 // from io_sdl1.h
+
 char*clip_data=NULL;
 int clip_size=0;
 lv* get_clip(void){return clip_data?lmcstr(clip_data): lmistr("");}
@@ -304,6 +293,17 @@ void set_clip(lv*x){
 	if(!clip_data    ){clip_size=x->c,clip_data=malloc(x->c);}
 	if(clip_size<x->c){clip_size=x->c,clip_data=realloc(clip_data,x->c);}
 	memcpy(clip_data,x->sv,clip_size);
+}
+
+lv *convert_image(Uint8*p,int w,int h,int grayscale) {
+    Uint32 *pixels = p;
+    lv*i=lmbuff((pair){w,h});
+    for(int y=0;y<h;y++)for(int x=0;x<w;x++){
+        Uint32 v=pixels[x+(y*w)];Uint8 cr,cg,cb,ca;
+        cr=v&0xff;cg=(v>>8)&0xff;cb=(v>>16)&0xff;ca=(v>>24)&0xff;
+        i->sv[x+y*w]=(ca!=0xFF)?(grayscale?0xFF:0x00):readcolor(cr,cg,cb,grayscale);
+    }
+    return image_make(i);
 }
 
 int record_possible(void){return 0;}
@@ -382,3 +382,21 @@ void event_padbutton(int b,int down);  // decker.c needs this forward declaratio
 #define KEYM_LGUI        8
 #define KEYM_RGUI        0
 """;
+
+// TODO: this would be less annoying if it was easy to import franca constants from the c. 
+//       for this situation it would almost work with just having them be multable globals 
+//       and setting them at comptime from franca but i don't rebake so not good enough. 
+ra :: fn(root: Str, resource_paths: []Str) Str = {
+    out := @ref u8.list(2_700_000, temp());
+    for resource_paths { path |
+        data := read_entire_file_or_crash(temp(), @tfmt("%/%", root, path));
+        name := temp().alloc_init(u8, path.len, fn(i) => 
+            @if("/.".contains(path[i]), "_".ascii(), path[i]));
+        @fmt(out, "unsigned char %[] = {", name);
+        for data { c |
+            @fmt(out, "%,", fmt_hex(c));
+        };
+        @fmt(out, "};\nint %_len = sizeof(%);\n", name, name);
+    };
+    out.items()
+}
