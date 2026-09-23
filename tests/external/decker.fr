@@ -1,0 +1,318 @@
+// this program embeds https://beyondloom.com/decker/ which is 
+// "a multimedia platform for creating and sharing interactive documents, with sound, images, hypertext, and scripted behavior". 
+// it uses most of Native-Decker (so serves as a test of my c compiler) 
+// but reimplements the io part (io_sdl2.h) with my @/graphics (instead of sdl). 
+// not implemented: sound/recording, transparent window, 
+// TODO: key modifiers, clipboard, open_url, base_path, embed resources, cursor, drop file, readimage, fullscreen
+// TODO: make it work in web playground. examples/os/user/libc needs (stat.st_size, gmtime). 
+// TODO: add this to tests/gpu.fr
+// TODO: deck that is a gallary of the example decks 
+//       and one for the lilt examples like http://beyondloom.com/tools/trylil.html
+// TODO: run their tests/*.lil in autotest (because the point of this whole thing is to test my c compiler)
+
+decker_src :: => import("@/examples/fetch.fr")'group(
+    url = "https://github.com/JohnEarnest/Decker/archive/54c46bb0e596b1f12d92f99a75c1b8fc331e08c9.tar.gz",
+    legacy = "4ab41baa074f2b3d1078c61950f920e10c18dda2201010d8724b7b1d53ebffdd",
+);
+
+driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
+main :: fn() void = {
+    io := Decker.io_vtable;
+    io.run = fn() = { Easy'start(State); };
+    io.get_texture = io_get_texture;
+    io.process_events = io_process_events;
+    
+    args := cli_args();
+    args = args.slice(int(args[1].str().ends_with(".fr")), args.len);  // :hack
+    Syscall'exit(Decker'main(args.len().intcast(), bit_cast_unchecked(*CStr, **i8, args.as_ptr())));
+};
+
+io_get_texture :: fn(i, w, h, stride_out) = {
+    state := the_state[];
+    it := @if(i == 0, state.gfx&, state.gtool&);
+    n := intcast(w*h);
+    if n > it.buf.len {
+        state.sg.destroy(it.img);
+        general_allocator().dealloc(u32, it.buf);
+        it.img = state.sg.make(
+            width = w,
+            height = h,
+            pixel_format = .BGRA8,
+            data = zeroed(Sg.ImageData),
+            usage = .DYNAMIC,
+        );
+        it.buf = general_allocator().alloc_zeroed(u32, n);
+        it.w = w;
+    };
+    stride_out[] = it.w;
+    it.buf.ptr
+};
+
+io_process_events :: fn(disp, size, scale) = {
+    state := the_state[];
+    each state.events& { event |
+        @match(event.type) {
+            fn QUIT_REQUESTED() => {
+                if Decker.should_exit[] == 0 {
+                    state.sapp.requests.quit = false;
+                    Decker'event_quit();
+                };
+            }
+            fn CHAR() => {
+                // field_input(lmutf8(e.text.text)->sv);
+            }
+            fn MOUSE_MOVE() => {
+                b: Decker.pair = (x = (disp.x-(size.x*scale))/2, y = (disp.y-(size.y*scale))/2);
+                raw: Decker.pair = (x = event.mouse_x.cast().int().intcast(), y = event.mouse_y.cast().int().intcast());
+                scaled: Decker.pair = (x = (raw.x-b.x)/scale, y = (raw.y-b.y)/scale);
+                @println("% % % % %", raw.x, raw.y, scaled.x, scaled.y, scale);
+                Decker'event_pointer_move(raw, scaled);
+            }
+            fn MOUSE_SCROLL() => {
+                // event_scroll((pair){e.wheel.x,e.wheel.y});
+            }
+            fn FILES_DROPPED() => for event.drop { path |
+                x := path.as_cstr();
+                Decker'event_file(bit_cast_unchecked(CStr, *i8, x));
+            };
+            @default => {
+                if @is(event.type, .MOUSE_DOWN, .MOUSE_UP) {
+                    Decker'event_pointer_button(@if(event.mouse_button == .LEFT, 1, 0),@if(event.mouse_button == .MIDDLE, 1, 0), @if(event.type == .MOUSE_UP, 1, 0));
+                };
+                if @is(event.type, .KEY_DOWN, .KEY_UP) {
+                    //if(e.type==SDL_KEYDOWN  )event_key(e.key.keysym.sym,e.key.keysym.mod,1,SDL_GetKeyName(e.key.keysym.sym));
+                };
+            };
+        };
+    };
+    state.events&.clear();
+};
+
+the_state :: @static_mut zeroed(*State);
+
+#use("@/graphics/lib.fr");
+State :: @struct {
+    HIGH_DPI :: false;
+    NO_EXIT_ON_CMD_W :: true;
+    draw: Sgl.Self;
+    sg: *Sg.Self;
+    sapp: *Sapp.Self;
+    
+    gfx: Texture;
+    gtool: Texture;
+    events: List(Sapp.Event);
+};
+
+Texture :: @struct(img: Sg.Image, w: i32, buf: []u32);
+
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    sapp.desc.enable_clipboard = true;
+    sapp.desc.enable_dragndrop = true;
+    the_state[] = state;
+    state.sg = sg; state.sapp = sapp;
+    Decker.io_vtable[].display_size = (x = sapp.width().intcast(), y = sapp.height().intcast());
+    state.draw&.setup(
+        allocator = general_allocator(),
+        sg = sg,
+    );
+    state.events = list(general_allocator());
+}
+
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    if Decker.should_exit[] != 0 {
+        sapp.requests.quit = true;
+        return();
+    };
+    Decker'tick(Decker.io_vtable[].env);
+    Decker'sync();
+
+    aspect := cast(Decker.io_vtable.framebuffer_src_size.x.intcast().float() / Decker.io_vtable.framebuffer_src_size.y.intcast().float());
+    Easy'commit_screen_fit_image(sg, sapp, state.draw&, state.gfx.img, state.gfx.buf, aspect);
+};
+
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    state.events&.push(event[]);  // TODO: this is silly, they're already collected. should have a flag to not call on_event. 
+    if event.type == .RESIZED {
+        Decker.io_vtable[].display_size = (x = sapp.width().intcast(), y = sapp.height().intcast());
+    };
+}
+
+Decker :: {
+    root := decker_src();
+    
+    resources := """
+        char *js_decker_html = "";
+        int js_decker_html_len = 0;
+        char *js_lil_js = "";
+        int js_lil_js_len = 0;
+        char *js_danger_js = "";
+        int js_danger_js_len = 0;
+        char *js_decker_js = "";
+        int js_decker_js_len = 0;
+        char *examples_decks_tour_deck = "";
+        int examples_decks_tour_deck_len = 0;
+        
+    """;  // TODO: generated
+    write_entire_file_or_crash(@tfmt("%/c/resources.h", root), resources);
+    write_entire_file_or_crash(@tfmt("%/c/SDL_version.h", root), "#define SDL_VERSION_ATLEAST(...) 1\n");
+    write_entire_file_or_crash(@tfmt("%/c/io_sdl2.h", root), io_src);
+    version := read_entire_file_or_crash(temp(), @tfmt("%/VERSION", root));
+    import("@/examples/import_c/ffi.fr")'include(@tfmt(SRC, root, version))
+};
+
+SRC :: """
+    #add_include_path "%/c/"
+    #define VERSION "%"
+    typedef unsigned char Uint8;
+    typedef unsigned int Uint32;
+    typedef short Sint16;
+    #include "decker.c"
+""";
+
+io_src :: """
+
+struct {
+    void (*run)();
+    unsigned int *(*get_texture)(int i, int w, int h, int *stride);
+    void (*process_events)(pair disp, pair size, int scale); 
+    
+    pair display_size;
+    
+    lv *env;
+    struct { int x,y,w,h; } framebuffer_dest;
+    pair framebuffer_src_size;
+} io_vtable;
+
+int gil;
+void interpreter_lock() { gil = 1; }
+void interpreter_unlock() { gil = 0; }
+void window_set_title(char *title) {}
+lv* readwav(char* name, int rawsamples) { return sound_make(lms(0)); }
+
+lv* readimage(char*path, int grayscale) { return image_empty(); }
+
+pair window_get_size(void) { return io_vtable.framebuffer_src_size; }
+pair get_display_size(){ return io_vtable.display_size; }
+
+void window_set_size(pair wsize, pair size, int scale) {
+    printf("window_set_size %d %d %d %d %d\n", wsize.x, wsize.y, size.x, size.y, scale);
+}
+
+int framebuffer_flip(pair disp,pair size,int scale,int mask,int frame,char*pal,lv*buffer) {
+    int pitch;
+    void *p = io_vtable.get_texture(0, size.x, size.y, &pitch);
+	draw_frame(pal,buffer,p,pitch*4,frame,mask);
+    io_vtable.framebuffer_dest = (struct { int x,y,w,h; }) {(disp.x-scale*size.x)/2,(disp.y-scale*size.y)/2,scale*size.x,scale*size.y};
+    io_vtable.framebuffer_src_size = size;  // TODO: *scale?
+    return 1;
+}
+
+void toolbar_flip(lv*buffer,int frame,char*pal,rect dest) {
+
+}
+
+void finish_flip(void) {}
+
+void process_events(pair disp, pair size, int scale) { 
+    io_vtable.process_events(disp, size, scale);
+}
+
+void window_set_fullscreen(int) {}
+void window_set_opacity(float) {}
+void window_set_cursor(int) {}
+void io_init(void) {}
+
+void io_run(lv*env) {
+    io_vtable.env = env;
+    io_vtable.run();
+}
+
+int nosound = 1;
+
+// from io_sdl1.h
+char*clip_data=NULL;
+int clip_size=0;
+lv* get_clip(void){return clip_data?lmcstr(clip_data): lmistr("");}
+void set_clip(lv*x){
+	x=ls(x);
+	if(!clip_data    ){clip_size=x->c,clip_data=malloc(x->c);}
+	if(clip_size<x->c){clip_size=x->c,clip_data=realloc(clip_data,x->c);}
+	memcpy(clip_data,x->sv,clip_size);
+}
+
+int record_possible(void){return 0;}
+int record_begin(void){return -1;}
+void record_pause(int device){(void)device;}
+void record_finish(int device){(void)device;}
+void base_path(char*path){snprintf(path,PATH_MAX,"%s","");}
+void open_url(char*x){(void)x;}
+int get_display_density(pair disp){(void)disp;return 1;}
+
+void event_padbutton(int b,int down);  // decker.c needs this forward declaration
+
+// these match @/graphics/app.fr/Keycode
+#define KEY_UP           265
+#define KEY_DOWN         264
+#define KEY_LEFT         263
+#define KEY_RIGHT        262
+#define KEY_PAGEUP       266
+#define KEY_PAGEDOWN     267
+#define KEY_HOME         268
+#define KEY_END          269
+#define KEY_SPACE        ' '
+#define KEY_BACKSPACE    259
+#define KEY_DELETE       261
+#define KEY_ESCAPE       256
+#define KEY_RETURN       0  // ?
+#define KEY_TAB          258
+#define KEY_CAPSLOCK     280
+#define KEY_LSHIFT       340
+#define KEY_RSHIFT       344
+#define KEY_LCTRL        341
+#define KEY_RCTRL        345
+#define KEY_LGUI         343
+#define KEY_RGUI         347
+#define KEY_LEFTBRACKET  '['
+#define KEY_RIGHTBRACKET ']'
+#define KEY_0            '0'
+#define KEY_1            '1'
+#define KEY_2            '2'
+#define KEY_3            '3'
+#define KEY_9            '9'
+#define KEY_l            'L'
+#define KEY_j            'J'
+#define KEY_k            'K'
+#define KEY_m            'M'
+#define KEY_r            'R'
+#define KEY_t            'T'
+#define KEY_u            'U'
+#define KEY_y            'Y'
+#define KEY_F1           290
+#define KEY_F2           291
+#define KEY_F3           292
+#define KEY_F4           293
+#define KEY_F5           294
+#define KEY_F6           295
+#define KEY_F7           296
+#define KEY_F8           297
+#define KEY_F9           298
+#define KEY_F10          299
+#define KEY_F11          300
+#define KEY_F12          301
+#define KEYPAD_UP        328
+#define KEYPAD_DOWN      322
+#define KEYPAD_LEFT      324
+#define KEYPAD_RIGHT     326
+#define KEYPAD_OK        321
+#define KEYPAD_CANCEL    323
+
+// TODO
+#define KEYM_LSHIFT      1
+#define KEYM_RSHIFT      2
+#define KEYM_LCTRL       4
+#define KEYM_RCTRL       8
+#define KEYM_LALT        16
+#define KEYM_RALT        32
+#define KEYM_LGUI        64
+#define KEYM_RGUI        128
+""";

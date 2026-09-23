@@ -1,4 +1,18 @@
 
+## (Sep 23)
+
+shockingly i've been distracted immediately. found something cool to use as a c test. (decker). 
+im too young for hypercard but this is still charming. i also like that their code is an unusual shape. 
+conveniently the sdl part is just on the edges so "easy" to swap out. 
+found something import_c chokes on, someday i aspire to be able to write a program without finding bugs :). 
+got it to draw on the screen which is a win. positioning is skewed tho. 
+
+## (Sep 22)
+
+rss is too simple to be using a slop app on he phone. 
+parsing xml wasn't on my bucket list but here we are. 
+not a waste of time! i found a type checking bug! 
+
 ## (Sep 21)
 
 - simplify lex hex and ReadBytes
