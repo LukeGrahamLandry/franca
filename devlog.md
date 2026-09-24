@@ -1,5 +1,12 @@
 
-## (Sep 23)
+## (Sep 24) decker
+
+- interesting that they don't share my aversion to having binary files in there.  
+- dont send CHAR+modifer. set app icon. title (but not for first deck because called too early)
+- doing a convoluted re-buffering of clipboard because i don't let you read it on the same frame without an event. 
+- for the unlock/screenshot shortcuts to work, the ascii key constants need to be lowercase. they use char literals instead of the defines. 
+
+## (Sep 23) decker
 
 shockingly i've been distracted immediately. found something cool to use as a c test. (decker). 
 im too young for hypercard but this is still charming. i also like that their code is an unusual shape. 
