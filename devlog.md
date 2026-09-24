@@ -5,6 +5,15 @@
 - dont send CHAR+modifer. set app icon. title (but not for first deck because called too early)
 - doing a convoluted re-buffering of clipboard because i don't let you read it on the same frame without an event. 
 - for the unlock/screenshot shortcuts to work, the ascii key constants need to be lowercase. they use char literals instead of the defines. 
+- lots more libc junk to make it work in web playground
+  - directory_normalize->realpath, directory_home->getenv, pjson->isdigit, strchr, image_write->log2, n_image_rotate->tan
+  - n_read->stat (also needed to add st_size), plove->isalnum, l_ina->strstr. 
+- making a deck (indulge my mandelbrot addiction once again)
+  - equals sign not being assignment is a mistake i make often
+  - very sad that the error popup doesn't tell you which line it's on
+  - format takes a list so if you want to print a list with %J you need to say list it wrap it in another list.
+  - modulo is backwards, that's ... a choice
+- (probably temporary) easy shortcut to cycle the example decks while developing
 
 ## (Sep 23) decker
 

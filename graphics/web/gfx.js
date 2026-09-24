@@ -100,7 +100,7 @@ webgpu.francaRequestState = (I, frame_callback_p, francaSaveState) => {
         try {
             frame_callback(I);
         } catch(e) {
-            G.show_error(e);
+            if (e !== "called exit 0") G.show_error(e);
             throw e;
         }
         G.animation_id = requestAnimationFrame(call_frame);

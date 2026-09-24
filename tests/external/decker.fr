@@ -4,11 +4,9 @@
 // but reimplements the io part (io_sdl2.h) with my @/graphics (instead of sdl). 
 //
 // not implemented: sound/recording, transparent window, window_set_size
-// TODO: open_url, base_path, cursor, fullscreen, -DDANGER_ZONE
+// TODO: open_url, base_path, cursor, fullscreen
 // TODO: cope if the window is too small
-// TODO: make it work in web playground. examples/os/user/libc needs (stat.st_size, gmtime). 
 // TODO: include.fr st_size linux x86
-// TODO: add this to tests/gpu.fr
 // TODO: deck that is a gallary of the example decks 
 //       and one for the lilt examples like http://beyondloom.com/tools/trylil.html
 // TODO: run their tests/*.lil in autotest (because the point of this whole thing is to test my c compiler)
@@ -19,11 +17,21 @@
 // TODO: set_title is called before on_init so need to save it for later
 // TODO: this would be less painful if it was easier to have the c import symbols from franca. 
 //       (rn only the other direction is easy). so wouldn't need the io_vtable verbosity. 
+// TODO: can i make DANGER_ZONE toggleable at runtime per deck? so don't have to recompile but can look at things in sandbox-ish mode if you want. 
+// --- for web playground ---
+// TODO: rtext_is_image->strspn,gmtime. directory_enumerate->qsort
+// TODO: some way to get decks in and save files out
+// TODO: listener(1+1) "printf flag 45"
+// TODO: "printf fmt 37"
+// TODO: snprintf needs to stop one early and put the null terminator so has_clip works
+// TODO: wigglypaint: size is in the wrong place and animation doesn't play
+// TODO: loveletters: broken
+// TODO: breakout: RuntimeError: index out of bounds
+// TODO: easy way to link to a specific deck (also for other examples ex. wasm4, circuits, stackie, etc.)
+// TODO: i need to not print stack trace for exit(0) but yes print it for panic
+// TODO: keyCode inst the same between browsers. need to do it properly
 
-decker_src :: => import("@/examples/fetch.fr")'group(
-    url = "https://github.com/JohnEarnest/Decker/archive/05514df3e1264833ad6e177c1cecc1bb77fa2fcb.tar.gz",
-    legacy = "d66643b3e6e1893704b2b55750d08b989889b5afd6a401f4a7ea6aa3e478b0dd",
-);
+FEAT_DANGER_ZONE :: true;
 
 driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
 main :: fn() void = {
@@ -36,8 +44,10 @@ main :: fn() void = {
     io.set_clip = io_set_clip;
     io.set_title = io_set_title;
     
+    @if(query_current_arch() == .wasm32) @eprintln("warning: THIS (running in web playground) IS VERY UNFINISHED. i need to do more libc stuff");
+    
     args := cli_args();
-    args = args.slice(int(args[1].str().ends_with(".fr")), args.len);  // :hack
+    args = args.slice(int(args.len >= 2 && args[1].str().ends_with(".fr")), args.len);  // :hack
     Syscall'exit(Decker'main(args.len().intcast(), bit_cast_unchecked(*CStr, **i8, args.as_ptr())));
 };
 
@@ -103,6 +113,18 @@ io_process_events :: fn(disp, size, scale) = {
                         k -= ("A".char() - "a".char());
                     };
                     Decker'event_key(k.intcast(), m, B(event.type == .KEY_DOWN), name);
+                };
+                
+                // relies on running in the franca source directory
+                decks := example_deck_paths;
+                @if(decks.len() > 0)
+                if event.type == .KEY_DOWN && event.modifiers.get(.shift) == 1 && event.modifiers.get(.super) == 1 {
+                    I :: @static_mut 0;
+                    if !event.key_repeat && @is(event.key_code, .COMMA, .PERIOD) {
+                        I[] = I[].add(@if(event.key_code == .COMMA, 1, -1)).add(decks.len()).mod(decks.len());
+                        deck_path := decks[I[]].as_cstr();
+                        Decker'open_deck_by_path(deck_path.ptr);
+                    };
                 };
             };
         };
@@ -170,6 +192,8 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             (pixels = pixels.shallow_copy(temp()), width = w.intcast(), height = h.intcast())));
         Viewer'Stb'stbi_image_free(u8.raw_from_ptr(pixels.ptr));
     };
+    
+    sapp.requests.fake_paste_event = true;  // see fn FOCUSED() =>
 }
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -260,28 +284,59 @@ io_set_clip :: fn(it) = {
     state.sapp.set_clipboard_string(clip.items());
 }
 
+fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    // TODO
+}
 
+example_deck_paths :: @static_mut @as([]Str) empty();
 app_icon_png :: @static_mut "";
 Decker :: {
-    root := decker_src();
+    root := Foreign'decker();
     if read_entire_file(ast_alloc(), @tfmt("%/icon_32x32.png", root)) { it |
         app_icon_png[] = it;
     };
+    example_deck_paths[] = collect_deck_paths(root);
+    
     resources := ra(root, @const_slice("js/decker.html", "js/lil.js", "js/danger.js", "js/decker.js", "examples/decks/tour.deck"));
     write_entire_file_or_crash(@tfmt("%/c/resources.h", root), resources);
     write_entire_file_or_crash(@tfmt("%/c/SDL_version.h", root), "#define SDL_VERSION_ATLEAST(...) 1\n");
     write_entire_file_or_crash(@tfmt("%/c/io_sdl2.h", root), io_src);
     version := read_entire_file_or_crash(temp(), @tfmt("%/VERSION", root));
-    import("@/examples/import_c/ffi.fr")'include(@tfmt(SRC, root, version))
+    danger := @if(FEAT_DANGER_ZONE, "#define DANGER_ZONE 1", "");
+    import("@/examples/import_c/ffi.fr")'include(@tfmt(SRC, danger, root, version))
 };
 
+collect_deck_paths :: fn(root: Str) []Str = {
+    out := Str.list(ast_alloc());
+    add_decks(@tfmt("%/examples/decks", root));
+    add_decks("tests/decks");
+    add_decks :: fn(dir) => {
+        @if_let(collect_directory_ordered(dir, temp(), temp())) fn Ok(files) => {
+            for files { it |
+                if it.name.ends_with(".deck") {
+                    out&.push(@afmt(ast_alloc(), "%/%", dir, it.name));
+                };
+            };
+        };
+    };
+    out.items()
+}
+
 SRC :: """
+    %
     #add_include_path "%/c"
     #define VERSION "%"
     typedef unsigned char Uint8;
     typedef unsigned int Uint32;
     typedef short Sint16;
     #include "decker.c"
+    
+    void open_deck_by_path(Uint8 *file) {
+        if(kiosk||menus_off())return;
+       	if(autosave&&strlen(document_path)){save_deck(lmcstr(document_path));}
+        // TODO: if(dirty) show warning popup
+        load_deck(deck_get(n_read(NULL,l_list(lmcstr(file))))),set_path(file);
+    }
 """;
 
 io_src :: """

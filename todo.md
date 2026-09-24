@@ -10,6 +10,9 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
+- better error message if you use an undeclared symbol in wasm. 
+  it doesn't say "Tried to call uncompiled function" because its at "runtime".
+  seal_imports doesn't error because everything is #weak because of the sketchy way i do -syscalls without re-sema. 
 - test #log_ir from the outside like tests/exe/errors_comptime.fr
   test that log_ir works. and with complex expression argument. and does it twice on things with const args. and for AsmFunction. 
 - `franca examples/os/build.fr -web -append "-file examples/os/bin/test_preempt.fr -lang franca"`

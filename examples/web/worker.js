@@ -51,7 +51,8 @@ export async function handleWasmLoaded(wasm_instance, msg) {
             postMessage({ tag: "done", ok: ok, text: " Compiled in " + time + "ms." });
             return;
         }
-        if (e !== "called exit 0") {
+        console.log(e.message);
+        if (e.message !== "called exit 0") {
             show_error(e);
             ok = false;
         }
@@ -120,14 +121,14 @@ export const imports = {
 
         js_worker_stop: (status, known_wasm_jit_event_) => {
             known_wasm_jit_event = known_wasm_jit_event_;
-            throw "called exit 0";
+            throw new Error("called exit 0");
         },
         js_shutdown: (ok) => {
             let G = get_G();
             cancelAnimationFrame(G.animation_id);
             if (ok == 0) postMessage({ tag: "err", text: "shutdown(error)" });
             postMessage({ tag: "done", text: "called exit." });
-            throw "called exit 0";
+            throw new Error("called exit 0");
         },
         jit_instantiate_module: (ptr, len, first_export, table_index) => {
             if (table_index != 0) throw new Error("table_index");
