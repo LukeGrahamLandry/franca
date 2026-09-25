@@ -90,8 +90,19 @@ openat :: fn() void = panic("TODO: use CVariadic");
 FR_openat :: fn(f: Fd, path: CStr, flags: i64, mode: i64) i64 = {
     path := path;
     need_close := false;
-    if path.str().contains("/") {  // :SLOW
-        parent, file := or follow_path_prefix(f, path.str()) { e |
+    path_s := path.str();
+    fs := get_vfs();
+    if path_s.contains("/") {  // :SLOW
+        break :: local_return;
+        
+        // nightmare
+        if path == "/" || path == "/." || path == "//." {
+            f = fs.root_dir;
+            path = ".";
+            break();
+        };
+        
+        parent, file := or follow_path_prefix(f,path_s) { e |
             return(e);
         };
         f = parent;
@@ -241,12 +252,68 @@ unlinkat :: fn(parent: Fd, path: CStr, mode: i64) i64 = {
 
 realpath :: fn(path: CStr, resolved: CStr) CStr = {
     @assert(!resolved.is_null(), "TODO: gnu realpath hell");
-    // TODO: implement this
-    // TODO: should be defining PATH_MAX then
     path := path.str();
-    @println("TODO: realpath(%)", path);
+    // TODO: should be defining PATH_MAX then
+    out := fixed_list(resolved.ptr.slice(4096));
+    
+    if path == "" || path == "." {
+        fs := Vfs'get_vfs();
+        if FR_frealpath(fs.cwd, out&) {
+            return resolved;
+        } else {
+            return zeroed(CStr);
+        };
+    };
+    
+    @trace("TODO: realpath(%; %)", path.len, path);
     //strcpy();
     resolved.ptr.slice(path.len).copy_from(path);
     resolved.ptr.offset(path.len)[] = 0;
     resolved
+}
+
+FR_frealpath :: fn(fd: Fd, out: *List(u8)) bool = {
+    fs := Vfs'get_vfs();
+    
+    file := get_file(fd) || return(false);
+    if !identical(file.vtable, get_vtable(MemDir)) {
+        @trace("TODO: FR_frealpath for non-MemDir");
+        return(false);
+    };
+    data := MemDir.ptr_from_raw(file.data);
+    
+    root_dir := get_file(fs.root_dir) || return(false);
+    if identical(root_dir, file) {
+        out.push_all("/\0");
+        return true;
+    };
+    
+    names := Str.list(temp());  // TODO: should mark/reset this for non-franca programs
+    failed := false;
+    with fs.mutex& {
+        while => !failed && data.files.len >= 2 && data.files[1].name == ".." {
+            parent_f := data.files[1].handle;
+            @assert(identical(parent_f.vtable, get_vtable(MemDir)), "TODO: FR_frealpath parent non-memdir");
+            parent := MemDir.ptr_from_raw(parent_f.data);
+            
+            if parent.files.find(fn(it) => identical(file, it.handle)) { child |
+                names&.push(child.name);
+                data = parent;
+                file = parent_f;
+            } else {
+                failed = true;
+                @trace("unreachable. FR_frealpath didn't find in parent");
+            };
+        };
+    };
+    @if(failed) return(false);
+    for_rev names { it |
+        out.push_all("/");
+        out.push_all(it);
+    };
+    if names.len == 0 {
+        out.push_all("/");
+    };
+    out.push(0);
+    true
 }

@@ -1,8 +1,13 @@
 
+## (Sep 25)
+
 - os/build/compile_user wasn't doing patch_out_interp_header so when building for -vzf, 
   the #libc log/sin/cos that i added for log2/tan for web was dying on elf_loader trying to import it. 
 - vfs: vtable pointer in close() is junk. open(..) to get parent doesn't work?
   mkdir calls create_child_dir with a stack pointer for the parent. probably didn't fix when i made FileHandle a pointer. 
+- did more of realpath. the way my openat works makes it hard to do stuff based on the root directory because it has no parent. 
+- in Posix'openat i wasn't using the arm flags on wasm so opendir wasn't passing O.DIRECTORY 
+  so it wasn't erroring if you did it on a file so the decker file dialogue was treating everything as a directory.  
 
 ## (Sep 24) decker
 

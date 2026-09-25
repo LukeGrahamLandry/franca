@@ -1708,7 +1708,7 @@ also stop pasting around code for handling the multi-part ops
   - BlockAlloc powers of 2
   - x64/arm/wasm/macho/elf but there's no winning there
   - boot but i really don't want to write the compiler again... so idk what to do about that
-  - some of the qbe ssa tests are generated: strspn, strcmp, mem3, cprime, abi8
+  - some of the qbe ssa tests are generated: strspn, strcmp, mem3, cprime
   - if i ever get serious about using tcc for anything, we can't be having thier lib/atomic.S
 - as an extension of argparse it would be cool if all the demo programs could be both 
 and exe and a dylib so if you want to run from cli it parses to a struct and calls the impl,
