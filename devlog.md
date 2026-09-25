@@ -15,7 +15,13 @@
   - modulo is backwards, that's ... a choice
   - for fields, .value is an rtext, .text is a string
   - it has the classic "friendly" language behaviour of just silently doing nothing if you make any mistake at all
+- it's really impressive, it feels like it should be perhaps the polar opposite of my langauge, 
+  and i like my language, but it's hard to stop playing with it. 
 - (probably temporary) easy shortcut to cycle the example decks while developing
+- run the headless test
+  - overloading hell, add RenderBackend.NONE as a way to hack around it. 
+  - macos-amd64 INODE64 hell
+    - glad i had the "inconsistant type info" assert, caught typo missing the `f`
 
 ## (Sep 23) decker
 
