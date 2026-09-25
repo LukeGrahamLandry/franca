@@ -13,6 +13,8 @@
   - very sad that the error popup doesn't tell you which line it's on
   - format takes a list so if you want to print a list with %J you need to say list it wrap it in another list.
   - modulo is backwards, that's ... a choice
+  - for fields, .value is an rtext, .text is a string
+  - it has the classic "friendly" language behaviour of just silently doing nothing if you make any mistake at all
 - (probably temporary) easy shortcut to cycle the example decks while developing
 
 ## (Sep 23) decker
