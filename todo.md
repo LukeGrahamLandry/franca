@@ -10,6 +10,9 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
+- my parse_float still isn't good enough for "0.000000059604644775390625" in wuffs/test/c/std/json.c
+- `examples/os/build.fr -vzf -graphics` ctrl+c doesn't kill the window, vzf.out process just hangs. 
+  presumably same thing about me not killing children as `make` being weird. 
 - better error message if you use an undeclared symbol in wasm. 
   it doesn't say "Tried to call uncompiled function" because its at "runtime".
   seal_imports doesn't error because everything is #weak because of the sketchy way i do -syscalls without re-sema. 

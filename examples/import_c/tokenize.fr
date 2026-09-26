@@ -571,24 +571,20 @@ fn convert_pp_int(c: *Ctx, tok: *Token) bool = {
 //
 // This function converts a pp-number token to a regular number token.
 fn convert_pp_number(c: *Ctx, tok: *Token) void = {
-    // Try to parse as an integer constant.
     if(convert_pp_int(c, tok), => return());
-
     // If it's not an integer, it must be a floating point constant.
+    
     p := tok.str().as_ptr();
-    ::if(Ty(f64, *u8));
-    val, end := if !is_linking_libc() {
-        // TODO: this one doesn't support all the syntax. 1e-2
-        N :: 128;  // arbitrary max length
-        n, rest := parse_float(p.slice(N));
-        (n, p.offset(N - rest.len))
-    } else {
+    is_hex := p[] == "0".ascii() && p.offset(1)[] == "x".ascii();
+    val, rest := @if(!is_linking_libc() || tls(.deny_syscalls)[], 
+        @if(is_hex, parse_hex_float(tok.str()), parse_float(tok.str())), {
         // TODO: can't be calling libc for stuff like this 🤡🤡  
         strtod :: fn(str: *u8, end_out: **u8) f64 #weak #libc;  
         end := @uninitialized *u8;
-        (strtod(p, end&), end)
-    };
-    
+        (strtod(p, end&), end.slice(tok.str().len() - ptr_diff(p, end)))
+    });
+    end := rest.ptr;
+
     end_char := end[];
     ty := @if_else {
         @if(end_char == "f".ascii() || end_char == "F".ascii()) => {
@@ -603,13 +599,62 @@ fn convert_pp_number(c: *Ctx, tok: *Token) void = {
         @else => c.ty_double;
     };
     
-    if ptr_diff(tok.str().as_ptr(), end) != tok.len.intcast() {
-        @error_tok(c, tok, "invalid numeric constant '%'", between(tok.str().as_ptr(), end));
+    if ptr_diff(p, end) != tok.len.intcast() {
+        @error_tok(c, tok, "invalid numeric constant '%'", tok.str());
     };
     
     tok.kind = .TK_NUM;
     tok.val.i = val.bitcast();
     tok.ty = ty;
+}
+
+// :UGLY :UGLY :UGLY :UGLY
+// TODO: do hex floats in a sane way. this is fucked!
+// TODO: since libc strtod does hex floats, this should be in parse_float too i guess since thats what examples/os/user/libc uses
+parse_hex_float :: fn(in: Str) Ty(f64, Str) = {
+    mantissa, r0 := convert_number_dyn(in.rest(2), 16);
+    
+    fraction := -1;
+    fraction_len := 0;
+    if r0.starts_with(".") {
+        r0 = r0.rest(1);
+        fraction_, r1 := convert_number_dyn(r0, 16);
+        fraction_len = r0.len - r1.len;
+        r0 = r1;
+        fraction = fraction_;
+    };
+    if r0.len == 0 || r0[0] != "p".ascii() {
+        return(0, "");
+    };
+    
+    r0 = r0.rest(1);
+    negative := r0.len > 0 && r0[0] == "-".ascii();
+    r0 = r0.rest(int(negative)); 
+    
+    exponent, r1 := convert_number_dyn(r0, 16);
+    
+    n: f64 = exponent.shift_left(52).bit_or(mantissa).bitcast();
+    
+    if fraction != -1 {
+        n = mantissa.float() + (fraction.float() / pow(16, fraction_len).float());
+        if negative {
+            range(0, exponent) { _ |
+                n /= 2;
+            }
+        } else {
+            range(0, exponent) { _ |
+                n *= 2;
+            }
+        };
+    } else {
+        if negative {
+            n = mantissa.bitcast();
+            range(0, exponent) { _ |
+                n /= 2;
+            };
+        };
+    };
+    (n, r1)
 }
 
 // backend `Con` only cares about bits, not types. 

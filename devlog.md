@@ -1,4 +1,13 @@
 
+- i want decker on examples/os but going to start with nuklear because i started the scafolding 
+  for that before and got stuck on the libc math functions that i don't want to think about 
+  and decker will be the same problem. 
+- im just going to use the musl ones for now. good time to experiment with lazily jitting 
+  libc functions the first time you run something that imports one. 
+- my parse_float was losing precision because accumulating the fraction part in the value that already had the whole part
+- hex floats without strtod
+- generate alltypes.h myself. 
+
 ## (Sep 25)
 
 - os/build/compile_user wasn't doing patch_out_interp_header so when building for -vzf, 
