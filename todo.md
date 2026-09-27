@@ -17,8 +17,8 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
-- terminal: if pid=-1 it says "exited with status 0"
-- add decker to tests/images.fr (annoying because need to call its main function)
+- wasm4 menu option to show readme text if available
+- add decker to tests/images.fr
 - "franca examples/os/build.fr -vzf -append "tests/images.fr;toy/shasum.fr target/release/repro.png;exit" -share"
   maze2d back wall is black instead of green. hctarcs linrays sky is green instead of blue. 
 - my parse_float still isn't good enough for "0.000000059604644775390625" in wuffs/test/c/std/json.c
@@ -186,6 +186,7 @@ TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
   - gpu/hctarcs/README.md
   - examples/import_c/ffi.fr
   - examples/emit_c.fr
+  - examples/gpu/multiplexer
 - use bubblewrap more
   - more fine grained settings. ie. enforce that the no-deps tests don't try to fetch anything, etc.
   - always run the with-deps tests in the sandbox? especially the ones that depend on other people's binaries (wuffs,tc,wasm4)
@@ -746,6 +747,12 @@ cset	w0, eq
 - stop using environment variables so much. they annoy me. 
 - run_qbe_passes_common takes 170ms on wuffs_jpeg__decoder__load_mcu_blocks_for_single_component_smooth
 - examples/os: small tests for O_APPEND and O_CLOEXEC
+- terminal: if pid=-1 it says "exited with status 0"  
+  that happening a bunch is the precursor to my computer just quitting all the windows suddenly. 
+  it's happened twice now. what the actual fuck.  
+  i need to stop using apple's garbage operating system.  
+  but mine is even more fragile and it's not like other real ones are any less slop than apple's.  
+  so here we are.   
 
 ## things i don't autotest
 

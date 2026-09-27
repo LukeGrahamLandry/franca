@@ -1,4 +1,11 @@
 
+## (Sep 27)
+
+- multiplexer: events for changing focus, app list, start app.requests (title,clipboard),
+- making decker a bit more embeddable is doable because main does nothing after io_run. 
+  but they have globals (and i have io_vtable/the_state) so can't have multiple at once. 
+  this wouldn't be a problem if i was re-jitting every time and getting new data. 
+
 ## (Sep 26)
 
 - i want decker on examples/os but going to start with nuklear because i started the scafolding 
@@ -11,6 +18,17 @@
 - generate alltypes.h myself. 
 - now that i can do math, trying to run tests/images.fr in -vzf. 
   crashes in maze2d->calculate_wall_lighting->pow->log_inline. `'__pow_log_data' is Invalid`. shame that's not a compile error. 
+
+---
+
+- started redoing multiplexer.fr to use nuklear as the window manager. 
+  new programs are always more boring to take notes about than debugging. 
+  idea is just that you can draw into an image like maze_game does and put that in the ui. 
+- trying to figure out what their canvas.c demo uses to draw on the whole window. 
+  i think the bottom can't be done and it just looks like it does because the background colour matches. 
+  can get the draw-er thingy and that tells me the clip bounds of the whole inner area without needing to guess numbers for the widget layout. 
+- reallocating the texture when the window resizes took
+  lots of messing around trying to get rid of jittering. 
 
 ## (Sep 25)
 
