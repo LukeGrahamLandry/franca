@@ -1,18 +1,42 @@
-// a trivial window manager for switching between multiple running graphics programs. 
-// CONTROLS: ctrl+(1/2) to cycle active program. 
-// currently only one program has the whole screen at a time. 
 
+// TODO: destroy state/textures when window closed.  
+// TODO: dynamically load new ones
+// TODO: iconified/focused events
+// TODO: can i hook close event like native?
+// TODO: window that lists applications to spawn new windows
+// TODO: make it work in web (stb_truetype irriducible control flow)
+// TODO: HIGH_DPI in webgpu doesn't work for nuklear. 
+//       also it dies if you grow the window need to replace_depth_texture in update_dimensions?
+
+Ui :: import("@/graphics/deps/nuklear.fr");
 State :: @struct {
     HIGH_DPI :: true;
     // children[i].(impl_storage,keycodes,webgpu) are junk. the platform part is only done by the host app. 
-    children: List(*Sapp.Self);
-    i: i64;
+    children: List(Window);
     sg: *Sg.Self;
     app: *Sapp.Self;
+    ui: Ui.State;
+    focus: ?i64;
+    idle_last_frame: bool;
+    dirty: bool;
+};
+
+Window :: @struct {
+    app: *Sapp.Self;
+    
+    // TODO: factor out these fields to share with examples/gpu/maze_game
+    img: Sg.Image;
+    att: Sg.Attachments;
+    d_img: Sg.Image;
+    
+    bounds: Ui.Nuklear.nk_rect_t;
+    target_bounds: Ui.Nuklear.nk_rect_t;
+    resizing_frames: i64;
 };
 
 fn on_init(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     a := general_allocator();
+    self.focus = .None;
     self.sg = sg;
     self.app = sapp;
     self.children = list(a);
@@ -20,8 +44,10 @@ fn on_init(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     // TODO: these need to be dynamic eventually. 
     //       little launchpad program as another demo? 
     // TODO: for os, each has to have its own controlling thread group so not all die when one panics. 
+    self.add_app("@/examples/chess/gui.fr");
     self.add_app("@/examples/gpu/mandelbrot.fr");
-    self.add_app("@/examples/gpu/stackie.fr");
+    
+    on_init(self.ui&, sg);
 };
 
 // TODO: be consistant about who has storage for Sg and Sapp. 
@@ -34,75 +60,147 @@ fn on_init(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 //       so then on examples/os applications can be dlopen and call get_app_desc or whatever. 
 // TODO: update (paste/drop)_enabled on the host
 fn add_app(self: *State, $path: Str) void = {
-    a := general_allocator();
-    app := a.box_zeroed(Sapp.Self);
-    app.events = list(a);  // annoying to reset after temp()
-    user := a.box_zeroed(UserData);
-    // TODO: pass the child app to the callbacks instead of the real one. 
-    //       so can lie about size and where to get swapchain. 
-    instance := a.boxed(Instance, (state = self, app = self.app /*app*/, user = user));
     UserData :: import(path).State;
-    app.desc.init_cb = fn(it) = {
-        it := Instance.ptr_from_raw(it);
-        it.user.on_init(it.app, it.state.sg);
-    };
-    app.desc.frame_cb = fn(it) = {
-        it := Instance.ptr_from_raw(it);
-        it.user.on_render(it.app, it.state.sg);
-    };
-    app.desc.event_cb = fn(it, e) = {
-        it := Instance.ptr_from_raw(it);
-        
-        if e.type == .RESTORED {  
-            // TODO: do this without it being $const generic over UserData.
-            // programs that only render if changed (i.e. mandelbrot), need to redraw the screen when taking control. 
-            it.user.dirty = true;
-        };
-        it.user.on_event(it.app, e);
-    };
-    app.desc.cleanup_cb = fn(it) = {
-        it := Instance.ptr_from_raw(it);
-        it.user.on_cleanup(it.app, it.state.sg);
-    };
-    Instance :: @struct(state: *State, app: *Sapp.Self, user: *UserData);
-    app.desc.user_data = Instance.raw_from_ptr(instance);
-    app.first_frame = true;
-    self.children&.push(app);
+    sg := self.sg;
+    a := general_allocator();
+    it := self.children&.push_uninit();
+    it[] = zeroed(Window);
+    W :: 512; H :: 512;
+    it.bounds.w = W;
+    it.bounds.h = H;
+    init_textures(sg, it, 1);
+    app, user := import("@/tests/gpu.fr")'local_scope'init_headless_app2(UserData, sg, it.att, W, H, a);
+    it.app = app;
+    app.events = list(a);  // annoying to reset after temp()
+    app.hack_no_reset_temp_and_no_handle_requests_for_headless = true;
+    it.resizing_frames = -1;
 }
 
 fn on_render(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
-    child := self.children[self.i];
-    if !child.cleanup_called {
+    ctx := self.ui.ctx&;
+    
+    // get rid of side padding
+    ctx.style.window.padding = (x=0,y=0);
+    // make the botton padding blend in to the background
+    ctx.style.window.fixed_background = Ui'Nuklear'nk_style_item_color(r=0,g=0,b=0,a=255);
+
+    prev_commit_count := sg.disabled_commit_calls;
+    prev_commit_disabled := sg.hack_disable_commit_for_headless_app;
+    sg.hack_disable_commit_for_headless_app = true;
+    
+    enumerate self.children& { i, it |
+        continue :: local_return;
+        child := it.app;
+        @if(child.cleanup_called) continue();
+        
+        // don't spam resize the texture while dragging to resize
+        if it.resizing_frames >= 0 {
+            it.resizing_frames += 1;
+            if it.resizing_frames > 2 {
+                it.bounds = it.target_bounds;
+                do_resize(sg, it, sapp.dpi_scale);
+                it.resizing_frames = -1;
+            };
+        };
+        
         if child.first_frame {
             child.first_frame = false;
             child.call_init();
         };
         
-        // TODO: rn the sapp passed in is the real one so child.requests won't be used anywhere. 
-        //child.requests = sapp.requests;
+        // TODO: handle child.requests
+        
         each child.events& { e |
             child'desc'event_cb(child.desc.user_data, e);
         };
         child.events&.clear();
         child.call_frame();
-        //sapp.requests = child.requests;
-        //if sapp.requests.quit {
-            // TODO: consume requests.quit myself and just quit the one child. 
-            // sapp.requests.quit = false;
+        
+        //if child.requests.quit {
+            // TODO: do something
         //};
     };
-    // TODO: render into a texture and blit it on a portion of the screen. 
-    //       which means having more control over get_swapchain which maybe i can then use to have auto test that draws the first frame and saves to a file.
-    //       when web.is_browser already always draws into a texture so that part is easy perhaps. 
-    //       also have to lie about size/positions in events. 
-    //       then i can have some ui like a tab bar around it. 
-    // TODO: i really don't understand the attachments thing, 
-    //       somehow it's easy to draw on the screen but to draw to a texture 
-    //       you have to bake an attatchments object that does nothing and 
-    //       begin_render_pass has two codepaths that have to overlap. 
-    //       is the whole thing just to avoid wgpuTextureCreateView every frame?
-    //       so that's why sokol could undo attachments being a resource after the sg_view update? 
+    
+    if sg.disabled_commit_calls != prev_commit_count {
+        self.dirty = true;
+    };
+    sg.hack_disable_commit_for_headless_app = prev_commit_disabled;
+    
+    if Easy'should_skip_frame(sapp, self.dirty&) {
+        self.idle_last_frame = true;
+        return();
+    };
+    
+    // TODO: factor this out (its a paste from hctarcs/gui)
+    if self.idle_last_frame {
+        // this avoids situation where you scroll one tick of scroll wheel and the 
+        // bar updates but the content doesn't move until you send another event. 
+        // https://github.com/Immediate-Mode-UI/Nuklear/blob/0dbc52f86404f9e1f26ce0df3015ed23ff54a726/nuklear.h#L1049
+        Ui'Nuklear'nk_input_end(ctx);
+        draw_ui(self);
+        Ui'Nuklear'nk_clear(ctx);
+        Ui'Nuklear'nk_input_begin(ctx);
+        self.idle_last_frame = false;
+    };
+    Ui'Nuklear'nk_input_end(ctx);
+    new_focus := draw_ui(self);
+    
+    if new_focus { new_i |
+        // TODO: send focus/unfocus
+        if self.focus { old_i |
+        
+        };
+    } else {
+        if self.focus { old_i |
+        
+        };
+    };
+    self.focus = new_focus;
+    
+    Ui'Nuklear'nk_input_end(ctx);
+    Easy'glue_begin_pass(sapp, sg, (colors = ((
+        load_action = .CLEAR,
+        clear_value = (r = 0, g = 0, b = 0, a = 1),
+    ), ..)));
+    draw(self.ui&, sg, sapp);
+    sg.end_pass();
+    sg.commit();
 };
+
+fn draw_ui(self: *State) ?i64 = {
+    ctx := self.ui.ctx&;
+    #use(Ui.Nuklear);
+    S :: fn(s: CStr) => bit_cast_unchecked(*u8, *i8, s.ptr);
+    flags := (@as(u32) nk_panel_flags.NK_WINDOW_MOVABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_SCALABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_CLOSABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_MINIMIZABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_NO_SCROLLBAR); 
+    new_focus: ?i64 = .None;
+    enumerate self.children& { i, it |
+        name := S(@fmt_cstr("%", i));
+        if nk_window_is_closed(ctx, name) {
+            // TODO: do something
+        };
+        if nk_begin(ctx, name, nk_rect(10, 10, 300, 300), flags) {
+            canvas := nk_window_get_canvas(ctx);
+            new_bounds := canvas.clip;  // like nk_window_get_bounds(ctx) but without including the menu bar, etc.
+            
+            if nk_window_has_focus(ctx) {
+                new_focus = (Some = i);
+            };
+            
+            it.bounds.x = new_bounds.x;
+            it.bounds.y = new_bounds.y;
+            x := it.target_bounds;
+            if it.target_bounds.w != new_bounds.w || it.target_bounds.h != new_bounds.h {
+                it.target_bounds = new_bounds;
+                it.resizing_frames = 0;
+            };
+            
+            img := nk_image_handle(pack_nk_handle(it.img, self.ui.smp));
+            nk_draw_image(canvas, it.bounds, img&, (r=255,g=255,b=255,a=255));
+        };
+        nk_end(ctx);
+    };
+    new_focus
+}
 
 // TODO: don't keep calling on_render when minimised when running as a standalone program either. 
 //       here it happens naturally that events/renders are only sent to the active program. 
@@ -110,37 +208,103 @@ fn on_render(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 //       (fallbackTimerFired, etc.), i guess it's bad to randomly pause time but it feels bad that 
 //       the general case is doing extra effort just to burn extra cpu for no reason. 
 //       maybe add Desc.tick_while_iconified as a config option. 
-// TODO: rn this switches self.i part way through so on frames where you switch the events will be split between old and new
 fn on_event(self: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
-    if event.type == .KEY_DOWN && event.modifiers.get(.control) != 0 {
-        @match(event.key_code) {
-            fn _2() => self.switch_app(1);
-            fn _1() => self.switch_app(-1);
-            @default => ();
-        };
+    is_mouse := @is(event.type, .MOUSE_DOWN, .MOUSE_UP, .MOUSE_MOVE, .MOUSE_SCROLL);
+    sent_ui_event := false;
+    if self.focus.is_none() || is_mouse || @is(event.type, .RESIZED) {
+        on_event(self.ui&, sapp, event);
+        sent_ui_event = true;
     };
-    self.children[self.i].events&.push(event[]);
-};
-
-fn switch_app(self: *State, delta: i64) void = {
-    @if(self.children.len <= 1) return();
-    old := self.children[self.i];
-    self.i = self.i.add(delta).add(self.children.len).mod(self.children.len);
-    new := self.children[self.i];
+    if event.type == .RESIZED {
+        self.dirty = true;
+        return();
+    };
     
-    e := old.init_event(.ICONIFIED);
-    old'desc'event_cb(old.desc.user_data, e);
-    e := new.init_event(.RESTORED);
-    new'desc'event_cb(new.desc.user_data, e);
-}
+    if self.focus { i |
+        child := self.children[i]&;
+        dpi_scale := sapp.dpi_scale;
+        event.mouse_x -= child.bounds.x * dpi_scale;
+        event.mouse_y -= child.bounds.y * dpi_scale;
+        
+        // TODO: this makes the .hovered pointless and the other thing isn't good neough ebcause it incloude hte bar
+        // TODO: this check should be relative to target_bounds instead so it works while resizing
+        @if(is_mouse)
+        if event.mouse_x < 0 || event.mouse_y < 0 || event.mouse_x > child.bounds.w*dpi_scale || event.mouse_y > child.bounds.h*dpi_scale { 
+            if sent_ui_event {
+                self.dirty = true;
+            };
+            return();
+        };
+        
+        // TODO: don't send scroll if mouse is not over the window
+        child.app.events&.push(event[]);
+    } else {
+        if sent_ui_event {
+            self.dirty = true;
+        };
+    }
+};
 
 #use("@/graphics/lib.fr");
 driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics(vtable, @source_file_name());
 main :: fn() void = Easy'start(State);
 
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
-    for state.children { app |
-        app.call_cleanup();
+    for state.children { it |
+        it.app.call_cleanup();
+        // TODO: drop textures
     };
     state.children&.drop();
+    on_cleanup(state.ui&, sg);
+}
+
+fn do_resize(sg: *Sg.Self, it: *Window, dpi_scale: f32) void = {
+    it.app.dpi_scale = dpi_scale;
+    W := (it.bounds.w*dpi_scale).cast().int();
+    H := (it.bounds.h*dpi_scale).cast().int();
+    init_textures(sg, it, dpi_scale);
+    app := it.app;
+    app.events&.push(app.init_event(.RESIZED)[]);
+    app.window_width = W;
+    app.window_height = H;
+    app.framebuffer_width = W;
+    app.framebuffer_height = H;
+    app.force_render_target = it.att.id;
+}
+
+// TODO: in browser there's already an extra texture
+fn init_textures(sg: *Sg.Self, it: *Window, dpi_scale: f32) void = {
+    sg.destroy(it.img);
+    sg.destroy(it.att);
+    sg.destroy(it.d_img);
+
+    w := (it.bounds.w * dpi_scale).cast().int().intcast();
+    h := (it.bounds.h * dpi_scale).cast().int().intcast();
+    
+    // TODO: this is a paste from tests/gpu.fr
+    image: Sg.Image = sg.make(
+        width = w,
+        height = h,
+        pixel_format = .BGRA8,
+        render_target = true,
+        copy_source = true,
+    );
+    // TODO: in website ask for features: Depth32FloatStencil8
+    // :DEPTH
+    dimage: Sg.Image = @if(SOKOL_BACKEND == .WGPU, (id = 0), sg.make(
+        width = w,
+        height = h,
+        pixel_format = .DEPTH_STENCIL,
+        render_target = true,
+    ));
+    at: Sg.Attachments = sg.make(
+        colors = ((
+            image = image,
+        ), ..),
+        depth_stencil = (image = dimage),
+    );
+    
+    it.img = image;
+    it.att = at;
+    it.d_img = dimage;
 }

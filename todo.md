@@ -8,8 +8,16 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 ---
 
+// TODO: i really don't understand the attachments thing, 
+//       somehow it's easy to draw on the screen but to draw to a texture 
+//       you have to bake an attatchments object that does nothing and 
+//       begin_render_pass has two codepaths that have to overlap. 
+//       is the whole thing just to avoid wgpuTextureCreateView every frame?
+//       so that's why sokol could undo attachments being a resource after the sg_view update? 
+
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
+- terminal: if pid=-1 it says "exited with status 0"
 - add decker to tests/images.fr (annoying because need to call its main function)
 - "franca examples/os/build.fr -vzf -append "tests/images.fr;toy/shasum.fr target/release/repro.png;exit" -share"
   maze2d back wall is black instead of green. hctarcs linrays sky is green instead of blue. 
