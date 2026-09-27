@@ -10,6 +10,9 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
+- add decker to tests/images.fr (annoying because need to call its main function)
+- "franca examples/os/build.fr -vzf -append "tests/images.fr;toy/shasum.fr target/release/repro.png;exit" -share"
+  maze2d back wall is black instead of green. hctarcs linrays sky is green instead of blue. 
 - my parse_float still isn't good enough for "0.000000059604644775390625" in wuffs/test/c/std/json.c
 - `examples/os/build.fr -vzf -graphics` ctrl+c doesn't kill the window, vzf.out process just hangs. 
   presumably same thing about me not killing children as `make` being weird. 

@@ -1,4 +1,6 @@
 
+## (Sep 26)
+
 - i want decker on examples/os but going to start with nuklear because i started the scafolding 
   for that before and got stuck on the libc math functions that i don't want to think about 
   and decker will be the same problem. 
@@ -7,6 +9,8 @@
 - my parse_float was losing precision because accumulating the fraction part in the value that already had the whole part
 - hex floats without strtod
 - generate alltypes.h myself. 
+- now that i can do math, trying to run tests/images.fr in -vzf. 
+  crashes in maze2d->calculate_wall_lighting->pow->log_inline. `'__pow_log_data' is Invalid`. shame that's not a compile error. 
 
 ## (Sep 25)
 

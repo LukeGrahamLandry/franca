@@ -4,26 +4,29 @@
 // TODO: several of the float things are one instruction on arm: floor/ceil/round/trunc/fma
 //       i don't have an assembler so can't use musl's arch specific versions of those 
 //       but i could just type the bits in as an AsmFunction here instead of getting them from musl. 
+// TODO: make this usable for statically linking musl's math when building with -syscalls as well
 
 // TODO: use `name` to not jit everything if you just want one thing? 
 //       but it's faster to do one compile than many if you do end up wanting more. 
 // TODO: general_allocator being the one from whoever called dlsym is a bit sketchy
 find_symbol :: fn(libc_exports: *RawHashMap(Str, rawptr), name: Str) ?rawptr = {
+    compiling :: @static_mut 0;
+    @if(compiling[] == -1 || compiling[] == tls(.thread_index)[]) return(.None);
     // TODO: __franca_aot_debug_info getting here is annoying :( (why does it? ex. when runing examples/prospero.fr (in import_wasm if that matters))
     @if(name.starts_with("__franca")) return(.None);
     @if(!functions.contains(name)) return(.None);  // :SLOW
-    
-    first :: @static_mut true;
-    @if(!first[]) return(.None);
-    first[] = false;
     
     // (in web and import_wasm, can use js_fetch to get the dep. in vzf it will only be there if target dir is shared. anything else can't use deps at all)
     // TODO: be able to check if the musl dep is there without pasting the hash again
     if query_current_arch() != .wasm32 && !file_exists("target/franca/fetch/a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4.out") {
         @trace("error: not built with 'examples/os/build.fr -share -lm' so can't jit(%)", name);
+        compiling[] = -1;
         return(.None);
     };
     
+    // TODO: lock libc_exports in dlsym. this isn't thread safe!
+init_once DoNotClearOnAotBake {
+    compiling[] = tls(.thread_index)[];
     @trace("jit_libc/find_symbol(initial = %)", name);
     
     if query_current_arch() != .wasm32 {
@@ -50,20 +53,24 @@ find_symbol :: fn(libc_exports: *RawHashMap(Str, rawptr), name: Str) ?rawptr = {
     // :SLOW
     // TODO: dont mangle the names. exportwithnames doesnt work for import_c-ed things?
     // notabley before fill_from_libc so self references work
+    found := 0;
     for(h, h.all(Qbe.Incremental.Sym)) { _, it |
         check := h.get(it.name);
         @if(it.segment == .Code)
         for functions { real_name |
-            if check.starts_with(real_name) && check.rest(real_name.len()).starts_with("__") {
+            if check.starts_with(real_name) && check.rest(real_name.len()).starts_with("__") && check.len > real_name.len()+2 && check.rest(real_name.len()+2)[0].is_ascii_digit() {
                 lnk := Qbe.Lnk.zeroed();
                 lnk.id = m.intern(real_name);
                 declare_alias(m, m.intern(check), lnk&);
+                found += 1;
             };
         };
     };
+    @assert_eq(found, functions.len(), "jit_libc missing some functions");
     
     m.Qbe'fill_from_libc();
     m.make_exec();
+    _ := push_resolver(QbeModule, m, find_ip_in_module);
     // mem::forget(m);
     
     for functions { name |
@@ -73,13 +80,15 @@ find_symbol :: fn(libc_exports: *RawHashMap(Str, rawptr), name: Str) ?rawptr = {
             libc_exports.insert(name, f, general_allocator());
         };
     };
+    compiling[] = -1;
+};
     
     libc_exports.get(name)
 }
 
 // doing this indirection means import_c doesn't need to be compiled into the init user binary. 
 // decode_and_run_cmd drops the compiler at the end so that's why making an ir module instead of just jit. 
-ir_output_path :: "target/franca/jit_libc.frc";
+ir_output_path :: "target/franca/cache/jit_libc.frc";
 
 main :: fn() void = @run {
     c := current_compiler_context();
@@ -94,16 +103,23 @@ main :: fn() void = @run {
     bytes := bytes.concat(temp());
     write_entire_file_or_crash(ir_output_path, bytes);
     c'vtable'drop_qbe_module(Qbe.Module.raw_from_ptr(m&));
+    _ := include_bytes(ir_output_path);  // so cache is invalidated if it's deleted
 }
+// TODO: why does the cache for libc_jit.fr have $franca/compiler's hash as all zeroes?
+//       (if that means something sane which it might should document in docs/caching.md)
 
 functions :: @const_slice(
     "floor", "ceil", "fmod", "cos", "sin",
+    "round", "acos", "sinf", "log", "asin", "atan", "cosf", "pow", "exp", 
     // TODO: don't make me write out the callgraph :(
     "__cos", "__sin", "__rem_pio2", "__rem_pio2_large", "scalbn",
+    "__sindf", "__math_invalid", "__math_oflow", "__cosdf", "__math_uflow", "__math_divzero", "__rem_pio2f", "__math_xflow",  
 );
 
 // TODO: cope with needing to discard_static_scope for each musl file. 
 //       new module for each function is stupid!!
+//          ex. the cache file for jit_libc.fr has a seperate dep on a .frc for each in `functions` 
+//          so they'll redundantly list the musl source files and be slow. 
 Musl :: fn(name: Str) FuncId = {
     root := Foreign'musl();
     src := @ref u8.list(temp());
@@ -112,6 +128,11 @@ Musl :: fn(name: Str) FuncId = {
     init_once DoNotClearOnAotBake {
         generate_alltypes_h(root);
     };
+    
+    // HACK
+    @if(name == "pow") @fmt(src, "#include \"math/%.c\"\n", "pow_data");
+    @if(name == "exp" || name == "pow") @fmt(src, "#include \"math/%.c\"\n", "exp_data");
+    @if(name == "log") @fmt(src, "#include \"math/%.c\"\n", "log_data");
     
     S := import("@/examples/import_c/ffi.fr")'include(src.items());
     FuncId.get_constant(S, name.sym())
