@@ -16,7 +16,6 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 //       so that's why sokol could undo attachments being a resource after the sg_view update? 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
-TODO: deduplicate the headless code in tests/gpu,multiplexer,maze_game
 - wasm4 menu option to show readme text if available
 - add decker to tests/images.fr
 - "franca examples/os/build.fr -vzf -append "tests/images.fr;toy/shasum.fr target/release/repro.png;exit" -share"

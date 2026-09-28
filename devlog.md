@@ -1,4 +1,10 @@
 
+TODO: factor out CachedCompilerEnv/Loader
+
+## (Sep 28)
+
+- factor out: idle_last_frame, init_textures
+
 ## (Sep 27)
 
 - multiplexer: events for changing focus, app list, start app.requests (title,clipboard),

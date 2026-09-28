@@ -111,6 +111,9 @@ tests :: filter_tests @const_slice(@as(TestCase)
         t.scroll(y = 50);
         t.frame();
     }),
+    ("@/examples/gpu/multiplexer.fr", 1, fn(t) = {
+        t.frame();
+    }),
     ("@/examples/life/gui.fr", 4, fn(t) = {
         t.key(press = .S);
         t.frame();
@@ -195,26 +198,9 @@ main :: fn() void = {
     // TODO: allow making pixel format not match default. need to change it in pipelinedesc.colors.pixel_format. 
     //       actually i guess just pass it into headless_environment instead. 
     //       it's just the blessed one that's pretending to be the screen that has this restriction 
-    image: Sg.Image = sg.make(
-        width = W,
-        height = H,
-        pixel_format = .BGRA8,
-        render_target = true,
-        copy_source = true,
-    );
-    // TODO: in website ask for features: Depth32FloatStencil8
-    dimage: Sg.Image = @if(SOKOL_BACKEND == .WGPU, (id = 0), sg.make(
-        width = W,
-        height = H,
-        pixel_format = .DEPTH_STENCIL,
-        render_target = true,
-    ));
-    at: Sg.Attachments = sg.make(
-        colors = ((
-            image = image,
-        ), ..),
-        depth_stencil = (image = dimage),
-    );
+    surface := zeroed(@struct(img: Sg.Image, d_img: Sg.Image, att: Sg.Attachments));
+    init_offscreen_att(sg, surface&, W, H);
+    image, at := (surface.img, surface.att);
     
     want_png := cli_args().contains(fn(it) => it[] == "-png");
     all_w, all_h := (W*N_FRAME, H*N_DEMO);
@@ -252,6 +238,13 @@ main :: fn() void = {
     dest := @if(want_png, "target/a.png", "target/a.ppm");
     write_entire_file_or_crash(dest, out);
     
+    sg.destroy(scratch);
+    drop_offscreen_att(sg, surface&);
+    each sg.pools& { kind, pool |
+        // i care about this because maze_game spams init/on_cleanup on the different programs. 
+        @assert_eq(pool.queue_top, pool.size - 1, "leaked gpu resource: %", kind);
+    };
+    
     if cli_args().contains(fn(it) => it[] == "-show") {
         #use("@/lib/sys/subprocess.fr");
         @assert(!cli_args().contains(fn(it) => it[] == "-o"), "// TODO: only works if not aot");
@@ -263,7 +256,41 @@ main :: fn() void = {
     };
 }
 
-// :paste from multiplexer example. TODO: factor out stuff that lets you run a headless app?
+init_offscreen_att :: fn(sg: *Sg.Self, it: ~T, w: i32, h: i32) void #where = {
+    image: Sg.Image = sg.make(
+        width = w,
+        height = h,
+        pixel_format = .BGRA8,
+        render_target = true,
+        copy_source = true,
+    );
+    // TODO: in website ask for features: Depth32FloatStencil8
+    // :DEPTH
+    dimage: Sg.Image = @if(SOKOL_BACKEND == .WGPU, (id = 0), sg.make(
+        width = w,
+        height = h,
+        pixel_format = .DEPTH_STENCIL,
+        render_target = true,
+    ));
+    at: Sg.Attachments = sg.make(
+        colors = ((
+            image = image,
+        ), ..),
+        depth_stencil = (image = dimage),
+    );
+    
+    it.img = image;
+    it.att = at;
+    it.d_img = dimage;
+}
+
+drop_offscreen_att :: fn(sg: *Sg.Self, it: ~T) void #where = {
+    sg.destroy(it.att);
+    sg.destroy(it.img);
+    sg.destroy(it.d_img);
+    it.att.id = 0; it.img.id = 0; it.d_img.id = 0;
+}
+
 init_headless_app :: fn($path: Str, sg: *Sg.Self, at: Sg.Attachments, W: i64, H: i64) *Sapp.Self = {
     UserData :: import(path).State;
     app, _ := init_headless_app2(UserData, sg, at, W, H, temp());

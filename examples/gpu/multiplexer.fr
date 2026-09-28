@@ -41,6 +41,7 @@
 //       Sapp.Desc so can have a thing to hold on to without being generic over it. 
 
 Ui :: import("@/graphics/deps/nuklear.fr");
+Headless :: import("@/tests/gpu.fr")'local_scope;
 State :: @struct {
     HIGH_DPI :: true;
     NO_EXIT_ON_CMD_W :: true;
@@ -50,7 +51,6 @@ State :: @struct {
     app: *Sapp.Self;
     ui: Ui.State;
     focus: ?i64;
-    idle_last_frame: bool;
     dirty: bool;
     next_window_id: i64;
     
@@ -71,6 +71,7 @@ Window :: @struct {
     minimized: bool;
     id: i64;
     title: RawList(u8);
+    request_fake_paste: bool;
     
     ready: i64;
     
@@ -86,7 +87,7 @@ fn on_init(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     self.children = list(a);
     sapp.desc.enable_dragndrop = true;
     sapp.desc.enable_clipboard = true;
-    
+    self.dirty = true;
     on_init(self.ui&, sg);
 };
 
@@ -111,7 +112,7 @@ fn add_app(self: *State, $path: Str) void = {
     init_textures(sg, it, 1);
     it.name = path;
     
-    app, user := import("@/tests/gpu.fr")'local_scope'init_headless_app2(UserData, sg, it.att, W, H, a);
+    app, user := Headless'init_headless_app2(UserData, sg, it.att, W, H, a);
     if it.name.ends_with("decker.fr") {
         if self.hack_decker&.take() { x |
             app = x;
@@ -125,6 +126,7 @@ fn add_app(self: *State, $path: Str) void = {
     it.resizing_frames = -1;
 }
 
+// TODO: reset temp per child
 fn on_render(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     ctx := self.ui.ctx&;
     
@@ -133,9 +135,7 @@ fn on_render(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sg.hack_disable_commit_for_headless_app = true;
     
     enumerate self.children& { i, it |
-        continue :: local_return;
         child := it.app;
-        @if(child.cleanup_called) continue();
         
         // don't spam resize the texture while dragging to resize
         if it.resizing_frames >= 0 {
@@ -147,31 +147,19 @@ fn on_render(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             };
         };
         
-        if child.first_frame {
-            child.first_frame = false;
-            child.call_init();
-        };
-                
+        child.frame();
+        
         if child.requests.window_title&.take() { title |
             it.title&.clear();
             it.title&.push_all(title, general_allocator());
             it.title&.push(0, general_allocator());
         };
         
-        // TODO: bubble up instead of doing .impl() directly (rn wont work on web)
         if child.requests.fake_paste_event {
             child.requests.fake_paste_event = false;
-            e := child.init_event(.CLIPBOARD_PASTED);
-            e.pasted = sapp.impl().get_clipboard_string();
-            e.fake = true;
-            child'desc'event_cb(child.desc.user_data, e);
+            sapp.requests.fake_paste_event = true;
+            it.request_fake_paste = true;
         };
-        
-        each child.events& { e |
-            child'desc'event_cb(child.desc.user_data, e);
-        };
-        child.events&.clear();
-        child.call_frame();
         
         if child.requests.set_clipboard&.take() { clip |
             sapp.set_clipboard_string(clip);
@@ -184,25 +172,15 @@ fn on_render(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sg.hack_disable_commit_for_headless_app = prev_commit_disabled;
     
     if Easy'should_skip_frame(sapp, self.dirty&) {
-        self.idle_last_frame = true;
+        self.ui.idle_last_frame = true;
         return();
     };
     
-    // TODO: factor this out (its a paste from hctarcs/gui)
-    if self.idle_last_frame {
-        // this avoids situation where you scroll one tick of scroll wheel and the 
-        // bar updates but the content doesn't move until you send another event. 
-        // https://github.com/Immediate-Mode-UI/Nuklear/blob/0dbc52f86404f9e1f26ce0df3015ed23ff54a726/nuklear.h#L1049
-        Ui'Nuklear'nk_input_end(ctx);
-        draw_ui(self);
-        Ui'Nuklear'nk_clear(ctx);
-        Ui'Nuklear'nk_input_begin(ctx);
-        self.idle_last_frame = false;
+    Ui'input_end_with_idle(self.ui&) {
+        new_focus := draw_ui(self);
+        update_focus(self, new_focus);
     };
-    Ui'Nuklear'nk_input_end(ctx);
-    new_focus := draw_ui(self);
     
-    Ui'Nuklear'nk_input_end(ctx);
     Easy'glue_begin_pass(sapp, sg, (colors = ((
         load_action = .CLEAR,
         clear_value = (r = 0, g = 0, b = 0, a = 1),
@@ -210,7 +188,9 @@ fn on_render(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     draw(self.ui&, sg, sapp);
     sg.end_pass();
     sg.commit();
-    
+}
+
+update_focus :: fn(self: *State, new_focus: ?i64) void = {
     old_i, new_i := (self.focus || -1, new_focus || -1);
     if old_i != new_i {
         if old_i != -1 {
@@ -342,7 +322,7 @@ fn draw_ui(self: *State) ?i64 = {
 fn on_event(self: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     is_mouse := @is(event.type, .MOUSE_DOWN, .MOUSE_UP, .MOUSE_MOVE, .MOUSE_SCROLL);
     sent_ui_event := false;
-    if self.focus.is_none() || is_mouse || @is(event.type, .RESIZED) {
+    if self.focus.is_none() || is_mouse {
         on_event(self.ui&, sapp, event);
         sent_ui_event = true;
     };
@@ -364,13 +344,22 @@ fn on_event(self: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         };
     }
     
+    if event.type == .CLIPBOARD_PASTED && event.fake {
+        each self.children { it |
+            if it.request_fake_paste {
+                it.request_fake_paste = false;
+                it.app.events&.push(event[]);
+            }
+        };
+        return();
+    };
+    
     if self.focus { i |
         child := self.children[i]&;
         dpi_scale := sapp.dpi_scale;
         event.mouse_x -= child.bounds.x * dpi_scale;
         event.mouse_y -= child.bounds.y * dpi_scale;
         
-        // TODO: this makes the .hovered pointless and the other thing isn't good neough ebcause it incloude hte bar
         // TODO: this check should be relative to target_bounds instead so it works while resizing
         @if(is_mouse)
         if event.mouse_x < 0 || event.mouse_y < 0 || event.mouse_x > child.bounds.w*dpi_scale || event.mouse_y > child.bounds.h*dpi_scale { 
@@ -383,7 +372,6 @@ fn on_event(self: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         @if(event.type == .FILES_DROPPED && !child.app.desc.enable_dragndrop) return();
         @if(event.type == .CLIPBOARD_PASTED && !child.app.desc.enable_clipboard) return();
         
-        // TODO: don't send scroll if mouse is not over the window
         child.app.events&.push(event[]);
     } else {
         if sent_ui_event {
@@ -432,44 +420,12 @@ fn do_resize(sg: *Sg.Self, it: *Window, dpi_scale: f32) void = {
     app.force_render_target = it.att.id;
 }
 
-fn drop_textures(sg: *Sg.Self, it: *Window) void = {
-    sg.destroy(it.img);
-    sg.destroy(it.att);
-    sg.destroy(it.d_img);
-}
-
 // TODO: in browser there's already an extra texture
 fn init_textures(sg: *Sg.Self, it: *Window, dpi_scale: f32) void = {
-    drop_textures(sg, it);
+    Headless'drop_offscreen_att(sg, it);
     w := (it.bounds.w * dpi_scale).cast().int().intcast();
     h := (it.bounds.h * dpi_scale).cast().int().intcast();
-    
-    // TODO: this is a paste from tests/gpu.fr
-    image: Sg.Image = sg.make(
-        width = w,
-        height = h,
-        pixel_format = .BGRA8,
-        render_target = true,
-        copy_source = true,
-    );
-    // TODO: in website ask for features: Depth32FloatStencil8
-    // :DEPTH
-    dimage: Sg.Image = @if(SOKOL_BACKEND == .WGPU, (id = 0), sg.make(
-        width = w,
-        height = h,
-        pixel_format = .DEPTH_STENCIL,
-        render_target = true,
-    ));
-    at: Sg.Attachments = sg.make(
-        colors = ((
-            image = image,
-        ), ..),
-        depth_stencil = (image = dimage),
-    );
-    
-    it.img = image;
-    it.att = at;
-    it.d_img = dimage;
+    Headless'init_offscreen_att(sg, it, w, h);
 }
 
 app_files :: @const_slice(
