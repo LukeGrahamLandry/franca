@@ -35,13 +35,11 @@
 //       (even better would be exec so crashes are contained)
 // TODO: have a way to force un-(fullscreen,mouse lock,mouse hide) if the child is misbehaving
 // TODO: "see inside" button
-// TODO: a list of all the windows in case you get stuck with the bar outside the real screen so can't close it
 // TODO: don't be able to lose windows off the screen (especially when resizing the native window)
 // TODO: can i make the top bar smaller?
 // TODO: check NO_EXIT_ON_CMD_W on the child before closing the subwindow on that event
 // TODO: really i should have Easy'start seperate out the part that makes the 
 //       Sapp.Desc so can have a thing to hold on to without being generic over it. 
-// TODO: force quit button even if it ignores QUIT_REQUESTED
 // TODO: it would be cool if i could make running a graphcis program in the terminal open it as a child window not a host one
 
 Ui :: import("@/graphics/deps/nuklear.fr");
@@ -59,6 +57,7 @@ State :: @struct {
     next_window_id: i64;
     
     hack_decker: ?*Sapp.Self;
+    show_monitor: bool;
 };
 
 Window :: @struct {
@@ -77,7 +76,8 @@ Window :: @struct {
     title: RawList(u8);
     request_fake_paste: bool;
     hover: bool;  // for MOUSE_LEAVE/MOUSE_ENTER
-    
+    paused: bool;
+
     ready: i64;
     
     name: Str;  // for hack_decker
@@ -140,6 +140,8 @@ fn on_render(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sg.hack_disable_commit_for_headless_app = true;
     
     enumerate self.children& { i, it |
+        continue :: local_return;
+        @if(it.paused) continue();
         child := it.app;
         
         child.mouse.shown = sapp.mouse.shown;
@@ -232,10 +234,19 @@ fn draw_ui(self: *State) ?i64 = {
     ctx := self.ui.ctx&;
     #use(Ui.Nuklear);
     S :: fn(s: CStr) => bit_cast_unchecked(*u8, *i8, s.ptr);
-    
     flags := (@as(u32) nk_panel_flags.NK_WINDOW_MOVABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_SCALABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_MINIMIZABLE);
     h := self.app.height().float().cast()/self.app.dpi_scale;
     if nk_begin(ctx, S"Applications", nk_rect(0, 0, 300, h), flags) {
+        nk_layout_row_dynamic(ctx, 20, 2);
+        
+        if nk_checkbox_label(ctx, S"Monitor", self.show_monitor&) || self.app.frame_count < 2 {
+            self.dirty = true;
+            nk_window_show(ctx, S"Monitor", @if(self.show_monitor, .NK_SHOWN, .NK_HIDDEN));
+            if self.show_monitor {
+                nk_window_set_focus(ctx, S"Monitor");
+            }
+        };
+        
         nk_layout_row_dynamic(ctx, 20, 1);
         inline_for app_files { $name |
             disable := name[].ends_with("decker.fr") && self.children.find(fn(it) => it.name == name[]).is_some();
@@ -249,13 +260,66 @@ fn draw_ui(self: *State) ?i64 = {
     };
     nk_end(ctx);
     
+    flags := flags.bit_or(@as(u32) nk_panel_flags.NK_WINDOW_CLOSABLE);
+    if nk_begin(ctx, S"Monitor", nk_rect(300, 0, 600, h), flags) {
+        each self.children { it |
+            title := @if(it.title.len != 0, S(ptr = it.title.ptr), S(@fmt_cstr("%", it.name)));
+            if nk_tree_push_hashed(ctx, .NK_TREE_NODE, title, .NK_MINIMIZED, S"child", 5, it.id.intcast()) {
+                name := S(@fmt_cstr("%", it.id));
+
+                nk_layout_row_dynamic(ctx, 16, 1);
+                nk_label(ctx, S(@fmt_cstr("%", it.name)), 0);
+                nk_layout_row_dynamic(ctx, 16, 4);
+                inline_for_enum Fields(@type it.bounds) { $f |
+                    value := get_field(@type it.bounds, it.bounds&, f[])[];
+                    nk_label(ctx, S(@fmt_cstr("%: %", f[], value)), 0);
+                };
+                    
+                nk_layout_row_dynamic(ctx, 0, 4);
+                
+                minimized := nk_window_is_collapsed(ctx, name);
+                if nk_checkbox_label(ctx, S"Minimized", minimized&) {
+                    nk_window_collapse(ctx, name, @if(minimized, .NK_MINIMIZED, .NK_MAXIMIZED));
+                };
+                nk_checkbox_label(ctx, S"Paused", it.paused&);
+                
+                nk_layout_row_dynamic(ctx, 0, 4);
+                focused := nk_window_is_active(ctx, name);
+                @if(focused) nk_widget_disable_begin(ctx);
+                if nk_button_label(ctx, S"Focus") {
+                    nk_window_set_focus(ctx, name);
+                };
+                @if(focused) nk_widget_disable_end(ctx);
+                if nk_button_label(ctx, S"Find") {
+                    nk_window_set_bounds(ctx, name, nk_window_get_bounds(ctx));
+                    nk_window_set_focus(ctx, name);
+                };
+                if nk_button_label(ctx, S"Quit") {
+                    it.paused = false;
+                    it.app.requests.quit = true;
+                    it.app.app_event(.QUIT_REQUESTED);
+                };
+                if nk_button_label(ctx, S"Kill") {
+                    it.paused = false;
+                    it.app.quit_ordered = true;
+                };
+                
+                nk_tree_pop(ctx);
+            };
+        };
+    } else {
+        self.show_monitor = !nk_window_is_hidden(ctx, S"Monitor");
+    };
+    nk_end(ctx);
+    
+    flags := flags.bit_or(@as(u32) nk_panel_flags.NK_WINDOW_NO_SCROLLBAR); 
+    
     old_padding := ctx.style.window.padding;
     old_background := ctx.style.window.fixed_background;
     black := Ui'Nuklear'nk_style_item_color(r=0,g=0,b=0,a=255);
     ctx.style.window.padding = (x=0,y=0);  // get rid of side padding
     ctx.style.window.fixed_background = black; // make the bottom padding blend in to the background
     
-    flags := (@as(u32) nk_panel_flags.NK_WINDOW_MOVABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_SCALABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_CLOSABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_MINIMIZABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_NO_SCROLLBAR); 
     new_focus: ?i64 = .None;
     enumerate self.children& { i, it |
         name := S(@fmt_cstr("%", it.id));
@@ -382,7 +446,7 @@ fn on_event(self: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     
     if event.type == .CLIPBOARD_PASTED && event.fake {
         each self.children { it |
-            if it.request_fake_paste {
+            if it.request_fake_paste && !it.paused {
                 it.request_fake_paste = false;
                 it.app.events&.push(event[]);
             }
@@ -391,7 +455,9 @@ fn on_event(self: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     };
     
     if self.focus { i |
+        break :: local_return;
         child := self.children[i]&;
+        @if(child.paused) break();
         dpi_scale := sapp.dpi_scale;
         event.mouse_x -= child.bounds.x * dpi_scale;
         event.mouse_y -= child.bounds.y * dpi_scale;
@@ -402,21 +468,18 @@ fn on_event(self: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         // TODO: this check should be relative to target_bounds instead so it works while resizing
         @if(is_mouse)
         if event.mouse_x < 0 || event.mouse_y < 0 || event.mouse_x > child.bounds.w*dpi_scale || event.mouse_y > child.bounds.h*dpi_scale { 
-            if sent_ui_event {
-                self.dirty = true;
-            };
-            return();
+            break();
         };
         
         @if(event.type == .FILES_DROPPED && !child.app.desc.enable_dragndrop) return();
         @if(event.type == .CLIPBOARD_PASTED && !child.app.desc.enable_clipboard) return();
         
         child.app.events&.push(event[]);
-    } else {
-        if sent_ui_event {
-            self.dirty = true;
-        };
-    }
+        return();
+    };
+    if sent_ui_event {
+        self.dirty = true;
+    };
 };
 
 #use("@/graphics/lib.fr");
