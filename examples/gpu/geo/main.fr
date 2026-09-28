@@ -11,7 +11,7 @@
 // franca examples/gpu/geo/main.fr -path ~/Downloads/spaceshuttle.laz 
 //
 
-Render :: import("@/examples/gpu/geo/render.fr");
+#use("@/examples/gpu/geo/render.fr");
 Las :: import("@/examples/gpu/geo/las.fr");
 Laz :: import("@/examples/gpu/geo/laz.fr");
 
@@ -45,6 +45,9 @@ State :: @struct {
     chunks: Laz.Chunks;
     prev_frame_time: f64;
     sg: Sg.Self;
+    
+    text: Sdtx.Self;
+    error: Str;
 };
 
 PointData :: @struct {
@@ -55,25 +58,26 @@ PointData :: @struct {
     rgb: Las.Format.Colour;
 }
 
-fn check_las_version(input: []u8) LasFile = {
+fn check_las_version(input: []u8) Result(LasFile, Str) = {
+    @if(input.len < Las.Header.size_of()) return(Err = "input too small for las header");
     h := input.peek_type(Las.Header);
-    @assert_eq(h.fourcc, 0x4653414C, "bad magic for las file. expected LASF");
+    @if(h.fourcc != 0x4653414C) return(Err = "bad magic for las file. expected LASF");
     @println("version = %.%", h.version_major, h.version_minor);
     is_legacy := h.version_minor < 4;
     format := h.point_record_format;
     @println("fmt = %, len = %, count = %, vlr_count = %", format, h.point_record_length, h.legacy_point_record_count, h.vlr_count);
     is_compressed := format >= 128;
     format -= 128 * int(is_compressed).trunc();
-    @assert_lt(format, 6, "TODO: implement more point formats");
+    @if(format >= 6) return(Err = "TODO: implement more point formats");
     records := input.rest(h.offset_to_point_data.zext());
     file: LasFile = (input = input, data = records, vlr = .None, laz_items = empty());
     if is_compressed {
         vv, iits := Laz'laz_header(input) 
-            || @panic("expected compressed laz file but couldn't find special header");  // TODO: result
+            || return(Err = "expected compressed laz file but couldn't find special header");  // TODO: result
         file.vlr = (Some = vv);
         file.laz_items = iits;
-    }
-    file
+    };
+    (Ok = file)
 }
 
 Args :: @struct {
@@ -83,26 +87,29 @@ Args :: @struct {
 
 getargs :: import("@/lib/args.fr").parse_args;  // TODO: the way const shadowing works is stupid
 
-main :: fn() void = {
-    args := getargs(Args);
-    state := zeroed State;
+load_model :: fn(state: *State, args: Args) Result(void, Str) = {
+    path := args.path.str();
+    @if(args.path.str() == "") return(Err = "need cli arg: -path <foo.laz>");
     state.chunk_i = 0;
     input := if args.mmap {
-        mmap_read(args.path) || @panic("failed to open %", args.path)
+        mmap_read(args.path) 
+            || return(Err = "failed to read file")
     } else {
-        general_allocator().read_to_string_or_crash(args.path.str()).items()
-    }
+        general_allocator().read_entire_file(path) 
+            || return(Err = "failed to read file")
+    };
     
-    state.file = check_las_version(input);
+    state.file = @try(check_las_version(input)) return;
     if state.file.vlr { vlr |
-        @assert_eq(vlr.compressor, .chunked, "unsupported laz compressor");
+        @if(vlr.compressor != .chunked) return(Err = "unsupported laz compressor");
         state.chunks = chunk_table(state.file&, general_allocator());
     };
     state.vertex_dirty = true;
-    Render'launch(state&);
+    .Ok
 }
 
+main :: fn() void = Easy'start(State);
 driver :: fn(vtable: *ImportVTable) void = 
-    Easy'build_for_graphics(vtable, @source_file_name());
+    Easy'build_for_graphics2(vtable, @source_file_name(), true);
 
 #use("@/lib/sys/fs.fr");

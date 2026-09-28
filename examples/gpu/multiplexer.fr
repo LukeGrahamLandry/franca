@@ -1,5 +1,7 @@
 // this program bundles all my graphical examples together 
-// and uses nuklear as a compositor to present them in their own little windows. 
+// and uses nuklear as a compositor to present them in their own little windows.  
+// 
+// (as you might guess i named this program before i remembered the word compositor)
 //
 // TODO: my long term goal is to make this work with just a framebuffer and use it in examples/os
 // TODO: dynamically load new ones
@@ -31,14 +33,16 @@
 //       could have a thing where you opt in to a resource intensive program getting 
 //       its own instance on another thread and just sync to copy the texture once a frame. 
 //       (even better would be exec so crashes are contained)
-// TODO: requests (fullscreen, mouse_shown, mouse_locked, cursor, icon)
+// TODO: have a way to force un-(fullscreen,mouse lock,mouse hide) if the child is misbehaving
 // TODO: "see inside" button
 // TODO: a list of all the windows in case you get stuck with the bar outside the real screen so can't close it
+// TODO: don't be able to lose windows off the screen (especially when resizing the native window)
 // TODO: can i make the top bar smaller?
-// TODO: make app_events embeddable like this. i keep wanting to use it to debug but i can't :(
 // TODO: check NO_EXIT_ON_CMD_W on the child before closing the subwindow on that event
 // TODO: really i should have Easy'start seperate out the part that makes the 
 //       Sapp.Desc so can have a thing to hold on to without being generic over it. 
+// TODO: force quit button even if it ignores QUIT_REQUESTED
+// TODO: it would be cool if i could make running a graphcis program in the terminal open it as a child window not a host one
 
 Ui :: import("@/graphics/deps/nuklear.fr");
 Headless :: import("@/tests/gpu.fr")'local_scope;
@@ -72,6 +76,7 @@ Window :: @struct {
     id: i64;
     title: RawList(u8);
     request_fake_paste: bool;
+    hover: bool;  // for MOUSE_LEAVE/MOUSE_ENTER
     
     ready: i64;
     
@@ -137,6 +142,10 @@ fn on_render(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     enumerate self.children& { i, it |
         child := it.app;
         
+        child.mouse.shown = sapp.mouse.shown;
+        child.mouse.locked = sapp.mouse.locked;
+        child.mouse.cursor = sapp.mouse.cursor;
+        
         // don't spam resize the texture while dragging to resize
         if it.resizing_frames >= 0 {
             it.resizing_frames += 1;
@@ -149,20 +158,34 @@ fn on_render(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         
         child.frame();
         
-        if child.requests.window_title&.take() { title |
+        if child.requests.quit {
+            child.quit_ordered = true;
+        };
+        
+        if child.requests.window_title { title |
             it.title&.clear();
             it.title&.push_all(title, general_allocator());
             it.title&.push(0, general_allocator());
         };
         
         if child.requests.fake_paste_event {
-            child.requests.fake_paste_event = false;
             sapp.requests.fake_paste_event = true;
             it.request_fake_paste = true;
         };
         
-        if child.requests.set_clipboard&.take() { clip |
+        if child.requests.set_clipboard { clip |
             sapp.set_clipboard_string(clip);
+        };
+        
+        if i == (self.focus || -1) {
+            sapp.requests.mouse_shown = child.requests.mouse_shown; 
+            sapp.requests.cursor = child.requests.cursor;
+            sapp.requests.mouse_locked = child.requests.mouse_locked;
+            
+            if child.requests.fullscreen != child.fullscreen {
+                // TODO: nk_window_set_bounds, save the old one for when un-fullscreen
+                // TODO: double click the top bar to toggle fullscreen? or just put a button
+            };
         };
     };
     
@@ -238,9 +261,8 @@ fn draw_ui(self: *State) ?i64 = {
         name := S(@fmt_cstr("%", it.id));
         title := @if(it.title.len != 0, S(ptr = it.title.ptr), S(""));
         
-        if it.app.requests.quit {
+        if it.app.quit_ordered {
             nk_window_close(ctx, name);
-            it.app.requests.quit = false;
             it.id = -1;
         };
         
@@ -261,6 +283,11 @@ fn draw_ui(self: *State) ?i64 = {
                 new_focus = (Some = i);
             };
             
+            if it.resizing_frames < 0 && nk_window_is_hovered(ctx) != it.hover {
+                it.hover = !it.hover;
+                it.app.events&.push(it.app.init_event(@if(it.hover, .MOUSE_ENTER, .MOUSE_LEAVE))[]);
+            };
+            
             it.bounds.x = new_bounds.x;
             it.bounds.y = new_bounds.y;
             x := it.target_bounds;
@@ -279,11 +306,13 @@ fn draw_ui(self: *State) ?i64 = {
         };
         nk_end(ctx);
         
-        if minimized && nk_window_is_hidden(ctx, name) {
+        if minimized && !it.app.quit_ordered && nk_window_is_hidden(ctx, name) {
             // pressed the x button in the menu bar
             minimized = false;
-            // TODO: send an event that we're trying to quit and let the thing deny it and reopen the window with nk_window_show
-            it.id = -1;
+            it.app.requests.quit = true;
+            it.app.app_event(.QUIT_REQUESTED);  
+            nk_window_show(ctx, name, .NK_SHOWN);
+            // will close next frame if not canceled
         };
         minimized := minimized && nk_window_is_collapsed(ctx, name);
         if minimized != it.minimized {
@@ -300,9 +329,14 @@ fn draw_ui(self: *State) ?i64 = {
     self.children&.ordered_retain(fn(it) => {
         keep := it.id != -1;
         if !keep {
+            if i == (self.focus||-1) {
+                r := self.app.requests&;
+                r.mouse_shown = true; r.cursor = .DEFAULT; r.mouse_locked = false;
+            };
+            // TODO: but i think this will send a junk UNFOCUSED event if an unfocued window closes itself 
             new_focus = .None;  // waste a frame to not deal with remapping indices
             drop(self, it, false);
-            if i >= (self.focus||MAX_i64) {
+            if i <= (self.focus||-1) {
                 self.focus = .None;
             };
         };
@@ -330,6 +364,8 @@ fn on_event(self: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         self.dirty = true;
         return();
     };
+    
+    @if(@is(event.type, .MOUSE_ENTER, .MOUSE_LEAVE)) return();  // don't care about the host window
     
     if event.type == .KEY_DOWN && event.key_code == .W && event.modifiers.get(.super) != 0 {
         if self.children.len == 0 {
@@ -360,6 +396,9 @@ fn on_event(self: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         event.mouse_x -= child.bounds.x * dpi_scale;
         event.mouse_y -= child.bounds.y * dpi_scale;
         
+        // TODO: the macos behaviour is you keep getting mouse move events when the 
+        //       mouse isn't hovering your window as long as you're still focused. should match that. 
+        //       (that's not what happens in web playground tho)
         // TODO: this check should be relative to target_bounds instead so it works while resizing
         @if(is_mouse)
         if event.mouse_x < 0 || event.mouse_y < 0 || event.mouse_x > child.bounds.w*dpi_scale || event.mouse_y > child.bounds.h*dpi_scale { 
@@ -445,8 +484,10 @@ app_files :: @const_slice(
     "@/tests/external/wasm4.fr",
     "@/tests/external/decker.fr",
     "@/tests/external/nuklear.fr",
+    "@/examples/gpu/app_events.fr",
     "@/examples/gpu/chip8.fr",
     "@/examples/gpu/rtc.fr",
     "@/examples/gpu/hello_triangle.fr",
     "@/examples/gpu/maze_game/editor.fr",
+    "@/examples/gpu/geo/main.fr",
 );

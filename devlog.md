@@ -1,9 +1,11 @@
 
-TODO: factor out CachedCompilerEnv/Loader
-
 ## (Sep 28)
 
 - factor out: idle_last_frame, init_textures
+- app_events,geo use Easy'start. 
+  - geo try to show load error on screen instead of exiting 
+  - i must have done app_events before deque
+- canceling quit_requested. basic mouse capturing
 
 ## (Sep 27)
 

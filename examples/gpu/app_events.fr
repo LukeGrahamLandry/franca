@@ -12,38 +12,22 @@
 // Simple driver program that links the native libraries required for doing graphics things
 driver :: fn(vtable: *ImportVTable) void = 
     Easy'build_for_graphics(vtable, @source_file_name());
+main :: fn() void = Easy'start(State);
 
 // The program entry point just calls into the app library to open a window. 
 // - init() will be called on the first frame (so once the window is already open). 
 // - render() will be called once per frame at a good time for your program to draw stuff. 
 // - event() will called as we get events from the operating system (an arbitrary number of times per frame). 
 // - cleanup() will be called if the application exits gracefully (since some platforms never return once you start thier event loop). 
-main :: fn() void = {
-    state := State.zeroed();
-    state.app&.run(
-        init_cb = do_init,
-        frame_cb = do_render,
-        event_cb = do_event,
-        user_data = State.raw_from_ptr(state&),
-        window_title = "example: app_events",
-        enable_clipboard = true,
-        enable_dragndrop = true,
-        allocator = general_allocator(),
-        // These are the same as if you call set_icon or toggle_fullscreen later in the program. 
-        // fullscreen = true,
-        icon = @slice(make_a_texture(temp(), 128, 128, 0)),
-    );
-    unreachable();  // run never returns
-}
+//     (currently only called by other programs that embed it. ex. multiplexer,maze_game,tests/gpu. 
+//      so if you do something important (other than freeing memory), do it on QUIT_REQUESTED instead). 
 
 State :: @struct {
     text: Sdtx.Self;
-    app: Sapp.Self; 
-    lines: List(Line);
+    lines: RawDeque(Line);
     font: i64;
     deny_quit: bool;
     icon: i64;
-    sg: Sg.Self;
 };
 
 Line :: @struct {
@@ -56,19 +40,18 @@ builtin_font_count :: 6;
 font_names :: ast_alloc().alloc_zeroed([]u8, builtin_font_count);
 font_pixels :: ast_alloc().alloc_zeroed([]u8, builtin_font_count);
 
-do_init :: fn(userdata: rawptr) void = {
-    state := State.ptr_from_raw(userdata);
-    
-    desc := Sg.Desc.zeroed();
-    setup(state.sg&, (
-        environment = Easy'glue_environment(state.app&),
-        allocator = general_allocator(),
-    ));
+fn on_init(state: *State, app: *Sapp.Self, sg: *Sg.Self) void = {
+    // if you call app.run directly instead of using Easy'start, these can be set on the App.Desc instead. 
+    app.desc.enable_clipboard = true;
+    app.desc.enable_dragndrop = true;
+    pixels := make_a_texture(temp(), 128, 128, 0);
+    app.set_icon(temp().alloc_init(Sapp.ImageDesc, 1, fn(_) => pixels));
+    app.set_window_title("example: app_events");
     
     a := general_allocator();
     load_all_default_fonts(font_pixels, font_names);
     state.text&.setup(
-        sg = state.sg&,
+        sg = sg,
         allocator = a,
         fonts = font_pixels,
         // You can also load just a specific font if you want: 
@@ -76,23 +59,19 @@ do_init :: fn(userdata: rawptr) void = {
     );
     
     // Prepare a bunch of empty lines to be filled in by do_event()
-    N :: 50;
-    state.lines = Line.list(N, a);
+    N :: 64;
+    state.lines = init(a, N);
     range(0, N) { i |
-        state.lines&.push(text = u8.list(a), colour = 0, font = 0);
+        state.lines&.push_back((text = u8.list(a), colour = 0, font = 0), a);
     };
 };
 
-do_render :: fn(userdata: rawptr) void = {
-    state := State.ptr_from_raw(userdata);
-    sapp := state.app&;
-    sg := state.sg&;
-    
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     // Record text rendering commands. 
     // You're allowed to call sdtx.put() anywhere in the frame (even in the event handler), 
     // that just doesn't help this program because we want to remember a few lines of past events. 
     sdtx := state.text.default_context&;
-    sdtx.canvas(sapp.width().float().div(1.75).cast(), sapp.height().float().div(1.75).cast());
+    sdtx.canvas(sapp, 1/1.75);
     
     // Show help text / current state. 
     sdtx.pos.y = 0;
@@ -111,7 +90,7 @@ do_render :: fn(userdata: rawptr) void = {
     sdtx.put("0: change app icon\n");
 
     // Show the lines we collected in the event handler. 
-    each_rev state.lines& { it |
+    each state.lines& { it |
         sdtx.color = it.colour;
         sdtx.font = it.font;
         sdtx.pos.x = 0;
@@ -178,18 +157,15 @@ red    :: pack_rgba(235, 0, 0, 255);
 green  :: pack_rgba(0, 235, 0, 255);
 blue   :: pack_rgba(0, 200, 235, 255);
 
-do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
-    state := State.ptr_from_raw(userdata);
-    sapp  := state.app&;
-
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     // Little helper to save some text to display on future frames. 
     report :: fn(colour: u32, $body: @Fn(out: *List(u8)) void) void => {
-        out := state.lines&.ordered_remove(0).unwrap(); // :SLOW
+        out := state.lines&.pop_back().unwrap();
         out.text&.clear();
         body(out.text&);
         out.colour = colour;
         out.font = state.font.trunc();
-        state.lines&.push(out);
+        state.lines&.push_front(out, panicking_allocator);
     };
     
     // Display all the information on the event object. 
@@ -209,11 +185,6 @@ do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
     // Let's map those to key presses. 
     if(event.type != .KEY_DOWN, => return());
     @match(event.key_code) {
-        fn W() => if event.modifiers.get(.super) != 0 {
-            // Exit the application after sending a QUIT_REQUESTED event.
-            // You could also call exit(0) but that won't call your cleanup callback. 
-            sapp.requests.quit = true;
-        }
         fn _1() => {
             // Change the text in the title bar. 
             sapp.set_window_title(@tfmt("set title at %", timestamp()));
@@ -328,3 +299,11 @@ fn load_all_default_fonts(font_bytes: [][]u8, font_names: [][]u8) void = {
     };
     @debug_assert_eq(i, builtin_font_count);
 }
+
+fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    each(state.lines&, fn(it) => it.text&.drop());
+    state.lines&.drop(general_allocator());
+    state.text&.shutdown();
+}
+
+#use("@/lib/collections/deque.fr");

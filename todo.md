@@ -756,7 +756,6 @@ cset	w0, eq
 ## things i don't autotest
 
 - many i compile in ci but don't run
-  - examples/gpu/(geo, app_events)
   - run_tests.deps_compile_only
   - run_tests.dylib_compile_only
   - tests/compiler.compile_only

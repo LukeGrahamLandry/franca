@@ -70,11 +70,19 @@ fn hsv2rgb(H: f64, S: f64, V: f64, a: f64) u32 = {
 
 /////////////////////////
 
-do_render :: fn(userdata: rawptr) void = {
-    state := State.ptr_from_raw(userdata);
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    if state.error != "" {
+        Easy'glue_begin_pass(sapp, sg, zeroed Sg.PassAction);
+        sdtx := state.text.default_context&;
+        sdtx.canvas(sapp, 1);
+        sdtx.put(state.error);
+        sdtx.draw_layer(0);
+        sg.end_pass();
+        sg.commit();
+        return();
+    };
+
     sgl := state.draw;
-    sapp := state.app&;
-    sg := state.sg&;
     
     now := timestamp_s();
     dt := (now - state.prev_frame_time).cast();
@@ -201,14 +209,13 @@ do_render :: fn(userdata: rawptr) void = {
 };
 
 // TODO: the controls feel really bad. you can like lose key presses. 
-do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
-    state := State.ptr_from_raw(userdata);
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     fly_controller(state.camera&, event);
-    @if(event.type == .RESIZED) update_aspect(state.camera&, state.app&);
+    @if(event.type == .RESIZED) update_aspect(state.camera&, sapp);
     
     if event.type == .KEY_DOWN {
         if event.key_code == .W && event.modifiers.get(.super) != 0 {
-            state.app.requests.quit = true; 
+            sapp.requests.quit = true; 
         };
     };
     
@@ -225,28 +232,24 @@ do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
 
 /////////////////////////
 
-launch :: fn(state: *State) void = {
-    state.draw = general_allocator().box_zeroed(@type state.draw[]);
-    state.app&.run(
-        init_cb = do_init,
-        frame_cb = do_render,
-        event_cb = do_event,
-        user_data = State.raw_from_ptr(state),
-        allocator = general_allocator(),
-        window_title = "Point Cloud Viewer", 
-    );
-}
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    // TODO: allow loading a new model by dropping a file and handle later decode errors gracefully
+    args := getargs(Args);
+    @match(load_model(state, args)) {
+        fn Ok(file) => {
+            sapp.lock_mouse(true);
+        }
+        fn Err(msg) => {
+            // TODO: afmt should shrink_to_fit so can free but that's wasteful in arenas until i move shrink_to_fit into the allocator interface
+            state.error = @afmt(general_allocator(), "error while loading path='%'\n%", args.path, msg);
+        };
+    };
+    state.text&.setup(sg = sg, allocator = general_allocator(), fonts = @slice(Sdtx.font.cpc));
 
-do_init :: fn(userdata: rawptr) void = {
-    state := State.ptr_from_raw(userdata);
-    sg := state.sg&;
-    
-    sg.setup(
-        environment = Easy'glue_environment(state.app&),
-        allocator = general_allocator(),
-    );
-    
-    vertices_needed := min(state.file&.header()[].legacy_point_record_count.zext() * 6, MAX_VERTICES);
+    state.draw = general_allocator().box_zeroed(@type state.draw[]);
+    sapp.set_window_title("Point Cloud Viewer");
+
+    vertices_needed := @if(state.error != "", 1, min(state.file&.header()[].legacy_point_record_count.zext() * 6, MAX_VERTICES));
     state.draw.setup(
         allocator = general_allocator(),
         sg = sg,
@@ -275,10 +278,19 @@ do_init :: fn(userdata: rawptr) void = {
         clear_value = (r = 0.3, g = 0.3, b = 0.3, a = 1.0),
     );
     
-    state.app&.lock_mouse(true);
     state.prev_frame_time = timestamp_s();
     
     state.camera.perspective = (aspect = 1, fovy = deg_to_rad(70), znear = 0.01, zfar = 100.0);
-    update_aspect(state.camera&, state.app&);
+    update_aspect(state.camera&, sapp);
     state.camera.speed = (pos = 0.045 * 30.0, rot = 0.005 * 30.0);
 };
+
+fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    state.text&.shutdown();
+    sg.destroy_pipeline(state.pipe&);
+    state.draw.destroy(sg, general_allocator());
+    // TODO
+}
+
+#use("@/examples/gpu/geo/main.fr");
+#use("@/graphics/lib.fr");
