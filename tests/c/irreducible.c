@@ -22,7 +22,6 @@ int A_fixed(int a) {
     H: j = c; label = 4; goto D;
 }
 
-/* // TODO
 int B(int a) {
     int i = 0; int j = 0;
     for (;i<a; i++) {
@@ -35,7 +34,6 @@ int B(int a) {
     }
     return i + j;
 }
-*/
 
 // same shape as stbi__hdr_load
 int C(int x) {
@@ -48,7 +46,6 @@ int C(int x) {
    return x+j;
 }
 
-/* // TODO
 // same shape as stbtt__run_charstring
 int D(int i, int x) {
     while (i) {
@@ -61,16 +58,15 @@ int D(int i, int x) {
     }
     return x;
 }
-*/
 
 // the important thing is the isel debug assertions and whether it makes a valid wasm module. 
 // i don't care enough to make the tests actually do stuff and try all interesting inputs.  
 int main() {
     ASSERT(1, A(1));
     ASSERT(1, A_fixed(1));
-    // TODO: ASSERT(25, B(15));
+    ASSERT(25, B(15));
     ASSERT(2, C(1));
-    // TODO: ASSERT(1, D(1, 1));
+    ASSERT(1, D(1, 1));
     printf("OK\n");
     return 0;
 }

@@ -33,7 +33,6 @@ You can still print out the ir as human readable text between passes and modify 
 - Added a Web Assembly target (outputs the binary format directly).
   - WIP: no dynamic/relocatable libraries and can't export/import globals.  
   - WIP: code quality is poor. there's lots of low hanging fruit optimisations in wasm/isel.fr.  
-  - WIP: irreducible control flow is not supported. 
   - WIP: late Cached .frc is not supported. 
 
 ### Features

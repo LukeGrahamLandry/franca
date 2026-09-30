@@ -51,7 +51,11 @@ fn wasm_isel(f: *Qbe.Fn) void = {
         
         when_debug_printfn(f, .InstSelect, "\n## After fix_multientry_loops:\n");
         f.globals.flush_debug();
-        @debug_assert(!f.is_irreducible(), "$% is STILL irreducible", f.name());
+        
+        if f.is_irreducible() {
+            f.temporary_give_up_and_be_slow();
+        };
+        @debug_assert(!f.is_irreducible(), "$% is STILL irreducible", { f.globals.flush_debug(); f.name() });
     };
     
     insert_blocks_for_conditional_phis(f);
@@ -771,6 +775,91 @@ fix_multientry_loops :: fn(f: *Qbe.Fn) void = {
     f.breaks(.Rpo);
 };
 
+// :SLOW :SLOW :SLOW :SLOW
+// this is stupid! can do the localized fix_multientry_loops properly, "just" need to be able to 
+// fill_scc on a smaller subsection of the cfg i think. even if don't do that, could stupidify like 
+// this only for the part that's hard. even if don't do that could use a real switch terminator. 
+// ... but playing with cfgs is fun sometimes and i don't want to waste it on being annoyed because im not in the mood ...
+// so as a gift to my future self, someday this can be a big perf win on some oddly shaped program. 
+// sorry :)
+temporary_give_up_and_be_slow :: fn(f: *Qbe.Fn) void = {
+    insert_blocks_for_conditional_phis(f);
+    f.fillrpo();
+    new_blocks_list := Qbe.Blk.ptr_from_int(0);
+    rpo := f.rpo();
+    end := Qbe.Blk.ptr_from_int(0);
+    
+    label := f.newtmp("SLOW_LABEL", .Kl);
+    new := f.create_block(new_blocks_list&);
+    new.name = "SLOW_DISPATCH_HEADER";
+    label_phi := new.new_phi(.Kl, f.nblk.intcast(), label);
+    
+    switch := f.new_switch(f.nblk.intcast(), new, label, new);
+    label_phi.push(new, f.getcon(new.id.intcast()));
+    
+    phis := list(*Qbe.Phi, temp());
+    for rpo { b |
+        if b.link.is_null() {
+            end = b;
+        };
+        
+        s := f.switches&[switch]&;
+        push(s.cases&, s.case_count&, (b, b.id.intcast()));
+        
+        for_phi b { p |
+            phis&.push(p);
+        };
+        b.phi = zeroed(*Qbe.Phi);
+        for phis { p |
+            p.link = new.phi;
+            new.phi = p;
+        };
+        phis&.clear();
+        
+        // note: no edgedel, will fuck up the phis too early
+        @match(b.jmp.type) {
+            fn jmp() => {
+                label_phi.push(b, f.getcon(b.s1.id.intcast()));
+                b.s1 = new;
+            }
+            fn jnz() => {
+                @debug_assert(b.s1.phi.is_null() && b.s2.phi.is_null(), "insert_blocks_for_conditional_phis");
+                dest_label := f.newtmp("SLOW_JNZ_LABEL", .Kl);
+                b.push(.sel0, .Kw, Qbe.Null, b.jmp.arg, Qbe.Null);
+                b.push(.sel1, .Kl, dest_label, f.getcon(b.s1.id.intcast()), f.getcon(b.s2.id.intcast()));
+                
+                b.s1 = new;
+                b.s2 = zeroed(*Qbe.Blk);
+                b.jmp = (type = .jmp, arg = Qbe.Null);
+                
+                label_phi.push(b, dest_label);
+            }
+            @default => ();
+        };
+    };
+    
+    end.link = new_blocks_list;
+    // :SLOW but now this block is reachable from everywhere
+    for_phi new { p |
+        for_blocks f { b |
+            break :: local_return;
+            range(0, p.narg.zext()) { i |
+                if identical(p.blk[i], b) {
+                    break();
+                };
+            };
+            p.push(b, p.to);
+        };
+    };
+    
+    when_debug_printfn(f, .InstSelect, "\n## After temporary_give_up_and_be_slow:\n");
+    f.replace_switches();
+    fillrpo(f);
+    fillpreds(f);
+    fill_use(f);
+    
+}
+
 create_block :: fn(f: *Qbe.Fn, link: **Qbe.Blk) *Qbe.Blk = {
     new := temp().box_zeroed(Qbe.Blk);
     new.id = f.nblk;
@@ -787,7 +876,7 @@ fn is_irreducible(f: *Qbe.Fn) bool = {
         for_jump_targets b { s |
             if s.id < b.id && !dom(s, b) {
                 when_debug(f, .InstSelect, fn(out) => 
-                    @fmt(out, "\n\n## $% has irreducible edge: % <- %\n#", f.name(), s.id, b.id));
+                    @fmt(out, "\n\n## $% has irreducible edge: % <- %\n#", f.name(), s, b));
                 return true;
             }
         }
@@ -816,12 +905,13 @@ fn fill_scc(f: *Qbe.Fn) void = {
 }
 
 // dot a.dot -Tsvg > a.svg && open a.svg
+// or paste it into https://dreampuf.github.io/GraphvizOnline
 fn dump_graph_vis(f: *Qbe.Fn) void = {
     out := f.globals.debug_out;
-    @fmt(out, "digraph{\n");
+    @fmt(out, "\ndigraph{\n");
     for_blocks f { b |
         for_jump_targets b { s |
-            @fmt(out, "\"%  #%  L% C%\" -> \"%  #%  L% C%\"\n", b.name, b.id, b.loop, b.visit, s.name, s.id, s.loop, s.visit);
+            @fmt(out, "\"%  L% C%\" -> \"%  L% C%\"\n", b, b.loop, b.visit, s, s.loop, s.visit);
         };
     }
     @fmt(out, "}\n");

@@ -6,6 +6,12 @@
   - geo try to show load error on screen instead of exiting 
   - i must have done app_events before deque
 - canceling quit_requested. basic mouse capturing
+- Easy'start's auto cmd+w to quit send the event so can be canceled
+- i had the realization i can actually do whatever the fuck i want. 
+  im allowed to just do something insanely stupidly slow to make the 
+  one stbtruetype function that has irreducible control flow in a weird nested loop 
+  work in wasm and defer dealing with playing with the fun cfg code until im in the mood for that again. 
+  
 
 ## (Sep 27)
 
