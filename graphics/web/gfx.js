@@ -276,6 +276,10 @@ webgpu.wgpuRenderPassEncoderSetViewport = (self, x, y, width, height, min_depth,
     G.get(self).setViewport(x, y, width, height, min_depth, max_depth);
 };
 
+webgpu.wgpuRenderPassEncoderSetScissorRect = (self, x, y, width, height) => {
+    G.get(self).setScissorRect(x, y, width, height);
+};
+
 webgpu.wgpuBufferMapAsync = (self, mode, offset, size, cb) => {
     const [f, u1, u2] = R.Callback(cb);
     let fut = G.get(self).mapAsync(Number(mode), Number(offset), Number(size));

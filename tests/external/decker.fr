@@ -5,15 +5,19 @@
 //
 // not implemented: sound/recording, transparent window, window_set_size
 // TODO: open_url, base_path, cursor, fullscreen
-// TODO: cope if the window is too small
-// TODO: deck that is a gallary of the example decks 
-//       and one for the lilt examples like http://beyondloom.com/tools/trylil.html
 // TODO: it feels weird to type in somehow. is that my fault? am i just going crazy? who can say
 // TODO: can i know if nothing changed and drop frames so it sucks less cpu?
 // TODO: if you copy text with multiple images they don't paste? that can't be my fault i hope. 
 // TODO: this would be less painful if it was easier to have the c import symbols from franca. 
 //       (rn only the other direction is easy). so wouldn't need the io_vtable verbosity. 
 // TODO: can i make DANGER_ZONE toggleable at runtime per deck? so don't have to recompile but can look at things in sandbox-ish mode if you want. 
+// --- examples ---
+// - i actually don't give a shit about xml. make rss_reader.fr be something that embeds a lil thing to use thier xml parser. and generates a deck instead of html. 
+//   or maybe do danger.franca like their danger.js so the whole thing can be a deck. 
+// - do the hashlife diagram with decker
+// - tests/images.fr do one screen shot of each of my tests/decks
+// - deck for the lilt examples like http://beyondloom.com/tools/trylil.html
+// - FEAT_ to bundle the example decks so instead of expecting to run in the franca directory
 // --- for web playground ---
 // TODO: rtext_is_image->strspn,gmtime
 // TODO: some way to get decks in and save files out
@@ -95,6 +99,7 @@ io_process_events :: fn(disp, size, scale) = {
                 Decker'field_input(s.sv);
             }
             fn MOUSE_MOVE() => {
+                @debug_assert_ne(scale, 0, "unreachable because of on_resize");
                 b: Decker.pair = (x = (disp.x-(size.x*scale))/2, y = (disp.y-(size.y*scale))/2);
                 raw: Decker.pair = (x = I(event.mouse_x), y = I(event.mouse_y));
                 scaled: Decker.pair = (x = (raw.x-b.x)/scale, y = (raw.y-b.y)/scale);
@@ -130,7 +135,7 @@ io_process_events :: fn(disp, size, scale) = {
                         Decker'open_deck_by_path(deck_path.ptr);
                     };
                     if event.key_code == ._0 {
-                        Decker'open_deck_by_path(decks[0].as_cstr().as_ptr());  // gallery
+                        Decker'open_deck_by_path("tests/decks/gallery.deck".as_cstr().as_ptr());
                     };
                 };
             };
@@ -164,7 +169,6 @@ the_state :: @static_mut zeroed(*State);
 #use("@/graphics/lib.fr");
 State :: @struct {
     HIGH_DPI :: false;
-    NO_EXIT_ON_CMD_W :: true;
     draw: Sgl.Self;
     sg: *Sg.Self;
     sapp: *Sapp.Self;
@@ -172,6 +176,9 @@ State :: @struct {
     textures: Array(Texture, 3);
     events: List(Sapp.Event);
     clipboard: List(u8);
+    
+    prev_noscale: ?i32;
+    prev_deck: *Decker.lv;
 };
 
 Texture :: @struct(img: Sg.Image, buf: []u32);
@@ -179,10 +186,10 @@ Texture :: @struct(img: Sg.Image, buf: []u32);
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sapp.desc.enable_clipboard = true;
     sapp.desc.enable_dragndrop = true;
+    state.prev_noscale = .None;
     
     the_state[] = state;
     state.sg = sg; state.sapp = sapp;
-    Decker.io_vtable[].window_size = (x = sapp.width().intcast(), y = sapp.height().intcast());
     state.draw&.setup(
         allocator = general_allocator(),
         sg = sg,
@@ -199,6 +206,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     sapp.requests.fake_paste_event = true;  // see fn FOCUSED() =>
     init_decker(cli_args());
+    state.on_resize();  // window_get_size only called on sync() so after init is fine
 }
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -207,6 +215,12 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         return();
     };
     Decker'tick(Decker.io_vtable[].env);
+    ::ptr_utils(Decker.lv);
+    if !identical(state.prev_deck, Decker'deck[]) {
+        // load_deck can be called after init and the size demanded by deck file might be bigger than the screen.
+        // TODO: in web-decker loading a new deck that's too big shows the top left (+ the useful menu bar) instead of the noscale middle (but reverts to the middle if you resize the tab). 
+        state.on_resize();
+    };
     Decker'sync();
     
     sgl := state.draw&;
@@ -255,11 +269,33 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sg.commit();
 };
 
+fn on_resize(state: *State) void = {
+    state.prev_deck = Decker'deck[];
+    sapp := state.sapp;
+    w := Decker.io_vtable[].window_size&;
+    w[] = (x = sapp.width().intcast(), y = sapp.height().intcast());
+    
+    // decker only wants to use an integer scale factor. 
+    // if the reported window size is too small, it uses scale=0 and draws nothing. 
+    // native-decker(sdl) avoids this by not letting you resize the window. 
+    // in web-decker some of the ui just gets cropped out (same as when --no-scale). 
+    size := Decker'buff_size(Decker'context.buffer);
+    noscale := Decker'noscale;
+    if w.x < size.x || w.y < size.y {
+        if state.prev_noscale.is_none() {
+            state.prev_noscale = (Some = noscale[]);
+        };
+        noscale[] = 1;
+    } else {
+        if state.prev_noscale&.take() { it |
+            noscale[] = it;
+        };
+    };
+}
+
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     @match(event.type) {
-        fn RESIZED() => {
-            Decker.io_vtable[].window_size = (x = sapp.width().intcast(), y = sapp.height().intcast());
-        }
+        fn RESIZED() => state.on_resize();
         fn CLIPBOARD_PASTED() => {
             // the paste event is after the key down event that decker responds to so can't do this when iterating events later
             state.clipboard&.clear();
@@ -314,7 +350,7 @@ Decker :: {
     };
     example_deck_paths[] = collect_deck_paths(root);
     
-    resources := ra(root, @const_slice("js/decker.html", "js/lil.js", "js/danger.js", "js/decker.js", "examples/decks/tour.deck"));
+    resources := ra(@ref collect_resources(root));
     write_entire_file_or_crash(@tfmt("%/c/resources.h", root), resources);
     write_entire_file_or_crash(@tfmt("%/c/SDL_version.h", root), "#define SDL_VERSION_ATLEAST(...) 1\n");
     write_entire_file_or_crash(@tfmt("%/c/io_sdl2.h", root), io_src);
@@ -335,9 +371,6 @@ collect_deck_paths :: fn(root: Str) []Str = {
                 };
             };
         };
-    };
-    if out.index_of(fn(it) => it[].ends_with("gallery.deck")) { i |
-        out&.insert(0, out&.ordered_remove(i).unwrap());
     };
     out.items()
 }
@@ -523,10 +556,9 @@ void event_padbutton(int b,int down);  // decker.c needs this forward declaratio
 // TODO: this would be less annoying if it was easy to import franca constants from the c. 
 //       for this situation it would almost work with just having them be multable globals 
 //       and setting them at comptime from franca but i don't rebake so not good enough. 
-ra :: fn(root: Str, resource_paths: []Str) Str = {
+ra :: fn(resources: *HashMap(Str, []u8)) Str = {
     out := @ref u8.list(2_700_000, temp());
-    for resource_paths { path |
-        data := read_entire_file_or_crash(temp(), @tfmt("%/%", root, path));
+    each resources { path, data |
         name := temp().alloc_init(u8, path.len, fn(i) => 
             @if("/.".contains(path[i]), "_".ascii(), path[i]));
         @fmt(out, "unsigned char %[] = {", name);
@@ -537,6 +569,18 @@ ra :: fn(root: Str, resource_paths: []Str) Str = {
     };
     out.items()
 }
+
+collect_resources :: fn(root: Str) HashMap(Str, []u8) = {
+    r: HashMap(Str, []u8) = init(temp());
+    resource_paths := @const_slice("js/decker.html", "js/lil.js", "js/danger.js", "js/decker.js", "examples/decks/tour.deck");
+    for resource_paths { path |
+        data := read_entire_file_or_crash(temp(), @tfmt("%/%", root, path));
+        r&.insert(path, data);
+    };
+    // this is the default deck when you run without cli args. 
+    r&.insert("examples/decks/tour.deck", read_entire_file_or_crash(temp(), "tests/decks/gallery.deck"));
+    r
+};
 
 lil_str :: fn(s: Str) *Decker.lv = {
     r := Decker'str_new();

@@ -16,8 +16,24 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 //       so that's why sokol could undo attachments being a resource after the sg_view update? 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
+
+- do the aot thing i was thinking about for web and make actually good seperate page 
+  for some of the fun example programs so maybe it could exist if you google for ex. mandelbrot viewer or whatever. 
+  i'd enjoy if i could make something that was good as a real program not only as an example in a corner of my language's playground. 
+- web: fix the panic stack trace thing when it was actually a Syscall'exit(0)  
+  - web: terminal: when you panic in child it shows the status in the left bar which is misleading. 
+- web: terminal: "press control + c to interrupt it" needs examples/os to implement kill
+- web: terminal: can't use the things builtin to examples/os/user/init.fr's baby shell (uptime,strace,time,nocache,devicetree,ps,tree). can't use the program running stuff from that because no longjmp but could move the rest out partially. 
+- terminal: silly that if you open a new buffer while a command is running the output goes to the new one
+- try to make wasm stack traces good in firefox so i don't have to keep opening chrome when debugging. is there some other place it wants me to put symbol names?
+- fix backend/wasm32/isel.fr/temporary_give_up_and_be_slow
+- `fn display(self: f64, writer: *List(u8))` should do hex float `if self < MIN_i64.float() || self > MAX_i64.float()` 
+  because i can't call .int() for floatunrepresentableinintegerrange in wasm.
+  the correct thing would be to pick a sane behaviour (probably saturating) and define it that way and make native match. 
+  (same for div0, which crashes on wasm and amd). 
+  but i kinda don't want to because it giving me extra safety checks for free catches some bugs sometimes. 
+  eventually should make it a compile option and be able to do it on any target. 
 - wasm4 menu option to show readme text if available
-- add decker to tests/images.fr
 - "franca examples/os/build.fr -vzf -append "tests/images.fr;toy/shasum.fr target/release/repro.png;exit" -share"
   maze2d back wall is black instead of green. hctarcs linrays sky is green instead of blue. 
 - my parse_float still isn't good enough for "0.000000059604644775390625" in wuffs/test/c/std/json.c
@@ -77,7 +93,6 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
     which is odd (might be a general problem for reproducible binaries) but also should use readable name anyway. 
     rn what is shown on the screen depends if you build with -keep-names which is silly.
 - hctarcs generated file main use gui instead of temporary_main
-- hctarcs: one of the builtin ones has floatunrepresentableinintegerrange in wasm when printing in literal_node to check if the string is floaty because my display does .int()
 - os/kernel real time device 
   so when you press `l` the order they're shown in the ui is consistant (rn different on macos and web)
 - don't die if linked against a libc that isn't compiled with frame pointers. 

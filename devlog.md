@@ -1,4 +1,14 @@
 
+## (Sep 29)
+
+- decker: don't just draw nothing when too small. problem was scale=0 which was caught as div0 error on wasm
+  i don't want to deal with scaling down to non-integer myself and remapping the event positions 
+  (even tho i think that would be a better solution dispite aliasing jankyness) but noscale already behaves tolerably so good enough for now. 
+  can change `size:[512,342]` to big numbers in a .deck file to test
+- hctarcs: don't die on trying to display a weird float on wasm
+- weird mismatch between web and native dawn. ah, gfx.js didn't have binding for setScissorRect. 
+- did broken version of .f in my bad printf but forgot f32 were promoted. now nuklear calcualtor demo kinda works. 
+
 ## (Sep 28)
 
 - factor out: idle_last_frame, init_textures
