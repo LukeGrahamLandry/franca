@@ -10,7 +10,6 @@
 
 // even when disabled still need to call compile_gates to fill `compile_order` for the interpreter and set fast_eval callback for tc builtins. 
 FEAT_COMPILE :: true;  // disable to test the interpreter. enabled is ~110x speedup on defs (nand only) maze solve. 
-FEAT_RT_COMPILE :: true && FEAT_COMPILE;  // disabling makes it compile faster because don't have to bundle franca compiler
 FEAT_TC_CIRCUIT :: true;  // be able to load TuringComplete.Game's circuit.data save files?
 max_in_out_wires :: 256;
 
@@ -555,7 +554,7 @@ fn compile_component(self: *CompileGates, doing_pre_read: bool) void = {
 // compiled fns call each other directly without going through the interpreter's calling convention. 
 compile_gates :: fn(fr: CompCtx, components: []Component) void = {
     src := compile_gates_source(components, fr.get_alloc(), 0);
-    fast_eval := compile_value(fr, []rawptr, src, "dispatch");
+    fast_eval := const_eval([]rawptr, @{ import(@[@literal src]).dispatch });
     enumerate components { i, it |
         it.fast_eval = fast_eval[i];
     };
@@ -872,98 +871,16 @@ fn arity(c: *Component) Ty(i64, i64) = {
 Main :: import().examples.circuit;
 #use("@/compiler/ast_external.fr");
 
-// same as import(src).var_name but can be called from outside. 
-// UNSAFE: T must have the right repr and `src` must be in fr.get_alloc(). 
-compile_value :: fn(fr: CompCtx, $T: Type, src: Str, var_name: Str) T #generic = {
-    fid := create_function_for_value(fr, src, var_name);
-    callee := fr.get_jitted(fid);
-    callee := bit_cast_unchecked(rawptr, @FnPtr() T, callee);
-    callee()
-};
-
-create_function_for_value :: fn(fr: CompCtx, src: Str, var_name: Str) FuncId = {
-    v, c := (fr.vtable, fr.data);
-    @assert(src.starts_with("{") && src.ends_with("};"), "compile_value wants block like import()");
-    src := src.slice(1, src.len - 2);
-    import_literal_file_name :: "(import literal)";
-    file := v'add_file(c, import_literal_file_name, src).shrink();
-    stmts := v'parse_stmts(c, file&);
-    stmts := stmts.or(fn(err) => fr.report_error(err));
-    loc := stmts[0].loc;
-    func: Func = empty_fn(fr.intern_string("compile_value_literal"), loc);
-    func.body = (Normal = (expr = (Block = (
-        body = stmts.as_raw_list(),
-        ret_label = .None,
-        flags = 0,
-        scope = NOSCOPE,
-        result = fr.get_alloc().boxed(FatExpr, (expr = (
-            GetNamed = fr.intern_string(var_name),
-        ), loc = loc)),
-    )), loc = loc));
-    func.resolve_scope = TOP_LEVEL_SCOPE;
-    fr.intern_func(func&)
-};
-
 // TODO: maybe get rid of switch gate so it's always ssa
 // TODO: compile pre_read version as a seperate function and call it directly instead of branching.
 // TODO: allow defs.fr to access tc/builtin.fr
 // TODO: move the part that's just for defs seperate from the compilation that tc also needs
 
-Qbe :: import("@/backend/lib.fr");
-Franca :: import("@/examples/repl.fr").R;
-CachedCompilerEnv :: @struct(it: ?Ty(CompCtx, *Qbe.Module) = .None);
-
-jit_circuit :: fn(slot: *CachedCompilerEnv, components: []Component, a: Alloc) void = {
-    // finished_defs don't need to be re-compiled every time because they'll already have it.fast_eval set from comptime. 
+fill_fast_eval :: fn(components: []Component, callee: rawptr) void = {
+    callee := bit_cast_unchecked(rawptr, @FnPtr() []rawptr, callee);
+    fast_eval := callee();
     first_index_that_needs_fast_eval := finished_defs.components.len();
-    
-    // either way need to set Component.compile_order for interp
-    src := compile_gates_source(components, a, first_index_that_needs_fast_eval);
-    @if(FEAT_RT_COMPILE) {
-    fr, m := slot.it.unwrap();
-    comptime_ctx := bit_cast_unchecked(Compiler, **rawptr, fr.data)[][];  // TODO: making everybody deal with this is kinda trash
-    push_as_tls(.comptime, comptime_ctx) {
-        // more convoluted than just `compile_gates` because don't want to allow jit-shims (so timer will be accurite). 
-        // TODO: annoying that doing it this way does useless bake_relocatable_value
-        fid := create_function_for_value(fr, src, "dispatch");
-        {fr.vtable.emit_qbe_included}(Qbe.Module.raw_from_ptr(m), fr&, @slice(fid), .GiveMeTheCodeAndGiveItToMeRaw);
-        name := fr'vtable'mangle_name(fr.data, fid);
-        callee := m.get_addr(name).unwrap();
-        callee := bit_cast_unchecked(rawptr, @FnPtr() []rawptr, callee);
-        fast_eval := callee();
-        range(first_index_that_needs_fast_eval, components.len) { i |
-            components[i].fast_eval = fast_eval[i];
-        };
-        Franca'end_profile();
-    };
-    };
-}
-
-destroy_jit :: fn(slot: *CachedCompilerEnv) void = 
-    if slot.it&.take() { fr, m |
-        fr'vtable'drop_qbe_module(Qbe.Module.raw_from_ptr(m));
-        fr'vtable'destroy_compiler(fr.data);
-    };
-
-reset_jit :: fn(slot: *CachedCompilerEnv) void = {    
-    if true {
-        // TODO: sometimes skip and reuse the setup work (saves ~60ms) but :CantReuseCompilerLikeThis
-        destroy_jit(slot);
-    };
-    slot := slot.it&;
-    Franca'start_profile();
-    
-    @if(slot[].is_none())
-    push_as_tls(.comptime, zeroed(rawptr)) {
-        v := Franca'init_driver_vtable();
-        opts := v.default_build_options();
-        opts.no_cache = true;
-        //opts.set_unsafe(!@run safety_check_enabled(.DebugAssertions));
-        opts.set_unsafe(true);
-        fr := v.with(v'init_compiler(opts));
-        make_and_resolve_and_compile_top_level(fr.data, fr.vtable, """ #include_std("lib/core.fr"); """, "-");
-        m := fr.get_alloc().box_uninit(Qbe.Module);
-        init_default_module_dyn(m, fr.vtable, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly));
-        slot[] = (Some = (fr, m));
+    range(first_index_that_needs_fast_eval, components.len) { i |
+        components[i].fast_eval = fast_eval[i];
     };
 };

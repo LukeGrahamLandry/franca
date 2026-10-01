@@ -1,4 +1,12 @@
 
+## (Sep 30)
+
+idk what im doing wrong but this always happens. 
+i do something in a pastey way twice and then when im thinking about a third thing 
+that would use it clearly its worth refactoring into something sane 
+but i never seem to end up with any less code. 
+somehow i managed to make circuit/gui longer.
+
 ## (Sep 29)
 
 - decker: don't just draw nothing when too small. problem was scale=0 which was caught as div0 error on wasm

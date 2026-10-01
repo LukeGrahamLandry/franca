@@ -16,7 +16,7 @@ n: select builtin architecture (overture, leg).
 l: fetch schematic archive.
 """;
 
-State :: @struct {
+State :: @rec @struct {
     HIGH_DPI :: true;
     WIDTH :: 500; HEIGHT :: 500;
     text: Sdtx.Self;
@@ -52,11 +52,9 @@ State :: @struct {
     circuit_arena: Arena.Allocator;
     is_new_overture: bool;  // TODO: remove
     load_time: i64;
-    fr: CachedCompilerEnv;
-    loading: ?@struct(start_time: i64, done: u32 = 0, frame_count := 0, root_index: i64, started_compiling := false);
-    loader_thread: ?*Thread;
-    have_load_work_futex: u32;
     warnings: List(u8);
+    loader: LoaderT;
+    download_schematic_archive_before_trying_to_load: bool;
     prev_timestamp_us: i64;
     frame_time_history: RawDeque(i64);
     frame_time_history_sum: i64;
@@ -79,6 +77,17 @@ CircuitNode :: @struct {
 
 has_dis :: @const_slice("overture", "leg", "OVERTURE", "LEG", "NANDverture");
 
+main_use_output :: fn(state: *State, in: LoaderT.I, out: Result(void, void)) void = {
+    if state.tree.len > 0 && state.tree[0].diagram_circuit.is_some() {
+        c := state.circuit[state.tree[0].diagram_circuit.Some]&; 
+        state.tree[0].component = c.compiled;
+    };
+    state.reset();
+    state.find_keyboard();
+    state.load_atlas_part2(state.sg);
+    state.load_time = timestamp() - state.loader.start_time;
+}
+
 // :UGLY this whole thing needs to be rewritten. 
 // for now i just care about having enough visuals to see what's going on while debugging the evaluator. 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -91,34 +100,24 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sgl := state.draw&;
     need_draw := false;
     
-    if state.loading& { it |
-        if it.done == 1 {
-            if query_current_arch() == .wasm32 {
-                _, m := state.fr.it.unwrap();
-                (m.target.wasm_jit_event)(.Sync);
-            };
-            state.loading = .None;
-            if state.tree.len > 0 && state.tree[0].diagram_circuit.is_some() {
-                c := state.circuit[state.tree[0].diagram_circuit.Some]&; 
-                state.tree[0].component = c.compiled;
-            };
-            state.reset();
-            state.find_keyboard();
-            state.load_atlas_part2(sg);
-        } else {
+    state.loader&.check();
+    if state.loader.progress != .Idle {
+        in := state.loader.in.unwrap();
+        name := @match(in) {  // TODO: this is a race. can tear
+            fn Path(it) => it.path;
+            fn Index(it) => state.circuit[it.root_index].name;
+        };
             sdtx.desc.char_height = 8;
             sdtx.desc.char_width = sdtx.desc.char_height / 2;
             sdtx.canvas(sapp, 1);
             sdtx.color = pack_rgba(255, 255, 255, 255);
-            sdtx.put(@tfmt("compiling %\nit's been % frames, % ms\nif you can read all this it's too slow!", state.circuit[it.root_index].name, it.frame_count, timestamp() - it.start_time));
-            it.frame_count += 1;
+            sdtx.put(@tfmt("compiling %\nit's been % ms\nif you can read all this it's too slow!", name, timestamp() - state.loader.start_time));
             state.dirty = true;
-        };
     };
     
     world := state.world&;
     halted_without_wire_values := false;
-    have_logic := state.loading.is_none() && state.tree.len > 0 && state.tree[0].component.is_some();
+    have_logic := state.loader.progress == .Idle && state.tree.len > 0 && state.tree[0].component.is_some();
     show_the_maze := !state.is_new_overture;
     
     eval_this_frame := have_logic && (state.want_eval || state.auto_eval);
@@ -256,11 +255,11 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sdtx.put(c.name);
         arch_list_count += 1;
         
-        if state.clicked && hover && state.loading.is_none() {
+        if state.clicked && hover && state.loader.progress == .Idle {
             state.clicked = false;
             state.dirty = true;
             have_logic = false;
-            load_circuit_index_async(state, i, state.world.tc_file_loader_device, timestamp());
+            load_circuit_index_async(state, i, state.world.tc_file_loader_device);
         };
     };
     
@@ -558,7 +557,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             goal_top_right := vec2(-100 * width, height*3);
             off = goal_top_right - circuit_top_right;
             
-            if state.loading.is_none() {
+            if state.loader.progress == .Idle {
                 sdtx.color = pack_rgba(255, 255, 255, 255);
                 sdtx.origin = world_to_text_pos(tc_to_world_pos(vec2(lo.x, hi.y + 5)));
                 sdtx.pos = vec2(0);
@@ -651,7 +650,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                 sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
             };
         };
-        @if(state.loading.is_none() || state.loading.Some.started_compiling)
+        @if(state.loader.progress != .Loading)
         each circuit.gates { it |
             info := Tc'get_builtin_shape(it.kind);
             for_pins(info, it, state.circuit) { i, dx, dy |
@@ -920,6 +919,7 @@ fn open_gate(state: *State, logical_gate_index: ?i64, diagram_gate_index: ?i64) 
             };
         };
         
+        @if(FEAT_TC_CIRCUIT) 
         if diagram_gate_index { i |
             it := c.gates[i]&;
             new_component = (Some = it.kind);
@@ -985,9 +985,7 @@ fn push_tree_node(state: *State, it: CircuitNode) void = {
 }
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
-    state.loading = .None;
-    state.loader_thread = .None;
-    state.fr = (it = .None);
+    init(state.loader&, state);
     state.keyboard_data = .None;
     sapp.desc.enable_dragndrop = true;
     state.sg = sg; state.sapp = sapp;
@@ -1021,7 +1019,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     for cli_args() { path |
         path := path.str();
         if path.ends_with("circuit.data") {
-            state.load_path(path);
+            state.load_path_async(path);
         }
     };
     
@@ -1218,11 +1216,9 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 }
                 fn LEFT_SHIFT() => { state.show_wire_ref_lines = true; }
                 fn L() => {
-                    // TODO: put downloading on a thread with loading screen like compiling
-                    root := Foreign'tc_archive();
-                    path := @tfmt("%/v6/schematics/architecture/%/circuit.data", root, "Mandelbrot");
-                    if state.loading.is_none() {
-                        state.load_path(path);
+                    if state.loader.progress == .Idle {
+                        state.download_schematic_archive_before_trying_to_load = true;
+                        state.load_path_async("Mandelbrot");
                     };
                 }
                 @default => return();
@@ -1239,8 +1235,8 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             state.clicked = true;
         }
         fn FILES_DROPPED() => for event.drop { path |
-            if state.loading.is_none() {
-                state.load_path(path);
+            if state.loader.progress == .Idle {
+                state.load_path_async(path);
             };
         };
         @default => return();
@@ -1261,79 +1257,103 @@ fn check_movement(state: *State) void = if state.pan_keys_pressed != 0 && !state
     state.pos += dir.normalize() * 0.05;
 };
 
-fn load_path(state: *State, path: Str) void = {
-    @debug_assert(state.loading.is_none());
+fn load_path_async(state: *State, path: Str) void = {
     @if(!FEAT_TC_CIRCUIT) return(eprintln("FEAT_TC_CIRCUIT is disabled"));
-    start := timestamp();
     #use("@/lib/sys/fs.fr");
-    in := read_entire_file(temp(), path) || return();
+    
     state.circuit = empty();
     state.world = zeroed(World);
     state.tree&.clear();
     state.circuit_arena&.reset_retaining_capacity();
     a := state.circuit_arena&.borrow();
+    path := path.shallow_copy(a);
     state.warnings = list(a);
+
+    state.loader&.start_async(Path = (path = path));
+}
+
+LoadSource :: @tagged(
+    Path: @struct(path: Str),
+    Index: @struct(root_index: i64, tc_file_loader_device: []Tc.LoadedFile),
+);
+LoaderT :: import("@/examples/jit_loader.fr")'Loader(
+    *State, LoadSource, void, void,
+    worker_get_source, worker_get_output, main_use_output,
+    "dispatch",
+);
+
+worker_get_source :: fn(state: *State, in: *LoaderT.I, a: Alloc) Result(Str, void) = {
+    @match(in[]) {
+        fn Path(it) => {
+            path := it.path;
+            if state.download_schematic_archive_before_trying_to_load {
+                state.download_schematic_archive_before_trying_to_load = false;
+                root := Foreign'tc_archive();
+                path = @tfmt("%/v6/schematics/architecture/%/circuit.data", root, path);
+            };
+            load_path_worker(state, in, a, path)
+        }
+        fn Index(it) => load_circuit_index_worker(state, it.root_index, it.tc_file_loader_device, a);
+    }
+}
+
+load_path_worker :: fn(state: *State, in: *LoaderT.I, out_a: Alloc, path: Str) Result(Str, void) = {
+    start := timestamp();
+    a := state.circuit_arena&.borrow();
     
     // if it uses custom components, need to load everything to find them
     circuits, root_index, tc_file_loader_device := Tc'load_all_circuits(path, a, state.warnings&);
     
+    if false {
     // TODO: don't hardcode this!!
     path := "/Users/luke/Library/Application Support/Steam/steamapps/common/Turing Complete/campaign";
     Tc'load_level_tests(circuits, path, a);
+    };
     
-    @eprintln("found circuit diagrams in %ms; %mb;", timestamp() - start, state.circuit_arena&.current_used_size()/1024/1024);
+    @eprintln("found % circuit diagrams in %ms; %mb;", circuits.len, timestamp() - start, state.circuit_arena&.current_used_size()/1024/1024);
     state.circuit = circuits;
     if circuits.len == 0 || root_index == -1 {
         state.circuit = empty();
         @fmtln(state.warnings&, "failed to load [%]", path);
-        return();
+        return(.Err);
     };
-    load_circuit_index_async(state, root_index, tc_file_loader_device, start);
+    state.push_tree_node(diagram_circuit = (Some = root_index));
+    in[] = (Index = (root_index = root_index, tc_file_loader_device = tc_file_loader_device));
+    worker_get_source(state, in, out_a)
 }
 
-fn load_circuit_index_async(state: *State, root_index: i64, tc_file_loader_device: []Tc.LoadedFile, start: i64) void = {
-    @debug_assert(state.loading.is_none());
-    state.world.tc_file_loader_device = tc_file_loader_device;
-    state.loading = (Some = (start_time = start, root_index = root_index));
+fn load_circuit_index_async(state: *State, root_index: i64, tc_file_loader_device: []Tc.LoadedFile) void = {
+    @debug_assert_eq(state.loader.progress, .Idle);
     state.load_time = 0;
     state.tree&.clear();
     state.push_tree_node(diagram_circuit = (Some = root_index));
-    if state.loader_thread.is_none() {
-        state.loader_thread = (Some = start_thread(State, fn(state) = {
-            while => state.have_load_work_futex == 1 {
-                load_circuit_index_worker(state);
-                u32.atomic_add(state.have_load_work_futex&, MAX_u32);
-                Futex'wait_while(state.have_load_work_futex&, fn(tmp) => tmp == 0);
-            };
-            destroy_jit(state.fr&);
-        }, state));
-    };
-    state.have_load_work_futex = 1;
-    Futex'wake(state.have_load_work_futex&, 1);
+    state.loader&.start_async(Index = (root_index = root_index, tc_file_loader_device = tc_file_loader_device));
 }
 
 // should fine for the ui to show the diagram on the other thread while this compiles. 
-// there needs to not use the logical part while state.loading.is_some() and here needs to not push to state.tree. 
-fn load_circuit_index_worker(state: *State) void = {
-    state.is_new_overture = true;
-    loading := state.loading&.unwrap();
-    circuits, tc_file_loader_device, root_index := (state.circuit, state.world.tc_file_loader_device, loading.root_index);
+// there needs to not use the logical part while progress==.Loading and here needs to not push to state.tree. 
+fn load_circuit_index_worker(state: *State, root_index: i64, tc_file_loader_device: []Tc.LoadedFile, a: Alloc) Result(Str, void) = {
+    @if(!FEAT_TC_CIRCUIT) panic("!FEAT_TC_CIRCUIT");
+    circuits := state.circuit;
     each circuits { c | 
         c.compiled = .None;
     };
     
-    a := @if(FEAT_RT_COMPILE, {
-        reset_jit(state.fr&);
-        fr, _ := state.fr.it.unwrap();
-        fr.get_alloc()
-    }, state.circuit_arena&.borrow());
-   
+    // TODO: bring back FEAT_RT_COMPILE which doesn't compile the franca compiler. 
+    
     components := @ref Component.list(a);
     components.push_all(finished_defs.components);
     Tc'compile_circuit(circuits, root_index, components, a, state.warnings&);
-    loading.started_compiling = true;
     
-    jit_circuit(state.fr&, components.items(), a);
+    first_index_that_needs_fast_eval := finished_defs.components.len();
+    src := compile_gates_source(components.items(), a, first_index_that_needs_fast_eval);
+    state.world.components = components.items();
+    (Ok = src)
+}
+    
+worker_get_output :: fn(state: *State, in: *LoaderT.I, callee: rawptr) Result(void, void) = {
+    components := state.world.components;
+    fill_fast_eval(components, callee);
     
     // TODO: if it has a level test, add that to the compilation. 
     // TODO: when entering a new level, trigger a compilation. 
@@ -1348,17 +1368,19 @@ fn load_circuit_index_worker(state: *State) void = {
     //    println(out.items());
     //};
     
-    init(state.world&, a, true, components.items());
-    state.world.tc_file_loader_device = tc_file_loader_device;
+    circuits := state.circuit; 
+    fr, _ := state.loader.fr.it.unwrap(); 
+    a := fr.get_alloc();
+    init(state.world&, a, true, components);
+    state.world.tc_file_loader_device = in.Index.tc_file_loader_device;
    
-    c := circuits[root_index]&; 
+    c := circuits[in.Index.root_index]&; 
     state.load_atlas_part1(c);
     state.arch_is_leg = c.name == "LEG";
+    state.is_new_overture = true;
     // the game ui lets you ask for as slow as 0.1hz (10 seconds per tick), so the number in the save file is scaled by 10
     state.ticks_per_eval = max(c.default_tick_rate / 10 / 60, 1);
-    
-    state.load_time = timestamp() - loading.start_time;
-    loading.done = 1;
+    .Ok
 }
 
 // TODO: if there were to be a sandbox escape in this program it would probably be by passing untrusted bytes to stb_image.
@@ -1455,11 +1477,7 @@ fn read_memory(world: *World, root_component: ComponentId) []u8 = {
 }
 
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
-    if state.loader_thread { loader_thread |
-        state.have_load_work_futex = 999;
-        Futex'wake(state.have_load_work_futex&, 1);
-        loader_thread.join();
-    };
+    drop(state.loader&);
     state.text&.shutdown();
     drop(state.world&, general_allocator());
     sg.destroy_pipeline(state.pipe&);;

@@ -1,0 +1,177 @@
+// library for graphics programs that compile something to franca code and then jit it. 
+// so they want to do it off the main thread to not hang the ui while waiting. 
+// usage examples: ./gpu/hctarcs/gui.fr, ./circuit/gui.fr
+
+fn Loader(
+    $UserData: Type,
+    $Input: Type,
+    $Output: Type,
+    $Error: Type,
+    $worker_get_source: @Fn(self: UserData, in: *Input, a: Alloc) Result(Str, Error),
+    $worker_get_output: @Fn(self: UserData, in: *Input, callee: rawptr) Result(Output, Error),
+    $main_use_output: @Fn(self: UserData, in: Input, out: Result(Output, Error)) void,
+    $value_name: Str,
+) Type #generic = {
+    Loader :: @struct {
+        I :: Input; O :: Output; E :: Error; U :: UserData;
+        progress: @enum(Idle, Loading, Compiling, Ready);
+        output: ?Result(Output, Error);
+        in: ?Input;
+        userdata: UserData;
+        
+        start_time: i64;
+        compile_start_time: i64;
+        done: u32 = 0;
+        thread: ?*Thread;
+        have_load_work_futex: u32;
+        fr: CachedCompilerEnv;
+    };
+    
+    fn init(self: *Loader, userdata: UserData) void = {
+        self[] = zeroed(Loader);
+        self.thread = .None; self.output = .None; self.in = .None; self.fr.it = .None;
+        self.userdata = userdata;
+    }
+    
+    fn drop(self: *Loader) void = {
+        if self.thread { loader_thread |
+            self.have_load_work_futex = 999;
+            Futex'wake(self.have_load_work_futex&, 1);
+            loader_thread.join();
+        };
+        destroy_jit(self.fr&);
+    }
+
+    fn start_async(self: *Loader, in: Input) void = {
+        @assert_eq(self.progress, .Idle, "can't start two tasks at once");
+        self.progress = .Loading;
+        self.in = (Some = in);
+        
+        self.start_time = timestamp();
+        self.done = 0;
+        if self.thread.is_none() {
+            self.thread = (Some = start_thread(Loader, fn(self) = {
+                while => self.have_load_work_futex == 1 {
+                    worker(self);
+                    u32.atomic_add(self.have_load_work_futex&, MAX_u32);
+                    Futex'wait_while(self.have_load_work_futex&, fn(tmp) => tmp == 0);
+                };
+            }, self));
+        };
+        self.have_load_work_futex = 1;
+        Futex'wake(self.have_load_work_futex&, 1);
+    }
+    
+    fn check(self: *Loader) void = {
+        @if(self.progress != .Ready) return();
+        if query_current_arch() == .wasm32 {
+            _, m := self.fr.it.unwrap();
+            (m.target.wasm_jit_event)(.Sync);
+        };
+        self.progress = .Idle;
+        in, out := (self.in&.take().unwrap(), self.output&.take().unwrap());
+        main_use_output(self.userdata, in, out);
+        self.start_time = 0;
+    }
+    
+    worker :: fn(self: *Loader) void = {
+        mark := temp().mark();
+        worker_body(self);
+        temp().reset(mark);
+        self.done = 1;
+    }
+    
+    worker_body :: fn(self: *Loader) void = {
+        reset_jit(self.fr&);
+        fr, _ := self.fr.it.unwrap();
+        in := self.in&.unwrap();
+        @match(worker_get_source(self.userdata, in, fr.get_alloc())) {
+            fn Err(it) => { self.output = (Some = (Err = it)); }
+            fn Ok(source) => {
+                self.compile_start_time = timestamp();
+                self.progress = .Compiling;
+                callee := jit_value(self.fr&, source, value_name);
+                r := worker_get_output(self.userdata, in, callee);
+                self.output = (Some = r);
+            }
+        };
+        self.progress = .Ready;
+    }
+    
+    Loader
+}
+
+CachedCompilerEnv :: @struct(it: ?Ty(CompCtx, *Qbe.Module) = .None);
+
+jit_value :: fn(slot: *CachedCompilerEnv, src: Str, value_name: Str) rawptr = {
+    fr, m := slot.it.unwrap();
+    comptime_ctx := bit_cast_unchecked(Compiler, **rawptr, fr.data)[][];  // TODO: making everybody deal with this is kinda trash
+    
+    result := zeroed(rawptr);
+    push_as_tls(.comptime, comptime_ctx) {
+        fid := create_function_for_value(fr, src, value_name);
+        {fr.vtable.emit_qbe_included}(Qbe.Module.raw_from_ptr(m), fr&, @slice(fid), .GiveMeTheCodeAndGiveItToMeRaw);
+        name := fr'vtable'mangle_name(fr.data, fid);
+        result = m.get_addr(name).unwrap();
+        Franca'end_profile();
+    };
+    result
+}
+
+destroy_jit :: fn(slot: *CachedCompilerEnv) void = 
+    if slot.it&.take() { fr, m |
+        fr'vtable'drop_qbe_module(Qbe.Module.raw_from_ptr(m));
+        fr'vtable'destroy_compiler(fr.data);
+    };
+
+reset_jit :: fn(slot: *CachedCompilerEnv) void = {    
+    if true {
+        // TODO: sometimes skip and reuse the setup work (saves ~60ms) but :CantReuseCompilerLikeThis
+        destroy_jit(slot);
+    };
+    slot := slot.it&;
+    Franca'start_profile();
+    
+    @if(slot[].is_none())
+    push_as_tls(.comptime, zeroed(rawptr)) {
+        v := Franca'init_driver_vtable();
+        opts := v.default_build_options();
+        opts.no_cache = true;
+        //opts.set_unsafe(!@run safety_check_enabled(.DebugAssertions));
+        opts.set_unsafe(true);
+        fr := v.with(v'init_compiler(opts));
+        make_and_resolve_and_compile_top_level(fr.data, fr.vtable, """ #include_std("lib/core.fr"); """, "-");
+        m := fr.get_alloc().box_uninit(Qbe.Module);
+        init_default_module_dyn(m, fr.vtable, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly));
+        slot[] = (Some = (fr, m));
+    };
+};
+
+#use("@/compiler/ast_external.fr");
+create_function_for_value :: fn(fr: CompCtx, src: Str, var_name: Str) FuncId = {
+    v, c := (fr.vtable, fr.data);
+    @assert(src.starts_with("{") && src.ends_with("};"), "compile_value wants block like import()");
+    src := src.slice(1, src.len - 2);
+    import_literal_file_name :: "(import literal)";
+    file := v'add_file(c, import_literal_file_name, src).shrink();
+    stmts := v'parse_stmts(c, file&);
+    stmts := stmts.or(fn(err) => fr.report_error(err));
+    loc := stmts[0].loc;
+    func: Func = empty_fn(fr.intern_string("compile_value_literal"), loc);
+    func.body = (Normal = (expr = (Block = (
+        body = stmts.as_raw_list(),
+        ret_label = .None,
+        flags = 0,
+        scope = NOSCOPE,
+        result = fr.get_alloc().boxed(FatExpr, (expr = (
+            GetNamed = fr.intern_string(var_name),
+        ), loc = loc)),
+    )), loc = loc));
+    func.resolve_scope = TOP_LEVEL_SCOPE;
+    fr.intern_func(func&)
+};
+
+#use("@/lib/sys/threads.fr");
+Futex :: import("@/lib/sys/sync/futex.fr");
+Qbe :: import("@/backend/lib.fr");
+Franca :: import("@/examples/repl.fr").R;

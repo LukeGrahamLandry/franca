@@ -1,9 +1,9 @@
 
 FEAT_UI :: true;
-FEAT_LOADER :: false;  // embed the franca compiler so new projects can be jitted at runtime
+FEAT_LOADER :: true;  // embed the franca compiler so new projects can be jitted at runtime
 FEAT_BUILTIN :: true;  // embed (aot) the example projects listed in ./main.fr
 
-State :: @struct {
+State :: @rec @struct {
     draw: Sgl.Self;
     img: Sg.Image;
     canvas: Rt.Canvas;
@@ -19,7 +19,9 @@ State :: @struct {
     allow_full_fps: bool;
     fps_limit_parity: bool;
     
-    loader: Loader;
+    loader: LoaderT;
+    buf: List(u8);
+    source: Str;
 };
 
 // all builtins and at most one jitted will have initialize=true. 
@@ -43,7 +45,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         return();
     };
     
-    @if(FEAT_LOADER) check_done_loading(state);
+    @if(FEAT_LOADER) state.loader&.check();
     
     if !state.paused && state.canvas_active {
     // TODO: don't spam if all are in a wait block
@@ -84,8 +86,9 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 };
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    state.buf = list(general_allocator());
     @if(FEAT_UI) on_init(state.ui&, sg);
-    init(state.loader&);
+    init(state.loader&, state);
     sapp.desc.enable_dragndrop = true;;
     sapp.desc.enable_clipboard = true;
     state.draw&.setup(allocator = general_allocator(), sg = sg, max_commands = 2, max_vertices = 6);
@@ -254,6 +257,7 @@ main :: fn() void = Easy'start(State);
 
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     drop(state.loader&);
+    drop(state.buf&);
     @if(state.canvas_active) drop(state.canvas&);
     for state.images.items().rest(state.builtin_image_count) { it |
         general_allocator().dealloc(u8, it.title);
@@ -389,11 +393,11 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
         @if(FEAT_LOADER) {
             self := state.loader&;
             if self.start_time != 0 || state.image_i >= state.builtin_image_count {
-                s := @if(self.done == 1, 
-                    self.buf.items(),
+                s := @if(@is(self.progress, .Idle, .Ready), 
+                    state.buf.items(),
                     @tfmt("loading for %ms", timestamp() - self.start_time));
                 text_box(ctx, S"Loader Log", 6, @slice(s));
-                text_box(ctx, S"Generated Code", 7, @slice(self.source));
+                text_box(ctx, S"Generated Code", 7, @slice(state.source));
             };
         };
         
@@ -433,58 +437,24 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
     nk_end(ctx);
 }
 
-// TODO: this is unfortunatly paste-y with examples/circuit/(parse, gui).fr does
-
-#use("@/lib/sys/threads.fr");
-Futex :: import("@/lib/sys/sync/futex.fr");
-Qbe :: import("@/backend/lib.fr");
-Franca :: import("@/examples/repl.fr").R;
-CachedCompilerEnv :: @struct(it: ?Ty(CompCtx, *Qbe.Module) = .None);
-
-Loader :: @struct {
-    start_time: i64;
-    done: u32 = 0;
-    thread: ?*Thread;
-    have_load_work_futex: u32;
-    fr: CachedCompilerEnv;
-    buf: List(u8);
-    initialize: ?Initialize;  // result of a compilation
-    source: Str;
-    image_i: i64;
-};
-
-check_done_loading :: fn(state: *State) void = {
-    self := state.loader&;
-    @if(self.done == 1)
-    if self.initialize { initialize |
-        self.initialize = .None;
-        self.start_time = 0;
-        if query_current_arch() == .wasm32 {
-            _, m := self.fr.it.unwrap();
-            (m.target.wasm_jit_event)(.Sync);
-        };
-        
-        state.images[self.image_i].initialize = (Some = initialize);
-        state.image_i = self.image_i;
+main_use_output :: fn(state: *State, in: LoaderT.I, out: Result(LoaderT.O, void)) void = {
+    @if_let(out) fn Ok(it) => {
+        initialize := it.initialize;
+        state.images[in.image_i].initialize = (Some = initialize);
+        state.image_i = in.image_i;
         next_example(state, 0);
         
         if !FEAT_UI {
-            eprint(state.c.metadata.warnings.items());
+            eprint(state.canvas.metadata.warning);
         };
     };
 };
 
-fn init(self: *Loader) void = {
-    self.thread = .None;
-    self.fr = (it = .None);
-    self.buf = list(general_allocator());
-    self.initialize = .None;
-}
-
 fn load_project_async(state: *State, path: Str, new: bool) void = {
+    // TODO: show these errors in the ui instead
     @if(!FEAT_LOADER) return(eprintln("FEAT_LOADER is disabled"));
     // TODO: queue them so multiple command line arguments work?
-    @if(state.loader.start_time != 0 && state.loader.done == 0) return(eprintln("can't load two at once"));
+    @if(state.loader.progress != .Idle) return(eprintln("can't load two at once"));
     
     // can't have old jitted thing active because compiler is going to be reset
     @if(state.canvas_active) drop(state.canvas&);
@@ -493,52 +463,24 @@ fn load_project_async(state: *State, path: Str, new: bool) void = {
         it.initialize = .None;
     };
     
-    self := state.loader&;
+    self := state;
     
     if new {
-        self.image_i = state.images.len;
         // TODO: only if not error
         state.images&.push(initialize = .None, title = path.shallow_copy(general_allocator()));
-    } else {
-        self.image_i = state.images.index_of(fn(it) => it.title == path).unwrap();
     };
+    image_i := state.images.index_of(fn(it) => it.title == path).unwrap();
     
     self.buf&.clear();
     self.buf&.push_all(path);
-    load_project_async(self);
+    state.loader&.start_async(image_i = image_i);
 }
 
-fn load_project_async(self: *Loader) void = {
-    self.start_time = timestamp();
-    self.done = 0;
-    
-    if self.thread.is_none() {
-        self.thread = (Some = start_thread(Loader, fn(self) = {
-            while => self.have_load_work_futex == 1 {
-                worker(self);
-                u32.atomic_add(self.have_load_work_futex&, MAX_u32);
-                Futex'wait_while(self.have_load_work_futex&, fn(tmp) => tmp == 0);
-            };
-        }, self));
-    };
-    self.have_load_work_futex = 1;
-    Futex'wake(self.have_load_work_futex&, 1);
-}
-
-fn worker(self: *Loader) void = {
-    mark := temp().mark();
-    worker_body(self);
-    temp().reset(mark);
-    self.done = 1;
-}
-
-fn worker_body(self: *Loader) void = {
+worker_get_source :: fn(self: *State, in: *LoaderT.I, a: Alloc) Result(Str, void) = {
     path := self.buf.items().shallow_copy(temp());
     @fmt(self.buf&, "\n");
     
     self.source = "";
-    reset_jit(self.fr&);
-    fr, _ := self.fr.it.unwrap();
     
     in := path;
     if read_entire_file(temp(), in) { data |
@@ -546,12 +488,12 @@ fn worker_body(self: *Loader) void = {
     } else {
         id, remaining := convert_number(path, 10, dec_digit);
         if remaining.len > 0 {
-            return @fmt(self.buf&, "failed to read file and doesn't look like a project id number.\n");
+            return(Err = @fmt(self.buf&, "failed to read file and doesn't look like a project id number.\n"));
         };
         @fmt(self.buf&, "fetch_sb3(%)\n", id);
         start := timestamp();
         in = import("@/examples/gpu/hctarcs/main.fr")'fetch_sb3(id, false).or(fn(msg) => {
-            return @fmt(self.buf&, "%", msg);
+            return(Err = @fmt(self.buf&, "%", msg));
         });
         t := timestamp() - start;
         if t <= 5 {
@@ -563,10 +505,10 @@ fn worker_body(self: *Loader) void = {
     
     start := timestamp();
     r := unbuild(in).or(fn(msg) => {
-        return @fmt(self.buf&, "%", msg);
+        return(Err = @fmt(self.buf&, "%", msg));
     });
     
-    out := list(u8, fr.get_alloc());
+    out := list(u8, a);
     @fmt(out&, "{");
     // TODO: this has panics which should be converted to errors
     import("@/examples/gpu/hctarcs/compile.fr")'compile_to_franca(r, out&);
@@ -574,94 +516,20 @@ fn worker_body(self: *Loader) void = {
     @fmt(out&, "};");
     @fmt(self.buf&, "parsed in %ms\n", timestamp() - start);
     
-    start := timestamp();
-    self.source = out.items();
-    initialize := jit_circuit(self.fr&, out.items());
-    self.initialize = (Some = initialize);
-    @fmt(self.buf&, "compiled in %ms\n", timestamp() - start);
+    (Ok = out.items())
 }
 
 Initialize :: @FnPtr(c: *Rt.Canvas) void;
-jit_circuit :: fn(slot: *CachedCompilerEnv, src: Str) Initialize = {
-    fr, m := slot.it.unwrap();
-    comptime_ctx := bit_cast_unchecked(Compiler, **rawptr, fr.data)[][];  // TODO: making everybody deal with this is kinda trash
-    
-    result := zeroed(Initialize);
-    push_as_tls(.comptime, comptime_ctx) {
-        // TODO: create_function_for_value is more convoluted than i need here 
-        //       if i put in all the source when creating the CompCtx i can just 
-        //       get the funcid directly. but eventually will want to not reset the CompCtx 
-        //       every time so it compiles faster but then need to deal with :CantReuseCompilerLikeThis
-        fid := create_function_for_value(fr, src, "initialize_fn");
-        {fr.vtable.emit_qbe_included}(Qbe.Module.raw_from_ptr(m), fr&, @slice(fid), .GiveMeTheCodeAndGiveItToMeRaw);
-        name := fr'vtable'mangle_name(fr.data, fid);
-        callee := m.get_addr(name).unwrap();
+
+// TODO: the functions passed here shouldn't need extra type annotations
+LoaderT :: import("@/examples/jit_loader.fr")'Loader(
+    *State, @struct(image_i: i64), @struct(initialize: Initialize), void,
+    worker_get_source,
+    fn(state: *State, in: *LoaderT.I, callee: rawptr) Result(LoaderT.O, void) = {
         callee := bit_cast_unchecked(rawptr, @FnPtr() Initialize, callee);
-        result = callee();
-        Franca'end_profile();
-    };
-    result
-}
-
-destroy_jit :: fn(slot: *CachedCompilerEnv) void = 
-    if slot.it&.take() { fr, m |
-        fr'vtable'drop_qbe_module(Qbe.Module.raw_from_ptr(m));
-        fr'vtable'destroy_compiler(fr.data);
-    };
-
-reset_jit :: fn(slot: *CachedCompilerEnv) void = {    
-    if true {
-        // TODO: sometimes skip and reuse the setup work (saves ~60ms) but :CantReuseCompilerLikeThis
-        destroy_jit(slot);
-    };
-    slot := slot.it&;
-    Franca'start_profile();
-    
-    @if(slot[].is_none())
-    push_as_tls(.comptime, zeroed(rawptr)) {
-        v := Franca'init_driver_vtable();
-        opts := v.default_build_options();
-        opts.no_cache = true;
-        //opts.set_unsafe(!@run safety_check_enabled(.DebugAssertions));
-        opts.set_unsafe(true);
-        fr := v.with(v'init_compiler(opts));
-        make_and_resolve_and_compile_top_level(fr.data, fr.vtable, """ #include_std("lib/core.fr"); """, "-");
-        m := fr.get_alloc().box_uninit(Qbe.Module);
-        init_default_module_dyn(m, fr.vtable, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly));
-        slot[] = (Some = (fr, m));
-    };
-};
-
-#use("@/compiler/ast_external.fr");
-create_function_for_value :: fn(fr: CompCtx, src: Str, var_name: Str) FuncId = {
-    v, c := (fr.vtable, fr.data);
-    @assert(src.starts_with("{") && src.ends_with("};"), "compile_value wants block like import()");
-    src := src.slice(1, src.len - 2);
-    import_literal_file_name :: "(import literal)";
-    file := v'add_file(c, import_literal_file_name, src).shrink();
-    stmts := v'parse_stmts(c, file&);
-    stmts := stmts.or(fn(err) => fr.report_error(err));
-    loc := stmts[0].loc;
-    func: Func = empty_fn(fr.intern_string("compile_value_literal"), loc);
-    func.body = (Normal = (expr = (Block = (
-        body = stmts.as_raw_list(),
-        ret_label = .None,
-        flags = 0,
-        scope = NOSCOPE,
-        result = fr.get_alloc().boxed(FatExpr, (expr = (
-            GetNamed = fr.intern_string(var_name),
-        ), loc = loc)),
-    )), loc = loc));
-    func.resolve_scope = TOP_LEVEL_SCOPE;
-    fr.intern_func(func&)
-};
-
-fn drop(loader: *Loader) void = {
-    if loader.thread { loader_thread |
-        loader.have_load_work_futex = 999;
-        Futex'wake(loader.have_load_work_futex&, 1);
-        loader_thread.join();
-    };
-    destroy_jit(loader.fr&);
-    loader.buf&.drop();
-}
+        @fmt(state.buf&, "compiled in %ms\n", timestamp() - state.loader.compile_start_time);
+        (Ok = (initialize = callee()))
+    },
+    main_use_output,
+    "initialize_fn",
+);
