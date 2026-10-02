@@ -1,0 +1,341 @@
+
+State :: @struct {
+    ui: Ui.State;
+    dirty: bool;
+    clicker: Clicker;
+    
+    action: @enum(None, PasteSaveFile, CopySaveFile);
+};
+
+Clicker :: @struct {
+    Generator :: @struct {
+        name: Str; 
+        price: Price; 
+        production: Price; 
+        auto_price: Price;
+        
+        level := 0;
+        auto: @struct(allow := false, enable := false) = ();
+    };
+    Currency :: @struct(name: Str, amount: i64);
+    currencies: []Currency;
+    generators: []Generator;
+    have_world_map: bool;
+    Price :: @struct(currency: i64, amount: i64);
+    
+    prev_time: f64;
+    delta_time: f64;
+    warp_start_time: ?i64;
+    prev_minimized: bool;
+};
+
+init_world :: fn(a: Alloc, c: *Clicker) void #use(Clicker) = {
+    c.warp_start_time = .None;
+    c.prev_time = timestamp_s();
+
+    c.generators = a.alloc_zeroed(Generator, 3);
+    c.currencies = a.alloc_zeroed(Currency, 2);
+    c.generators[0] = (name = "X", price = (currency=0, amount=1), production = (currency=0, amount=1), auto_price=(currency=0, amount=50));
+    c.generators[1] = (name = "Y", price = (currency=0, amount=500), production = (currency=0, amount=10), auto_price=(currency=0, amount=200));
+    c.generators[2] = (name = "Z", price = (currency=0, amount=3500), production = (currency=1, amount=1), auto_price=(currency=1, amount=80));
+    c.currencies[0] = (name = "A", amount = 1);
+    c.currencies[1] = (name = "B", amount = 0);
+}
+
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    sapp.desc.enable_clipboard = true;
+    on_init(state.ui&, sg);
+    state.dirty = true;
+    init_world(general_allocator(), state.clicker&);
+}
+
+fn consume_delta_time(c: *Clicker) void = {
+    powers :: ast_alloc().alloc_init(i64, 6, fn(i) => powI(10, i));
+    for_rev powers { scale |
+        while => c.delta_time >= scale.float() {
+            c.delta_time -= scale.float();
+            each c.generators { it |
+                if it.auto.enable {
+                    c.currencies[it.production.currency].amount += it.production.amount * it.level * scale;
+                };
+            };
+        };
+    };
+}
+
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    c := state.clicker&;
+    if sapp.frame_count.umod(64) == 0 {
+        break :: local_return;
+        @if(c.warp_start_time.is_some()) break();
+        now := timestamp_s();
+        @if(now < c.prev_time) break();  // unreachable you'd hope
+        
+        c.delta_time += now - c.prev_time;
+        c.prev_time = now;
+        @if(c.delta_time < 1) break();
+        
+        state.dirty = true;
+        c.consume_delta_time();
+    };
+    
+    @match(state.action) {
+        fn None() => ();
+        fn CopySaveFile() => {
+            out := write_save_file(c);
+            sapp.set_clipboard_string(out);
+            state.action = .None;
+        }
+        fn PasteSaveFile() => {
+            sapp.requests.fake_paste_event = true;
+        }
+    }
+    
+    if Easy'should_skip_frame(sapp, state.dirty&) {
+        state.ui.idle_last_frame = true;
+        return();
+    };
+    
+    Easy'glue_begin_pass(sapp, sg, zeroed(Sg.PassAction));
+    input_end_with_idle(state.ui&, => draw_ui(state));
+    draw(state.ui&, sg, sapp);
+    sg.end_pass();
+    sg.commit();
+}
+
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    c := state.clicker&;
+    @if(@is(event.type, .UNFOCUSED, .ICONIFIED, .MOUSE_LEAVE)) c.start_warp();
+    @if(@is(event.type, .FOCUSED, .RESTORED, .MOUSE_ENTER)) c.end_warp();
+    if event.type == .CLIPBOARD_PASTED && state.action == .PasteSaveFile {
+        state.action = .None;
+        read_save_file(c, event.pasted);
+    };
+
+    on_event(state.ui&, sapp, event);
+    state.dirty = true;
+}
+
+fn start_warp(c: *Clicker) void = {
+    if c.warp_start_time.is_none() {
+        t := get_real_time();
+        @println("start_warp t=%", t);
+        c.warp_start_time = (Some =t);
+    };
+}
+
+fn end_warp(c: *Clicker) void = {
+    @if(c.prev_minimized) return();
+    if c.warp_start_time&.take() { prev_time | 
+        t := get_real_time();
+        @println("end_warp t=% delta=%", t, t - prev_time);
+        if t > prev_time {
+            c.delta_time += float(t - prev_time);
+            c.prev_time = timestamp_s();
+            c.consume_delta_time();
+        };
+    };
+}
+
+fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
+    ctx := state.ui.ctx&;
+    S :: fn(s: CStr) => bit_cast_unchecked(*u8, *i8, s.ptr);
+    flags := (@as(u32) nk_panel_flags.NK_WINDOW_MOVABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_SCALABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_MINIMIZABLE);
+    c := state.clicker&;
+    
+    minimized := true;
+    if nk_begin(ctx, S"Clicker", nk_rect(10, 10, 500, 280), flags) {
+        break :: local_return;
+        minimized = false;
+        if c.warp_start_time { _ |
+            nk_layout_row_dynamic(ctx, 0, 1);
+            nk_label(ctx, S("Warping To The Future!"), 0);
+            break();
+        };
+    
+        if nk_tree_push_hashed(ctx, .NK_TREE_NODE, S"Save Game Data", .NK_MINIMIZED, S"", 0, 0) {
+            nk_layout_row_dynamic(ctx, 0, 2);
+            if nk_button_label(ctx, S"Copy") {
+                state.action = .CopySaveFile;
+            };
+            if nk_button_label(ctx, S"Paste (replaces current game)") {
+                state.action = .PasteSaveFile;
+            };
+            nk_tree_pop(ctx);
+        };
+        
+        nk_layout_row_dynamic(ctx, 0, c.currencies.len.intcast());
+        enumerate c.currencies { i, it |
+            nk_label(ctx, S(@fmt_cstr("% %", it.amount, it.name)), 0);
+        };
+        
+        enumerate c.generators { i, it |
+            nk_layout_row_dynamic(ctx, 0, 4);
+            
+            nk_label(ctx, S(@fmt_cstr("% %", it.level, it.name)), 0);
+            
+            cant_click := it.level == 0 || it.auto.enable;
+            @if(cant_click) nk_widget_disable_begin(ctx);
+            kind := c.currencies[it.production.currency]&;
+            amount := it.level * it.production.amount;
+            if nk_button_label(ctx, S(@fmt_cstr("+% %", amount, kind.name))) {
+                kind.amount += amount;
+            };
+            @if(cant_click) nk_widget_disable_end(ctx);
+            
+            price := int(it.price.amount.float() * (1 + (powI(2, it.level)-1).float()/10));
+            kind := c.currencies[it.price.currency]&;
+            cant_afford := price > kind.amount;
+            @if(cant_afford) nk_widget_disable_begin(ctx);
+            if nk_button_label(ctx, S(@fmt_cstr("Buy (-% %)", price, kind.name))) {
+                it.level += 1;
+                kind.amount -= price;
+            };
+            @if(cant_afford) nk_widget_disable_end(ctx);
+
+            if it.auto.allow {
+                nk_checkbox_label(ctx, S"Auto", it.auto.enable&);
+            } else {
+                kind := c.currencies[it.auto_price.currency]&;
+                price := it.auto_price.amount;
+                cant_afford := price > kind.amount || it.level == 0;
+                @if(cant_afford) nk_widget_disable_begin(ctx);
+                if nk_button_label(ctx, S(@fmt_cstr("Auto (-% %)", price, kind.name))) {
+                    it.auto.allow = true;
+                    it.auto.enable = true;
+                    kind.amount -= price;
+                };
+                @if(cant_afford) nk_widget_disable_end(ctx);
+            };
+        };
+        
+        nk_layout_row_dynamic(ctx, 0, 1);
+        if !c.have_world_map {
+            kind := c.currencies[1]&;
+            price := 300;
+            cant_afford := price > kind.amount;
+            @if(cant_afford) nk_widget_disable_begin(ctx);
+            if nk_button_label(ctx, S(@fmt_cstr("Buy World Map (-% %)", price, kind.name))) {
+                c.have_world_map = true;
+                kind.amount -= price;
+            };
+            @if(cant_afford) nk_widget_disable_end(ctx);
+        };
+    };
+    nk_end(ctx);
+    
+    if c.have_world_map {
+        if nk_begin(ctx, S"World Map", nk_rect(10, 300, 500, 100), flags) {
+            nk_layout_row_dynamic(ctx, 0, 1);
+            nk_label(ctx, S("something will go here eventually"), 0);
+        };
+        nk_end(ctx);
+    }
+    
+    if minimized != c.prev_minimized {
+        c.prev_minimized = minimized;
+        @if(minimized, c.start_warp(), c.end_warp());
+    }
+}
+
+get_real_time :: fn() i64 = { t := zeroed(TimeSpec); Posix'clock_gettime(Posix.CLOCK.REALTIME, t&); t.seconds };
+
+B64 :: import("@/lib/encoding/base64.fr");
+fn write_save_file(c: *Clicker) []u8 = {
+    out := @ref u8.list(temp());
+    
+    // something trivial just so i can keep my progress between recompiling the game to tweak a number
+    @fmt(out, "IDLE_FR,v=1,g=");
+    enumerate c.generators { i, it |
+        @fmt(out, "%:%:%:%|", i, it.level, it.auto.allow.int(), it.auto.enable.int());
+    };
+    @fmt(out, ",c=");
+    enumerate c.currencies { i, it |
+        @fmt(out, "%:%|", i, it.amount);
+    };
+    @fmt(out, ",t=%,w=%,", c.warp_start_time || get_real_time(), c.have_world_map.int());
+    
+    in := out.items(); 
+    @println("CopySaveFile(plain):  %", in);
+    flip_encrypt(in, true);
+    out := @ref u8.list(temp());
+    B64'encode(out, in);
+    @println("CopySaveFile(cipher): %", out.items());
+    out.items()
+}
+
+fn read_save_file(c: *Clicker, in: []u8) void = {
+    @println("PasteSaveFile(cipher): %", in);
+    out := @ref u8.list(temp());
+    @if(in.len.umod(4) != 0) return();
+    B64'base64_decode(out, in);
+    in := out.items();
+    flip_encrypt(in, false);
+    @println("PasteSaveFile(plain):  %", in);
+    
+    in := in.split(",", temp());
+    @if(in.len < 5 || in[0] != "IDLE_FR" || in[1] != "v=1") return();
+    if in[2].starts_with("g=") {
+        in := in[2].rest(2).split("|", temp());
+        @if(in.len > c.generators.len)
+        enumerate c.generators { i, it |
+            in := in[i].split(":", temp());
+            it.level = in[1].parse_int(); 
+            it.auto.allow = in[2] == "1";
+            it.auto.enable = in[3] == "1";
+        };
+    };
+    if in[3].starts_with("c=") {
+        in := in[3].rest(2).split("|", temp());
+        @if(in.len > c.currencies.len)
+        enumerate c.currencies { i, it |
+            in := in[i].split(":", temp());
+            it.amount = in[1].parse_int(); 
+        };
+        
+    };
+    c.warp_start_time = .None;
+    if in[4].starts_with("t=") {
+        t := in[4].rest(2).parse_int();
+        c.warp_start_time = (Some = t);
+        c.end_warp();
+    };
+    c.have_world_map = false;
+    if in.len > 4 && in[5].starts_with("w=") {
+        c.have_world_map = in[5] == "w=1";
+    };
+}
+
+// cute way to make it inconvenient for myself to cheat by editing the save. 
+// obviously nobody else is going to play this and if they did they could just look at the source and get the key.  
+flip_encrypt :: fn(data: []u8, encrypting: bool) void = {
+    rng: Random.Rng = @run Random.xoshiro256SS.new(42);
+    iv: u64 = 0x123456789ABCDEF;
+    while => data.len > 8 {
+        it := data&.pop_type(u64);
+        input := it[];
+        it[] = it[].bit_xor(rng&.next()).bit_xor(iv);
+        iv = @if(encrypting, it[], input);
+    };
+    if data.len != 0 {
+        buf: u64 = 0;
+        buf_s := buf&.slice(1).interpret_as_bytes().slice(0, data.len);
+        buf_s.copy_from(data);
+        buf = buf.bit_xor(rng&.next()).bit_xor(iv);
+        data.copy_from(buf_s);
+    };
+}
+
+driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics2(vtable, @source_file_name(), true);
+main :: fn() void = Easy'start(State);
+#use("@/graphics/lib.fr");
+Ui :: import("@/graphics/deps/nuklear.fr");
+
+// TODO: wtf, can't call the int pow() overload :compiler
+powI :: fn(base: i64, exp: i64) i64 = {  // :SLOW
+    n := 1;
+    range(0, exp) {_|
+        n *= base;
+    };
+    n
+}
