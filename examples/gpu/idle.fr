@@ -3,6 +3,10 @@ State :: @struct {
     ui: Ui.State;
     dirty: bool;
     clicker: Clicker;
+    factory: Factory;
+    
+    save_is_dirty: i64;
+    prev_save_time: i64;
     
     action: @enum(None, PasteSaveFile, CopySaveFile);
 };
@@ -29,24 +33,34 @@ Clicker :: @struct {
     prev_minimized: bool;
 };
 
-init_world :: fn(a: Alloc, c: *Clicker) void #use(Clicker) = {
+fn init_world(c: *Clicker, a: Alloc) void #use(Clicker) = {
     c.warp_start_time = .None;
     c.prev_time = timestamp_s();
+    c.have_world_map = false;
 
-    c.generators = a.alloc_zeroed(Generator, 3);
-    c.currencies = a.alloc_zeroed(Currency, 2);
+    c.generators = a.alloc_zeroed(Generator, 4);
+    c.currencies = a.alloc_zeroed(Currency, 3);
     c.generators[0] = (name = "X", price = (currency=0, amount=1), production = (currency=0, amount=1), auto_price=(currency=0, amount=50));
     c.generators[1] = (name = "Y", price = (currency=0, amount=500), production = (currency=0, amount=10), auto_price=(currency=0, amount=200));
     c.generators[2] = (name = "Z", price = (currency=0, amount=3500), production = (currency=1, amount=1), auto_price=(currency=1, amount=80));
+    c.generators[3] = (name = "Q", price = (currency=2, amount=50), production = (currency=1, amount=5), auto_price=(currency=0, amount=10000));
     c.currencies[0] = (name = "A", amount = 1);
     c.currencies[1] = (name = "B", amount = 0);
+    c.currencies[2] = (name = "C", amount = 0);
 }
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sapp.desc.enable_clipboard = true;
     on_init(state.ui&, sg);
     state.dirty = true;
-    init_world(general_allocator(), state.clicker&);
+    init_world(state.clicker&, general_allocator());
+    init_world(state.factory&, general_allocator());
+        
+    if read_entire_file(temp(), save_file_path) { in |
+        read_save_file(state.clicker&, state.factory&, in);
+    };
+    state.prev_save_time = get_real_time();
+    
 }
 
 fn consume_delta_time(c: *Clicker) void = {
@@ -79,10 +93,88 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         c.consume_delta_time();
     };
     
+    f := state.factory&;
+    if sapp.frame_count.umod(64) == 0 && c.have_world_map {
+        if f.buildings.find(fn(it) => it.kind == .Spawner) { spawner |
+            spawner_pos := spawner.pos; spawner := ();
+            if sapp.frame_count.umod(64*8) == 0 {
+                pos := spawner_pos + vec2(0, 1);
+                if f.buildings.find(fn(it) => it.pos == pos).is_none() {
+                    place_building(f, pos, .Monster);
+                };
+            }
+        } else {
+            if sapp.frame_count.umod(64*32) == 0 {
+                place_building(f, vec2(10, 2), .Spawner);
+            };
+        };
+        
+        if f.buildings.find(fn(it) => it.kind == .Clicker) { clicker |
+            clicker_pos := clicker.pos; clicker := ();
+            
+            // TODO: better path finding
+            // TODO: you lose if your clicker dies
+            moved := false;
+            killed := 0;
+            each f.buildings { it |
+                @match(it.kind) {
+                    fn Monster() => {
+                        goal_dir := clicker_pos - it.pos;
+                        if goal_dir.x != 0 {
+                            goal_dir.y = 0;
+                        };
+                        goal_dir = goal_dir.normalize();
+                        new_pos := it.pos + goal_dir;
+                        if f.buildings.find(fn(it) => it.pos == new_pos) { blocker |
+                            if @is(blocker.kind, .Turret, .Wall, .Collector, .Clicker) {
+                                blocker.hp -= 10 * it.level;
+                                killed += int(blocker.hp <= 0);
+                            };
+                            // TODO: choose a different target
+                        } else {
+                            it.pos = new_pos;
+                            moved = true;
+                        };
+                    }
+                    fn Spawner() => {
+                        if closest(f, it.pos, 1.5, fn(it) => @is(it.kind, .Turret, .Wall, .Collector, .Clicker)) { blocker |
+                            blocker.hp -= 20 * it.level;
+                            killed += int(blocker.hp <= 0);
+                        };
+                        if closest(f, it.pos, 1.5, fn(it) => it.kind == .Monster) { target |
+                            target.hp += it.level;
+                        };
+                        if sapp.frame_count.umod(64*64) == 0 {
+                            it.level += 1;
+                        };
+                    }
+                    fn Turret() => {
+                        turret := it;
+                        if closest(f, it.pos, 3, fn(it) => @is(it.kind, .Monster, .Spawner)) { blocker |
+                            blocker.hp -= turret.level;
+                            if blocker.hp <= 0 {
+                                killed += 1;
+                                // TODO: collect for *each* collector in range
+                                if closest(f, blocker.pos, 3, fn(it) => it.kind == .Collector) { collector |
+                                    c.currencies[2].amount += collector.level * @if(blocker.kind == .Spawner, 100, 1);
+                                };
+                            };
+                        };
+                    }
+                    @default => ();
+                };
+            };
+            @if(killed > 0) f.buildings&.ordered_retain(fn(it) => it.hp > 0);
+            @if(moved) f.resort();
+            state.dirty = true;
+        };
+    };
+    
+    
     @match(state.action) {
         fn None() => ();
         fn CopySaveFile() => {
-            out := write_save_file(c);
+            out := write_save_file(c, state.factory&);
             sapp.set_clipboard_string(out);
             state.action = .None;
         }
@@ -94,6 +186,13 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     if Easy'should_skip_frame(sapp, state.dirty&) {
         state.ui.idle_last_frame = true;
         return();
+    };
+    
+    // autosave
+    if state.save_is_dirty > 25 && state.prev_save_time + 120 > get_real_time() {
+        state.save_to_file();
+        state.save_is_dirty = 0;
+        state.prev_save_time = get_real_time();
     };
     
     Easy'glue_begin_pass(sapp, sg, zeroed(Sg.PassAction));
@@ -109,11 +208,18 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     @if(@is(event.type, .FOCUSED, .RESTORED, .MOUSE_ENTER)) c.end_warp();
     if event.type == .CLIPBOARD_PASTED && state.action == .PasteSaveFile {
         state.action = .None;
-        read_save_file(c, event.pasted);
+        read_save_file(c, state.factory&, event.pasted);
     };
+    @if(event.type == .QUIT_REQUESTED) state.save_to_file();
 
     on_event(state.ui&, sapp, event);
     state.dirty = true;
+}
+
+save_file_path :: "target/franca/idle.txt";
+fn save_to_file(state: *State) void = {
+    _ := make_dirs(pop_path_segment(save_file_path));
+    _ := write_entire_file(save_file_path, write_save_file(state.clicker&, state.factory&));
 }
 
 fn start_warp(c: *Clicker) void = {
@@ -143,25 +249,35 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
     flags := (@as(u32) nk_panel_flags.NK_WINDOW_MOVABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_SCALABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_MINIMIZABLE);
     c := state.clicker&;
     
+    
+    if nk_begin(ctx, S"About", nk_rect(520, 10, 300, 200), flags) {
+        if nk_tree_push_hashed(ctx, .NK_TREE_NODE, S"Save Game Data", .NK_MINIMIZED, S"", 0, 0) {
+            nk_layout_row_dynamic(ctx, 0, 1);
+            if nk_button_label(ctx, S"Copy to Clipboard") {
+                state.action = .CopySaveFile;
+            };
+            if nk_button_label(ctx, S"Paste (replaces current game)") {
+                println(write_save_file(state.clicker&, state.factory&));
+                state.action = .PasteSaveFile;
+            };
+            if nk_button_label(ctx, S"Restart (replaces current game)") {
+                println(write_save_file(state.clicker&, state.factory&));
+                init_world(state.clicker&, general_allocator());
+                init_world(state.factory&, general_allocator());
+            };
+            nk_tree_pop(ctx);
+        };
+    };
+    nk_end(ctx);
+        
     minimized := true;
-    if nk_begin(ctx, S"Clicker", nk_rect(10, 10, 500, 280), flags) {
+    if nk_begin(ctx, S"The Mines", nk_rect(10, 10, 500, 280), flags) {
         break :: local_return;
         minimized = false;
         if c.warp_start_time { _ |
             nk_layout_row_dynamic(ctx, 0, 1);
             nk_label(ctx, S("Warping To The Future!"), 0);
             break();
-        };
-    
-        if nk_tree_push_hashed(ctx, .NK_TREE_NODE, S"Save Game Data", .NK_MINIMIZED, S"", 0, 0) {
-            nk_layout_row_dynamic(ctx, 0, 2);
-            if nk_button_label(ctx, S"Copy") {
-                state.action = .CopySaveFile;
-            };
-            if nk_button_label(ctx, S"Paste (replaces current game)") {
-                state.action = .PasteSaveFile;
-            };
-            nk_tree_pop(ctx);
         };
         
         nk_layout_row_dynamic(ctx, 0, c.currencies.len.intcast());
@@ -190,6 +306,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
             if nk_button_label(ctx, S(@fmt_cstr("Buy (-% %)", price, kind.name))) {
                 it.level += 1;
                 kind.amount -= price;
+                state.save_is_dirty += 1;
             };
             @if(cant_afford) nk_widget_disable_end(ctx);
 
@@ -204,6 +321,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                     it.auto.allow = true;
                     it.auto.enable = true;
                     kind.amount -= price;
+                    state.save_is_dirty += 1;
                 };
                 @if(cant_afford) nk_widget_disable_end(ctx);
             };
@@ -218,6 +336,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
             if nk_button_label(ctx, S(@fmt_cstr("Buy World Map (-% %)", price, kind.name))) {
                 c.have_world_map = true;
                 kind.amount -= price;
+                state.save_is_dirty += 1;
             };
             @if(cant_afford) nk_widget_disable_end(ctx);
         };
@@ -225,9 +344,62 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
     nk_end(ctx);
     
     if c.have_world_map {
-        if nk_begin(ctx, S"World Map", nk_rect(10, 300, 500, 100), flags) {
-            nk_layout_row_dynamic(ctx, 0, 1);
-            nk_label(ctx, S("something will go here eventually"), 0);
+        f := state.factory&;
+        if nk_begin(ctx, S"World Map", nk_rect(10, 300, 800, 260), flags) {
+            @run @assert_eq(building_colours.len(), Factory.Kind.enum_count());
+            style := ctx.style.button;
+            
+            placeable := @const_slice(Factory.Kind.Empty, .Turret, .Wall, .Collector);
+            nk_layout_row_dynamic(ctx, 0, placeable.len().intcast());
+            for placeable { kind |
+                style.normal = nk_style_item_color(building_colours[@as(i64) kind]);
+                
+                cur := c.currencies[f.templates&[kind].price.currency]&;
+                price := f.templates&[kind].price.amount;
+                disable := f.placing == kind || cur.amount < price;
+                style.border = ctx.style.button.border * @if(disable, 6, 1);
+                @if(disable) nk_widget_disable_begin(ctx);
+                s := @if(kind == .Empty, S"Sell", S(@fmt_cstr("% (-% %)", kind, price, cur.name)));
+                if nk_button_label_styled(ctx, style&, s) {
+                    f.placing = kind;
+                };
+                @if(disable) nk_widget_disable_end(ctx);
+            };
+            
+            style.rounding = 0;
+            style.border = 0;
+            W :: 16;
+            nk_layout_row_dynamic(ctx, 0, W);
+            i := 0;
+            range(0, W) { y |
+                range(0, W) { x |
+                    kind := Factory.Kind.Empty;
+                    pos := vec2(x.float().cast(), y.float().cast());
+                    if i < f.buildings.len && f.buildings[i].pos == pos {
+                        kind = f.buildings[i].kind;
+                        i += 1;
+                    };
+                    style.normal = nk_style_item_color(building_colours[@as(i64) kind]);
+                    
+                    can_sell := placeable.contains(fn(it) => it[] == kind);
+                    priced_kind := @if(f.placing == .Empty, kind, f.placing);
+                    cur := c.currencies[f.templates&[priced_kind].price.currency]&;
+                    price := f.templates&[priced_kind].price.amount;
+                    can_afford := cur.amount >= price;
+                    disable := @if(f.placing == .Empty, 
+                        kind == .Empty || !can_sell, 
+                        kind != .Empty || !can_afford);
+                    @if(disable) nk_widget_disable_begin(ctx);
+                    s := @if(kind == .Empty, S(""), S(@fmt_cstr("%", f.buildings[i-1].hp)));
+                    if nk_button_label_styled(ctx, style&, s) {
+                        // TODO: less refund if hp is low
+                        cur.amount += @if(f.placing == .Empty, price, -price);
+                        place_building(f, pos, f.placing);
+                        state.save_is_dirty += 1;
+                    };
+                    @if(disable) nk_widget_disable_end(ctx);
+                };
+            };
         };
         nk_end(ctx);
     }
@@ -241,7 +413,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
 get_real_time :: fn() i64 = { t := zeroed(TimeSpec); Posix'clock_gettime(Posix.CLOCK.REALTIME, t&); t.seconds };
 
 B64 :: import("@/lib/encoding/base64.fr");
-fn write_save_file(c: *Clicker) []u8 = {
+fn write_save_file(c: *Clicker, f: *Factory) []u8 = {
     out := @ref u8.list(temp());
     
     // something trivial just so i can keep my progress between recompiling the game to tweak a number
@@ -255,6 +427,14 @@ fn write_save_file(c: *Clicker) []u8 = {
     };
     @fmt(out, ",t=%,w=%,", c.warp_start_time || get_real_time(), c.have_world_map.int());
     
+    if c.have_world_map {
+        @fmt(out, "f=");
+        enumerate f.buildings { i, it |
+            @fmt(out, "%:%:%:%:%:%|", i, @as(i64) it.kind, it.pos.x, it.pos.y, it.hp, it.level);
+        };
+        @fmt(out, ",");
+    };
+    
     in := out.items(); 
     @println("CopySaveFile(plain):  %", in);
     flip_encrypt(in, true);
@@ -264,7 +444,7 @@ fn write_save_file(c: *Clicker) []u8 = {
     out.items()
 }
 
-fn read_save_file(c: *Clicker, in: []u8) void = {
+fn read_save_file(c: *Clicker, f: *Factory, in: []u8) void = {
     @println("PasteSaveFile(cipher): %", in);
     out := @ref u8.list(temp());
     @if(in.len.umod(4) != 0) return();
@@ -277,8 +457,7 @@ fn read_save_file(c: *Clicker, in: []u8) void = {
     @if(in.len < 5 || in[0] != "IDLE_FR" || in[1] != "v=1") return();
     if in[2].starts_with("g=") {
         in := in[2].rest(2).split("|", temp());
-        @if(in.len > c.generators.len)
-        enumerate c.generators { i, it |
+        enumerate c.generators.slice(0, min(c.generators.len, in.len - 1)) { i, it |
             in := in[i].split(":", temp());
             it.level = in[1].parse_int(); 
             it.auto.allow = in[2] == "1";
@@ -287,12 +466,10 @@ fn read_save_file(c: *Clicker, in: []u8) void = {
     };
     if in[3].starts_with("c=") {
         in := in[3].rest(2).split("|", temp());
-        @if(in.len > c.currencies.len)
-        enumerate c.currencies { i, it |
+        enumerate c.currencies.slice(0, min(c.currencies.len, in.len - 1)) { i, it |
             in := in[i].split(":", temp());
             it.amount = in[1].parse_int(); 
         };
-        
     };
     c.warp_start_time = .None;
     if in[4].starts_with("t=") {
@@ -303,6 +480,24 @@ fn read_save_file(c: *Clicker, in: []u8) void = {
     c.have_world_map = false;
     if in.len > 4 && in[5].starts_with("w=") {
         c.have_world_map = in[5] == "w=1";
+    };
+    
+    if c.have_world_map && in.len > 5 && in[6].starts_with("f=") {
+        f.buildings&.clear();
+        in := in[6].rest(2).split("|", temp());
+        for in { in |
+            if in.len != 0 {
+                in := in.split(":", temp());
+                it: Factory.Building = (
+                    kind = @as(Factory.Kind) @as(i64) in[1].parse_int(),
+                    pos = vec2(in[2].parse_int().float().cast(), in[3].parse_int().float().cast()),
+                    hp = in[4].parse_int(),
+                    level = in[5].parse_int(),
+                );
+                f.buildings&.push(it, f.gpa);
+            };
+        };
+        @fmt(out, ",");
     };
 }
 
@@ -338,4 +533,72 @@ powI :: fn(base: i64, exp: i64) i64 = {  // :SLOW
         n *= base;
     };
     n
+}
+
+Factory :: @struct {
+    Kind :: @enum(Empty, Clicker, Turret, Wall, Collector, Spawner, Monster);
+    Building :: @struct {
+        pos: Vec2;
+        kind: Kind;
+        level: i64;
+        hp: i64;
+    };
+    Template :: @struct(hp: i64, price := zeroed(Clicker.Price));
+    
+    buildings: RawList(Building);
+    templates: EnumMap(Kind, Template);
+    placing: Kind;
+    gpa: Alloc;
+};
+
+building_colours :: @const_slice(@as(Ui.Nuklear.nk_color) 
+    (r=20,g=20,b=20,a=255), 
+    (r=100,g=100,b=200,a=255),
+    (r=10,g=100,b=0,a=255), 
+    (r=0,g=50,b=0,a=255), 
+    (r=0,g=0,b=100,a=255), 
+    (r=100,g=100,b=0,a=255),
+    (r=0,g=100,b=100,a=255),
+);
+
+fn init_world(f: *Factory, a: Alloc) void = {
+    f.gpa = a;
+    f.templates&[.Turret] = (hp = 25, price = (currency = 1, amount = 50));
+    f.templates&[.Wall] = (hp = 200, price = (currency = 1, amount = 20));
+    f.templates&[.Collector] = (hp = 20, price = (currency = 1, amount = 40));
+    f.templates&[.Monster] = (hp = 20);
+    f.templates&[.Spawner] = (hp = 1000);
+    f.templates&[.Clicker] = (hp = 5000);
+    f.buildings&.clear();
+    place_building(f, vec2(2), .Clicker);
+}
+
+fn place_building(f: *Factory, pos: Vec2, kind: Factory.Kind) void = {
+    // :SLOW
+    if kind == .Empty {
+        f.buildings&.ordered_remove(f.buildings&.index_of(fn(it) => it.pos == pos) || return());
+    } else {
+        hp := f.templates&[kind].hp;
+        f.buildings&.push((pos=pos, kind=kind, hp = hp, level = 1), f.gpa);
+        f.resort();
+    };
+}
+
+fn resort(f: *Factory) void = 
+    Sort'default(Factory.Building, f.buildings&.items(), fn(a, b) => @if(a.pos.y == b.pos.y, a.pos.x <= b.pos.x, a.pos.y <= b.pos.y));
+
+
+fn closest(f: *Factory, pos: Vec2, range: f32, $filter: @Fn(it: *Factory.Building) bool) ?*Factory.Building = {
+    best_i := -1;
+    best_dist: f32 = 10000;
+    enumerate f.buildings { i, it |
+        if it.hp > 0 && filter(it) {
+            dist := norm_sq(it.pos - pos);
+            if dist < best_dist {
+                best_dist = dist;
+                best_i = i;
+            };
+        };
+    };
+    @if(best_i != -1 && best_dist < range*range, (Some = f.buildings[best_i]&), .None)
 }

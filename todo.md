@@ -17,6 +17,7 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 
+- use nk_button_text instead of nk_button_label everywhere so don't have to make CStr
 - do the aot thing i was thinking about for web and make actually good seperate page 
   for some of the fun example programs so maybe it could exist if you google for ex. mandelbrot viewer or whatever. 
   i'd enjoy if i could make something that was good as a real program not only as an example in a corner of my language's playground. 
