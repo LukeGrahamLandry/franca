@@ -112,32 +112,39 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             };
         };
         
-        if f.buildings.find(fn(it) => it.kind == .Clicker) { clicker |
-            clicker_pos := clicker.pos; clicker := ();
+        if f.buildings.index_of(fn(it) => it.kind == .Clicker) { clicker_i |
+            clicker_pos := f.buildings[clicker_i].pos;
             
-            // TODO: better path finding
             // TODO: you lose if your clicker dies
             moved := false;
             killed := 0;
-            each f.buildings { it |
+            enumerate f.buildings { i, it |
+                continue :: local_return;
                 @match(it.kind) {
                     fn Monster() => {
-                        goal_dir := clicker_pos - it.pos;
-                        if goal_dir.x != 0 {
-                            goal_dir.y = 0;
-                        };
-                        goal_dir = goal_dir.normalize();
-                        new_pos := it.pos + goal_dir;
-                        if f.buildings.find(fn(it) => it.pos == new_pos) { blocker |
+                        path := a_star(f, (pos=it.pos,i=i), (pos=clicker_pos,i=clicker_i));
+                        @if(path.len < 2) continue();
+                        
+                        if path[1].i != -1 {
+                            blocker := f.buildings[path[1].i]&;
+                            if blocker.kind == .Monster {
+                                // this would be unreachable if i didn't have it treat other monsters as passable but then it's too indecisive
+                                others := get_neighbors(f, (pos=it.pos,i=i));
+                                each others& { it |
+                                    if it.i != -1 && !@is(f.buildings[it.i].kind, .Spawner, .Monster) {
+                                        blocker = f.buildings[it.i]&;
+                                    };
+                                };
+                            };
+                            
                             if @is(blocker.kind, .Turret, .Wall, .Collector, .Clicker) {
                                 @if(blocker.kind == .Clicker) sim.completed("SticksAndStonesMayBreakMyBonesButLowHpExcitesMe");
                                 blocker.hp -= 10 * it.level;
                                 killed += int(blocker.hp <= 0);
                                 @if(blocker.kind == .Wall && blocker.hp <= 0) sim.completed("ElevenFootLadder");
                             };
-                            // TODO: choose a different target
                         } else {
-                            it.pos = new_pos;
+                            it.pos = path[1].pos;
                             moved = true;
                         };
                     }
@@ -426,8 +433,8 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
             
             style.rounding = 0;
             style.border = 0;
-            W :: 16;
-            nk_layout_row_dynamic(ctx, 0, W);
+            W := f.dimensions.cast().int();
+            nk_layout_row_dynamic(ctx, 0, W.intcast());
             i := 0;
             range(0, W) { y |
                 range(0, W) { x |
@@ -519,6 +526,12 @@ fn write_save_file(sim: *Simulation) []u8 = {
 }
 
 fn read_save_file(sim: *Simulation, in: []u8) void = {
+    while => in.len > 0 && in[in.len - 1].is_ascii_whitespace() {
+        in.len -= 1;
+    };
+    while => in.len > 0 && in[0].is_ascii_whitespace() {
+        in = in.rest(1);
+    };
     @println("PasteSaveFile(cipher): %", in);
     out := @ref u8.list(temp());
     @if(in.len.umod(4) != 0) return();
@@ -642,6 +655,7 @@ Factory :: @struct {
     templates: EnumMap(Kind, Template);
     placing: Kind;
     gpa: Alloc;
+    dimensions: f32;
 };
 
 building_colours :: @const_slice(@as(Ui.Nuklear.nk_color) 
@@ -663,6 +677,7 @@ fn init_world(f: *Factory, a: Alloc) void = {
     f.templates&[.Spawner] = (hp = 1000);
     f.templates&[.Clicker] = (hp = 5000);
     f.buildings&.clear();
+    f.dimensions = 16;
     place_building(f, vec2(2), .Clicker);
 }
 
@@ -743,3 +758,101 @@ achievements :: @const_slice(
     ("LuckOfTheDice", "have a spawner appear inside your walls with your mine", "new spawners can appear in any empty cell"),
     ("EverythingTheLightTouches", "fill every cell of the map", "now there's no space for monsters to spawn so if you want to collect more resources from them, you'll need to sell some buildings"),
 );
+
+
+// https://en.wikipedia.org/wiki/A*_search_algorithm#Pseudocode
+a_star :: fn(f: *Factory, start: Node, goal: Node) []Node = {
+    h :: fn(node) => (goal.pos - node.pos).norm_sq();
+    d :: fn(_current, neighbor) f32 => @if(neighbor.i == -1, 1, {
+        it := f.buildings[neighbor.i]&;
+        @match(it.kind) {
+            fn Monster() => 5;
+            fn Spawner() => infinity;
+            @default => 1 + it.hp.float().cast().max(0)/10;
+        }
+    });
+    Get :: fn(map, key) => map.get(key) || infinity;
+    infinity: f32 = 1.0/0.0;
+    
+    open_set := Node.list(temp());
+    open_set&.push(start);
+    
+    came_from: HashMap(Node, Node) = init(temp());
+
+    g_score: HashMap(Node, f32) = init(temp());
+    g_score&.insert(start, 0);
+
+    f_score: HashMap(Node, f32) = init(temp());
+    f_score&.insert(start, h(start));
+
+    while => open_set.len > 0 {
+        // :SLOW
+        current_i := 0;
+        best_score := f_score&.Get(open_set[current_i]);
+        range(0, open_set.len) { i |
+            score := f_score&.Get(open_set[i]);
+            if score < best_score {
+                best_score = score;
+                current_i = i;
+            };
+        };
+        
+        current := open_set[current_i];
+        if current.pos == goal.pos {
+            return reconstruct_path(came_from&, current);
+        };
+
+        open_set&.unordered_remove(current_i);
+        neighbors := get_neighbors(f, current);
+        for neighbors& { neighbor |
+            continue :: local_return;
+            @if(neighbor.pos.x < 0) continue();
+            current_score := g_score&.Get(current);
+            neighbor_score := g_score&.Get(neighbor);
+            tentative_g_score := current_score + d(current, neighbor);
+            if tentative_g_score < neighbor_score {
+                came_from&.insert(neighbor, current);
+                g_score&.insert(neighbor, tentative_g_score);
+                f_score&.insert(neighbor, tentative_g_score + h(neighbor));
+                if !open_set.contains(neighbor) {
+                    open_set&.push(neighbor);
+                };
+            };
+        };
+    };
+    
+    reconstruct_path :: fn(came_from: *HashMap(Node, Node), current: Node) []Node = {
+        total_path := Node.list(temp());
+        total_path&.push(current);
+        while => came_from.get(current) { next |
+            current = next;
+            total_path&.push(current);
+        };
+        total_path.items().reverse();
+        total_path.items()
+    };
+
+    empty()
+}
+
+Node :: @struct(pos: Vec2, i: i64);
+fn get_neighbors(f: *Factory, start: Node) Array(Node, 4) = {
+    F :: fn(x: f32, y: f32) Node => (pos = vec2(x, y), i = -1);
+    out: Array(Node, 4) = (F(1, 0), F(0, 1), F(-1, 0), F(0, -1));
+    each out& { it |
+        pos := start.pos + it.pos;
+        // :SLOW
+        it.i = f.buildings&.index_of(fn(it) => it.pos == pos) || -1;
+        it.pos = pos;
+        if it.pos.y < 0 || it.pos.x >= f.dimensions || it.pos.y >= f.dimensions {
+            it.pos.x = -1;
+        };
+    };
+    out
+}
+
+::AutoEq(Node); 
+fn hash(h: *TrivialHasher, s: *Node) void = {
+    h.hash(@ref @as(u32) s.pos.x.bitcast());
+    h.hash(@ref @as(u32) s.pos.y.bitcast());
+}

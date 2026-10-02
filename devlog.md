@@ -1,3 +1,6 @@
+## (Oct 2)
+
+- astar hanging because can have negative weight if overshoot killing it and hp<0 for a frame
 
 ## (Sep 30)
 
