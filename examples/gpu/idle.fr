@@ -23,8 +23,11 @@ Clicker :: @struct {
     Currency :: @struct(name: Str, amount: i64);
     currencies: []Currency;
     generators: []Generator;
+    // TODO: redundant with the achivement
     have_world_map: bool;
     Price :: @struct(currency: i64, amount: i64);
+    
+    total_earnings: i64;
     
     prev_time: f64;
     delta_time: f64;
@@ -38,14 +41,15 @@ fn init_world(c: *Clicker, a: Alloc) void #use(Clicker) = {
     c.have_world_map = false;
 
     c.generators = a.alloc_zeroed(Generator, 4);
-    c.currencies = a.alloc_zeroed(Currency, 3);
+    c.currencies = a.alloc_zeroed(Currency, 4);
     c.generators[0] = (name = "X", price = (currency=0, amount=1), production = (currency=0, amount=1), auto_price=(currency=0, amount=50));
     c.generators[1] = (name = "Y", price = (currency=0, amount=500), production = (currency=0, amount=10), auto_price=(currency=0, amount=200));
     c.generators[2] = (name = "Z", price = (currency=0, amount=3500), production = (currency=1, amount=1), auto_price=(currency=1, amount=80));
     c.generators[3] = (name = "Q", price = (currency=2, amount=50), production = (currency=1, amount=5), auto_price=(currency=0, amount=10000));
     c.currencies[0] = (name = "A", amount = 1);
     c.currencies[1] = (name = "B", amount = 0);
-    c.currencies[2] = (name = "C", amount = 0);
+    c.currencies[collector_currency_index] = (name = "C", amount = 0);
+    c.currencies[prestige_currency_index] = (name = "D", amount = 0);
 }
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -72,11 +76,57 @@ fn consume_delta_time(c: *Clicker) void = {
             c.delta_time -= scale.float();
             each c.generators { it |
                 if it.auto.enable {
-                    c.currencies[it.production.currency].amount += it.production.amount * it.level * scale;
+                    delta := it.production.amount * it.level * scale;
+                    add_earnings(c, it.production.currency, delta);
                 };
             };
         };
     };
+}
+
+fn add_earnings(c: *Clicker, currency: i64, delta: i64) void = {
+    delta := c.adjust_for_prestige(delta);
+    c.currencies[currency].amount += delta;
+    c.total_earnings += delta;
+}
+
+fn adjust_for_prestige(c: *Clicker, delta: i64) i64 = {
+    prestige := c.currencies[prestige_currency_index].amount;
+    if prestige > 0 {
+        delta += int(delta.float() * (prestige.float()/50));
+    };
+    delta
+}
+
+prestige_currency_index :: 3;
+collector_currency_index :: 2;
+fn reset_for_prestige(sim: *Simulation) void = {
+    c, f := (sim.clicker&, sim.factory&);
+    prestige := c.currencies[prestige_currency_index].amount;
+    delta := c.calculate_next_prestige();
+    
+    each c.currencies { it |
+        it.amount = 0;
+    };
+    each c.generators { it |
+        it.auto = ();
+        it.level = 0;
+    };
+    f.buildings&.clear();
+    each sim.achievements { it |
+        it.set(.complete_this_run, 0);
+    };
+    c.have_world_map = false;
+    
+    c.currencies[0].amount = 1;
+    c.currencies[prestige_currency_index].amount = prestige + delta;
+}
+
+fn calculate_next_prestige(c: *Clicker) i64 = {
+    root :: fn(x: i64) i64 = x.float().sqrt().int();
+    prestige := c.currencies[prestige_currency_index].amount;
+    next := c.total_earnings.root().root();
+    @if(next < prestige.root(), 0, next)
 }
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -120,16 +170,17 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             killed := 0;
             enumerate f.buildings { i, it |
                 continue :: local_return;
+                node: Node = (pos=it.pos,i=i);
                 @match(it.kind) {
                     fn Monster() => {
-                        path := a_star(f, (pos=it.pos,i=i), (pos=clicker_pos,i=clicker_i));
+                        path := a_star(f, node, (pos=clicker_pos,i=clicker_i));
                         @if(path.len < 2) continue();
                         
                         if path[1].i != -1 {
                             blocker := f.buildings[path[1].i]&;
                             if blocker.kind == .Monster {
                                 // this would be unreachable if i didn't have it treat other monsters as passable but then it's too indecisive
-                                others := get_neighbors(f, (pos=it.pos,i=i));
+                                others := get_neighbors(f, node);
                                 each others& { it |
                                     if it.i != -1 && !@is(f.buildings[it.i].kind, .Spawner, .Monster) {
                                         blocker = f.buildings[it.i]&;
@@ -172,7 +223,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                                 killed += 1;
                                 // TODO: collect for *each* collector in range
                                 if closest(f, blocker.pos, 3, fn(it) => it.kind == .Collector) { collector |
-                                    c.currencies[2].amount += collector.level * @if(blocker.kind == .Spawner, 100, 1);
+                                    delta := collector.level * @if(blocker.kind == .Spawner, 100, 1);
+                                    add_earnings(c, collector_currency_index, delta);
                                 } else {
                                     sim.completed("WasteNotWantNot");
                                 };
@@ -326,6 +378,21 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
             };
             nk_tree_pop(ctx);
         };
+        
+        @if(sim.completed_in_this_run("InvestingInYourFuture"))
+        if nk_tree_push_hashed(ctx, .NK_TREE_NODE, S"Alter Of Sacrifice", .NK_MINIMIZED, S"", 0, 2) {
+            nk_layout_row_dynamic(ctx, 0, 1);
+            kind := c.currencies[prestige_currency_index]&;
+            delta := c.calculate_next_prestige();
+            @if(delta == 0) nk_widget_disable_begin(ctx);
+            if nk_button_label(ctx, S(@fmt_cstr("Reset (+% %)", delta, kind.name))) {
+                sim.reset_for_prestige();
+            };
+            @if(delta == 0) nk_widget_disable_end(ctx);
+            nk_tree_pop(ctx);
+        };
+        
+        
     };
     nk_end(ctx);
         
@@ -357,8 +424,8 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
             @if(cant_click) nk_widget_disable_begin(ctx);
             kind := c.currencies[it.production.currency]&;
             amount := it.level * it.production.amount;
-            if nk_button_label(ctx, S(@fmt_cstr("+% %", amount, kind.name))) {
-                kind.amount += amount;
+            if nk_button_label(ctx, S(@fmt_cstr("+% %", c.adjust_for_prestige(amount), kind.name))) {
+                c.add_earnings(it.production.currency, amount);
             };
             @if(cant_click) nk_widget_disable_end(ctx);
             
@@ -392,16 +459,23 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
         };
         
         nk_layout_row_dynamic(ctx, 0, 1);
-        if !c.have_world_map {
+        
+        n := 0 
+            + sim.completed_in_this_run("TheDarkForest").int() 
+            + sim.completed_in_this_run("InvestingInYourFuture").int()
+        ;
+        if n < 2 {
             kind := c.currencies[1]&;
             price := 300;
             cant_afford := price > kind.amount;
             @if(cant_afford) nk_widget_disable_begin(ctx);
-            if nk_button_label(ctx, S(@fmt_cstr("Buy World Map (-% %)", price, kind.name))) {
+            names := @const_slice("World Map", "Alter Of Sacrifice");
+            if nk_button_label(ctx, S(@fmt_cstr("Buy % (-% %)", names[n], price, kind.name))) {
                 c.have_world_map = true;
                 kind.amount -= price;
                 state.save_is_dirty += 1;
-                sim.completed("TheDarkForest");
+                @if(n == 0) sim.completed("TheDarkForest");
+                @if(n == 1) sim.completed("InvestingInYourFuture");
             };
             @if(cant_afford) nk_widget_disable_end(ctx);
         };
@@ -695,8 +769,8 @@ fn place_building(f: *Factory, pos: Vec2, kind: Factory.Kind) void = {
 fn resort(f: *Factory) void = 
     Sort'default(Factory.Building, f.buildings&.items(), fn(a, b) => @if(a.pos.y == b.pos.y, a.pos.x <= b.pos.x, a.pos.y <= b.pos.y));
 
-
 fn closest(f: *Factory, pos: Vec2, range: f32, $filter: @Fn(it: *Factory.Building) bool) ?*Factory.Building = {
+    // TODO: once get_neighbors uses the sortedness to be faster, check those first
     best_i := -1;
     best_dist: f32 = 10000;
     enumerate f.buildings { i, it |
@@ -720,7 +794,8 @@ Simulation :: @struct {
     Achivement :: @(import("@/lib/bit_fields.fr")'bit_fields)(
         complete := 1,
         hint := 2,
-        _ := 5,
+        complete_this_run := 1,
+        _ := 4,
     );
 };
 
@@ -735,7 +810,13 @@ fn completed(s: *Simulation, $name: Str) void = {
     i :: achievements.index_of(fn(x) => x._0 == name) || @panic("invalid achivement name: %", name);
     @run { achievement_referenced[i] = true; };
     s.achievements[i]&.set(.complete, 1);
+    s.achievements[i]&.set(.complete_this_run, 1);
     s.achievements[i]&.set(.hint, 3);
+}
+
+fn completed_in_this_run(s: *Simulation, $name: Str) bool = {
+    i :: achievements.index_of(fn(x) => x._0 == name) || @panic("invalid achivement name: %", name);
+    s.achievements[i].get(.complete_this_run) == 1
 }
 
 achievements :: @const_slice(
@@ -757,8 +838,8 @@ achievements :: @const_slice(
     ("WhenISayJumpYouSayHowHigh", "buy a hint", "if you get stuck, trying buying your way to the answer. the more you buy the more they cost"),
     ("LuckOfTheDice", "have a spawner appear inside your walls with your mine", "new spawners can appear in any empty cell"),
     ("EverythingTheLightTouches", "fill every cell of the map", "now there's no space for monsters to spawn so if you want to collect more resources from them, you'll need to sell some buildings"),
+    ("InvestingInYourFuture", "buy alter of sacrifice", "use the alter to reset your progress and restart the game with greatly boosted earnings"),
 );
-
 
 // https://en.wikipedia.org/wiki/A*_search_algorithm#Pseudocode
 a_star :: fn(f: *Factory, start: Node, goal: Node) []Node = {
@@ -841,7 +922,7 @@ fn get_neighbors(f: *Factory, start: Node) Array(Node, 4) = {
     out: Array(Node, 4) = (F(1, 0), F(0, 1), F(-1, 0), F(0, -1));
     each out& { it |
         pos := start.pos + it.pos;
-        // :SLOW
+        // :SLOW TODO: if start.i!=-1 can use the sortedness to be faster ex. x+/-1 will be i+/-1 if there
         it.i = f.buildings&.index_of(fn(it) => it.pos == pos) || -1;
         it.pos = pos;
         if it.pos.y < 0 || it.pos.x >= f.dimensions || it.pos.y >= f.dimensions {
