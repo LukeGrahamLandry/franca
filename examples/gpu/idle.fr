@@ -2,8 +2,7 @@
 State :: @struct {
     ui: Ui.State;
     dirty: bool;
-    clicker: Clicker;
-    factory: Factory;
+    sim: Simulation #use;
     
     save_is_dirty: i64;
     prev_save_time: i64;
@@ -53,13 +52,16 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sapp.desc.enable_clipboard = true;
     on_init(state.ui&, sg);
     state.dirty = true;
-    init_world(state.clicker&, general_allocator());
-    init_world(state.factory&, general_allocator());
+    init_world(state.sim&, general_allocator());
         
     if read_entire_file(temp(), save_file_path) { in |
-        read_save_file(state.clicker&, state.factory&, in);
+        read_save_file(state.sim&, in);
     };
     state.prev_save_time = get_real_time();
+    
+    enumerate achievement_referenced { i, it |
+        @if(!it[]) @println("achievement % cannot be completed", achievements[i]._0);
+    };
     
 }
 
@@ -94,6 +96,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     
     f := state.factory&;
+    sim := state.sim&;
     if sapp.frame_count.umod(64) == 0 && c.have_world_map {
         if f.buildings.find(fn(it) => it.kind == .Spawner) { spawner |
             spawner_pos := spawner.pos; spawner := ();
@@ -127,8 +130,10 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                         new_pos := it.pos + goal_dir;
                         if f.buildings.find(fn(it) => it.pos == new_pos) { blocker |
                             if @is(blocker.kind, .Turret, .Wall, .Collector, .Clicker) {
+                                @if(blocker.kind == .Clicker) sim.completed("SticksAndStonesMayBreakMyBonesButLowHpExcitesMe");
                                 blocker.hp -= 10 * it.level;
                                 killed += int(blocker.hp <= 0);
+                                @if(blocker.kind == .Wall && blocker.hp <= 0) sim.completed("ElevenFootLadder");
                             };
                             // TODO: choose a different target
                         } else {
@@ -140,9 +145,13 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                         if closest(f, it.pos, 1.5, fn(it) => @is(it.kind, .Turret, .Wall, .Collector, .Clicker)) { blocker |
                             blocker.hp -= 20 * it.level;
                             killed += int(blocker.hp <= 0);
+                            sim.completed("SuspiciouslySpikey");
                         };
                         if closest(f, it.pos, 1.5, fn(it) => it.kind == .Monster) { target |
                             target.hp += it.level;
+                            if target.hp > f.templates&[target.kind].hp + it.level*2 {  // don't give the achivement if could move away the whole time
+                                sim.completed("DidYouGoToMedicalSchool?MeNeither!");
+                            };
                         };
                         if sapp.frame_count.umod(64*64) == 0 {
                             it.level += 1;
@@ -157,6 +166,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                                 // TODO: collect for *each* collector in range
                                 if closest(f, blocker.pos, 3, fn(it) => it.kind == .Collector) { collector |
                                     c.currencies[2].amount += collector.level * @if(blocker.kind == .Spawner, 100, 1);
+                                } else {
+                                    sim.completed("WasteNotWantNot");
                                 };
                             };
                         };
@@ -170,16 +181,16 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         };
     };
     
-    
     @match(state.action) {
         fn None() => ();
         fn CopySaveFile() => {
-            out := write_save_file(c, state.factory&);
+            out := write_save_file(state.sim&);
             sapp.set_clipboard_string(out);
             state.action = .None;
         }
         fn PasteSaveFile() => {
             sapp.requests.fake_paste_event = true;
+            sim.completed("EtchedInStone");
         }
     }
     
@@ -205,10 +216,13 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     c := state.clicker&;
     @if(@is(event.type, .UNFOCUSED, .ICONIFIED, .MOUSE_LEAVE)) c.start_warp();
-    @if(@is(event.type, .FOCUSED, .RESTORED, .MOUSE_ENTER)) c.end_warp();
+    @if(@is(event.type, .FOCUSED, .RESTORED, .MOUSE_ENTER)) {
+        @if(c.warp_start_time.is_some()) state.sim&.completed("BeachVacation");
+        c.end_warp();
+    };
     if event.type == .CLIPBOARD_PASTED && state.action == .PasteSaveFile {
         state.action = .None;
-        read_save_file(c, state.factory&, event.pasted);
+        read_save_file(state.sim&, event.pasted);
     };
     @if(event.type == .QUIT_REQUESTED) state.save_to_file();
 
@@ -219,7 +233,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
 save_file_path :: "target/franca/idle.txt";
 fn save_to_file(state: *State) void = {
     _ := make_dirs(pop_path_segment(save_file_path));
-    _ := write_entire_file(save_file_path, write_save_file(state.clicker&, state.factory&));
+    _ := write_entire_file(save_file_path, write_save_file(state.sim&));
 }
 
 fn start_warp(c: *Clicker) void = {
@@ -248,7 +262,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
     S :: fn(s: CStr) => bit_cast_unchecked(*u8, *i8, s.ptr);
     flags := (@as(u32) nk_panel_flags.NK_WINDOW_MOVABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_SCALABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_MINIMIZABLE);
     c := state.clicker&;
-    
+    sim := state.sim&;
     
     if nk_begin(ctx, S"About", nk_rect(520, 10, 300, 200), flags) {
         if nk_tree_push_hashed(ctx, .NK_TREE_NODE, S"Save Game Data", .NK_MINIMIZED, S"", 0, 0) {
@@ -257,13 +271,51 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                 state.action = .CopySaveFile;
             };
             if nk_button_label(ctx, S"Paste (replaces current game)") {
-                println(write_save_file(state.clicker&, state.factory&));
+                println(write_save_file(state.sim&));
                 state.action = .PasteSaveFile;
             };
             if nk_button_label(ctx, S"Restart (replaces current game)") {
-                println(write_save_file(state.clicker&, state.factory&));
-                init_world(state.clicker&, general_allocator());
-                init_world(state.factory&, general_allocator());
+                println(write_save_file(state.sim&));
+                init_world(state.sim&, general_allocator());
+            };
+            nk_tree_pop(ctx);
+        };
+        
+        if nk_tree_push_hashed(ctx, .NK_TREE_NODE, S"Achievements", .NK_MINIMIZED, S"", 0, 1) {
+            complete := 0;
+            for sim.achievements { it |
+                complete += it.get(.complete);
+            };
+            
+            nk_label(ctx, S(@fmt_cstr("%/% Completed", complete, achievements.len())), 0);
+            enumerate sim.achievements { i, it |
+                nk_layout_row_dynamic(ctx, 0.01, 1);
+                name, pre_hint, post_hint := achievements[i]; 
+                n := it[].get(.hint);
+                title := @if(n > 0, S(name.as_cstr()), S("?"));
+                if nk_tree_push_hashed(ctx, .NK_TREE_NODE, title, .NK_MINIMIZED, S"achive", 6, i.intcast()) {
+                    nk_layout_row_dynamic(ctx, 40, 1);
+                    @if(n > 1) nk_label_wrap(ctx, S(pre_hint.as_cstr()));
+                    @if(n > 2) nk_label_wrap(ctx, S(post_hint.as_cstr()));
+                    nk_layout_row_dynamic(ctx, 20, 1);
+                    if it[].get(.complete) == 0 {
+                        price := powI(2, sim.total_hints);
+                        kind := c.currencies[0]&;
+                        cant_afford := price > kind.amount || n == 3;
+                        @if(cant_afford) nk_widget_disable_begin(ctx);
+                        title := S(@fmt_cstr("Buy Hint %/3 (-% %)", n+1, price, kind.name));
+                        if nk_button_label(ctx, @if(n < 3, title, S"Not Yet Completed")) {
+                            it.set(.hint, n + 1);
+                            kind.amount -= price;
+                            state.save_is_dirty += 1;
+                            sim.total_hints += 1;
+                            sim.completed("WhenISayJumpYouSayHowHigh");
+                        };
+                        @if(cant_afford) nk_widget_disable_end(ctx);
+                    };
+                    
+                    nk_tree_pop(ctx);
+                };
             };
             nk_tree_pop(ctx);
         };
@@ -281,9 +333,13 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
         };
         
         nk_layout_row_dynamic(ctx, 0, c.currencies.len.intcast());
+        
+        n := 0;
         enumerate c.currencies { i, it |
             nk_label(ctx, S(@fmt_cstr("% %", it.amount, it.name)), 0);
+            n += int(it.amount != 0);
         };
+        @if(n == c.currencies.len) sim.completed("VeritableCornucopia");
         
         enumerate c.generators { i, it |
             nk_layout_row_dynamic(ctx, 0, 4);
@@ -322,6 +378,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                     it.auto.enable = true;
                     kind.amount -= price;
                     state.save_is_dirty += 1;
+                    sim.completed("TheyAreTakingOurJobs");
                 };
                 @if(cant_afford) nk_widget_disable_end(ctx);
             };
@@ -337,6 +394,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                 c.have_world_map = true;
                 kind.amount -= price;
                 state.save_is_dirty += 1;
+                sim.completed("TheDarkForest");
             };
             @if(cant_afford) nk_widget_disable_end(ctx);
         };
@@ -392,6 +450,13 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                     @if(disable) nk_widget_disable_begin(ctx);
                     s := @if(kind == .Empty, S(""), S(@fmt_cstr("%", f.buildings[i-1].hp)));
                     if nk_button_label_styled(ctx, style&, s) {
+                        @match(f.placing) {
+                            fn Empty() => sim.completed("CashBackGuarentee");
+                            fn Wall() => sim.completed("AndMakeTheMonstersPayForIt");
+                            fn Turret() => sim.completed("NowWeAreCookingWithBullets");
+                            @default => ();
+                        };
+                        
                         // TODO: less refund if hp is low
                         cur.amount += @if(f.placing == .Empty, price, -price);
                         place_building(f, pos, f.placing);
@@ -413,7 +478,8 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
 get_real_time :: fn() i64 = { t := zeroed(TimeSpec); Posix'clock_gettime(Posix.CLOCK.REALTIME, t&); t.seconds };
 
 B64 :: import("@/lib/encoding/base64.fr");
-fn write_save_file(c: *Clicker, f: *Factory) []u8 = {
+fn write_save_file(sim: *Simulation) []u8 = {
+    c, f := (sim.clicker&, sim.factory&);
     out := @ref u8.list(temp());
     
     // something trivial just so i can keep my progress between recompiling the game to tweak a number
@@ -435,6 +501,14 @@ fn write_save_file(c: *Clicker, f: *Factory) []u8 = {
         @fmt(out, ",");
     };
     
+    @fmt(out, "a=");
+    enumerate sim.achievements { i, it |
+        if it.repr != 0 {
+            @fmt(out, "%:%|", i, it.repr);
+        };
+    };
+    @fmt(out, ",h=%,", sim.total_hints);
+    
     in := out.items(); 
     @println("CopySaveFile(plain):  %", in);
     flip_encrypt(in, true);
@@ -444,7 +518,7 @@ fn write_save_file(c: *Clicker, f: *Factory) []u8 = {
     out.items()
 }
 
-fn read_save_file(c: *Clicker, f: *Factory, in: []u8) void = {
+fn read_save_file(sim: *Simulation, in: []u8) void = {
     @println("PasteSaveFile(cipher): %", in);
     out := @ref u8.list(temp());
     @if(in.len.umod(4) != 0) return();
@@ -453,6 +527,7 @@ fn read_save_file(c: *Clicker, f: *Factory, in: []u8) void = {
     flip_encrypt(in, false);
     @println("PasteSaveFile(plain):  %", in);
     
+    c, f := (sim.clicker&, sim.factory&);
     in := in.split(",", temp());
     @if(in.len < 5 || in[0] != "IDLE_FR" || in[1] != "v=1") return();
     if in[2].starts_with("g=") {
@@ -499,6 +574,24 @@ fn read_save_file(c: *Clicker, f: *Factory, in: []u8) void = {
         };
         @fmt(out, ",");
     };
+    I := 6 + int(c.have_world_map);
+    if in.len > I && in[I].starts_with("a=") {
+        in := in[I].rest(2).split("|", temp());
+        sim.achievements.set_zeroed();
+        for in { in |
+            if in.len != 0 {
+                in := in.split(":", temp());
+                sim.achievements[in[0].parse_int()].repr = in[1].parse_int().trunc();
+            };
+        };
+        I += 1;
+    };
+    
+    if in.len > I && in[I].starts_with("h=") {
+        sim.total_hints = in[I].rest(2).parse_int();
+        I += 1;
+    };
+    
 }
 
 // cute way to make it inconvenient for myself to cheat by editing the save. 
@@ -602,3 +695,51 @@ fn closest(f: *Factory, pos: Vec2, range: f32, $filter: @Fn(it: *Factory.Buildin
     };
     @if(best_i != -1 && best_dist < range*range, (Some = f.buildings[best_i]&), .None)
 }
+
+Simulation :: @struct {
+    clicker: Clicker;
+    factory: Factory;
+    
+    achievements: []Achivement;
+    total_hints: i64;
+    Achivement :: @(import("@/lib/bit_fields.fr")'bit_fields)(
+        complete := 1,
+        hint := 2,
+        _ := 5,
+    );
+};
+
+fn init_world(s: *Simulation, a: Alloc) void = {
+    init_world(s.clicker&, a);
+    init_world(s.factory&, a);
+    s.achievements = a.alloc_zeroed(Simulation.Achivement, achievements.len());
+}
+
+achievement_referenced :: ast_alloc().alloc_zeroed(bool, achievements.len());
+fn completed(s: *Simulation, $name: Str) void = {
+    i :: achievements.index_of(fn(x) => x._0 == name) || @panic("invalid achivement name: %", name);
+    @run { achievement_referenced[i] = true; };
+    s.achievements[i]&.set(.complete, 1);
+    s.achievements[i]&.set(.hint, 3);
+}
+
+achievements :: @const_slice(
+    ("TheyAreTakingOurJobs", "buy auto collect", "you can still collect manually if you choose to disable the Auto checkbox. how fast can you click?"),
+    ("BeachVacation", "return from being idle", "time in the mine keeps passing while the window is unfocused. you'll have plenty of resources to return to"),
+    ("EtchedInStone", "create and restore a save file", "the save includes the time it was made so resources will continue being collected while the game isn't running"),
+    ("TheDarkForest", "unlock the world map", "the world looks quite empty but you never know what might be lerking. build defences to be on the safe side"),
+    ("SticksAndStonesMayBreakMyBonesButLowHpExcitesMe", "let a monster damage your mine", "don't let your mine be destroyed"),
+    ("WasteNotWantNot", "kill a monster without a collector", "monsters drop resources when defeated close to a Collector building"),
+    ("SuspiciouslySpikey", "place a building close to a spawner", "spawners damage adjacent buildings, keep a safe distance"),
+    ("DidYouGoToMedicalSchool?MeNeither!", "let a moster get healed", "spawners heal adjacent monsters. don't build walls too close or they'll get stuck and regen"),
+    // TODO: make this "surround your mine with walls", needs more complicated checking logic
+    ("AndMakeTheMonstersPayForIt", "buy a wall", "this feels safe. nothing can get over these ten foot tall walls"),
+    ("ElevenFootLadder", "let a wall be destroyed", ""),
+    ("NowWeAreCookingWithBullets", "place a turret", ""),
+    ("CashBackGuarentee", "sell a building", "you get full price back if full hp. less if it took damage"),
+    ("InstaKill", "kill a monster on the same tick it spawns", "i hope you share a reel with your followers. btw, buildings are evaulated left to right, top to bottom"),
+    ("VeritableCornucopia", "have some of every resource type in the game", ""),
+    ("WhenISayJumpYouSayHowHigh", "buy a hint", "if you get stuck, trying buying your way to the answer. the more you buy the more they cost"),
+    ("LuckOfTheDice", "have a spawner appear inside your walls with your mine", "new spawners can appear in any empty cell"),
+    ("EverythingTheLightTouches", "fill every cell of the map", "now there's no space for monsters to spawn so if you want to collect more resources from them, you'll need to sell some buildings"),
+);
