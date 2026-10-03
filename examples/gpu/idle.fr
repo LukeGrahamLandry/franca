@@ -321,46 +321,45 @@ fn end_warp(sim: *Simulation) void = {
 
 fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
     ctx := state.ui.ctx&;
-    S :: fn(s: CStr) => bit_cast_unchecked(*u8, *i8, s.ptr);
     flags := (@as(u32) nk_panel_flags.NK_WINDOW_MOVABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_SCALABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_MINIMIZABLE);
     c := state.clicker&;
     sim := state.sim&;
     f := state.factory&;
     
-    if nk_begin(ctx, S"About", nk_rect(520, 10, 300, 200), flags) {
-        if nk_tree_push_hashed(ctx, .NK_TREE_NODE, S"Save Game Data", .NK_MINIMIZED, S"", 0, 0) {
+    if begin(ctx, "About", nk_rect(520, 10, 300, 200), flags) {
+        if tree_push_hashed(ctx, .NK_TREE_NODE, "Save Game Data", .NK_MINIMIZED, "", 0) {
             nk_layout_row_dynamic(ctx, 0, 1);
-            if nk_button_label(ctx, S"Copy to Clipboard") {
+            if button(ctx, "Copy to Clipboard") {
                 state.action = .CopySaveFile;
             };
-            if nk_button_label(ctx, S"Paste (replaces current game)") {
+            if button(ctx, "Paste (replaces current game)") {
                 println(write_save_file(state.sim&));
                 state.action = .PasteSaveFile;
             };
-            if nk_button_label(ctx, S"Restart (replaces current game)") {
+            if button(ctx, "Restart (replaces current game)") {
                 println(write_save_file(state.sim&));
                 init_world(state.sim&, general_allocator());
             };
             nk_tree_pop(ctx);
         };
         
-        if nk_tree_push_hashed(ctx, .NK_TREE_NODE, S(@fmt_cstr("Notifications (%)", sim.notifications.len)), .NK_MINIMIZED, S"", 0, 4) {
+        if tree_push_hashed(ctx, .NK_TREE_NODE, @tfmt("Notifications (%)", sim.notifications.len), .NK_MINIMIZED, "", 4) {
             dismiss: ?i64 = .None;
             enumerate_rev sim.notifications { i, it |
                 @match(it) {
                     fn Achievement(i) => {
                         nk_layout_row_dynamic(ctx, 0, 2);
-                        nk_label(ctx, S(@fmt_cstr("%", achievements[i[]]._0)), 0);
+                        text(ctx, achievements[i[]]._0);
                     }
                     fn EndWarp(it) => {
                         nk_layout_row_dynamic(ctx, 0, c.currencies.len.intcast() + 2);
-                        nk_label(ctx, S(@fmt_cstr("%s", it.t)), 0);
+                        text(ctx, @tfmt("%s", it.t));
                         enumerate c.currencies { i, kind |
-                            nk_label(ctx, S(@fmt_cstr("% %", it.earned[i], kind.name)), 0);
+                            text(ctx, @tfmt("% %", it.earned[i], kind.name));
                         };
                     }
                 };
-                if nk_button_label(ctx, S"ok") {
+                if button(ctx, "ok") {
                     dismiss = (Some = i);
                 };
             };
@@ -371,43 +370,30 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
             
             nk_tree_pop(ctx);
         };
-        
-        if nk_tree_push_hashed(ctx, .NK_TREE_NODE, S"Achievements", .NK_MINIMIZED, S"", 0, 1) {
-            complete, this_run := (0, 0);
+        if tree_push_hashed(ctx, .NK_TREE_NODE, "Achievements", .NK_MINIMIZED, "", 1) {
+            complete := 0;
             for sim.achievements { it |
                 complete += it.get(.complete);
-                this_run += it.get(.complete_this_run);
             };
             
-            nk_label(ctx, S(@fmt_cstr("%/% Completed", complete, achievements.len())), 0);
-            if c.currencies[prestige_currency_index].amount > 0 {
-                nk_label(ctx, S(@fmt_cstr("%/% Since Sacrifice", this_run, achievements.len())), 0);
-            };
+            wrapping_text_row(ctx, @tfmt("%/% Completed", complete, achievements.len()));
             
             enumerate sim.achievements { i, it |
                 nk_layout_row_dynamic(ctx, 0.01, 1);
                 name, pre_hint, post_hint := achievements[i]; 
                 n := it[].get(.hint);
-                title := @if(n > 0, S(name.as_cstr()), S("?"));
-                if nk_tree_push_hashed(ctx, .NK_TREE_NODE, title, .NK_MINIMIZED, S"achive", 6, i.intcast()) {
-                    nk_layout_row_dynamic(ctx, 40, 1);
-                    @if(n > 1) nk_label_wrap(ctx, S(pre_hint.as_cstr()));
-                    @if(n > 2) nk_label_wrap(ctx, S(post_hint.as_cstr()));
-                    nk_layout_row_dynamic(ctx, 20, 1);
-                    if it[].get(.complete) == 0 {
-                        price := powI(2, sim.total_hints);
-                        kind := c.currencies[0]&;
-                        cant_afford := price > kind.amount || n == 3;
-                        @if(cant_afford) nk_widget_disable_begin(ctx);
-                        title := S(@fmt_cstr("Buy Hint %/3 (-% %)", n+1, price, kind.name));
-                        if nk_button_label(ctx, @if(n < 3, title, S"Not Yet Completed")) {
+                title := @if(n > 0, name, "?");
+                if tree_push_hashed(ctx, .NK_TREE_NODE, title, .NK_MINIMIZED, "achive", i) {
+                    @if(it[].get(.complete) == 0) wrapping_text_row(ctx, "Not Yet Completed");
+                    @if(n > 1) wrapping_text_row(ctx, pre_hint);
+                    @if(n > 2) wrapping_text_row(ctx, post_hint);
+                    if n < 3 {
+                        price: Clicker.Price = (amount = powI(2, sim.total_hints), currency = 0);
+                        buy_button(price, false, @tfmt("Buy Hint %/3", n+1)) {
                             it.set(.hint, n + 1);
-                            kind.amount -= price;
-                            state.save_is_dirty += 1;
                             sim.total_hints += 1;
                             sim.completed("WhenISayJumpYouSayHowHigh");
                         };
-                        @if(cant_afford) nk_widget_disable_end(ctx);
                     };
                     
                     nk_tree_pop(ctx);
@@ -417,28 +403,27 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
         };
         
         @if(sim.completed_in_this_run("InvestingInYourFuture"))
-        if nk_tree_push_hashed(ctx, .NK_TREE_NODE, S"Alter Of Sacrifice", .NK_MINIMIZED, S"", 0, 2) {
+        if tree_push_hashed(ctx, .NK_TREE_NODE, "Alter Of Sacrifice", .NK_MINIMIZED, "", 2) {
             nk_layout_row_dynamic(ctx, 0, 1);
             kind := c.currencies[prestige_currency_index]&;
             delta := c.calculate_next_prestige();
-            disable := delta == 0 || f.clicker_destroyed_popup;
-            @if(disable) nk_widget_disable_begin(ctx);
-            if nk_button_label(ctx, S(@fmt_cstr("Reset (+% %)", delta, kind.name))) {
+            disable_if(delta == 0 || f.clicker_destroyed_popup) {
+            if button(ctx, @tfmt("Reset (+% %)", delta, kind.name)) {
                 sim.reset_for_prestige(true);
             };
-            @if(disable) nk_widget_disable_end(ctx);
+            };
             nk_tree_pop(ctx);
         };
     };
     nk_end(ctx);
         
     minimized := true;
-    if nk_begin(ctx, S"The Mines", nk_rect(10, 10, 500, 280), flags) {
+    if begin(ctx, "The Mines", nk_rect(10, 10, 500, 280), flags) {
         break :: local_return;
         minimized = false;
         if c.warp_start_time { _ |
             nk_layout_row_dynamic(ctx, 0, 1);
-            nk_label(ctx, S("Warping To The Future!"), 0);
+            text(ctx, "Warping To The Future!");
             break();
         };
         
@@ -446,7 +431,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
         
         n := 0;
         enumerate c.currencies { i, it |
-            nk_label(ctx, S(@fmt_cstr("% %", it.amount, it.name)), 0);
+            text(ctx, @tfmt("% %", it.amount, it.name));
             n += int(it.amount != 0);
         };
         @if(n == c.currencies.len) sim.completed("VeritableCornucopia");
@@ -454,43 +439,30 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
         enumerate c.generators { i, it |
             nk_layout_row_dynamic(ctx, 0, 4);
             
-            nk_label(ctx, S(@fmt_cstr("% %", it.level, it.name)), 0);
+            text(ctx, @tfmt("% %", it.level, it.name));
             
-            cant_click := it.level == 0 || it.auto.enable;
-            @if(cant_click) nk_widget_disable_begin(ctx);
+            disable_if(it.level == 0 || it.auto.enable) {
             kind := c.currencies[it.production.currency]&;
             amount := it.level * it.production.amount;
-            if nk_button_label(ctx, S(@fmt_cstr("+% %", c.adjust_for_prestige(amount), kind.name))) {
+            if button(ctx, @tfmt("+% %", c.adjust_for_prestige(amount), kind.name)) {
                 c.add_earnings(it.production.currency, amount);
             };
-            @if(cant_click) nk_widget_disable_end(ctx);
+            };
             
             price := int(it.price.amount.float() * (1 + (powI(2, it.level)-1).float()/10));
-            kind := c.currencies[it.price.currency]&;
-            cant_afford := price > kind.amount;
-            @if(cant_afford) nk_widget_disable_begin(ctx);
-            if nk_button_label(ctx, S(@fmt_cstr("Buy (-% %)", price, kind.name))) {
+            price: Clicker.Price = (amount = price, currency = it.price.currency);
+            buy_button(price, false, "Buy") {
                 it.level += 1;
-                kind.amount -= price;
-                state.save_is_dirty += 1;
             };
-            @if(cant_afford) nk_widget_disable_end(ctx);
 
             if it.auto.allow {
-                nk_checkbox_label(ctx, S"Auto", it.auto.enable&);
+                checkbox(ctx, "Auto", it.auto.enable&);
             } else {
-                kind := c.currencies[it.auto_price.currency]&;
-                price := it.auto_price.amount;
-                cant_afford := price > kind.amount || it.level == 0;
-                @if(cant_afford) nk_widget_disable_begin(ctx);
-                if nk_button_label(ctx, S(@fmt_cstr("Auto (-% %)", price, kind.name))) {
+                buy_button(it.auto_price, it.level == 0, "Auto") {
                     it.auto.allow = true;
                     it.auto.enable = true;
-                    kind.amount -= price;
-                    state.save_is_dirty += 1;
                     sim.completed("TheyAreTakingOurJobs");
                 };
-                @if(cant_afford) nk_widget_disable_end(ctx);
             };
         };
         
@@ -501,18 +473,12 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
             + sim.completed_in_this_run("InvestingInYourFuture").int()
         ;
         if n < 2 {
-            kind := c.currencies[building_currency_index]&;
-            price := 300;
-            cant_afford := price > kind.amount;
-            @if(cant_afford) nk_widget_disable_begin(ctx);
+            price: Clicker.Price = (currency = building_currency_index, amount = 300);
             names := @const_slice("World Map", "Alter Of Sacrifice");
-            if nk_button_label(ctx, S(@fmt_cstr("Buy % (-% %)", names[n], price, kind.name))) {
-                kind.amount -= price;
-                state.save_is_dirty += 1;
+            buy_button(price, false, @tfmt("Buy %", names[n])) {
                 @if(n == 0) sim.completed("TheDarkForest");
                 @if(n == 1) sim.completed("InvestingInYourFuture");
             };
-            @if(cant_afford) nk_widget_disable_end(ctx);
         };
     };
     nk_end(ctx);
@@ -520,7 +486,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
     // TODO: there's a flicker when you place a building when there are a lot. 
     //       might have to switch to drawing to a texture directly instead of using buttons. 
     if sim.completed_in_this_run("TheDarkForest") {
-        if nk_begin(ctx, S"World Map", nk_rect(10, 300, 800, 260), flags) {
+        if begin(ctx, "World Map", nk_rect(10, 300, 800, 260), flags) {
             @run @assert_eq(building_colours.len(), Factory.Kind.enum_count());
             style := ctx.style.button;
             
@@ -534,12 +500,12 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                 // not disabling when can't afford because then its confusing if you try to switch too early and just wait to place, you end up buying the old thing
                 disable := f.placing == kind;
                 style.border = ctx.style.button.border * @if(disable, 6, 1);
-                @if(disable) nk_widget_disable_begin(ctx);
-                s := @if(kind == .Empty, S"Sell", S(@fmt_cstr("% (-% %)", kind, price, cur.name)));
-                if nk_button_label_styled(ctx, style&, s) {
+                disable_if(f.placing == kind) {
+                s := @if(kind == .Empty, "Sell", @tfmt("% (-% %)", kind, price, cur.name));
+                if button_styled(ctx, style&, s) {
                     f.placing = kind;
                 };
-                @if(disable) nk_widget_disable_end(ctx);
+                };
             };
             
             style.rounding = 0;
@@ -565,9 +531,9 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                     disable := @if(f.placing == .Empty, 
                         kind == .Empty || !can_sell, 
                         kind != .Empty || !can_afford);
-                    @if(disable) nk_widget_disable_begin(ctx);
-                    s := @if(kind == .Empty, S(""), S(@fmt_cstr("%", f.buildings[i-1].hp)));
-                    if nk_button_label_styled(ctx, style&, s) {
+                    disable_if(disable) {
+                    s := @if(kind == .Empty, "", @tfmt("%", f.buildings[i-1].hp));
+                    if button_styled(ctx, style&, s) {
                         @match(f.placing) {
                             fn Empty() => sim.completed("CashBackGuarentee");
                             fn Wall() => sim.completed("AndMakeTheMonstersPayForIt");
@@ -584,7 +550,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                         };
                         state.save_is_dirty += 1;
                     };
-                    @if(disable) nk_widget_disable_end(ctx);
+                    };
                 };
             };
         };
@@ -593,16 +559,15 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
     
     // feels jarring if you suddenly reset when you die so at least tell you what happened. 
     if f.clicker_destroyed_popup {
-        if nk_begin(ctx, S"Alert", nk_rect(10, 300, 800, 260), flags) {
-            nk_layout_row_dynamic(ctx, 0, 1);
+        if begin(ctx, "Alert", nk_rect(10, 300, 800, 260), flags) {
             prestige := c.currencies[prestige_currency_index]&;
-            nk_label(ctx, S"The Mine was destroyed", 0);
-            nk_label(ctx, S"progress will be reset", 0);
+            wrapping_text_row(ctx, "The mine was destroyed, progress will be reset.");
             if prestige.amount + c.calculate_next_prestige() > 0 {
-                nk_label(ctx, S(@fmt_cstr("your % % will be kept", prestige.amount, prestige.name)), 0);
-                nk_label(ctx, S(@fmt_cstr("but % % was wasted by not sacrificing", c.calculate_next_prestige(), prestige.name)), 0);
+                wrapping_text_row(ctx, @tfmt("Your % % will be kept but % % was wasted by not sacrificing.", 
+                    prestige.amount, prestige.name, c.calculate_next_prestige(), prestige.name));
             };
-            if nk_button_label(ctx, S("Continue")) {
+            nk_layout_row_dynamic(ctx, 0, 1);
+            if button(ctx, "Continue") {
                 f.clicker_destroyed_popup = false;
                 sim.reset_for_prestige(false);
             };
@@ -613,7 +578,25 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
     if minimized != c.prev_minimized {
         c.prev_minimized = minimized;
         @if(minimized, c.start_warp(), sim.end_warp());
-    }
+    };
+    
+    buy_button :: fn(price: Clicker.Price, disable: bool, label: Str, $body: @Fn() void) => {
+        kind := c.currencies[price.currency]&;
+        price := price.amount;
+        disable_if(price > kind.amount || disable) {
+            if button(ctx, @tfmt("% (-% %)", label, price, kind.name)) {
+                kind.amount -= price;
+                state.save_is_dirty += 1;
+                body();
+            };
+        };
+    };
+    
+    disable_if :: fn(disable: bool, $body: @Fn() void) = {
+        @if(disable) nk_widget_disable_begin(ctx);
+        body();
+        @if(disable) nk_widget_disable_end(ctx);
+    };
 }
 
 get_real_time :: fn() i64 = { t := zeroed(TimeSpec); Posix'clock_gettime(Posix.CLOCK.REALTIME, t&); t.seconds };
@@ -679,6 +662,7 @@ fn read_save_file(sim: *Simulation, in: []u8) void = {
     @println("PasteSaveFile(plain):  %", in);
     
     c, f := (sim.clicker&, sim.factory&);
+    sim.notifications&.clear();
     in := in.split(",", temp());
     @if(in.len < 5 || in[0] != "IDLE_FR" || in[1] != "v=1") return();
     if in[2].starts_with("g=") {
@@ -877,6 +861,7 @@ fn init_world(s: *Simulation, a: Alloc) void = {
     init_world(s.clicker&, a);
     init_world(s.factory&, a);
     s.achievements = a.alloc_zeroed(Simulation.Achivement, achievements.len());
+    s.notifications&.clear();
 }
 
 achievement_referenced :: ast_alloc().alloc_zeroed(bool, achievements.len());

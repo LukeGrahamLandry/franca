@@ -269,6 +269,9 @@ Nuklear :: {
         typedef enum nk_edit_events nk_edit_events;
         typedef struct nk_rect nk_rect_t;
         typedef struct nk_color nk_color;
+        typedef struct nk_style_button nk_style_button;
+        typedef enum nk_tree_type nk_tree_type;
+        typedef enum nk_collapse_states nk_collapse_states;
         
         // for examples/os/bin/test_ui
         #define NK_RAWFB_IMPLEMENTATION
@@ -277,3 +280,44 @@ Nuklear :: {
     allow :: @const_slice("puts", "exit", "qsort", "free", "malloc", "memset", "memcpy", "floor", "ceil", "sqrt", "fabs");
     Ffi'include(current_compiler_context(), c_source, (whitelist = (Some = allow)))
 };
+
+// this has to recreate nk_widget_text_wrap to precalulcate how much will fit on each line and then ask for a row tall enough to fit the whole thing
+fn wrapping_text_row(ctx: *nk_context, msg: Str) void #use(Nuklear) = {
+    while => msg.len > 0 {
+        bounds, font := (nk_layout_widget_bounds(ctx), ctx.style.font&);
+        (lines: f32, width: f32) := (1, 0);
+        line_width, line_height := (bounds.w - ctx.style.text.padding.x*2, font.height + ctx.style.text.padding.y*2);
+        i := 0;
+        while => i < msg.len && msg[i] != "\n".ascii() {
+            char_width := font'width(font.userdata, font.height, nk_string(msg.rest(i)), 1);
+            width += char_width;
+            if width >= line_width {
+                lines += 1;
+                width = char_width;
+            };
+            i += 1;
+        };
+        total := lines * line_height + ctx.style.window.spacing.y;
+        
+        nk_layout_row_dynamic(ctx, total, 1);
+        nk_text_wrap(ctx, nk_string(msg), i.intcast());
+        msg = msg.rest(i+int(i != msg.len));
+    };
+};
+
+nk_cstring :: fn(text: Str) = bit_cast_unchecked(*u8, *i8, text.as_cstr().as_ptr());
+nk_string :: fn(text: Str) *i8 = {
+    if text.len == 0 {
+        // they assert the pointer isn't null which is fine for zero length c strings because they still point at the terminator. 
+        // but the ones that pass the length won't dereference it anyway so nobody cares. 
+        text.ptr = u8.ptr_from_int(1);  
+    };
+    bit_cast_unchecked(*u8, *i8, text.ptr)
+};
+
+fn button_styled(ctx: *nk_context, style: *nk_style_button, title: Str) bool #use(Nuklear) = nk_button_text_styled(ctx, style, nk_string(title), title.len.intcast());
+fn button(ctx: *nk_context, title: Str) bool #use(Nuklear) = nk_button_text(ctx, nk_string(title), title.len.intcast());
+fn text(ctx: *nk_context, text: Str) void #use(Nuklear) = nk_text(ctx, nk_string(text), text.len.intcast(), 0);
+fn checkbox(ctx: *nk_context, text: Str, active: *bool) bool #use(Nuklear) = nk_checkbox_text(ctx, nk_string(text), text.len.intcast(), active);
+fn tree_push_hashed(ctx: *nk_context, type: nk_tree_type, title: Str, initial: nk_collapse_states, hash: Str, id: i64) bool #use(Nuklear) = nk_tree_push_hashed(ctx, type, nk_cstring(title), initial, nk_string(hash), hash.len.intcast(), id.intcast());
+fn begin(ctx: *nk_context, title: Str, bounds: nk_rect_t, flags: nk_flags) bool #use(Nuklear) = nk_begin(ctx, nk_cstring(title), bounds, flags);
