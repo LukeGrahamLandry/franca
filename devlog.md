@@ -1,6 +1,21 @@
-## (Oct 2)
 
+## (Oct 2) idle
+
+- cute names for achievements. the mechanic where you can reset with a boost to get farther before the exponential gets too big. 
+- i don't know why i find the idea of stealing slop from ai repulsive 
+  but porting the pseudocode for astar from wikipedia feels fine. 
+  you'd think both are being lazy and avoiding learning but it really feels different. 
 - astar hanging because can have negative weight if overshoot killing it and hp<0 for a frame
+- it's impressive how much more like a game it feels when the monsters know how to walk around walls
+
+## (Sep 31, Oct 1) idle
+
+i want to make something that other people like but i don't know how to do that.  
+my idea is to practice by trying to make something i like without letting it get to complicated to explain what it is.  
+making one of those silly clicker games because i was playing one yesterday until i couldn't progress without watching an ad. 
+- i resolve to not get distracted by obsessing over if the code is slow until i can see the problem in a profiler. 
+- did something cute with "encrypting" the save file so i can't cheat and im forced to try to make something i don't hate playing while testing it
+- clicker that takes about as long until i get bored until you unlock a thing with placing buildings
 
 ## (Sep 30)
 

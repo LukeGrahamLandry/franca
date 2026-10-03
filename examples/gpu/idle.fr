@@ -23,8 +23,6 @@ Clicker :: @struct {
     Currency :: @struct(name: Str, amount: i64);
     currencies: []Currency;
     generators: []Generator;
-    // TODO: redundant with the achivement
-    have_world_map: bool;
     Price :: @struct(currency: i64, amount: i64);
     
     total_earnings: i64;
@@ -38,7 +36,6 @@ Clicker :: @struct {
 fn init_world(c: *Clicker, a: Alloc) void #use(Clicker) = {
     c.warp_start_time = .None;
     c.prev_time = timestamp_s();
-    c.have_world_map = false;
 
     c.generators = a.alloc_zeroed(Generator, 4);
     c.currencies = a.alloc_zeroed(Currency, 4);
@@ -47,7 +44,7 @@ fn init_world(c: *Clicker, a: Alloc) void #use(Clicker) = {
     c.generators[2] = (name = "Z", price = (currency=0, amount=3500), production = (currency=1, amount=1), auto_price=(currency=1, amount=80));
     c.generators[3] = (name = "Q", price = (currency=2, amount=50), production = (currency=1, amount=5), auto_price=(currency=0, amount=10000));
     c.currencies[0] = (name = "A", amount = 1);
-    c.currencies[1] = (name = "B", amount = 0);
+    c.currencies[building_currency_index] = (name = "B", amount = 0);
     c.currencies[collector_currency_index] = (name = "C", amount = 0);
     c.currencies[prestige_currency_index] = (name = "D", amount = 0);
 }
@@ -100,10 +97,11 @@ fn adjust_for_prestige(c: *Clicker, delta: i64) i64 = {
 
 prestige_currency_index :: 3;
 collector_currency_index :: 2;
-fn reset_for_prestige(sim: *Simulation) void = {
+building_currency_index :: 1;
+fn reset_for_prestige(sim: *Simulation, grant_prestige: bool) void = {
     c, f := (sim.clicker&, sim.factory&);
     prestige := c.currencies[prestige_currency_index].amount;
-    delta := c.calculate_next_prestige();
+    delta := @if(grant_prestige, c.calculate_next_prestige(), 0);
     
     each c.currencies { it |
         it.amount = 0;
@@ -116,7 +114,6 @@ fn reset_for_prestige(sim: *Simulation) void = {
     each sim.achievements { it |
         it.set(.complete_this_run, 0);
     };
-    c.have_world_map = false;
     
     c.currencies[0].amount = 1;
     c.currencies[prestige_currency_index].amount = prestige + delta;
@@ -131,7 +128,8 @@ fn calculate_next_prestige(c: *Clicker) i64 = {
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     c := state.clicker&;
-    if sapp.frame_count.umod(64) == 0 {
+    f := state.factory&;
+    if sapp.frame_count.umod(64) == 0 && !f.clicker_destroyed_popup {
         break :: local_return;
         @if(c.warp_start_time.is_some()) break();
         now := timestamp_s();
@@ -145,9 +143,10 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         c.consume_delta_time();
     };
     
-    f := state.factory&;
+    // TODO: extract this out so can easily run multiple updates at once. 
+    //       probably don't run while saved so you don't just auto die but could run more efficiently without rendering when idle just because unfocused. 
     sim := state.sim&;
-    if sapp.frame_count.umod(64) == 0 && c.have_world_map {
+    if sapp.frame_count.umod(64) == 0 && sim.completed_in_this_run("TheDarkForest") && !f.clicker_destroyed_popup {
         if f.buildings.find(fn(it) => it.kind == .Spawner) { spawner |
             spawner_pos := spawner.pos; spawner := ();
             if sapp.frame_count.umod(64*8) == 0 {
@@ -165,7 +164,6 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         if f.buildings.index_of(fn(it) => it.kind == .Clicker) { clicker_i |
             clicker_pos := f.buildings[clicker_i].pos;
             
-            // TODO: you lose if your clicker dies
             moved := false;
             killed := 0;
             enumerate f.buildings { i, it |
@@ -237,7 +235,9 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             @if(killed > 0) f.buildings&.ordered_retain(fn(it) => it.hp > 0);
             @if(moved) f.resort();
             state.dirty = true;
-        };
+        } else {
+            f.clicker_destroyed_popup = true;
+        }
     };
     
     @match(state.action) {
@@ -274,10 +274,11 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     c := state.clicker&;
+    sim := state.sim&;
     @if(@is(event.type, .UNFOCUSED, .ICONIFIED, .MOUSE_LEAVE)) c.start_warp();
     @if(@is(event.type, .FOCUSED, .RESTORED, .MOUSE_ENTER)) {
         @if(c.warp_start_time.is_some()) state.sim&.completed("BeachVacation");
-        c.end_warp();
+        sim.end_warp();
     };
     if event.type == .CLIPBOARD_PASTED && state.action == .PasteSaveFile {
         state.action = .None;
@@ -298,22 +299,24 @@ fn save_to_file(state: *State) void = {
 fn start_warp(c: *Clicker) void = {
     if c.warp_start_time.is_none() {
         t := get_real_time();
-        @println("start_warp t=%", t);
         c.warp_start_time = (Some =t);
     };
 }
 
-fn end_warp(c: *Clicker) void = {
+fn end_warp(sim: *Simulation) void = {
+    c := sim.clicker&;
     @if(c.prev_minimized) return();
-    if c.warp_start_time&.take() { prev_time | 
-        t := get_real_time();
-        @println("end_warp t=% delta=%", t, t - prev_time);
-        if t > prev_time {
-            c.delta_time += float(t - prev_time);
-            c.prev_time = timestamp_s();
-            c.consume_delta_time();
-        };
-    };
+    prev_time := c.warp_start_time&.take() || return();
+    t := get_real_time();
+    delta := t - prev_time;
+    @if(delta <= 0) return();
+    amounts := temp().alloc_init(i64, c.currencies.len, fn(i) => c.currencies[i].amount);
+    c.delta_time += float(delta);
+    c.prev_time = timestamp_s();
+    c.consume_delta_time();
+    @if(delta < 120) return();
+    earned := sim.factory.gpa.alloc_init(i64, amounts.len, fn(i) => c.currencies[i].amount - amounts[i]);
+    sim.notifications&.push((EndWarp = (t = delta, earned = earned)), sim.factory.gpa);
 }
 
 fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
@@ -322,6 +325,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
     flags := (@as(u32) nk_panel_flags.NK_WINDOW_MOVABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_SCALABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_MINIMIZABLE);
     c := state.clicker&;
     sim := state.sim&;
+    f := state.factory&;
     
     if nk_begin(ctx, S"About", nk_rect(520, 10, 300, 200), flags) {
         if nk_tree_push_hashed(ctx, .NK_TREE_NODE, S"Save Game Data", .NK_MINIMIZED, S"", 0, 0) {
@@ -340,13 +344,46 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
             nk_tree_pop(ctx);
         };
         
+        if nk_tree_push_hashed(ctx, .NK_TREE_NODE, S(@fmt_cstr("Notifications (%)", sim.notifications.len)), .NK_MINIMIZED, S"", 0, 4) {
+            dismiss: ?i64 = .None;
+            enumerate_rev sim.notifications { i, it |
+                @match(it) {
+                    fn Achievement(i) => {
+                        nk_layout_row_dynamic(ctx, 0, 2);
+                        nk_label(ctx, S(@fmt_cstr("%", achievements[i[]]._0)), 0);
+                    }
+                    fn EndWarp(it) => {
+                        nk_layout_row_dynamic(ctx, 0, c.currencies.len.intcast() + 2);
+                        nk_label(ctx, S(@fmt_cstr("%s", it.t)), 0);
+                        enumerate c.currencies { i, kind |
+                            nk_label(ctx, S(@fmt_cstr("% %", it.earned[i], kind.name)), 0);
+                        };
+                    }
+                };
+                if nk_button_label(ctx, S"ok") {
+                    dismiss = (Some = i);
+                };
+            };
+            if dismiss { i |
+                it := sim.notifications&.ordered_remove(i).unwrap();
+                @if_let(it) fn EndWarp(it) => f.gpa.dealloc(i64, it.earned);
+            };
+            
+            nk_tree_pop(ctx);
+        };
+        
         if nk_tree_push_hashed(ctx, .NK_TREE_NODE, S"Achievements", .NK_MINIMIZED, S"", 0, 1) {
-            complete := 0;
+            complete, this_run := (0, 0);
             for sim.achievements { it |
                 complete += it.get(.complete);
+                this_run += it.get(.complete_this_run);
             };
             
             nk_label(ctx, S(@fmt_cstr("%/% Completed", complete, achievements.len())), 0);
+            if c.currencies[prestige_currency_index].amount > 0 {
+                nk_label(ctx, S(@fmt_cstr("%/% Since Sacrifice", this_run, achievements.len())), 0);
+            };
+            
             enumerate sim.achievements { i, it |
                 nk_layout_row_dynamic(ctx, 0.01, 1);
                 name, pre_hint, post_hint := achievements[i]; 
@@ -384,15 +421,14 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
             nk_layout_row_dynamic(ctx, 0, 1);
             kind := c.currencies[prestige_currency_index]&;
             delta := c.calculate_next_prestige();
-            @if(delta == 0) nk_widget_disable_begin(ctx);
+            disable := delta == 0 || f.clicker_destroyed_popup;
+            @if(disable) nk_widget_disable_begin(ctx);
             if nk_button_label(ctx, S(@fmt_cstr("Reset (+% %)", delta, kind.name))) {
-                sim.reset_for_prestige();
+                sim.reset_for_prestige(true);
             };
-            @if(delta == 0) nk_widget_disable_end(ctx);
+            @if(disable) nk_widget_disable_end(ctx);
             nk_tree_pop(ctx);
         };
-        
-        
     };
     nk_end(ctx);
         
@@ -465,13 +501,12 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
             + sim.completed_in_this_run("InvestingInYourFuture").int()
         ;
         if n < 2 {
-            kind := c.currencies[1]&;
+            kind := c.currencies[building_currency_index]&;
             price := 300;
             cant_afford := price > kind.amount;
             @if(cant_afford) nk_widget_disable_begin(ctx);
             names := @const_slice("World Map", "Alter Of Sacrifice");
             if nk_button_label(ctx, S(@fmt_cstr("Buy % (-% %)", names[n], price, kind.name))) {
-                c.have_world_map = true;
                 kind.amount -= price;
                 state.save_is_dirty += 1;
                 @if(n == 0) sim.completed("TheDarkForest");
@@ -482,8 +517,9 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
     };
     nk_end(ctx);
     
-    if c.have_world_map {
-        f := state.factory&;
+    // TODO: there's a flicker when you place a building when there are a lot. 
+    //       might have to switch to drawing to a texture directly instead of using buttons. 
+    if sim.completed_in_this_run("TheDarkForest") {
         if nk_begin(ctx, S"World Map", nk_rect(10, 300, 800, 260), flags) {
             @run @assert_eq(building_colours.len(), Factory.Kind.enum_count());
             style := ctx.style.button;
@@ -495,7 +531,8 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                 
                 cur := c.currencies[f.templates&[kind].price.currency]&;
                 price := f.templates&[kind].price.amount;
-                disable := f.placing == kind || cur.amount < price;
+                // not disabling when can't afford because then its confusing if you try to switch too early and just wait to place, you end up buying the old thing
+                disable := f.placing == kind;
                 style.border = ctx.style.button.border * @if(disable, 6, 1);
                 @if(disable) nk_widget_disable_begin(ctx);
                 s := @if(kind == .Empty, S"Sell", S(@fmt_cstr("% (-% %)", kind, price, cur.name)));
@@ -538,9 +575,13 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                             @default => ();
                         };
                         
-                        // TODO: less refund if hp is low
-                        cur.amount += @if(f.placing == .Empty, price, -price);
-                        place_building(f, pos, f.placing);
+                        prev := place_building(f, pos, f.placing);
+                        if f.placing == .Empty {
+                            prev := prev.unwrap();
+                            cur.amount += int(price.float() * (prev.hp.float() / f.templates&[prev.kind].hp.float()));
+                        } else {
+                            cur.amount -= price;
+                        };
                         state.save_is_dirty += 1;
                     };
                     @if(disable) nk_widget_disable_end(ctx);
@@ -548,16 +589,37 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
             };
         };
         nk_end(ctx);
-    }
+    };
+    
+    // feels jarring if you suddenly reset when you die so at least tell you what happened. 
+    if f.clicker_destroyed_popup {
+        if nk_begin(ctx, S"Alert", nk_rect(10, 300, 800, 260), flags) {
+            nk_layout_row_dynamic(ctx, 0, 1);
+            prestige := c.currencies[prestige_currency_index]&;
+            nk_label(ctx, S"The Mine was destroyed", 0);
+            nk_label(ctx, S"progress will be reset", 0);
+            if prestige.amount + c.calculate_next_prestige() > 0 {
+                nk_label(ctx, S(@fmt_cstr("your % % will be kept", prestige.amount, prestige.name)), 0);
+                nk_label(ctx, S(@fmt_cstr("but % % was wasted by not sacrificing", c.calculate_next_prestige(), prestige.name)), 0);
+            };
+            if nk_button_label(ctx, S("Continue")) {
+                f.clicker_destroyed_popup = false;
+                sim.reset_for_prestige(false);
+            };
+        };
+        nk_end(ctx);
+    };
     
     if minimized != c.prev_minimized {
         c.prev_minimized = minimized;
-        @if(minimized, c.start_warp(), c.end_warp());
+        @if(minimized, c.start_warp(), sim.end_warp());
     }
 }
 
 get_real_time :: fn() i64 = { t := zeroed(TimeSpec); Posix'clock_gettime(Posix.CLOCK.REALTIME, t&); t.seconds };
 
+// TODO: add more to save file if use it for suspend in maze_game:
+//       sim.notifications,f.placing,c.delta_time,f.(fraction of a tick)
 B64 :: import("@/lib/encoding/base64.fr");
 fn write_save_file(sim: *Simulation) []u8 = {
     c, f := (sim.clicker&, sim.factory&);
@@ -572,9 +634,10 @@ fn write_save_file(sim: *Simulation) []u8 = {
     enumerate c.currencies { i, it |
         @fmt(out, "%:%|", i, it.amount);
     };
-    @fmt(out, ",t=%,w=%,", c.warp_start_time || get_real_time(), c.have_world_map.int());
+    have_world_map := sim.completed_in_this_run("TheDarkForest");
+    @fmt(out, ",t=%,w=%,", c.warp_start_time || get_real_time(), have_world_map.int());
     
-    if c.have_world_map {
+    if have_world_map {
         @fmt(out, "f=");
         enumerate f.buildings { i, it |
             @fmt(out, "%:%:%:%:%:%|", i, @as(i64) it.kind, it.pos.x, it.pos.y, it.hp, it.level);
@@ -589,6 +652,7 @@ fn write_save_file(sim: *Simulation) []u8 = {
         };
     };
     @fmt(out, ",h=%,", sim.total_hints);
+    @fmt(out, "e=%,", c.total_earnings);
     
     in := out.items(); 
     @println("CopySaveFile(plain):  %", in);
@@ -637,14 +701,14 @@ fn read_save_file(sim: *Simulation, in: []u8) void = {
     if in[4].starts_with("t=") {
         t := in[4].rest(2).parse_int();
         c.warp_start_time = (Some = t);
-        c.end_warp();
+        sim.end_warp();
     };
-    c.have_world_map = false;
+    have_world_map := false;
     if in.len > 4 && in[5].starts_with("w=") {
-        c.have_world_map = in[5] == "w=1";
+        have_world_map = in[5] == "w=1";
     };
     
-    if c.have_world_map && in.len > 5 && in[6].starts_with("f=") {
+    if have_world_map && in.len > 5 && in[6].starts_with("f=") {
         f.buildings&.clear();
         in := in[6].rest(2).split("|", temp());
         for in { in |
@@ -661,7 +725,7 @@ fn read_save_file(sim: *Simulation, in: []u8) void = {
         };
         @fmt(out, ",");
     };
-    I := 6 + int(c.have_world_map);
+    I := 6 + int(have_world_map);
     if in.len > I && in[I].starts_with("a=") {
         in := in[I].rest(2).split("|", temp());
         sim.achievements.set_zeroed();
@@ -678,7 +742,10 @@ fn read_save_file(sim: *Simulation, in: []u8) void = {
         sim.total_hints = in[I].rest(2).parse_int();
         I += 1;
     };
-    
+    if in.len > I && in[I].starts_with("e=") {
+        c.total_earnings = in[I].rest(2).parse_int();
+        I += 1;
+    };
 }
 
 // cute way to make it inconvenient for myself to cheat by editing the save. 
@@ -730,6 +797,7 @@ Factory :: @struct {
     placing: Kind;
     gpa: Alloc;
     dimensions: f32;
+    clicker_destroyed_popup: bool;
 };
 
 building_colours :: @const_slice(@as(Ui.Nuklear.nk_color) 
@@ -744,9 +812,10 @@ building_colours :: @const_slice(@as(Ui.Nuklear.nk_color)
 
 fn init_world(f: *Factory, a: Alloc) void = {
     f.gpa = a;
-    f.templates&[.Turret] = (hp = 25, price = (currency = 1, amount = 50));
-    f.templates&[.Wall] = (hp = 200, price = (currency = 1, amount = 20));
-    f.templates&[.Collector] = (hp = 20, price = (currency = 1, amount = 40));
+    C :: building_currency_index;
+    f.templates&[.Turret] = (hp = 25, price = (currency = C, amount = 50));
+    f.templates&[.Wall] = (hp = 200, price = (currency = C, amount = 20));
+    f.templates&[.Collector] = (hp = 20, price = (currency = C, amount = 40));
     f.templates&[.Monster] = (hp = 20);
     f.templates&[.Spawner] = (hp = 1000);
     f.templates&[.Clicker] = (hp = 5000);
@@ -755,15 +824,15 @@ fn init_world(f: *Factory, a: Alloc) void = {
     place_building(f, vec2(2), .Clicker);
 }
 
-fn place_building(f: *Factory, pos: Vec2, kind: Factory.Kind) void = {
-    // :SLOW
+// :SLOW the sorting matters for rendering. empty cells aren't saved as a building. 
+fn place_building(f: *Factory, pos: Vec2, kind: Factory.Kind) ?Factory.Building = {
     if kind == .Empty {
-        f.buildings&.ordered_remove(f.buildings&.index_of(fn(it) => it.pos == pos) || return());
-    } else {
+        return(f.buildings&.ordered_remove(f.buildings&.index_of(fn(it) => it.pos == pos) || return(.None)));
+    };
         hp := f.templates&[kind].hp;
         f.buildings&.push((pos=pos, kind=kind, hp = hp, level = 1), f.gpa);
         f.resort();
-    };
+        .None
 }
 
 fn resort(f: *Factory) void = 
@@ -797,6 +866,11 @@ Simulation :: @struct {
         complete_this_run := 1,
         _ := 4,
     );
+    notifications: RawList(Notification);
+    Notification :: @tagged(
+        Achievement: i64, 
+        EndWarp: @struct(t: i64, earned: []i64),
+    );
 };
 
 fn init_world(s: *Simulation, a: Alloc) void = {
@@ -809,9 +883,13 @@ achievement_referenced :: ast_alloc().alloc_zeroed(bool, achievements.len());
 fn completed(s: *Simulation, $name: Str) void = {
     i :: achievements.index_of(fn(x) => x._0 == name) || @panic("invalid achivement name: %", name);
     @run { achievement_referenced[i] = true; };
-    s.achievements[i]&.set(.complete, 1);
-    s.achievements[i]&.set(.complete_this_run, 1);
-    s.achievements[i]&.set(.hint, 3);
+    it := s.achievements[i]&;
+    if it[].get(.complete) == 0 {
+        s.notifications&.push((Achievement = i), s.factory.gpa);
+        it.set(.complete, 1);
+        it.set(.hint, 3);
+    };
+    it.set(.complete_this_run, 1);
 }
 
 fn completed_in_this_run(s: *Simulation, $name: Str) bool = {
@@ -819,6 +897,7 @@ fn completed_in_this_run(s: *Simulation, $name: Str) bool = {
     s.achievements[i].get(.complete_this_run) == 1
 }
 
+// stored by index in the save file and used for important unlocks (world map / alter) so reorder is breaking change. 
 achievements :: @const_slice(
     ("TheyAreTakingOurJobs", "buy auto collect", "you can still collect manually if you choose to disable the Auto checkbox. how fast can you click?"),
     ("BeachVacation", "return from being idle", "time in the mine keeps passing while the window is unfocused. you'll have plenty of resources to return to"),
@@ -841,9 +920,19 @@ achievements :: @const_slice(
     ("InvestingInYourFuture", "buy alter of sacrifice", "use the alter to reset your progress and restart the game with greatly boosted earnings"),
 );
 
+// TODO: only return the one next step if that's all im using
+// TODO: if get stuck waiting in line behind other monsters, 
+//       change target (to an exposed turret/collector) if possible 
+//       and remember it for longer so don't keep going back and forth as the blockers move. 
+
 // https://en.wikipedia.org/wiki/A*_search_algorithm#Pseudocode
 a_star :: fn(f: *Factory, start: Node, goal: Node) []Node = {
-    h :: fn(node) => (goal.pos - node.pos).norm_sq();
+    // estimate of total weight on path to goal 
+    h :: fn(node) => {  
+        it := abs(goal.pos - node.pos);
+        it.x + it.y
+    };
+    // exact weight for this one edge
     d :: fn(_current, neighbor) f32 => @if(neighbor.i == -1, 1, {
         it := f.buildings[neighbor.i]&;
         @match(it.kind) {
