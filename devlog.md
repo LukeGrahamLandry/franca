@@ -1,4 +1,8 @@
 
+## (Oct 3) idle
+
+- the flicker when buying a building was just because i was inserting in the middle without fixing the index used to step which building will be drawn
+
 ## (Oct 2) idle
 
 - cute names for achievements. the mechanic where you can reset with a boost to get farther before the exponential gets too big. 
