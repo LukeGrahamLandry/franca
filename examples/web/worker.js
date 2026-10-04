@@ -194,6 +194,21 @@ export const imports = {
                     dest.set(new Uint8Array(result));
                     return BigInt(result.byteLength);
                 }
+                case 0xBBBB0003n: {
+                    if (Number(len) != 48) return -1n;
+                    const get = (n) => new DataView(Franca.memory.buffer, Number(ptr)).getBigInt64(n*8, true);
+                    const [action, key_ptr, key_len, value_ptr, value_len, futex_ptr] = [get(0), get(1), get(2), get(3), get(4), get(5)];
+                    const key = get_wasm_string(key_ptr, key_len);
+                    console.log([action, key_ptr, key_len, value_ptr, value_len, futex_ptr]);
+                    if (action == 0n) {  // read
+                        const buf = new Int32Array(Franca.memory.buffer, Number(futex_ptr), 1);
+                        buf[0] = -2;
+                        postMessage({ tag: "get_local_storage", key, futex_ptr, value_ptr, value_len, memory: Franca.memory });
+                    } else {  // write
+                        postMessage({ tag: "set_local_storage", key, value: get_wasm_string(value_ptr, value_len) });
+                    }
+                    return 0n;
+                }
                 default: {
                     // this is convoluted! 
                     // ex. paste event passes franca a handle the pasted string and it can then ask for the bytes here. 

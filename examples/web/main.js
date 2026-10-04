@@ -71,6 +71,32 @@ const handle = (resolve, handle_app_request) => (_msg) => {
             w.postMessage({ tag: "start", args: [], child: msg.child, memory: msg.memory, epoch });
             break
         }
+        case "set_local_storage": {
+            try { localStorage.setItem(msg.key, msg.value); } catch (e) { console.error(e); }
+            break
+        }
+        case "get_local_storage": {
+            const buf = new Int32Array(msg.memory.buffer, Number(msg.futex_ptr), 1);
+            if (buf[0] != -2) return;
+            try { 
+                const value_s = localStorage.getItem(msg.key);
+                if (value_s === null) {
+                    buf[0] = -1;
+                } else {
+                    const value = new TextEncoder().encode(value_s);
+                    buf[0] = value.byteLength;
+                    if (BigInt(value.byteLength) <= msg.value_len) {
+                        const dest = new Uint8Array(msg.memory.buffer, Number(msg.value_ptr), value.byteLength);
+                        dest.set(new Uint8Array(value.buffer));
+                    }
+                }
+            } catch (e) {
+                console.error(e);
+                buf[0] = -1;
+            };
+            Atomics.notify(buf, 0);
+            break
+        }
         default:
             throw msg;
     }

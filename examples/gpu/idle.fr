@@ -7,7 +7,7 @@ State :: @struct {
     save_is_dirty: i64;
     prev_save_time: i64;
     
-    action: @enum(None, PasteSaveFile, CopySaveFile);
+    action: @enum(None, PasteSaveFile, CopySaveFile, SaveToFile);
 };
 
 Clicker :: @struct {
@@ -55,7 +55,8 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     on_init(state.ui&, sg);
     state.dirty = true;
     init_world(state.sim&, general_allocator());
-        
+    
+    sync_local_storage_if_web(save_file_path, true, 1024);
     if read_entire_file(temp(), save_file_path) { in |
         read_save_file(state.sim&, in);
     };
@@ -172,6 +173,10 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     @match(state.action) {
         fn None() => ();
+        fn SaveToFile() => {
+            save_to_file(state);
+            state.action = .None;
+        }
         fn CopySaveFile() => {
             out := write_save_file(state.sim&);
             sapp.set_clipboard_string(out);
@@ -188,7 +193,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     
     // autosave
-    if state.save_is_dirty > 25 && state.prev_save_time + 120 > get_real_time() {
+    if state.save_is_dirty > 25 && state.prev_save_time + 120 < get_real_time() {
         state.save_to_file();
         state.save_is_dirty = 0;
         state.prev_save_time = get_real_time();
@@ -224,6 +229,7 @@ save_file_path :: "target/franca/idle.txt";
 fn save_to_file(state: *State) void = {
     _ := make_dirs(pop_path_segment(save_file_path));
     _ := write_entire_file(save_file_path, write_save_file(state.sim&));
+    sync_local_storage_if_web(save_file_path, false, 0);
 }
 
 fn start_warp(c: *Clicker) void = {
@@ -259,6 +265,9 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
     if begin(ctx, "About", nk_rect(520, 10, 300, 200), flags) {
         if tree_push_hashed(ctx, .NK_TREE_NODE, "Save Game Data", .NK_MINIMIZED, "", 0) {
             nk_layout_row_dynamic(ctx, 0, 1);
+            if button(ctx, "Save") {
+                state.action = .SaveToFile;
+            };
             if button(ctx, "Copy to Clipboard") {
                 state.action = .CopySaveFile;
             };
