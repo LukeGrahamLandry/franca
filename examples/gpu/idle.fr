@@ -61,11 +61,15 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     state.prev_save_time = get_real_time();
     
+    @run {
     enumerate achievement_referenced { i, it |
-        @if(!it[]) @println("achievement % cannot be completed", achievements[i]._0);
+        @if(!it[]) @println("achievement[%]:% cannot be completed", i, achievements[i]._0);
     };
-    
+    };
+    hack_delay_achievement_referenced[] = achievement_referenced;
 }
+
+hack_delay_achievement_referenced :: @static_mut zeroed([]bool);
 
 fn consume_delta_time(sim: *Simulation) void = {
     @if(sim.completed_in_this_run("WasteOfAGoodSacrifice")) return();
@@ -106,6 +110,7 @@ prestige_currency_index :: 3;
 collector_currency_index :: 2;
 building_currency_index :: 1;
 fn reset_for_prestige(sim: *Simulation, grant_prestige: bool) void = {
+    println(write_save_file(sim));
     c, f := (sim.clicker&, sim.factory&);
     prestige := c.currencies[prestige_currency_index].amount;
     delta := @if(grant_prestige, c.calculate_next_prestige(), 0);
@@ -201,7 +206,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     sim := state.sim&;
     @if(@is(event.type, .UNFOCUSED, .ICONIFIED, .MOUSE_LEAVE)) c.start_warp();
     @if(@is(event.type, .FOCUSED, .RESTORED, .MOUSE_ENTER)) {
-        @if(c.warp_start_time.is_some()) state.sim&.completed("DoingTheDevilsWork");
+        @if(c.warp_start_time.is_some()) state.sim&.completed("IdleHandsDoTheDevilsWork");
         sim.end_warp();
     };
     if event.type == .CLIPBOARD_PASTED && state.action == .PasteSaveFile {
@@ -224,7 +229,7 @@ fn save_to_file(state: *State) void = {
 fn start_warp(c: *Clicker) void = {
     if c.warp_start_time.is_none() {
         t := get_real_time();
-        c.warp_start_time = (Some =t);
+        c.warp_start_time = (Some = t);
     };
 }
 
@@ -268,25 +273,31 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
             nk_tree_pop(ctx);
         };
         
-        if tree_push_hashed(ctx, .NK_TREE_NODE, @tfmt("Notifications (%)", sim.notifications.len), .NK_MINIMIZED, "", 4) {
+        if tree_push_hashed(ctx, .NK_TREE_NODE, @tfmt("Notifications (%)", sim.notifications.len), .NK_MAXIMIZED, "", 4) {
             dismiss: ?i64 = .None;
             enumerate_rev sim.notifications { i, it |
                 @match(it) {
                     fn Achievement(i) => {
-                        nk_layout_row_dynamic(ctx, 0, 2);
-                        text(ctx, achievements[i[]]._0);
+                        name, pre_hint, post_hint := achievements[i[]]; 
+                        wrapping_text_row(ctx, name);
+                        wrapping_text_row(ctx, pre_hint);
+                        wrapping_text_row(ctx, post_hint);
                     }
                     fn EndWarp(it) => {
-                        nk_layout_row_dynamic(ctx, 0, c.currencies.len.intcast() + 2);
-                        text(ctx, @tfmt("%s", it.t));
+                        wrapping_text_row(ctx, @tfmt("idle for % seconds", it.t));
+                        out := @ref u8.list(temp());
                         enumerate c.currencies { i, kind |
-                            text(ctx, @tfmt("% %", it.earned[i], kind.name));
+                            @if(it.earned[i] != 0) @fmt(out, "+% %, ", it.earned[i], kind.name);
                         };
+                        @if(out.len != 0) wrapping_text_row(ctx, out.items());
                     }
                 };
+                nk_layout_row_dynamic(ctx, 0, 1);
                 if button(ctx, "ok") {
                     dismiss = (Some = i);
                 };
+                nk_layout_row_dynamic(ctx, 2, 1);
+                nk_rule_horizontal(ctx, (r=255,g=255,b=255,a=255), true);
             };
             if dismiss { i |
                 it := sim.notifications&.ordered_remove(i).unwrap();
@@ -297,14 +308,19 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
         };
         if tree_push_hashed(ctx, .NK_TREE_NODE, "Achievements", .NK_MINIMIZED, "", 1) {
             complete := 0;
-            for sim.achievements { it |
-                complete += it.get(.complete);
+            total := 0;
+            enumerate sim.achievements { i, it |
+                complete += it[].get(.complete);
+                total += int(hack_delay_achievement_referenced[i]);
             };
             
-            wrapping_text_row(ctx, @tfmt("%/% Completed", complete, achievements.len()));
+            wrapping_text_row(ctx, @tfmt("%/% Completed", complete, total));
             wrapping_text_row(ctx, @tfmt("% Lifetime Earnings", c.total_earnings));
             
             enumerate sim.achievements { i, it |
+                continue :: local_return;
+                @if(!hack_delay_achievement_referenced[i]) continue();
+                
                 nk_layout_row_dynamic(ctx, 0.01, 1);
                 name, pre_hint, post_hint := achievements[i]; 
                 n := it[].get(.hint);
@@ -364,7 +380,12 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
         };
         @if(n == c.currencies.len) sim.completed("VeritableCornucopia");
         
+        locked := false;
         enumerate c.generators { i, it |
+            continue :: local_return;
+            @if(locked) continue(show_locked_button(true));
+            locked = it.level == 0;
+        
             nk_layout_row_dynamic(ctx, 0, 4);
             
             text(ctx, @tfmt("% %", it.level, it.name));
@@ -396,24 +417,26 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
         
         nk_layout_row_dynamic(ctx, 0, 1);
         
-        upgrades :: @const_slice("TheDarkForest", "InvestingInYourFuture", "CompactMachines", "TimeWarpTonic");
-        names := @const_slice("World Map", "Altar Of Sacrifice", "Building Upgrade Menu", "World Speed Control");
-        n := 0;
-        inline_for upgrades { $name |
-            n += sim.completed_in_this_run(name[]).int();
-        };
-        if n < 4 {
-            cur := @if(n < 2, building_currency_index, collector_currency_index);
-            price: Clicker.Price = (currency = cur, amount = 300 * @if(n < 3, 1, 150));
-            buy_button(price, false, @tfmt("Buy %", names[n])) {
-                @if(n == 0) f.buildings&.push(f.init_building(vec2(2), .Clicker), f.gpa);
-                i := 0;
-                inline_for upgrades { $name |
-                    @if(n == i) sim.completed(name[]);
-                    i += 1;
-                };
-                @if(sim.time_since_reset < 30) sim.completed("FastestHandsInTheWest");
+        n := do_upgrade_chain(@const_slice(0, 1, 2, 3));
+        @if(n >= 1) { do_upgrade_chain(@const_slice(4, 5, 6)); };
+        
+        do_upgrade_chain :: fn($indices: []i64) i64 => {
+            n := 0;
+            inline_for indices { $i |
+                n += sim.completed_in_this_run(upgrades[i[]]._0).int();
             };
+            if n < indices.len() {
+                price: Clicker.Price = upgrades[indices[n]]._2;
+                buy_button(price, false, @tfmt("Buy %", upgrades[indices[n]]._1)) {
+                    j := 0;
+                    inline_for indices { $i |
+                        @if(n == j) sim.completed(upgrades[i[]]._0);
+                        j += 1;
+                    };
+                    @if(sim.time_since_reset < 30) sim.completed("FastestHandsInTheWest");
+                };
+            };
+            n
         };
     };
     nk_end(ctx);
@@ -440,8 +463,12 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                 // not disabling when can't afford because then its confusing if you try to switch too early and just wait to place, you end up buying the old thing
                 disable := f.placing == kind;
                 style.border = ctx.style.button.border * @if(disable, 6, 1);
-                disable_if(f.placing == kind) {
+                no_sell := !sim.completed_in_this_run("EverythingMustGo") && kind == .Empty;
+                disable_if(f.placing == kind || no_sell) {
                 s := @if(kind == .Empty, "Sell", @tfmt("% (-% %)", kind, price, cur.name));
+                if no_sell {
+                    s = "?";
+                };
                 if button_styled(ctx, style&, s) {
                     f.placing = kind;
                 };
@@ -465,7 +492,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                     style.normal = nk_style_item_color(building_colours[@as(i64) kind]);
                     style.border = level.float().cast().div(2).min(5);
                     
-                    can_sell := placeable.contains(fn(it) => it[] == kind);
+                    can_sell := placeable.contains(fn(it) => it[] == kind) && sim.completed_in_this_run("EverythingMustGo");
                     priced_kind := @if(f.placing == .Empty, kind, f.placing);
                     cur := c.currencies[f.templates&[priced_kind].price.currency]&;
                     price := f.templates&[priced_kind].price.amount;
@@ -500,20 +527,22 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                             mine := it.kind == .Clicker;
                             name := @if(mine, "Mine", it.kind.name_str());
                             wrapping_text_row(ctx, @tfmt("Level % % (%hp)", it.level, name, it.hp));
+                            if sim.completed_in_this_run("Inspectigator") {
                             @match(kind) {
                                 fn Turret() => wrapping_text_row(ctx, @tfmt("Range=3, Damage=%", it.level));
-                                fn Collector() => wrapping_text_row(ctx, @tfmt("Range=3, Earnings=%", it.level));
-                                fn Spawner() => wrapping_text_row(ctx, @tfmt("Range=1.5, Damage=%, Chance=%", it.level*20, min(1.0/8.0 + float(it.level)/40, 1)));
-                                fn Monster() => wrapping_text_row(ctx, @tfmt("Range=1, Damage=%", it.level*10));
+                                fn Collector() => wrapping_text_row(ctx, @tfmt("Range=3, Earnings=%x", it.level));
+                                fn Spawner() => wrapping_text_row(ctx, @tfmt("Range=1.5, Damage=%, Chance=%, Reward=%x", it.level*20, min(1.0/8.0 + float(it.level)/40, 1), it.level*100));
+                                fn Monster() => wrapping_text_row(ctx, @tfmt("Range=1, Damage=%, Reward=%x", it.level*10, it.level));
                                 fn Clicker() => wrapping_text_row(ctx, @tfmt("Bonus=%x", c.earnings_multiplier));
                                 @default => ();
+                            };
                             };
                             
                             nk_layout_row_dynamic(ctx, 0, 1);
                             if !@is(it.kind, .Monster, .Spawner) {
+                                if sim.completed_in_this_run("CompactMachines") {
                                 cur := @if(mine, collector_currency_index, building_currency_index);
                                 price := f.upgrade_price(it.kind, it.level);
-                                disable_if(!sim.completed_in_this_run("CompactMachines")) {
                                 buy_button(price, false, "Upgrade") {
                                     damage := f.max_hp(it) - it.hp;
                                     it.level += 1;
@@ -523,14 +552,19 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                                         sim.completed("GoldPlatedPickaxe");
                                     };
                                 };
+                                } else {
+                                    show_locked_button(false);
                                 };
-                                if !mine {
+                                @if(!mine)
+                                if sim.completed_in_this_run("EverythingMustGo") {
                                     price := f.calculate_refund(it);
                                     name := c.currencies[price.currency].name;
                                     if button(ctx, @tfmt("Sell (+% %)", price.amount, name)) {
                                         i -= 1;
                                         sell_at_index(sim, i);
                                     };
+                                } else {
+                                    show_locked_button(false);
                                 };
                             };
                         } else {
@@ -555,8 +589,9 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                 };
             };
             
+            if sim.completed_in_this_run("TheWorldIsYourOyster") {
             nk_layout_row_dynamic(ctx, 0, 2);
-            price: Clicker.Price = (amount = 64 + powI(2, W+H-24+2), currency = collector_currency_index);
+            price: Clicker.Price = (amount = 16 + powI(2, W+H-18), currency = collector_currency_index);
             buy_button(price, H >= 20, "Buy Row") {
                 f.dimensions.y += 1;
                 sim.completed("GentlyDownTheStream");
@@ -565,6 +600,9 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                 f.dimensions.x += 1;
             };
             @if(W == H) sim.completed("AsWideAsItIsTall");
+            } else {
+                show_locked_button(true);
+            };
             
             if sim.completed_in_this_run("TimeWarpTonic") {
                 nk_layout_row_dynamic(ctx, 0, 3);
@@ -574,9 +612,16 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                 buy_button(price, false, "Upgrade") {
                     f.max_time_multiplier += 1;
                 };
+            } else {
+                show_locked_button(true);
             };
         };
         nk_end(ctx);
+    };
+    
+    show_locked_button :: fn(row: bool) => {
+        @if(row) nk_layout_row_dynamic(ctx, 0, 1);
+        disable_if(true, => { button(ctx, "?"); });
     };
     
     // feels jarring if you suddenly reset when you die so at least tell you what happened. 
@@ -700,11 +745,11 @@ fn write_save_file(sim: *Simulation) []u8 = {
     @fmt(out, "m=%:%,", f.time_multiplier, f.max_time_multiplier);
     
     in := out.items(); 
-    @println("CopySaveFile(plain):  %", in);
+    // @println("CopySaveFile(plain):  %", in);
     flip_encrypt(in, true);
     out := @ref u8.list(temp());
     B64'encode(out, in);
-    @println("CopySaveFile(cipher): %", out.items());
+    // @println("CopySaveFile(cipher): %", out.items());
     out.items()
 }
 
@@ -715,13 +760,13 @@ fn read_save_file(sim: *Simulation, in: []u8) void = {
     while => in.len > 0 && in[0].is_ascii_whitespace() {
         in = in.rest(1);
     };
-    @println("PasteSaveFile(cipher): %", in);
+    // @println("PasteSaveFile(cipher): %", in);
     out := @ref u8.list(temp());
     @if(in.len.umod(4) != 0) return();
     B64'base64_decode(out, in);
     in := out.items();
     flip_encrypt(in, false);
-    @println("PasteSaveFile(plain):  %", in);
+    // @println("PasteSaveFile(plain):  %", in);
     
     c, f := (sim.clicker&, sim.factory&);
     sim.notifications&.clear();
@@ -878,7 +923,7 @@ building_colours :: @const_slice(@as(Ui.Nuklear.nk_color)
     (r=0,g=100,b=100,a=255),
 );
 
-base_factory_dimensions :: vec2(16, 8);
+base_factory_dimensions :: vec2(12, 6);
 fn init_world(f: *Factory, a: Alloc) void = {
     f.gpa = a;
     f.rng = (s = (1,2,3,4), next = Random.xoshiro256SS);
@@ -893,6 +938,7 @@ fn init_world(f: *Factory, a: Alloc) void = {
     f.templates&[.Clicker] = (hp = 5000);
     f.buildings&.clear();
     f.dimensions = base_factory_dimensions;
+    f.buildings&.push(f.init_building(vec2(2), .Clicker), f.gpa);
 }
 
 fn tick_factory(sim: *Simulation) void = {
@@ -912,7 +958,7 @@ fn tick_factory(sim: *Simulation) void = {
     moved, killed := (false, 0);
     
     if f.buildings.find(fn(it) => it.kind == .Spawner).is_none() {
-        if f.rng&.rand_float() < 1.0/32.0 {
+        if f.rng&.rand_float() < 1.0/32.0 + float(w*h)/75000 {
             f.trying_to_spawn_spawner = true;
         };
         if f.trying_to_spawn_spawner && has_space {
@@ -1109,9 +1155,9 @@ fn completed_in_this_run(s: *Simulation, $name: Str) bool = {
 // stored by index in the save file and used for important unlocks (world map / altar) so reorder is breaking change. 
 achievements :: @const_slice(
     ("TheyAreTakingOurJobs", "buy auto collect", "you can still collect manually if you choose to disable the Auto checkbox. how fast can you click?"),
-    ("DoingTheDevilsWork", "return from being idle", "time in the mine keeps passing while the window is unfocused. you'll have plenty of resources to return to"),
+    ("IdleHandsDoTheDevilsWork", "return from being idle", "time in the mine keeps passing while the window is unfocused. you'll have plenty of resources to return to"),
     ("EtchedInStone", "create and restore a save file", "the save includes the time it was made so resources will continue being collected while the game isn't running"),
-    ("TheDarkForest", "unlock the world map", "the world looks quite empty but you never know what might be lurking. build defences to be on the safe side"),
+    ("TheDarkForest", "unlock the world map", "the world looks quite empty but you never know what might be lurking. build defences to be on the safe side. btw you can move/resize the windows."),
     ("SticksAndStonesMayBreakMyBonesButLowHpExcitesMe", "let a monster damage your mine", "don't let your mine be destroyed"),
     ("WasteNotWantNot", "kill a monster without a collector", "each collector building grants resouces when a monster is defeated in its range"),
     ("SuspiciouslySpikey", "place a building close to a spawner", "spawners damage adjacent buildings, keep a safe distance"),
@@ -1123,10 +1169,10 @@ achievements :: @const_slice(
     ("CashBackGuarentee", "sell a building", "you get full price back if full hp. less if it took damage"),
     ("InstaKill", "kill a monster on the same tick it spawns", "i hope you share a reel with your followers"),
     ("VeritableCornucopia", "have some of every resource type in the game", ""),
-    ("WhenISayJumpYouSayHowHigh", "buy a hint", "if you get stuck, trying buying your way to the answer. the more you buy the more they cost"),
+    ("WhenISayJumpYouSayHowHigh", "buy a hint", "if you get stuck, trying buying your way to the answer. pace yourself, the more you buy the more they cost"),
     ("LuckOfTheDice", "have a spawner appear inside your walls with your mine", "new spawners can appear in any empty cell"),
     ("EverythingTheLightTouches", "fill every cell of the map with buildings", "now there's no space for monsters to spawn so if you want to collect more resources from them, you'll need to sell some buildings"),
-    ("InvestingInYourFuture", "buy altar of sacrifice", "use the altar to reset your progress and restart the game with greatly boosted earnings"),
+    ("InvestingInYourFuture", "buy altar of sacrifice", "use the altar to reset your progress and restart the game with greatly boosted earnings. (the button is below the achievements tab)"),
     ("GentlyDownTheStream", "add a row to the world map", "square pastures hold the most sheep"),
     ("WhoWantsToBeAKillionaire", "10^3 lifetime earnings", ""),
     ("WhoWantsToBeAMillionaire", "10^6 lifetime earnings", ""),
@@ -1143,9 +1189,24 @@ achievements :: @const_slice(
     ("AnEyeForAnEye", "defeat a spawner", "a new one will... spawn... eventually but destroying them is very profitable if there's a collector near by"),
     ("GoldPlatedPickaxe", "upgrade your mine", "higher level mines multiply your earnings"),
     ("TimeWarpTonic", "unlock world speed slider", "upgrade to speed up time more. be careful! it's easy to lose as the spawners level up on high speeds if you're not paying attention"),
+    ("Inspectigator", "unlock building stats", ""),
+    ("TheWorldIsYourOyster", "unlock row/col expansion", "if you're feeling cramped, you can buy new rows/columns of the world grid (buttons at the bottom)"),
+    ("EverythingMustGo", "unlock selling buildings", ""),
+);
+
+upgrades :: @const_slice(@as(Ty(Str, Str, Clicker.Price))
+    ("TheDarkForest", "World Map", (amount = 300, currency = building_currency_index)),
+    ("InvestingInYourFuture", "Altar Of Sacrifice", (amount = 300, currency = building_currency_index)),
+    ("CompactMachines", "Building Upgrade Menu", (amount = 300, currency = collector_currency_index)),
+    ("TimeWarpTonic", "World Speed Control", (amount = 45_000, currency = collector_currency_index)),
+    ///
+    ("EverythingMustGo", "Building Sell Button", (amount = 1000, currency = 0)),
+    ("TheWorldIsYourOyster", "Grid Expansion", (amount = 1, currency = collector_currency_index)),
+    ("Inspectigator", "Show Building Stats", (amount = 5_000, currency = collector_currency_index)),
 );
 
 // TODO: only return the one next step if that's all im using
+//       (maybe an upgrade that lets you see the path?)
 // TODO: if get stuck waiting in line behind other monsters, 
 //       change target (to an exposed turret/collector) if possible 
 //       and remember it for longer so don't keep going back and forth as the blockers move. 
@@ -1255,4 +1316,9 @@ fn in_bounds(f: *Factory, x: Vec2) bool #inline =
 fn hash(h: *TrivialHasher, s: *Node) void = {
     h.hash(@ref @as(u32) s.pos.x.bitcast());
     h.hash(@ref @as(u32) s.pos.y.bitcast());
+}
+
+fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    on_cleanup(state.ui&, sg);
+    // TODO
 }

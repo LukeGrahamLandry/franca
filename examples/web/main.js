@@ -443,6 +443,7 @@ document.getElementById("repro.png").href = `/${manifest_version}/repro.png`;
 
 document.getElementById("togglecanvas").addEventListener("click", (e) => enable_graphics(e.target.checked));
 function enable_graphics(on) {
+    document.getElementById("fullscreen").disabled = !on || !document.fullscreenEnabled;
     document.getElementById("togglecanvas").checked = on;
     let out = document.getElementById("out");
     let c = document.getElementById("canvas");
@@ -457,3 +458,7 @@ function enable_graphics(on) {
         out.style.height = "100%";
     }
 }
+
+document.getElementById("fullscreen").addEventListener("click", (event) => {
+    if (document.fullscreenEnabled) document.getElementById("canvas").requestFullscreen();
+});
