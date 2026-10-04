@@ -66,7 +66,9 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
 }
 
-fn consume_delta_time(c: *Clicker) void = {
+fn consume_delta_time(sim: *Simulation) void = {
+    @if(sim.completed_in_this_run("WasteOfAGoodSacrifice")) return();
+    c := sim.clicker&;
     powers :: ast_alloc().alloc_init(i64, 6, fn(i) => powI(10, i));
     for_rev powers { scale |
         while => c.delta_time >= scale.float() {
@@ -79,6 +81,12 @@ fn consume_delta_time(c: *Clicker) void = {
             };
         };
     };
+    
+    @if(c.total_earnings < 1_000) return(); sim.completed("WhoWantsToBeAKillionaire");
+    @if(c.total_earnings < 1_000_000) return(); sim.completed("WhoWantsToBeAMillionaire");
+    @if(c.total_earnings < 1_000_000_000) return(); sim.completed("WhoWantsToBeABillionaire");
+    @if(c.total_earnings < 1_000_000_000_000) return(); sim.completed("WhoWantsToBeATrillionaire");
+    @if(c.total_earnings < 1_000_000_000_000_000) return(); sim.completed("WhoWantsToBeAQuadrillionaire");
 }
 
 fn add_earnings(c: *Clicker, currency: i64, delta: i64) void = {
@@ -90,7 +98,7 @@ fn add_earnings(c: *Clicker, currency: i64, delta: i64) void = {
 fn adjust_for_prestige(c: *Clicker, delta: i64) i64 = {
     prestige := c.currencies[prestige_currency_index].amount;
     if prestige > 0 {
-        delta += int(delta.float() * (prestige.float()/50));
+        delta += int(delta.float() * (prestige.float()/100));
     };
     delta
 }
@@ -110,26 +118,29 @@ fn reset_for_prestige(sim: *Simulation, grant_prestige: bool) void = {
         it.auto = ();
         it.level = 0;
     };
-    f.buildings&.clear();
+    init_world(f, f.gpa);
     each sim.achievements { it |
         it.set(.complete_this_run, 0);
     };
     
     c.currencies[0].amount = 1;
     c.currencies[prestige_currency_index].amount = prestige + delta;
+    c.total_earnings += delta;
+    sim.time_since_reset = 0;    
 }
 
 fn calculate_next_prestige(c: *Clicker) i64 = {
     root :: fn(x: i64) i64 = x.float().sqrt().int();
     prestige := c.currencies[prestige_currency_index].amount;
-    next := c.total_earnings.root().root();
-    @if(next < prestige.root(), 0, next)
+    next := c.total_earnings.root() / 10 - prestige/5;
+    @if(next < 0, 0, next)
 }
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     c := state.clicker&;
     f := state.factory&;
-    if sapp.frame_count.umod(64) == 0 && !f.clicker_destroyed_popup {
+    sim := state.sim&;
+    if sapp.frame_count.umod(64) == 0 {
         break :: local_return;
         @if(c.warp_start_time.is_some()) break();
         now := timestamp_s();
@@ -138,106 +149,18 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         c.delta_time += now - c.prev_time;
         c.prev_time = now;
         @if(c.delta_time < 1) break();
-        
         state.dirty = true;
-        c.consume_delta_time();
-    };
-    
-    // TODO: extract this out so can easily run multiple updates at once. 
-    //       probably don't run while saved so you don't just auto die but could run more efficiently without rendering when idle just because unfocused. 
-    sim := state.sim&;
-    if sapp.frame_count.umod(64) == 0 && sim.completed_in_this_run("TheDarkForest") && !f.clicker_destroyed_popup {
-        if f.buildings.find(fn(it) => it.kind == .Spawner) { spawner |
-            spawner_pos := spawner.pos; spawner := ();
-            if sapp.frame_count.umod(64*8) == 0 {
-                pos := spawner_pos + vec2(0, 1);
-                if f.buildings.find(fn(it) => it.pos == pos).is_none() {
-                    place_building(f, pos, .Monster);
-                };
-            }
-        } else {
-            if sapp.frame_count.umod(64*32) == 0 {
-                place_building(f, vec2(10, 2), .Spawner);
-            };
+        
+        // TODO: maybe an upgrade that lets you have this run in end_warp as well? 
+        //       probably don't run while saved so you don't just auto die but could run more efficiently without rendering when idle just because unfocused. 
+        dt := c.delta_time;
+        sim.time_since_reset += dt;
+        while => dt >= 1 {
+            tick_factory(sim);
+            dt -= 1;
         };
         
-        if f.buildings.index_of(fn(it) => it.kind == .Clicker) { clicker_i |
-            clicker_pos := f.buildings[clicker_i].pos;
-            
-            moved := false;
-            killed := 0;
-            enumerate f.buildings { i, it |
-                continue :: local_return;
-                node: Node = (pos=it.pos,i=i);
-                @match(it.kind) {
-                    fn Monster() => {
-                        path := a_star(f, node, (pos=clicker_pos,i=clicker_i));
-                        @if(path.len < 2) continue();
-                        
-                        if path[1].i != -1 {
-                            blocker := f.buildings[path[1].i]&;
-                            if blocker.kind == .Monster {
-                                // this would be unreachable if i didn't have it treat other monsters as passable but then it's too indecisive
-                                others := get_neighbors(f, node);
-                                each others& { it |
-                                    if it.i != -1 && !@is(f.buildings[it.i].kind, .Spawner, .Monster) {
-                                        blocker = f.buildings[it.i]&;
-                                    };
-                                };
-                            };
-                            
-                            if @is(blocker.kind, .Turret, .Wall, .Collector, .Clicker) {
-                                @if(blocker.kind == .Clicker) sim.completed("SticksAndStonesMayBreakMyBonesButLowHpExcitesMe");
-                                blocker.hp -= 10 * it.level;
-                                killed += int(blocker.hp <= 0);
-                                @if(blocker.kind == .Wall && blocker.hp <= 0) sim.completed("ElevenFootLadder");
-                            };
-                        } else {
-                            it.pos = path[1].pos;
-                            moved = true;
-                        };
-                    }
-                    fn Spawner() => {
-                        if closest(f, it.pos, 1.5, fn(it) => @is(it.kind, .Turret, .Wall, .Collector, .Clicker)) { blocker |
-                            blocker.hp -= 20 * it.level;
-                            killed += int(blocker.hp <= 0);
-                            sim.completed("SuspiciouslySpikey");
-                        };
-                        if closest(f, it.pos, 1.5, fn(it) => it.kind == .Monster) { target |
-                            target.hp += it.level;
-                            if target.hp > f.templates&[target.kind].hp + it.level*2 {  // don't give the achivement if could move away the whole time
-                                sim.completed("DidYouGoToMedicalSchool?MeNeither!");
-                            };
-                        };
-                        if sapp.frame_count.umod(64*64) == 0 {
-                            it.level += 1;
-                        };
-                    }
-                    fn Turret() => {
-                        turret := it;
-                        if closest(f, it.pos, 3, fn(it) => @is(it.kind, .Monster, .Spawner)) { blocker |
-                            blocker.hp -= turret.level;
-                            if blocker.hp <= 0 {
-                                killed += 1;
-                                // TODO: collect for *each* collector in range
-                                if closest(f, blocker.pos, 3, fn(it) => it.kind == .Collector) { collector |
-                                    delta := collector.level * @if(blocker.kind == .Spawner, 100, 1);
-                                    add_earnings(c, collector_currency_index, delta);
-                                } else {
-                                    sim.completed("WasteNotWantNot");
-                                };
-                            };
-                        };
-                    }
-                    @default => ();
-                };
-            };
-            @if(killed > 0) f.buildings&.ordered_retain(fn(it) => it.hp > 0);
-            @if(moved) f.resort();
-            state.dirty = true;
-        } else {
-            f.clicker_destroyed_popup = true;
-        }
+        sim.consume_delta_time();
     };
     
     @match(state.action) {
@@ -249,7 +172,6 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         }
         fn PasteSaveFile() => {
             sapp.requests.fake_paste_event = true;
-            sim.completed("EtchedInStone");
         }
     }
     
@@ -283,6 +205,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     if event.type == .CLIPBOARD_PASTED && state.action == .PasteSaveFile {
         state.action = .None;
         read_save_file(state.sim&, event.pasted);
+        sim.completed("EtchedInStone");
     };
     @if(event.type == .QUIT_REQUESTED) state.save_to_file();
 
@@ -313,7 +236,7 @@ fn end_warp(sim: *Simulation) void = {
     amounts := temp().alloc_init(i64, c.currencies.len, fn(i) => c.currencies[i].amount);
     c.delta_time += float(delta);
     c.prev_time = timestamp_s();
-    c.consume_delta_time();
+    sim.consume_delta_time();
     @if(delta < 120) return();
     earned := sim.factory.gpa.alloc_init(i64, amounts.len, fn(i) => c.currencies[i].amount - amounts[i]);
     sim.notifications&.push((EndWarp = (t = delta, earned = earned)), sim.factory.gpa);
@@ -377,6 +300,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
             };
             
             wrapping_text_row(ctx, @tfmt("%/% Completed", complete, achievements.len()));
+            wrapping_text_row(ctx, @tfmt("% Lifetime Earnings", c.total_earnings));
             
             enumerate sim.achievements { i, it |
                 nk_layout_row_dynamic(ctx, 0.01, 1);
@@ -403,13 +327,15 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
         };
         
         @if(sim.completed_in_this_run("InvestingInYourFuture"))
-        if tree_push_hashed(ctx, .NK_TREE_NODE, "Alter Of Sacrifice", .NK_MINIMIZED, "", 2) {
-            nk_layout_row_dynamic(ctx, 0, 1);
+        if tree_push_hashed(ctx, .NK_TREE_NODE, "Altar Of Sacrifice", .NK_MINIMIZED, "", 2) {
             kind := c.currencies[prestige_currency_index]&;
+            wrapping_text_row(ctx, @tfmt("currencies/miners/buildings will be lost. achievements and % are kept. all earnings are boosted by 1\% per %", kind.name, kind.name));
+            nk_layout_row_dynamic(ctx, 0, 1);
             delta := c.calculate_next_prestige();
-            disable_if(delta == 0 || f.clicker_destroyed_popup) {
+            disable_if(delta == 0 || sim.completed_in_this_run("WasteOfAGoodSacrifice")) {
             if button(ctx, @tfmt("Reset (+% %)", delta, kind.name)) {
                 sim.reset_for_prestige(true);
+                sim.completed("PhoenixFromTheAshes");
             };
             };
             nk_tree_pop(ctx);
@@ -474,10 +400,12 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
         ;
         if n < 2 {
             price: Clicker.Price = (currency = building_currency_index, amount = 300);
-            names := @const_slice("World Map", "Alter Of Sacrifice");
+            names := @const_slice("World Map", "Altar Of Sacrifice");
             buy_button(price, false, @tfmt("Buy %", names[n])) {
+                @if(n == 0) { place_building(f, vec2(2), .Clicker); };
                 @if(n == 0) sim.completed("TheDarkForest");
                 @if(n == 1) sim.completed("InvestingInYourFuture");
+                @if(sim.time_since_reset < 30) sim.completed("FastestHandsInTheWest");
             };
         };
     };
@@ -487,6 +415,13 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
     //       might have to switch to drawing to a texture directly instead of using buttons. 
     if sim.completed_in_this_run("TheDarkForest") {
         if begin(ctx, "World Map", nk_rect(10, 300, 800, 260), flags) {
+            break :: local_return;
+            if c.warp_start_time { _ |
+                nk_layout_row_dynamic(ctx, 0, 1);
+                text(ctx, "Paused!");
+                break();
+            };
+            
             @run @assert_eq(building_colours.len(), Factory.Kind.enum_count());
             style := ctx.style.button;
             
@@ -509,19 +444,21 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
             };
             
             style.rounding = 0;
-            style.border = 0;
-            W := f.dimensions.cast().int();
+            W, H := (f.dimensions.x.cast().int(), f.dimensions.y.cast().int());
             nk_layout_row_dynamic(ctx, 0, W.intcast());
             i := 0;
-            range(0, W) { y |
+            range(0, H) { y |
                 range(0, W) { x |
                     kind := Factory.Kind.Empty;
                     pos := vec2(x.float().cast(), y.float().cast());
+                    level := 0;
                     if i < f.buildings.len && f.buildings[i].pos == pos {
                         kind = f.buildings[i].kind;
+                        level = f.buildings[i].level - 1;
                         i += 1;
                     };
                     style.normal = nk_style_item_color(building_colours[@as(i64) kind]);
+                    style.border = level.float().cast().div(2).min(5);
                     
                     can_sell := placeable.contains(fn(it) => it[] == kind);
                     priced_kind := @if(f.placing == .Empty, kind, f.placing);
@@ -553,13 +490,24 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                     };
                 };
             };
+            
+            nk_layout_row_dynamic(ctx, 0, 2);
+            price: Clicker.Price = (amount = 64 + powI(2, W+H-24+2), currency = collector_currency_index);
+            buy_button(price, H >= 20, "Buy Row") {
+                f.dimensions.y += 1;
+                sim.completed("GentlyDownTheStream");
+            };
+            buy_button(price, W >= 20, "Buy Column") {
+                f.dimensions.x += 1;
+            };
+            @if(W == H) sim.completed("AsWideAsItIsTall");
         };
         nk_end(ctx);
     };
     
     // feels jarring if you suddenly reset when you die so at least tell you what happened. 
-    if f.clicker_destroyed_popup {
-        if begin(ctx, "Alert", nk_rect(10, 300, 800, 260), flags) {
+    if sim.completed_in_this_run("WasteOfAGoodSacrifice") {
+        if begin(ctx, "Alert", nk_rect(10, 300, 500, 120), flags) {
             prestige := c.currencies[prestige_currency_index]&;
             wrapping_text_row(ctx, "The mine was destroyed, progress will be reset.");
             if prestige.amount + c.calculate_next_prestige() > 0 {
@@ -568,7 +516,6 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
             };
             nk_layout_row_dynamic(ctx, 0, 1);
             if button(ctx, "Continue") {
-                f.clicker_destroyed_popup = false;
                 sim.reset_for_prestige(false);
             };
         };
@@ -634,8 +581,7 @@ fn write_save_file(sim: *Simulation) []u8 = {
             @fmt(out, "%:%|", i, it.repr);
         };
     };
-    @fmt(out, ",h=%,", sim.total_hints);
-    @fmt(out, "e=%,", c.total_earnings);
+    @fmt(out, ",h=%,e=%,d=%:%,", sim.total_hints, c.total_earnings, f.dimensions.x, f.dimensions.y);
     
     in := out.items(); 
     @println("CopySaveFile(plain):  %", in);
@@ -685,7 +631,6 @@ fn read_save_file(sim: *Simulation, in: []u8) void = {
     if in[4].starts_with("t=") {
         t := in[4].rest(2).parse_int();
         c.warp_start_time = (Some = t);
-        sim.end_warp();
     };
     have_world_map := false;
     if in.len > 4 && in[5].starts_with("w=") {
@@ -730,6 +675,13 @@ fn read_save_file(sim: *Simulation, in: []u8) void = {
         c.total_earnings = in[I].rest(2).parse_int();
         I += 1;
     };
+    if in.len > I && in[I].starts_with("d=") {
+        in := in[I].rest(2).split(":", temp());
+        f.dimensions = vec2(in[0].parse_int().float().cast(), in[1].parse_int().float().cast());
+        I += 1;
+    };
+    
+    sim.end_warp();
 }
 
 // cute way to make it inconvenient for myself to cheat by editing the save. 
@@ -773,6 +725,7 @@ Factory :: @struct {
         kind: Kind;
         level: i64;
         hp: i64;
+        trying_to_spawn := false;
     };
     Template :: @struct(hp: i64, price := zeroed(Clicker.Price));
     
@@ -780,8 +733,10 @@ Factory :: @struct {
     templates: EnumMap(Kind, Template);
     placing: Kind;
     gpa: Alloc;
-    dimensions: f32;
-    clicker_destroyed_popup: bool;
+    dimensions: Vec2;
+    rng: Random.Rng;
+    
+    trying_to_spawn_spawner: bool;
 };
 
 building_colours :: @const_slice(@as(Ui.Nuklear.nk_color) 
@@ -794,8 +749,10 @@ building_colours :: @const_slice(@as(Ui.Nuklear.nk_color)
     (r=0,g=100,b=100,a=255),
 );
 
+base_factory_dimensions :: vec2(16, 8);
 fn init_world(f: *Factory, a: Alloc) void = {
     f.gpa = a;
+    f.rng = (s = (1,2,3,4), next = Random.xoshiro256SS);
     C :: building_currency_index;
     f.templates&[.Turret] = (hp = 25, price = (currency = C, amount = 50));
     f.templates&[.Wall] = (hp = 200, price = (currency = C, amount = 20));
@@ -804,8 +761,128 @@ fn init_world(f: *Factory, a: Alloc) void = {
     f.templates&[.Spawner] = (hp = 1000);
     f.templates&[.Clicker] = (hp = 5000);
     f.buildings&.clear();
-    f.dimensions = 16;
-    place_building(f, vec2(2), .Clicker);
+    f.dimensions = base_factory_dimensions;
+}
+
+fn tick_factory(sim: *Simulation) void = {
+    @if(!sim.completed_in_this_run("TheDarkForest")) return();
+    @if(sim.completed_in_this_run("WasteOfAGoodSacrifice")) return();
+
+    c, f := (sim.clicker&, sim.factory&);
+    w, h := (f.dimensions.x.cast().int(), f.dimensions.y.cast().int());
+    has_space := f.buildings.len != w*h;
+    if !has_space && f.buildings.find(fn(it) => @is(it.kind, .Spawner, .Monster)).is_none() {
+        sim.completed("EverythingTheLightTouches");
+        return();  // don't let the spawner level up. so you can use this as a way to disable the factory if you want
+    };
+    
+    clicker_i := f.buildings.index_of(fn(it) => it.kind == .Clicker).unwrap();
+    clicker_pos := f.buildings[clicker_i].pos;
+    moved, killed := (false, 0);
+    
+    if f.buildings.find(fn(it) => it.kind == .Spawner).is_none() {
+        if f.rng&.rand_float() < 1.0/32.0 {
+            f.trying_to_spawn_spawner = true;
+        };
+        if f.trying_to_spawn_spawner && has_space {
+            pos := vec2(f.rng&.rand_int(w).float().cast(), f.rng&.rand_int(h).float().cast());
+            if f.in_bounds(pos) && norm_sq(pos - clicker_pos) > 25 && f.buildings.find(fn(it) => it.pos == pos).is_none() {
+                moved = true;
+                f.buildings&.push(f.init_building(pos, .Spawner), f.gpa);
+                f.trying_to_spawn_spawner = false;
+            };
+        };
+    };
+        
+    range(0, f.buildings.len) { i |
+        continue :: local_return;
+        it := f.buildings[i]&;
+        node: Node = (pos=it.pos,i=i);
+        @match(it.kind) {
+            fn Monster() => {
+                path := a_star(f, node, (pos=clicker_pos,i=clicker_i));
+                @if(path.len < 2) continue();
+                if path[1].i == -1 {
+                    it.pos = path[1].pos;
+                    moved = true;
+                    continue();
+                };
+                
+                blocker := f.buildings[path[1].i]&;
+                if blocker.kind == .Monster {
+                    // this would be unreachable if i didn't have it treat other monsters as passable but then it's too indecisive
+                    others := get_neighbors(f, node);
+                    each others& { it |
+                        if it.i != -1 && !@is(f.buildings[it.i].kind, .Spawner, .Monster) {
+                            blocker = f.buildings[it.i]&;
+                        };
+                    };
+                    @if(blocker.kind == .Monster) check_fusion(sim, it, others&, killed&);
+                };
+                
+                if @is(blocker.kind, .Turret, .Wall, .Collector, .Clicker) {
+                    deal_damage(sim, blocker, 10 * it.level, killed&);
+                };
+            }
+            fn Spawner() => {
+                if closest(f, it.pos, 1.5, fn(it) => @is(it.kind, .Turret, .Wall, .Collector, .Clicker)) { blocker |
+                    deal_damage(sim, blocker, 20 * it.level, killed&);
+                    sim.completed("SuspiciouslySpikey");
+                };
+                if closest(f, it.pos, 1.5, fn(it) => it.kind == .Monster) { target |
+                    target.hp += it.level;
+                    if target.hp > f.templates&[target.kind].hp + it.level*2 {  // don't give the achivement if could move away the whole time
+                        sim.completed("DidYouGoToMedicalSchool?MeNeither!");
+                    };
+                };
+                if f.rng&.rand_float() < 1.0/64.0 {
+                    it.level += 1;
+                };
+                if it.trying_to_spawn {
+                    pos := @const_slice(vec2(1, 0), vec2(0, 1), vec2(-1, 0), vec2(0, -1));
+                    pos := it.pos + pos[f.rng&.rand_int(pos.len)];
+                    if f.in_bounds(pos) && f.buildings.find(fn(it) => it.pos == pos).is_none() {
+                        it.trying_to_spawn = false;
+                        f.buildings&.push(f.init_building(pos, .Monster), f.gpa);
+                        moved = true;
+                    };
+                    it := ();
+                } else {
+                    // saved so if there's no space this tick it doesn't have to wait for the random to recharge before trying again
+                    spawn_chance := 1.0/8.0 + float(it.level)/40;
+                    it.trying_to_spawn = f.rng&.rand_float() < spawn_chance;
+                    @if(spawn_chance >= 1) sim.completed("SpeedIsTheKeyHere");
+                };
+                it := ();
+            }
+            fn Turret() => {
+                blocker := closest(f, it.pos, 3, fn(it) => @is(it.kind, .Monster, .Spawner)) || continue();
+                @if(!deal_damage(sim, blocker, it.level, killed&)) continue();
+                n := 0;
+                each f.buildings { it |
+                    n += it.level * int(it.kind == .Collector && norm_sq(blocker.pos - it.pos) <= 3*3);
+                };
+                @if(n != 0) sim.completed("WasteNotWantNot");
+                delta := n * blocker.level * @if(blocker.kind == .Spawner, 100, 1);
+                add_earnings(c, collector_currency_index, delta);
+            }
+            @default => ();
+        };
+    };
+    
+    @if(killed > 0) f.buildings&.ordered_retain(fn(it) => it.hp > 0);
+    @if(moved) f.resort();
+}
+
+fn deal_damage(sim: *Simulation, target: *Factory.Building, amount: i64, killed: *i64) bool = {
+    target.hp -= amount;
+    if target.kind == .Clicker {
+        sim.completed("SticksAndStonesMayBreakMyBonesButLowHpExcitesMe");
+        @if(target.hp <= 0) sim.completed("WasteOfAGoodSacrifice");
+    };
+    @if(target.kind == .Wall && target.hp <= 0) sim.completed("ElevenFootLadder");
+    killed[] += int(target.hp <= 0);
+    target.hp <= 0
 }
 
 // :SLOW the sorting matters for rendering. empty cells aren't saved as a building. 
@@ -813,11 +890,13 @@ fn place_building(f: *Factory, pos: Vec2, kind: Factory.Kind) ?Factory.Building 
     if kind == .Empty {
         return(f.buildings&.ordered_remove(f.buildings&.index_of(fn(it) => it.pos == pos) || return(.None)));
     };
-        hp := f.templates&[kind].hp;
-        f.buildings&.push((pos=pos, kind=kind, hp = hp, level = 1), f.gpa);
+        f.buildings&.push(f.init_building(pos, kind), f.gpa);
         f.resort();
         .None
 }
+
+fn init_building(f: *Factory, pos: Vec2, kind: Factory.Kind) Factory.Building = 
+    (pos=pos, kind=kind, hp = f.templates&[kind].hp, level = 1);
 
 fn resort(f: *Factory) void = 
     Sort'default(Factory.Building, f.buildings&.items(), fn(a, b) => @if(a.pos.y == b.pos.y, a.pos.x <= b.pos.x, a.pos.y <= b.pos.y));
@@ -825,17 +904,38 @@ fn resort(f: *Factory) void =
 fn closest(f: *Factory, pos: Vec2, range: f32, $filter: @Fn(it: *Factory.Building) bool) ?*Factory.Building = {
     // TODO: once get_neighbors uses the sortedness to be faster, check those first
     best_i := -1;
-    best_dist: f32 = 10000;
+    best_dist: f32 = range*range;
     enumerate f.buildings { i, it |
         if it.hp > 0 && filter(it) {
             dist := norm_sq(it.pos - pos);
-            if dist < best_dist {
+            if dist <= best_dist {
                 best_dist = dist;
                 best_i = i;
             };
         };
     };
-    @if(best_i != -1 && best_dist < range*range, (Some = f.buildings[best_i]&), .None)
+    @if(best_i != -1, (Some = f.buildings[best_i]&), .None)
+}
+
+fn check_fusion(sim: *Simulation, monster: *Factory.Building, others: *Array(Node, 4), killed: *i64) void = {
+    n, level, hp := (0, 0, 0);
+    each others { it |
+        if it.i != -1 {
+            other := sim.factory.buildings[it.i]&;
+            n += int(other.kind == .Monster);
+            level += other.level;
+            hp += other.hp;
+        };
+    };
+    @if(n != others.len()) return();
+    
+    monster.level += level + 1;
+    monster.hp += hp;
+    sim.completed("FusionReactor");
+    each others { it |
+        sim.factory.buildings[it.i].hp = 0;
+    };
+    killed[] += 4;
 }
 
 Simulation :: @struct {
@@ -851,6 +951,7 @@ Simulation :: @struct {
         _ := 4,
     );
     notifications: RawList(Notification);
+    time_since_reset: f64;
     Notification :: @tagged(
         Achievement: i64, 
         EndWarp: @struct(t: i64, earned: []i64),
@@ -882,14 +983,14 @@ fn completed_in_this_run(s: *Simulation, $name: Str) bool = {
     s.achievements[i].get(.complete_this_run) == 1
 }
 
-// stored by index in the save file and used for important unlocks (world map / alter) so reorder is breaking change. 
+// stored by index in the save file and used for important unlocks (world map / altar) so reorder is breaking change. 
 achievements :: @const_slice(
     ("TheyAreTakingOurJobs", "buy auto collect", "you can still collect manually if you choose to disable the Auto checkbox. how fast can you click?"),
     ("BeachVacation", "return from being idle", "time in the mine keeps passing while the window is unfocused. you'll have plenty of resources to return to"),
     ("EtchedInStone", "create and restore a save file", "the save includes the time it was made so resources will continue being collected while the game isn't running"),
-    ("TheDarkForest", "unlock the world map", "the world looks quite empty but you never know what might be lerking. build defences to be on the safe side"),
+    ("TheDarkForest", "unlock the world map", "the world looks quite empty but you never know what might be lurking. build defences to be on the safe side"),
     ("SticksAndStonesMayBreakMyBonesButLowHpExcitesMe", "let a monster damage your mine", "don't let your mine be destroyed"),
-    ("WasteNotWantNot", "kill a monster without a collector", "monsters drop resources when defeated close to a Collector building"),
+    ("WasteNotWantNot", "kill a monster without a collector", "each collector building grants resouces when a monster is defeated in its range"),
     ("SuspiciouslySpikey", "place a building close to a spawner", "spawners damage adjacent buildings, keep a safe distance"),
     ("DidYouGoToMedicalSchool?MeNeither!", "let a moster get healed", "spawners heal adjacent monsters. don't build walls too close or they'll get stuck and regen"),
     // TODO: make this "surround your mine with walls", needs more complicated checking logic
@@ -901,8 +1002,20 @@ achievements :: @const_slice(
     ("VeritableCornucopia", "have some of every resource type in the game", ""),
     ("WhenISayJumpYouSayHowHigh", "buy a hint", "if you get stuck, trying buying your way to the answer. the more you buy the more they cost"),
     ("LuckOfTheDice", "have a spawner appear inside your walls with your mine", "new spawners can appear in any empty cell"),
-    ("EverythingTheLightTouches", "fill every cell of the map", "now there's no space for monsters to spawn so if you want to collect more resources from them, you'll need to sell some buildings"),
-    ("InvestingInYourFuture", "buy alter of sacrifice", "use the alter to reset your progress and restart the game with greatly boosted earnings"),
+    ("EverythingTheLightTouches", "fill every cell of the map with buildings", "now there's no space for monsters to spawn so if you want to collect more resources from them, you'll need to sell some buildings"),
+    ("InvestingInYourFuture", "buy altar of sacrifice", "use the altar to reset your progress and restart the game with greatly boosted earnings"),
+    ("GentlyDownTheStream", "add a row to the world map", "square pastures hold the most sheep"),
+    ("WhoWantsToBeAKillionaire", "10^3 lifetime earnings", ""),
+    ("WhoWantsToBeAMillionaire", "10^6 lifetime earnings", ""),
+    ("WhoWantsToBeABillionaire", "10^9 lifetime earnings", ""),
+    ("WhoWantsToBeATrillionaire", "10^12 lifetime earnings", ""),
+    ("WhoWantsToBeAQuadrillionaire", "10^15 lifetime earnings", ""),
+    ("WasteOfAGoodSacrifice", "let your mine be destroyed", "if your mine is in danger and you can't defend it, you can quickly choose to reset at the altar of sacrifice to continue with more of an earnings boost"),
+    ("AsWideAsItIsTall", "make the world map square", ""),
+    ("PhoenixFromTheAshes", "use the altar of sacrifice", "prices scale faster than earnings so eventually you can only progress by resetting the curve"),
+    ("FusionReactor", "let 5 monsters fuse into one", "a monster that can't move because its surrounded by 4 others will absorb their hp and do extra damage (and be worth extra resources when collected)"),
+    ("SpeedIsTheKeyHere", "let a spawner level up until it spawns a monster every second", "your turrets have longer range than spawners. try to kill them before they get too strong."),
+    ("FastestHandsInTheWest", "unlock the world map within 30 seconds of a reset", ""),
 );
 
 // TODO: only return the one next step if that's all im using
@@ -997,15 +1110,19 @@ fn get_neighbors(f: *Factory, start: Node) Array(Node, 4) = {
     each out& { it |
         pos := start.pos + it.pos;
         // :SLOW TODO: if start.i!=-1 can use the sortedness to be faster ex. x+/-1 will be i+/-1 if there
+        //             (but can't do that when moved=true earlier in the loop)
         it.i = f.buildings&.index_of(fn(it) => it.pos == pos) || -1;
         it.pos = pos;
-        if it.pos.y < 0 || it.pos.x >= f.dimensions || it.pos.y >= f.dimensions {
+        if !f.in_bounds(it.pos) {
             it.pos.x = -1;
         };
     };
     out
 }
 
+fn in_bounds(f: *Factory, x: Vec2) bool #inline = 
+    x.x > 0 && x.y > 0 && x.x < f.dimensions.x && x.y < f.dimensions.y;
+    
 ::AutoEq(Node); 
 fn hash(h: *TrivialHasher, s: *Node) void = {
     h.hash(@ref @as(u32) s.pos.x.bitcast());
