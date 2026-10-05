@@ -1,4 +1,18 @@
 
+## (Oct 5)
+
+- nuklear: the alpha thing in the pipeline to fix weird highlighting of text in web (like debugtext a while ago)
+
+## (Oct 4)
+
+- need local storage for web so idle can have autosave. 
+  i can't quite bring myself to be fanatic about the everything is a file and make a magic directory in vfs that means local storage. 
+  but having the api act on a file path makes sense to me because then its a drop in to make a native program behave properly because files are already persistant. 
+- now im thinking about doing aot more for web demo im looking at the wasm i output to see what got pulled. 
+  the @map_enum in to_wgpu is far too offensive. maybe i'll just have to deal with annoying type annotations. 
+  ah heck, the low effort is_const doesn't see field access of a struct scope as constant. 
+  maybe should just put this thing in the compiler instead. 
+
 ## (Oct 3) idle
 
 - the flicker when buying a building was just because i was inserting in the middle without fixing the index used to step which building will be drawn

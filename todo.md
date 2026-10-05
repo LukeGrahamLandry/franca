@@ -17,6 +17,7 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 
+- my dump_wasm doesn't see the custom name section written by -keep-names. it works in https://webassembly.github.io/wabt/demo/wasm2wat/ so the emit isn't the problem
 - use nk_button_text instead of nk_button_label everywhere so don't have to make CStr
 - do the aot thing i was thinking about for web and make actually good seperate page 
   for some of the fun example programs so maybe it could exist if you google for ex. mandelbrot viewer or whatever. 
@@ -1631,7 +1632,7 @@ just a problem with how that program is doing directions not with the app lib)
   - modifiers
   - make test programs that force me to implement the rest of the wgpu api surface
   - a bunch of the bindings im writing manually in gfx.js could be generated
-  - do the rest of the events in app.js
+  - QUIT_REQUESTED
   - all the app commands are stubs
   - might want to limit the scrolling so the scale of the numbers is the same as native. 
     ie. i had to clamp mandelbrot_ui so you can't overshoot and that isn't a problem in the macos version. 

@@ -1,7 +1,6 @@
 driver :: fn(vtable: *ImportVTable) void = {
     ci := Foreign.ENV.GITHUB_REPOSITORY.get_environment_variable().is_some();
     franca := get_executable_path(temp());
-
     ok := run_cmd_blocking(franca, @slice("graphics/web/webgpu_api.fr"));
     @assert(ok, "failed build");
     ok := run_cmd_blocking(franca, @slice("examples/default_driver.fr", "build", 
@@ -29,8 +28,9 @@ driver :: fn(vtable: *ImportVTable) void = {
     
     ::DeriveJson(Manifest);
     ::DeriveJson(Manifest.Compiler);
-    manifest := u8.list(temp());
-    m&.dump_json(manifest&);
+    main_js := @ref u8.list(temp());
+    @fmt(main_js, "const manifest = ");
+    m&.dump_json(main_js);
     
     mirror_path := "target/web/mirror";
     cache_path := "target/franca/fetch";
@@ -72,17 +72,34 @@ driver :: fn(vtable: *ImportVTable) void = {
         write_entire_file_or_crash(hash_path, hash);
         write_entire_file_or_crash(@tfmt("%/%", mirror_path, hash), root_fs);
         copy(@tfmt("%/%.out", cache_path, hash), @tfmt("%/%", mirror_path, hash));
+        
+        if !cli_args().contains(fn(it) => it[] == "-dev") {
+            for m.compilers[4].examples { path |
+                dest := @ref u8.list(temp());
+                @fmt(dest, "%/", target_dir);
+                for path.slice(0, path.len - 3) { c |
+                    dest.push(@if(c == "/".ascii(), "_".ascii(), c));
+                };
+                @fmt(dest, ".wasm");
+            
+                ok := run_cmd_blocking(franca, @slice("examples/default_driver.fr", "build", 
+                    "examples/os/host/web.fr", "-o", dest.items(),
+                    "-arch", "wasm32", "-dynamiclib", "-keep-names", "-wasm_threads",
+                    "-unsafe",
+                    "-lightweb", path,
+                ));
+                @assert(ok, "failed build");
+            };
+        };
     };
     
     Target :: fn(file: Str) Str => @tfmt("%/%", target_dir, file);
     
     main_js_target := Target("main.js");
     copy :: fn(dest, src) => write_entire_file_or_crash(dest, read_entire_file_or_crash(temp(), src));
-    write_entire_file_or_crash(Target("manifest.json"), manifest.items());
     copy(Target("app.js"), "graphics/web/app.js");
     copy(Target("gfx.js"), "graphics/web/gfx.js");
     copy(Target("webgpu.g.js"), "target/franca/webgpu.g.js");
-    copy(main_js_target, "examples/web/main.js");
     copy(Target("worker.js"), "examples/web/worker.js");
     copy(Target("demo.wasm"), "target/demo.wasm");
     copy("target/web/ls.html", "examples/web/ls.html");
@@ -98,13 +115,10 @@ driver :: fn(vtable: *ImportVTable) void = {
     
     write_entire_file_or_crash("target/web/index.html", index_html_out.items());
     
-        default := "\"----------------------------------------------------------------\"";
-        prefix := "let manifest_version = ";
-        main_js := read_entire_file_or_crash(temp(), main_js_target);
-        dest := main_js.rest(prefix.len).slice(0, default.len);
-        @assert(main_js.starts_with(prefix) && dest == default && commit.len == dest.len - 2);
-        dest.slice(1, commit.len + 1).copy_from(commit);
-        write_entire_file_or_crash(main_js_target, main_js);
+    @fmt(main_js, ";\nconst manifest_version = '%';\n", commit);
+    read_and_push_or_crash(main_js, "examples/web/main.js");
+    write_entire_file_or_crash(main_js_target, main_js.items());
+    
     if ci || cli_args().contains(fn(it) => it[] == "-mirror") {
         // mirror any deps used by the examples so the web demo can get them from its own domain to get around CORS
         ok := run_cmd_blocking(franca, @slice("tests/run_tests.fr", "fetch"));
@@ -187,13 +201,19 @@ manifest :: fn(commit: Str) Manifest = (
         name = "kaleidoscope",
         about = "See also: https://llvm.org/docs/tutorial/MyFirstLanguageFrontend",
         examples = @const_slice("target/mandel.txt"),
+    ), (
+        name = "aot",
+        about = "precompiled franca programs",
+        examples = @const_slice(
+            "examples/gpu/mandelbrot.fr",
+            "examples/gpu/idle.fr",
+            "examples/gpu/farm_game.fr", 
+            "examples/chess/gui.fr",
+            "examples/life/gui.fr", 
+            "examples/gpu/stackie.fr",
+        ),
     ))).shallow_copy(temp()),
     commit = commit,
-    wisdom = @const_slice(
-        "Blazingly 9x slower than native!", 
-        "Abstraction will continue until moral improves.",
-        "High precision timers are considered unsafe.",
-    ),
 );
 
 // all numbers u32, offsets are relative to the blob (so start+8)
@@ -259,7 +279,6 @@ Fs :: RawHashMap(Str, Ty(i64, i64));
 Manifest :: @struct {
     compilers: []Compiler;
     commit: Str;
-    wisdom: []Str;
     
     Compiler :: @struct {
         name: Str;

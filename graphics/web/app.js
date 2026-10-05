@@ -1,5 +1,3 @@
-// THIS IS UNFINISHED
-
 export const add_events = (canvas, send) => {
     const I = 0n;  // this is a placeholder for the (web: *Impl) which is patched by send. 
     const removers = [];
@@ -86,11 +84,19 @@ export const add_events = (canvas, send) => {
         send("drop_files_event", I, buf.byteLength, new Uint8Array(buf), files.length);
     });
     
-    // TODO
-    // MOUSE_ENTER, MOUSE_LEAVE,
-    // ICONIFIED, RESTORED, FOCUSED, UNFOCUSED, QUIT_REQUESTED,
+    event("mouseenter", (e) => send("simple_event", I, 8));
+    event("mouseleave", (e) => send("simple_event", I, 9));
+    document.addEventListener("visibilitychange", () => {
+        // TODO: these both fire when going fullscreen which isn't really what i want but not worth hacking around
+        if (document.hidden) send("simple_event", I, 11);  // ICONIFIED
+        else                 send("simple_event", I, 12);  // RESTORED
+    });
+    event("focus", (e) => send("simple_event", I, 13));
+    event("focusout", (e) => send("simple_event", I, 14));
+    // TODO: QUIT_REQUESTED
     
     const handle_app_request = (data) => {
+        const msg = data[1];
         switch (data[0]) {
             case "set_clipboard_string": {
                 /*await*/ navigator.clipboard.write([new ClipboardItem({ "text/plain": data[1] })]);
@@ -101,6 +107,35 @@ export const add_events = (canvas, send) => {
                     s = new TextEncoder().encode(s);
                     send("paste_event", I, s.byteLength, s, 1);
                 });
+            }
+            case "set_local_storage": {
+                try { localStorage.setItem(msg.key, msg.value); } catch (e) { console.error(e); }
+                break
+            }
+            case "remove_local_storage": {
+                try { localStorage.removeItem(msg.key); } catch (e) { console.error(e); }
+                break
+            }
+            case "get_local_storage": {
+                const buf = new Int32Array(msg.memory.buffer, Number(msg.futex_ptr), 1);
+                if (buf[0] != -2) return;
+                try { 
+                    const value_s = localStorage.getItem(msg.key);
+                    if (value_s === null) {
+                        buf[0] = -1;
+                    } else {
+                        const value = new TextEncoder().encode(value_s);
+                        buf[0] = value.byteLength;
+                        if (BigInt(value.byteLength) <= msg.value_len) {
+                            const dest = new Uint8Array(msg.memory.buffer, Number(msg.value_ptr), value.byteLength);
+                            dest.set(new Uint8Array(value.buffer));
+                        }
+                    }
+                } catch (e) {
+                    buf[0] = -1;
+                };
+                Atomics.notify(buf, 0);
+                break
             }
             default: console.error("bad handle_app_request", data);
         }

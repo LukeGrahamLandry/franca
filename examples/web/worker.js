@@ -48,7 +48,7 @@ export async function handleWasmLoaded(wasm_instance, msg) {
         if (e === ESCAPE_MAIN) {
             // not quite true, this is how long it took to call francaRequestState so includes anything else you do in main before calling app.run, but close enough.
             let time = Math.round(performance.now() - load_end);
-            postMessage({ tag: "done", ok: ok, text: " Compiled in " + time + "ms." });
+            postMessage({ tag: "done", ok: ok, time });
             return;
         }
         console.log(e.message);
@@ -199,13 +199,19 @@ export const imports = {
                     const get = (n) => new DataView(Franca.memory.buffer, Number(ptr)).getBigInt64(n*8, true);
                     const [action, key_ptr, key_len, value_ptr, value_len, futex_ptr] = [get(0), get(1), get(2), get(3), get(4), get(5)];
                     const key = get_wasm_string(key_ptr, key_len);
-                    console.log([action, key_ptr, key_len, value_ptr, value_len, futex_ptr]);
-                    if (action == 0n) {  // read
+                    switch (action) {
+                    case 0n: {
                         const buf = new Int32Array(Franca.memory.buffer, Number(futex_ptr), 1);
                         buf[0] = -2;
-                        postMessage({ tag: "get_local_storage", key, futex_ptr, value_ptr, value_len, memory: Franca.memory });
-                    } else {  // write
-                        postMessage({ tag: "set_local_storage", key, value: get_wasm_string(value_ptr, value_len) });
+                        handle_app_request(["get_local_storage", { key, futex_ptr, value_ptr, value_len, memory: Franca.memory }]);
+                    break; }
+                    case 1n: {
+                        handle_app_request(["set_local_storage", { key, value: get_wasm_string(value_ptr, value_len) }]);
+                    break; }
+                    case 2n: {
+                        handle_app_request(["remove_local_storage", { key }]);
+                    break; }
+                    default: break;
                     }
                     return 0n;
                 }
@@ -241,20 +247,14 @@ export const imports = {
         js_worker_spawn: (userdata, stack, exit_futex) => {
             postMessage({ tag: "spawn", child: [userdata, stack, exit_futex], memory: imports.main.memory });
         },
-        js_set_clipboard_string: (ptr, len) => {
-            postMessage({ 
-                tag: "handle_app_request", 
-                data: ["set_clipboard_string", get_wasm_string(ptr, len)],
-            });
-        },
-        js_get_clipboard_string: () => {
-            postMessage({ 
-                tag: "handle_app_request", 
-                data: ["get_clipboard_string"],
-            });
-        },
+        js_set_clipboard_string: (ptr, len) => handle_app_request(["set_clipboard_string", get_wasm_string(ptr, len)]),
+        js_get_clipboard_string: () => handle_app_request(["get_clipboard_string"]),
     },
 };
+
+function handle_app_request(data) {
+    postMessage({ tag: "handle_app_request", data });
+}
 
 function yield_file(bytes, name) {
     postMessage({
@@ -320,6 +320,7 @@ let weak_imports = [
     "posix_spawn_file_actions_init", "posix_spawn_file_actions_destroy",
     "posix_spawn_file_actions_adddup2", "posix_spawn_file_actions_addclose", 
     "fdopendir", "fdopendir$INODE64",
+    "fabs", "memset", "qsort", "sqrt", "memcpy", 
 ];
 
 for (const it of weak_imports) {

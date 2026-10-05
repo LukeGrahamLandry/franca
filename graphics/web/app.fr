@@ -464,27 +464,40 @@ read_js_string :: fn(handle: rawptr, length: f64, a: Alloc) []u8 = {
     buf
 };
 
+#export 
+fn simple_event(web: *Impl, type: Sapp.EventType) void = {
+    sapp := web.common();
+    sapp.init_event(type);
+    sapp.event.modifiers = web.modifiers;
+    sapp.call_event(sapp.event&);
+}
+
 Sapp :: import("@/graphics/app.fr");
 Sg :: import("@/graphics/gfx.fr");
 
 fn sync_local_storage_if_web(file_path: Str, is_read: bool, length_hint: i64) void = {
     @if(query_current_arch() != .wasm32) return();
     mark := temp().mark();
+    _ := make_dirs(file_path.pop_path_segment());
     value := "";
+    remove := false;
     if !is_read {
-        // TODO: if file doesn't exist ask to clear from local storage
-        value = read_entire_file(temp(), file_path) || return();
+        if read_entire_file(temp(), file_path) { it |
+            value = it;
+        } else {
+            remove = true;
+        };
     } else {
         value = temp().alloc_uninit(u8, length_hint);
     };
-    js_write :: fn(id: rawptr, ptr: *u8, len: i64) i64 #weak #import("libc");
+    js_write :: fn(id: i64, ptr: *u8, len: i64) i64 #weak #import("libc");
     Futex :: import("@/lib/sys/sync/futex.fr");
     Args :: @struct(action: i64, key: Str, value: Str, futex: *u32);
-    futex_value: u32 = 0 - 2;
-    args: Args = (action = int(!is_read), key = file_path, value = value, futex = futex_value&);
-    @if(js_write(rawptr_from_int(0xBBBB0003), bit_cast_unchecked(*Args, *u8, args&), size_of(Args)) != 0) return();
+    n2: u32 = 0 - 2;
+    args: Args = (action = int(!is_read) + int(remove), key = file_path, value = value, futex = @ref n2);
+    @if(js_write(0xBBBB0003, bit_cast_unchecked(*Args, *u8, args&), size_of(Args)) != 0) return();
     @if(!is_read) return();
-    Futex'wait_while(args.futex, fn(tmp) => tmp == 0-2);
+    Futex'wait_while(args.futex, fn(tmp) => tmp == n2);
     length := intcast(@as(i32) args.futex[].bitcast());
     if length < 0 {
         _ := Posix'remove(file_path.as_cstr());

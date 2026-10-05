@@ -1,8 +1,12 @@
-let manifest_version = "----------------------------------------------------------------";
+// const [manifest_version, manifest]; patched by ./build.fr
+
 if (typeof WebAssembly === "undefined")
     alert("Your browser does not support web assembly.");
 if (typeof Worker === "undefined")
     alert("Your browser does not support web workers.");
+
+const p = new URLSearchParams(window.location.search);
+const lang = p.get("lang");
 
 let thread_pool = []
 let running_threads = []
@@ -18,6 +22,7 @@ const handle = (resolve, handle_app_request) => (_msg) => {
         }
         case "err": {
             document.getElementById("err").innerText += msg.text;
+            layout_sidebar(true);
             break;
         }
         case "done": {
@@ -27,7 +32,10 @@ const handle = (resolve, handle_app_request) => (_msg) => {
             running = false;
             let end = performance.now();
             if (real_start_time !== undefined) {
-                document.getElementById("time").innerText = msg.text + " Wall: " + Math.round(end - real_start_time) + "ms.";
+                let text = (prev_was_aot ? "Loaded" : "Compiled") + " in " + msg.time + "ms.";
+                if (msg.time === undefined) text = "";
+                text += " Wall: " + Math.round(end - real_start_time) + "ms.";
+                document.getElementById("time").innerText = text;
             }
             real_start_time = undefined;
             flush();
@@ -71,32 +79,6 @@ const handle = (resolve, handle_app_request) => (_msg) => {
             w.postMessage({ tag: "start", args: [], child: msg.child, memory: msg.memory, epoch });
             break
         }
-        case "set_local_storage": {
-            try { localStorage.setItem(msg.key, msg.value); } catch (e) { console.error(e); }
-            break
-        }
-        case "get_local_storage": {
-            const buf = new Int32Array(msg.memory.buffer, Number(msg.futex_ptr), 1);
-            if (buf[0] != -2) return;
-            try { 
-                const value_s = localStorage.getItem(msg.key);
-                if (value_s === null) {
-                    buf[0] = -1;
-                } else {
-                    const value = new TextEncoder().encode(value_s);
-                    buf[0] = value.byteLength;
-                    if (BigInt(value.byteLength) <= msg.value_len) {
-                        const dest = new Uint8Array(msg.memory.buffer, Number(msg.value_ptr), value.byteLength);
-                        dest.set(new Uint8Array(value.buffer));
-                    }
-                }
-            } catch (e) {
-                console.error(e);
-                buf[0] = -1;
-            };
-            Atomics.notify(buf, 0);
-            break
-        }
         default:
             throw msg;
     }
@@ -126,7 +108,13 @@ const start_message = "Run";
 let worker = null;
 let running = false;
 let removers = [];
-const toggle_worker = (resolve) => {
+let prev_was_aot = false;
+const toggle_worker = async (resolve) => {
+    let compiler_i = document.getElementById("compiler").value;
+    const compiler = manifest.compilers[parseInt(compiler_i)];
+    const aot = compiler.name == "aot";
+    if (rootfs === null && !aot) await prefetch();
+    
     if (!running && worker !== null) {  // means it sent "done" so not stuck
         thread_pool.push(worker);
         worker = null;
@@ -145,10 +133,21 @@ const toggle_worker = (resolve) => {
     }
     running = worker === null;
     if (running) {
+        if (prev_was_aot !== aot) {
+            document.getElementById("fullcanvas").checked = aot;
+            layout_canvas(aot);
+        }
+        if (prev_was_aot || aot) {
+            // don't keep the wasm_module cached on the worker
+            for (let w of thread_pool) {
+                w.terminate();
+            }
+            thread_pool = []
+        }
+        prev_was_aot = aot;
+        
         real_start_time = performance.now();
         
-        let compiler_i = document.getElementById("compiler").value;
-        const compiler = manifest.compilers[parseInt(compiler_i)];
         document.getElementById("err").innerText = "";
         document.getElementById("time").innerText = ".";
         document.getElementById("out").value = "";
@@ -177,7 +176,12 @@ const toggle_worker = (resolve) => {
         ];
         worker = get_worker();
         worker.onmessage = handle(resolve, handle_app_request__);
-        let need_canvas = input.includes("graphics/lib.fr");  // :HackyGraphicsDetection
+        let need_canvas = input.includes("graphics/lib.fr") || aot;  // :HackyGraphicsDetection
+        
+        if (aot) {
+            const source_path = document.getElementById("example").value;
+            worker.postMessage({ tag: "setmodule", module: await load_wasm(precompiled_wasm_path(source_path)) });
+        }
         
         // need to do this extra dance because you can't un-transferControlToOffscreen, 
         // and when you run a new program i give you a new worker. 
@@ -243,14 +247,18 @@ function new_memory() {
 
 const worker_url = `./${manifest_version}/worker.js`;
 // _: my hope is that i can ask it to prefetch everything i want and then it will be faster on the workers via magic.   
-let [wasm_module, manifest, rootfs, _worker_script] = await Promise.all([
-    load_wasm(`./${manifest_version}/demo.wasm`),
-    fetch(`./${manifest_version}/manifest.json`).then(async (it) => await it.json()),
-    fetch(`mirror/${manifest_version}`).then(async (it) => await it.arrayBuffer()),
-    fetch(worker_url),
-]);
+const _worker_script = fetch(worker_url);
+let [wasm_module, rootfs] = [null, null];
+if (lang !== "aot") await prefetch();
+async function prefetch() {
+    const [a, b] = await Promise.all([
+        load_wasm(`./${manifest_version}/demo.wasm`),
+        fetch(`mirror/${manifest_version}`).then(async (it) => await it.arrayBuffer()),
+    ]);
+    wasm_module = a;
+    rootfs = b;
+}
 
-console.log(manifest);
 document.getElementById("version").innerText = manifest.commit;
 
 // (length, off(indices), [blob; indices=[off(name), length(name), off(data), length(data)]])
@@ -269,6 +277,12 @@ const get_file = (path) => {
 
 const load_example = async (path) => {
     document.getElementById("err").innerText = "SLOW\n";
+    
+    let compiler_i = document.getElementById("compiler").value;
+    const compiler = manifest.compilers[parseInt(compiler_i)];
+    const aot = compiler.name == "aot";
+    if (rootfs === null && !aot) await prefetch();
+    
     try {
         document.getElementById("in").value = get_file(path);
     } catch (s) {
@@ -286,7 +300,7 @@ const show_examples = (lang_i) => {
     const it = document.getElementById("example");
     it.innerHTML = src;
     
-    document.getElementById("version").innerText = `${manifest.commit} ${c.about}`;
+    document.getElementById("version").innerText = `${manifest.commit}\n${c.about}`;
 };
 const show_compilers = () => {
     let src = "";
@@ -311,6 +325,7 @@ document.getElementById("compiler").onchange = function () {
     
     const url = new URL(window.location);
     url.searchParams.delete("file");
+    url.searchParams.set("lang", manifest.compilers[this.value].name);
     if (!doing_test) history.replaceState(null, '', url);
 };
 document.getElementById("example").onchange = function () {
@@ -345,18 +360,20 @@ async function load_wasm(url) {
 }
 let line = "";
 
-const p = new URLSearchParams(window.location.search);
 const dbg = p.get("dbg");
 if (dbg !== null) document.getElementById("dbg").value = dbg;
 
 const path = p.get("file");
 if (path !== null) {
+    const lang = p.get("lang");
     for (const [i, it] of manifest.compilers.entries()) {
+        if (lang !== null && lang !== it.name) continue;
         let idx = it.examples.indexOf(path);
         if (idx != -1) {
             show_examples(i);
             document.getElementById("compiler").options.selectedIndex = i;
             document.getElementById("example").options.selectedIndex = idx+1;
+            break;
         }
     }
     await load_example(path);
@@ -373,7 +390,6 @@ if (path !== null) {
     document.getElementById("target").innerHTML = src; 
 }
 
-enable_graphics(true);  // TODO: only do this if the program being compiled needs it
 toggle_worker(() => {});
 
 document.getElementById("all").onclick = async () => {
@@ -463,7 +479,6 @@ for (const it of document.getElementsByTagName("textarea")) {
     });
 }
 
-document.getElementById("wisdom").innerText = manifest.wisdom[Math.floor(Math.random() * manifest.wisdom.length)];
 document.getElementById("repro.txt").href = `/${manifest_version}/repro.txt`;
 document.getElementById("repro.png").href = `/${manifest_version}/repro.png`;
 
@@ -485,6 +500,34 @@ function enable_graphics(on) {
     }
 }
 
+// TODO: if you do this after transferoffscreen, it doesn't do a resize so it's all warped until you manually resize the window
+document.getElementById("fullcanvas").addEventListener("change", (event) => layout_canvas(event.target.checked));
+function layout_canvas(graphics_only) {
+    let out = document.getElementById("out");
+    let c = document.getElementById("canvas");
+    if (graphics_only) {
+        document.getElementById("in_box").style.display = "none";
+        document.getElementById("out_box").style.width = "100%";
+        out.style.height = "0";
+        c.style.height = "100%";
+    } else {
+        document.getElementById("in_box").style.display = "inline-block";
+        document.getElementById("out_box").style.width = "49%";
+        c.style.height = "71%";
+        out.style.height = "29%";
+    }
+};
+
 document.getElementById("fullscreen").addEventListener("click", (event) => {
     if (document.fullscreenEnabled) document.getElementById("canvas").requestFullscreen();
 });
+
+document.getElementById("hidebar").addEventListener("click", (event) => layout_sidebar(false));
+function layout_sidebar(show) {
+    document.getElementById("sidebar").style.display = show ? "inline-block" : "none";
+    document.getElementById("text").style.width = show ? "90%" : "100%";
+}
+
+function precompiled_wasm_path(source_path) {
+    return "./" + manifest_version + "/" + source_path.slice(0, -3).replaceAll("/", "_") + ".wasm";
+}
