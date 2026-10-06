@@ -38,12 +38,13 @@ Clicker :: @struct {
 fn init_world(c: *Clicker, a: Alloc) void #use(Clicker) = {
     c.warp_start_time = .None;
     c.prev_time = timestamp_s();
+    c.earnings_multiplier = 1;
 
     c.generators = a.alloc_zeroed(Generator, 4);
     c.currencies = a.alloc_zeroed(Currency, 4);
     c.generators[0] = (name = "X", price = (currency=0, amount=1), production = (currency=0, amount=1), auto_price=(currency=0, amount=50));
     c.generators[1] = (name = "Y", price = (currency=0, amount=500), production = (currency=0, amount=10), auto_price=(currency=0, amount=200));
-    c.generators[2] = (name = "Z", price = (currency=0, amount=3500), production = (currency=1, amount=1), auto_price=(currency=1, amount=80));
+    c.generators[2] = (name = "Z", price = (currency=0, amount=3500), production = (currency=1, amount=1), auto_price=(currency=1, amount=60));
     c.generators[3] = (name = "Q", price = (currency=2, amount=50), production = (currency=1, amount=5), auto_price=(currency=0, amount=10000));
     c.currencies[0] = (name = "A", amount = 1);
     c.currencies[building_currency_index] = (name = "B", amount = 0);
@@ -92,8 +93,8 @@ fn consume_delta_time(sim: *Simulation) void = {
     @if(c.total_earnings < 1_000) return(); sim.completed("WhoWantsToBeAThousandaire");
     @if(c.total_earnings < 1_000_000) return(); sim.completed("WhoWantsToBeAMillionaire");
     @if(c.total_earnings < 1_000_000_000) return(); sim.completed("WhoWantsToBeABillionaire");
-    @if(c.total_earnings < 1_000_000_000_000) return(); sim.completed("WhoWantsToBeATrillionaire");
-    @if(c.total_earnings < 1_000_000_000_000_000) return(); sim.completed("WhoWantsToBeAQuadrillionaire");
+    //@if(c.total_earnings < 1_000_000_000_000) return(); sim.completed("WhoWantsToBeATrillionaire");
+    //@if(c.total_earnings < 1_000_000_000_000_000) return(); sim.completed("WhoWantsToBeAQuadrillionaire");
 }
 
 fn add_earnings(c: *Clicker, currency: i64, delta: i64) void = {
@@ -105,8 +106,8 @@ fn add_earnings(c: *Clicker, currency: i64, delta: i64) void = {
 
 fn adjust_for_prestige(c: *Clicker, delta: i64) i64 = {
     prestige := c.currencies[prestige_currency_index].amount;
-    delta += int((delta.float() * (prestige.float()/100)) + (delta.float() * c.earnings_multiplier));
-    delta
+    scale := c.earnings_multiplier * (1 + prestige.float()/100);
+    delta.float().mul(scale).int()
 }
 
 prestige_currency_index :: 3;
@@ -121,7 +122,7 @@ fn reset_for_prestige(sim: *Simulation, grant_prestige: bool) void = {
     each c.currencies { it |
         it.amount = 0;
     };
-    c.earnings_multiplier = 0;
+    c.earnings_multiplier = 1;
     f.time_multiplier = 1;
     f.max_time_multiplier = 2;
     each c.generators { it |
@@ -525,6 +526,14 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                     disable_if(disable) {
                     s := @if(kind == .Empty, "", @tfmt("%", f.buildings[i-1].hp));
                     
+                    style.border_color = ctx.style.button.border_color;
+                    if f.range_hover { hover_pos, range |
+                        if range > 0 && norm_sq(pos - hover_pos) <= range*range {
+                            style.border_color = (r=75,g=0,b=75,a=255);
+                            style.border = max(style.border, 2);
+                        };
+                    };
+                    
                     if button_styled(ctx, style&, s) {
                         kind = f.placing;
                         if f.placing == .Empty {
@@ -546,17 +555,19 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                         if kind != .Empty {
                             it := f.buildings[i - 1]&;
                             mine := it.kind == .Clicker;
+                            if sim.completed_in_this_run("Inspectigator") {
                             name := @if(mine, "Mine", it.kind.name_str());
                             wrapping_text_row(ctx, @tfmt("Level % % (%hp)", it.level, name, it.hp));
-                            if sim.completed_in_this_run("Inspectigator") {
+                            r := range(it);
                             @match(kind) {
-                                fn Turret() => wrapping_text_row(ctx, @tfmt("Range=3, Damage=%", it.level));
-                                fn Collector() => wrapping_text_row(ctx, @tfmt("Range=3, Earnings=%x", it.level));
-                                fn Spawner() => wrapping_text_row(ctx, @tfmt("Range=1.5, Damage=%, Chance=%, Reward=%x", it.level*20, min(1.0/8.0 + float(it.level)/40, 1), it.level*100));
-                                fn Monster() => wrapping_text_row(ctx, @tfmt("Range=1, Damage=%, Reward=%x", it.level*10, it.level));
-                                fn Clicker() => wrapping_text_row(ctx, @tfmt("Bonus=%x", c.earnings_multiplier));
+                                fn Turret() => wrapping_text_row(ctx, @tfmt("Range=%, Damage=%", r, it.level));
+                                fn Collector() => wrapping_text_row(ctx, @tfmt("Range=%, Earnings=%x", r, it.level));
+                                fn Spawner() => wrapping_text_row(ctx, @tfmt("Range=%, Damage=%, Chance=%, Reward=%x", r, it.level*20, min(1.0/8.0 + float(it.level)/40, 1), it.level*100));
+                                fn Monster() => wrapping_text_row(ctx, @tfmt("Range=%, Damage=%, Reward=%x", r, it.level*10, it.level));
+                                fn Clicker() => wrapping_text_row(ctx, @tfmt("Global Earnings Multiplier=%x", c.earnings_multiplier));
                                 @default => ();
                             };
+                            f.range_hover = (Some = (pos, r));
                             };
                             
                             nk_layout_row_dynamic(ctx, 0, 1);
@@ -569,7 +580,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                                     it.level += 1;
                                     it.hp = f.max_hp(it) - damage;
                                     if mine {
-                                        c.earnings_multiplier += 0.5;
+                                        c.earnings_multiplier += 0.25;
                                         sim.completed("GoldPlatedPickaxe");
                                     };
                                 };
@@ -583,6 +594,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                                     if button(ctx, @tfmt("Sell (+% %)", price.amount, name)) {
                                         i -= 1;
                                         sell_at_index(sim, i);
+                                        f.range_hover = .None;
                                     };
                                 } else {
                                     show_locked_button(false);
@@ -606,18 +618,23 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                         //    nk_contextual_close(ctx);
                         //};
                         nk_contextual_end(ctx);
+                    } else {
+                        if f.range_hover.is_some() && f.range_hover.Some._0 == pos {
+                            f.range_hover = .None;
+                        };
                     };
                 };
             };
             
             if sim.completed_in_this_run("TheWorldIsYourOyster") {
             nk_layout_row_dynamic(ctx, 0, 2);
-            price: Clicker.Price = (amount = 16 + powI(2, W+H-18), currency = collector_currency_index);
-            buy_button(price, H >= 20, "Buy Row") {
+            price: Clicker.Price = (amount = powI(2, W+H-18+6), currency = collector_currency_index);
+            max_size :: 18;
+            buy_button(price, H >= max_size, "Buy Row") {
                 f.dimensions.y += 1;
                 sim.completed("GentlyDownTheStream");
             };
-            buy_button(price, W >= 20, "Buy Column") {
+            buy_button(price, W >= max_size, "Buy Column") {
                 f.dimensions.x += 1;
             };
             @if(W == H) sim.completed("AsWideAsItIsTall");
@@ -729,6 +746,14 @@ fn check_building_achievement(sim: *Simulation, kind: Factory.Kind) void = @matc
     @default => ();
 };
 
+fn range(it: *Factory.Building) f32 = @match(it.kind) {
+    fn Turret() => 3;
+    fn Collector() => 3;
+    fn Spawner() => 1.5;
+    fn Monster() => 1;
+    @default => 0;
+};
+
 get_real_time :: fn() i64 = { t := zeroed(TimeSpec); Posix'clock_gettime(Posix.CLOCK.REALTIME, t&); t.seconds };
 
 // TODO: add more to save file if use it for suspend in maze_game:
@@ -821,7 +846,7 @@ fn read_save_file(sim: *Simulation, in: []u8) void = {
         have_world_map = in[5] == "w=1";
     };
     
-    c.earnings_multiplier = 0;
+    c.earnings_multiplier = 1;
     if have_world_map && in.len > 5 && in[6].starts_with("f=") {
         f.buildings&.clear();
         in := in[6].rest(2).split("|", temp());
@@ -836,7 +861,7 @@ fn read_save_file(sim: *Simulation, in: []u8) void = {
                 );
                 f.buildings&.push(it, f.gpa);
                 if it.kind == .Clicker {
-                    c.earnings_multiplier += (it.level.float() - 1) / 2;
+                    c.earnings_multiplier += (it.level.float() - 1) / 4;
                 };
             };
         };
@@ -937,6 +962,7 @@ Factory :: @struct {
     
     trying_to_spawn_spawner: bool;
     ui_quick_buy_bar: bool;
+    range_hover: ?Ty(Vec2, f32);
 };
 
 building_colours :: @const_slice(@as(Ui.Nuklear.nk_color) 
@@ -956,6 +982,7 @@ fn init_world(f: *Factory, a: Alloc) void = {
     f.time_multiplier = 1;
     f.max_time_multiplier = 2;
     f.ui_quick_buy_bar = true;
+    f.range_hover = .None;
     C :: building_currency_index;
     f.templates&[.Turret] = (hp = 25, price = (currency = C, amount = 50));
     f.templates&[.Wall] = (hp = 200, price = (currency = C, amount = 20));
@@ -1029,11 +1056,11 @@ fn tick_factory(sim: *Simulation) void = {
                 };
             }
             fn Spawner() => {
-                if closest(f, it.pos, 1.5, fn(it) => @is(it.kind, .Turret, .Wall, .Collector, .Clicker)) { blocker |
+                if closest(f, it, fn(it) => @is(it.kind, .Turret, .Wall, .Collector, .Clicker)) { blocker |
                     deal_damage(sim, blocker, 20 * it.level, killed&);
                     sim.completed("SuspiciouslySpikey");
                 };
-                if closest(f, it.pos, 1.5, fn(it) => it.kind == .Monster) { target |
+                if closest(f, it, fn(it) => it.kind == .Monster) { target |
                     target.hp += it.level;
                     if target.hp > f.templates&[target.kind].hp + it.level*2 {  // don't give the achivement if could move away the whole time
                         sim.completed("DidYouGoToMedicalSchool?MeNeither!");
@@ -1060,11 +1087,12 @@ fn tick_factory(sim: *Simulation) void = {
                 it := ();
             }
             fn Turret() => {
-                blocker := closest(f, it.pos, 3, fn(it) => @is(it.kind, .Monster, .Spawner)) || continue();
+                blocker := closest(f, it, fn(it) => @is(it.kind, .Monster, .Spawner)) || continue();
                 @if(!deal_damage(sim, blocker, it.level, killed&)) continue();
                 n := 0;
                 each f.buildings { it |
-                    n += it.level * int(it.kind == .Collector && norm_sq(blocker.pos - it.pos) <= 3*3);
+                    r := range(it);
+                    n += it.level * int(it.kind == .Collector && norm_sq(blocker.pos - it.pos) <= r*r);
                 };
                 @if(n == 0) sim.completed("WasteNotWantNot");
                 delta := n * blocker.level * @if(blocker.kind == .Spawner, 100, 1);
@@ -1096,10 +1124,11 @@ fn init_building(f: *Factory, pos: Vec2, kind: Factory.Kind) Factory.Building =
 fn resort(f: *Factory) void = 
     Sort'default(Factory.Building, f.buildings&.items(), fn(a, b) => @if(a.pos.y == b.pos.y, a.pos.x <= b.pos.x, a.pos.y <= b.pos.y));
 
-fn closest(f: *Factory, pos: Vec2, range: f32, $filter: @Fn(it: *Factory.Building) bool) ?*Factory.Building = {
+fn closest(f: *Factory, it: *Factory.Building, $filter: @Fn(it: *Factory.Building) bool) ?*Factory.Building = {
+    pos, r := (it.pos, it.range());
     // TODO: once get_neighbors uses the sortedness to be faster, check those first
     best_i := -1;
-    best_dist: f32 = range*range;
+    best_dist: f32 = r*r;
     enumerate f.buildings { i, it |
         if it.hp > 0 && filter(it) {
             dist := norm_sq(it.pos - pos);
@@ -1124,7 +1153,7 @@ fn check_fusion(sim: *Simulation, monster: *Factory.Building, others: *Array(Nod
     };
     @if(n != others.len()) return();
     
-    monster.level += level + 1;
+    monster.level += level;
     monster.hp += hp;
     sim.completed("FusionReactor");
     each others { it |
@@ -1216,7 +1245,7 @@ achievements :: @const_slice(
     ("SpeedIsTheKeyHere", "let a spawner level up until it spawns a monster every second", "your turrets have longer range than spawners. try to kill them before they get too strong."),
     ("FastestHandsInTheWest", "unlock the world map within 30 seconds of a reset", ""),
     ("CompactMachines", "unlock the ability to upgrade buildings", ""),
-    ("AnEyeForAnEye", "defeat a spawner", "a new one will... spawn... eventually but destroying them is very profitable if there's a collector near by"),
+    ("AnEyeForAnEye", "defeat a spawner", "a new one will... spawn... eventually but destroying them is very profitable if there are collectors near by. spawners appear faster when there are more empty cells."),
     ("GoldPlatedPickaxe", "upgrade your mine", "higher level mines multiply your earnings"),
     ("TimeWarpTonic", "unlock world speed slider", "upgrade to speed up time more. be careful! it's easy to lose as the spawners level up on high speeds if you're not paying attention"),
     ("Inspectigator", "unlock building stats", ""),
