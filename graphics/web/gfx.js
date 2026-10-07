@@ -64,7 +64,9 @@ export const init_gpu = async (wasm_instance, canvas, devicePixelRatio) => {
     G.canvas = canvas;
     const adapter = await navigator.gpu.requestAdapter();
     G.adapter = G.push(adapter);
-    const device = await adapter.requestDevice();
+    const device = await adapter.requestDevice({
+        requiredFeatures: ["depth32float-stencil8"],
+    });
     device.addEventListener('uncapturederror', (event) => {
         console.trace(event.error.message);
         G.show_error(event.error.message);
@@ -181,6 +183,10 @@ webgpu.wgpuTextureCreateView = (texure, i) => {
     const o = R.TextureViewDescriptor(i);
     return G.push(G.get(texure).createView(o));
 };
+
+webgpu.wgpuTextureGetWidth = (tex) => G.get(tex).width;
+webgpu.wgpuTextureGetHeight = (tex) => G.get(tex).height;
+
 webgpu.wgpuCommandEncoderBeginRenderPass = (encoder, i) => {
     const o = R.RenderPassDescriptor(i);
     return G.push(G.get(encoder).beginRenderPass(o));
@@ -259,6 +265,13 @@ webgpu.wgpuDeviceCreateTexture = (device, i) => {
     return G.push(G.get(device).createTexture(o));
 }
 
+const TextureFormat_ = R.TextureFormat.bind(R);
+R.TextureFormat = (x) => {
+    let o = TextureFormat_(x);
+    if (o === "depth32-float-stencil8") o = "depth32float-stencil8";
+    return o;
+};
+
 webgpu.wgpuQueueWriteTexture = (self, destination, data, data_size, data_layout, write_size) => {
     destination = R.TexelCopyTextureInfo(destination);
     data_layout = R.TexelCopyBufferLayout(data_layout);
@@ -307,6 +320,7 @@ R.r64 = (i) => G.get(R.p64(i));
 R.i64 = function (i) {
     return Number(this.p64(i));
 };
+R.i32 = (i) => new DataView(G.M()).getInt32(Number(i), true);
 R.Str = function (i) {
     let ptr = this.i64(i);
     let len = this.i64(i + 8n);

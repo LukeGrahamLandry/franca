@@ -1102,6 +1102,7 @@ fn init_world(f: *Factory, a: Alloc) void = {
     f.templates&[.Monster] = (hp = 20);
     f.templates&[.Spawner] = (hp = 1000);
     f.templates&[.Clicker] = (hp = 5000, price = (currency = collector_currency_index, amount = 0));  // price is base for upgrade
+    // TODO: leaks monsterdata when its reset_for_prestige
     f.buildings&.clear();
     f.dimensions = base_factory_dimensions;
     f.buildings&.push(f.init_building(vec2(2), .Clicker), f.gpa);
@@ -1579,10 +1580,10 @@ fn tick_quarry(sim: *Simulation) void = {
             distance := it.pos - center;
         @match(it.kind) {
             fn Expander() => {
-                collide(it.pos.x, it.vel.x&, -1, q.bottom_right.x&, gt);
-                collide(it.pos.x, it.vel.x&, 1, q.top_left.x&, lt);
-                collide(it.pos.y, it.vel.y&, -1, q.bottom_right.y&, gt);
-                collide(it.pos.y, it.vel.y&, 1, q.top_left.y&, lt);
+                range(0, 2) { i |
+                    collide(it.pos&[i], it.vel&[i]&, -1, q.bottom_right&[i]&, gt);
+                    collide(it.pos&[i], it.vel&[i]&, 1, q.top_left&[i]&, lt);
+                };
                 
                 if distance.x.abs() > w/2+q.miner_speed || distance.y.abs() > h/2+q.miner_speed {
                     // if a compressor makes the wall move so this guy is outside, run back in
@@ -1595,24 +1596,17 @@ fn tick_quarry(sim: *Simulation) void = {
                 dir *= 2;
                 
                 force: f32 = 2;
-                if it.pos.y < q.bottom_right.y && it.pos.y > q.top_left.y {
-                    if it.pos.x < q.bottom_right.x && it.pos.x > q.top_left.x {
-                        it.vel = dir;
-                        q.bottom_right.x -= force;
-                    };
-                    if it.pos.x > q.top_left.x && it.pos.x < q.bottom_right.x {
-                        it.vel = dir;
-                        q.top_left.x += force;
-                    };
-                };
-                if it.pos.x < q.bottom_right.x && it.pos.x > q.top_left.x {
-                    if it.pos.y < q.bottom_right.y && it.pos.y > q.top_left.y {
-                        it.vel = dir;
-                        q.bottom_right.y -= force;
-                    };
-                    if it.pos.y > q.top_left.y && it.pos.y < q.bottom_right.y {
-                        it.vel = dir;
-                        q.top_left.y += force;
+                range(0, 2) { i |
+                    j := int(i == 0);
+                    if it.pos&[j] < q.bottom_right&[j] && it.pos&[j] > q.top_left&[j] {
+                        if it.pos&[i] < q.bottom_right&[i] && it.pos&[i] > q.top_left&[i] {
+                            it.vel = dir;
+                            q.bottom_right&[i] -= force;
+                        };
+                        if it.pos&[i] > q.top_left&[i] && it.pos&[i] < q.bottom_right&[i] {
+                            it.vel = dir;
+                            q.top_left&[i] += force;
+                        };
                     };
                 };
             }

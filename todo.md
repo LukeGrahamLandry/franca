@@ -17,6 +17,7 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 
+- do sync_local_storage_if_web for maze_game save file but need to cope with binary data
 - farm_game/chess zoom in based on window size
 - my dump_wasm doesn't see the custom name section written by -keep-names. it works in https://webassembly.github.io/wabt/demo/wasm2wat/ so the emit isn't the problem
 - use nk_button_text instead of nk_button_label everywhere so don't have to make CStr
@@ -1625,7 +1626,7 @@ actually that's a bit too agressive but certainly stop processing ANSI escape co
 make sure that's not something i broke (i think it was always like that, 
 just a problem with how that program is doing directions not with the app lib)
 - :LazyMagicNumbers
-- :DEPTH (which is also for msaa)
+- msaa
 - bindgroups_cache 
 - web
   - safari

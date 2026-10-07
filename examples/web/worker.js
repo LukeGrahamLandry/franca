@@ -321,6 +321,7 @@ let weak_imports = [
     "posix_spawn_file_actions_adddup2", "posix_spawn_file_actions_addclose", 
     "fdopendir", "fdopendir$INODE64",
     "fabs", "memset", "qsort", "sqrt", "memcpy", 
+    "chdir", "kill", 
 ];
 
 for (const it of weak_imports) {

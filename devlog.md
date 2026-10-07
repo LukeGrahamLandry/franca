@@ -1,4 +1,10 @@
 
+## (Oct 7)
+
+- in browser renderpass depth format not matching on first frame but works in dawn? 
+  if i fly away and come back the screens start working.
+  was because i was creating depth in get_current_surface which is called on post_frame in browser but pre_frame native.
+
 ## (Oct 6)
 
 - my overloading woes with pow/abs is if you #use something that #includes math.h it shadows ex. abs() with the libc one that's only for ints. 

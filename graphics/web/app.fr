@@ -63,7 +63,6 @@ pre_init :: fn(sapp: *Sapp.Self) void = {
         height = trunc sapp.framebuffer_height,
     );
     web.surface.configure(web.config&);
-    // TODO: what about depth texture / msaa :DEPTH
 }
 
 fn native_init_device(web: *RealGraphicsState, metal_layer: ?rawptr) void = {
@@ -129,6 +128,7 @@ pre_frame :: fn(sapp: *Sapp.Self) void = {
     
     if web.is_browser {
         web.swapchain_view = web.wip_frame._1;
+        maybe_resize_depth_texture(web, web.wip_frame._0);
     } else {
         release(get_current_surface(web));
     };
@@ -153,7 +153,23 @@ get_current_surface :: fn(web: *GraphicsState) WGPU.Texture = {
     @debug_assert(!surface_tex.texture._.is_null(), "failed getCurrentTexture");    
     web.swapchain_view = createView(surface_tex.texture, zeroed(*WGPU.TextureViewDescriptor));
     @debug_assert(!web.swapchain_view._.is_null(), "failed to create swapchain_view");   
+    maybe_resize_depth_texture(web, surface_tex.texture);
     surface_tex.texture 
+}
+
+// TODO: do this on resize event instead
+maybe_resize_depth_texture :: fn(web: *GraphicsState, colour_texture: WGPU.Texture) void = {
+    w, h := (colour_texture.getWidth(), colour_texture.getHeight());
+    if web.depth_tex._.is_null() || w != web.depth_tex.getWidth() || h != web.depth_tex.getHeight() {
+        if !web.depth_tex._.is_null() {
+            release(web.depth_tex);
+            release(web.depth_view);
+        };
+        tex, view := create_tex_view(web.device, .Depth32FloatStencil8, w, h, "auto-depth", 
+            (_ = WGPU.TextureUsage.RenderAttachment));
+        web.depth_tex = tex;
+        web.depth_view = view;
+    };
 }
 
 post_frame :: fn(sapp: *Sapp.Self) void = {
@@ -199,30 +215,34 @@ init_browser_wip_frame :: fn(web: *GraphicsState) void = {
         release(web.wip_frame._1);
     };  // else: first time being called (ie. for init not resize)
     ::Sg.Webgpu;
-    tex := createTexture(web.device, @ref(@as(WGPU.TextureDescriptor) (
-        label = "saved-frame",
-        usage = (_ = @or(WGPU.TextureUsage.CopySrc, WGPU.TextureUsage.CopyDst, WGPU.TextureUsage.RenderAttachment)),
+    // TODO: navigator.gpu.getPreferredCanvasFormat()
+    tex, view := create_tex_view(web.device, .BGRA8Unorm, web.config.width, web.config.height, "saved-frame", 
+        (_ = @or(WGPU.TextureUsage.CopySrc, WGPU.TextureUsage.CopyDst, WGPU.TextureUsage.RenderAttachment)));
+    @assert(!tex._.is_null(), "failed to create wip_frame");
+    web.wip_frame = (tex, view);
+    web.is_browser = true;
+}
+
+create_tex_view :: fn(device: WGPU.Device, format: WGPU.TextureFormat, w: u32, h: u32, label: Str, usage: WGPU.TextureUsage) Ty(WGPU.Texture, WGPU.TextureView) = {
+   tex := createTexture(device, @ref(@as(WGPU.TextureDescriptor) (
+        label = label,
+        usage = usage,
         dimension = ._2D,
-        size = (
-            width = web.config.width,
-            height = web.config.height,
-        ),
-        format = .BGRA8Unorm, // TODO: navigator.gpu.getPreferredCanvasFormat(),
+        size = (width = w, height = h),
+        format = format,
         mipLevelCount = 1,
         sampleCount = 1,
     )));
     view := createView(tex, @ref(@as(WGPU.TextureViewDescriptor)(
         usage = (_ = 0),
-        label = "saved-frame",
+        label = label,
         dimension = ._2D,
         mipLevelCount = 1,
         arrayLayerCount = 1,
         aspect = .All,
     )));
-    @assert(!tex._.is_null(), "failed to create wip_frame");
-    web.wip_frame = (tex, view);
-    web.is_browser = true;
-}
+    (tex, view)
+} 
 
 native_shutdown :: fn(sapp: *Sapp.Self) void = {
     // TODO
