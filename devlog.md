@@ -1,4 +1,9 @@
 
+## (Oct 6)
+
+- my overloading woes with pow/abs is if you #use something that #includes math.h it shadows ex. abs() with the libc one that's only for ints. 
+  that's a relief. need to be more sane about how visible stuff in headers is. 
+
 ## (Oct 5)
 
 - nuklear: the alpha thing in the pipeline to fix weird highlighting of text in web (like debugtext a while ago)

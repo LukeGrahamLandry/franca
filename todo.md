@@ -17,6 +17,7 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 
+- farm_game/chess zoom in based on window size
 - my dump_wasm doesn't see the custom name section written by -keep-names. it works in https://webassembly.github.io/wabt/demo/wasm2wat/ so the emit isn't the problem
 - use nk_button_text instead of nk_button_label everywhere so don't have to make CStr
 - do the aot thing i was thinking about for web and make actually good seperate page 

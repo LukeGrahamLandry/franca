@@ -41,7 +41,7 @@ fn init_world(c: *Clicker, a: Alloc) void #use(Clicker) = {
     c.earnings_multiplier = 1;
 
     c.generators = a.alloc_zeroed(Generator, 4);
-    c.currencies = a.alloc_zeroed(Currency, 4);
+    c.currencies = a.alloc_zeroed(Currency, 5);
     c.generators[0] = (name = "X", price = (currency=0, amount=1), production = (currency=0, amount=1), auto_price=(currency=0, amount=50));
     c.generators[1] = (name = "Y", price = (currency=0, amount=500), production = (currency=0, amount=10), auto_price=(currency=0, amount=200));
     c.generators[2] = (name = "Z", price = (currency=0, amount=3500), production = (currency=1, amount=1), auto_price=(currency=1, amount=60));
@@ -50,6 +50,7 @@ fn init_world(c: *Clicker, a: Alloc) void #use(Clicker) = {
     c.currencies[building_currency_index] = (name = "B", amount = 0);
     c.currencies[collector_currency_index] = (name = "C", amount = 0);
     c.currencies[prestige_currency_index] = (name = "D", amount = 0);
+    c.currencies[quarry_currency_index] = (name = "E", amount = 0);
 }
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -110,6 +111,7 @@ fn adjust_for_prestige(c: *Clicker, delta: i64) i64 = {
     delta.float().mul(scale).int()
 }
 
+quarry_currency_index :: 4;
 prestige_currency_index :: 3;
 collector_currency_index :: 2;
 building_currency_index :: 1;
@@ -130,6 +132,7 @@ fn reset_for_prestige(sim: *Simulation, grant_prestige: bool) void = {
         it.level = 0;
     };
     init_world(f, f.gpa);
+    init_world(sim.quarry&);
     each sim.achievements { it |
         it.set(.complete_this_run, 0);
     };
@@ -349,7 +352,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                     @if(n > 2) wrapping_text_row(ctx, post_hint);
                     if n < 3 - int(post_hint == "") {
                         price: Clicker.Price = (amount = powI(2, sim.total_hints), currency = 0);
-                        buy_button(price, false, @tfmt("Buy Hint %/3", n+1)) {
+                        buy_button(price, false, @tfmt("Buy Hint %/3", n+1), true) {
                             it.set(.hint, n + 1);
                             sim.total_hints += 1;
                             sim.completed("WhenISayJumpYouSayHowHigh");
@@ -390,12 +393,15 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
             break();
         };
         
-        nk_layout_row_dynamic(ctx, 0, c.currencies.len.intcast());
-        
         n := 0;
         enumerate c.currencies { i, it |
-            text(ctx, @tfmt("% %", it.amount, it.name));
             n += int(it.amount != 0);
+        };
+        nk_layout_row_dynamic(ctx, 0, n.intcast());
+        enumerate c.currencies { i, it |
+            if it.amount != 0 {
+                text(ctx, @tfmt("% %", it.amount, it.name));
+            }
         };
         @if(n == c.currencies.len) sim.completed("VeritableCornucopia");
         
@@ -419,7 +425,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
             
             price := int(it.price.amount.float() * (1 + (powI(2, it.level)-1).float()/10));
             price: Clicker.Price = (amount = price, currency = it.price.currency);
-            buy_button(price, false, "Buy") {
+            buy_button(price, false, "Buy", true) {
                 it.level += 1;
                 @if(sim.completed_in_this_run("WasteOfAGoodSacrifice")) sim.completed("Sneaky");
             };
@@ -427,7 +433,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
             if it.auto.allow {
                 checkbox(ctx, "Auto", it.auto.enable&);
             } else {
-                buy_button(it.auto_price, it.level == 0, "Auto") {
+                buy_button(it.auto_price, it.level == 0, "Auto", true) {
                     it.auto.allow = true;
                     it.auto.enable = true;
                     sim.completed("TheyAreTakingOurJobs");
@@ -437,17 +443,17 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
         
         nk_layout_row_dynamic(ctx, 0, 1);
         
-        n := do_upgrade_chain(@const_slice(0, 1, 2, 3));
-        @if(n >= 1) { do_upgrade_chain(@const_slice(5, 4, 6)); };
+        n := do_upgrade_chain(@const_slice(0, 1, 2, 3, 4), true);
+        do_upgrade_chain(@const_slice(6, 5, 7), n >= 1);
         
-        do_upgrade_chain :: fn($indices: []i64) i64 => {
+        do_upgrade_chain :: fn($indices: []i64, unlocked: bool) i64 => {
             n := 0;
             inline_for indices { $i |
                 n += sim.completed_in_this_run(upgrades[i[]]._0).int();
             };
             if n < indices.len() {
                 price: Clicker.Price = upgrades[indices[n]]._2;
-                buy_button(price, false, @tfmt("Buy %", upgrades[indices[n]]._1)) {
+                buy_button(price, false, @tfmt("Buy %", upgrades[indices[n]]._1), unlocked) {
                     j := 0;
                     inline_for indices { $i |
                         @if(n == j) sim.completed(upgrades[i[]]._0);
@@ -572,10 +578,9 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                             
                             nk_layout_row_dynamic(ctx, 0, 1);
                             if !@is(it.kind, .Monster, .Spawner) {
-                                if sim.completed_in_this_run("CompactMachines") {
                                 cur := @if(mine, collector_currency_index, building_currency_index);
                                 price := f.upgrade_price(it.kind, it.level);
-                                buy_button(price, false, "Upgrade") {
+                                buy_button(price, false, "Upgrade", sim.completed_in_this_run("CompactMachines")) {
                                     damage := f.max_hp(it) - it.hp;
                                     it.level += 1;
                                     it.hp = f.max_hp(it) - damage;
@@ -583,9 +588,6 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                                         c.earnings_multiplier += 0.25;
                                         sim.completed("GoldPlatedPickaxe");
                                     };
-                                };
-                                } else {
-                                    show_locked_button(false);
                                 };
                                 @if(!mine)
                                 if sim.completed_in_this_run("EverythingMustGo") {
@@ -603,7 +605,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                         } else {
                             nk_layout_row_dynamic(ctx, 0, 1);
                             for placeable.rest(1) { kind |
-                                buy_button(f.templates&[kind].price, false, @tfmt("Buy %", kind)) {
+                                buy_button(f.templates&[kind].price, false, @tfmt("Buy %", kind), true) {
                                     check_building_achievement(sim, kind);
                                     f.buildings&.insert(i, f.init_building(pos, kind), f.gpa);
                                     i += 1;
@@ -626,28 +628,24 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                 };
             };
             
-            if sim.completed_in_this_run("TheWorldIsYourOyster") {
             nk_layout_row_dynamic(ctx, 0, 2);
             price: Clicker.Price = (amount = powI(2, W+H-18+6), currency = collector_currency_index);
             max_size :: 18;
-            buy_button(price, H >= max_size, "Buy Row") {
+            buy_button(price, H >= max_size, "Buy Row", sim.completed_in_this_run("TheWorldIsYourOyster")) {
                 f.dimensions.y += 1;
                 sim.completed("GentlyDownTheStream");
             };
-            buy_button(price, W >= max_size, "Buy Column") {
+            buy_button(price, W >= max_size, "Buy Column", sim.completed_in_this_run("TheWorldIsYourOyster")) {
                 f.dimensions.x += 1;
             };
             @if(W == H) sim.completed("AsWideAsItIsTall");
-            } else {
-                show_locked_button(true);
-            };
             
             if sim.completed_in_this_run("TimeWarpTonic") {
                 nk_layout_row_dynamic(ctx, 0, 3);
                 text(ctx, @tfmt("World Speed: %x", f.time_multiplier));
                 nk_slider_int(ctx, 0, f.time_multiplier&, f.max_time_multiplier, 1);
                 price: Clicker.Price = (amount = powI(2, f.max_time_multiplier.intcast()), currency = 0);
-                buy_button(price, false, "Upgrade") {
+                buy_button(price, false, "Upgrade", true) {
                     f.max_time_multiplier += 1;
                 };
             } else {
@@ -657,6 +655,81 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
             checkbox(ctx, "Quick Buy", f.ui_quick_buy_bar&);
         };
         nk_end(ctx);
+    };
+    
+    
+    q := sim.quarry&;
+    if sim.completed_in_this_run("Quarrelsome") {
+    tick_quarry(sim);
+    if begin(ctx, "The Quarry", nk_rect(380, 60, 400, 300), flags) {
+        draw := nk_window_get_canvas(ctx);
+        off := vec2(draw.clip.x, draw.clip.y);
+        w, h := (q.bottom_right.x - q.top_left.x, q.bottom_right.y - q.top_left.y);
+        off_the_charts := q.top_left.x > draw.clip.w || q.top_left.y > draw.clip.h || q.bottom_right.x < 0 || q.bottom_right.y < 0;
+      
+        if !off_the_charts {
+            nk_fill_rect(draw, nk_rect(off.x + q.top_left.x, off.y + q.top_left.y, w, h), 0, (r=0,g=0,b=0,a=255));
+            each q.miners& { it |
+                p := it.pos + off;
+                rot :: fn(v: Vec2, r: f32) Vec2 = {
+                    s, c := sin_cos(r);
+                    vec2(v.x * c - v.y * s, v.x * s + v.y * c)
+                };
+                dir := -it.vel * 10;
+                p1, p2 := (p + rot(dir, 0.5), p + rot(dir, -0.5));
+                colours := @const_slice(@as(nk_color) 
+                    (r=255,g=0,b=0,a=255),
+                    (r=255,g=255,b=0,a=255),
+                );
+                nk_fill_triangle(draw, p.x, p.y, p1.x, p1.y, p2.x, p2.y, colours[it.kind.raw().zext()]);
+            };
+            
+            @if(!sim.completed_in_this_run("FourCornersOfTheWorld"))
+            if q.top_left.x < 0 && q.top_left.y < 0 && q.bottom_right.x > draw.clip.w && q.bottom_right.y > draw.clip.y {
+                sim.completed("FourCornersOfTheWorld");
+            };
+        } else {
+            sim.completed("OffTheCharts");
+        };
+        
+        rand_pos :: fn() Vec2 => {
+            x, y := (f.rng&.rand_float().cast(), f.rng&.rand_float().cast());
+            vec2(x,y)*vec2(w,h) + q.top_left
+        }
+        
+        nk_layout_row_dynamic(ctx, 0, 2);
+        price: Clicker.Price = (amount = powI(3, q.miners.len), currency = collector_currency_index);
+        buy_button(price, false, "Buy Expander", true) {
+            x, y := (f.rng&.rand_float().cast(), f.rng&.rand_float().cast());
+            dx, dy := (f.rng&.rand_float().cast(), f.rng&.rand_float().cast());
+            q.miners&.push((pos = rand_pos(), vel = vec2(dx, dy).normalize(), kind = .Expander), f.gpa);
+            sim.completed("WhatGoesUp");
+        };
+        buy_button(price, false, "Buy Compressor", sim.completed_in_this_run("FourCornersOfTheWorld")) {
+            x, y := (f.rng&.rand_float().cast(), f.rng&.rand_float().cast());
+            q.miners&.push((pos = rand_pos(), vel = vec2(0), kind = .Compressor), f.gpa);
+            sim.completed("MustComeDown");
+        };
+        price: Clicker.Price = (amount = powI(3, q.miner_speed.cast().int()), currency = quarry_currency_index);
+        buy_button(price, false, "Buy Speed", sim.completed_in_this_run("MustComeDown")) {
+            q.miner_speed += 1;
+            sim.completed("WarpSpeedAhead");
+        };
+       
+        area_middle := q.top_left + vec2(w,h)/2 + off;
+        screen_middle := vec2(draw.clip.x, draw.clip.y) + vec2(draw.clip.w, draw.clip.h) / 2;
+        shift := screen_middle - area_middle; 
+        price: Clicker.Price = (amount = min(shift.norm_sq().cast().int()/1000*100, 10_000), currency = 0);
+        buy_button(price, false, "Recenter", sim.completed_in_this_run("OffTheCharts")) {
+            q.top_left += shift;
+            q.bottom_right += shift;
+            each q.miners& { it |
+                it.pos += shift;
+            };
+        };
+        wrapping_text_row(ctx, @tfmt("Mined Area = %", w*h));
+    };
+    nk_end(ctx);
     };
     
     show_locked_button :: fn(row: bool) => {
@@ -686,9 +759,10 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
         @if(minimized, c.start_warp(), sim.end_warp());
     };
     
-    buy_button :: fn(price: Clicker.Price, disable: bool, label: Str, $body: @Fn() void) => {
+    buy_button :: fn(price: Clicker.Price, disable: bool, label: Str, unlocked: bool, $body: @Fn() void) => {
         kind := c.currencies[price.currency]&;
         price := price.amount;
+        @if(unlocked)
         disable_if(price > kind.amount || disable) {
             if button(ctx, @tfmt("% (-% %)", label, price, kind.name)) {
                 kind.amount -= price;
@@ -696,6 +770,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                 body();
             };
         };
+        @if(!unlocked) show_locked_button(false);
     };
     
     disable_if :: fn(disable: bool, $body: @Fn() void) = {
@@ -791,6 +866,13 @@ fn write_save_file(sim: *Simulation) []u8 = {
     };
     @fmt(out, ",h=%,e=%:%,d=%:%,", sim.total_hints, c.earnings_this_run, c.total_earnings, f.dimensions.x, f.dimensions.y);
     @fmt(out, "m=%:%,", f.time_multiplier, f.max_time_multiplier);
+    
+    q := sim.quarry&;
+    @fmt(out, "q=%:%:%:%:%", q.top_left.x, q.top_left.y, q.bottom_right.x, q.bottom_right.y, q.miner_speed);
+    each q.miners { it |
+        @fmt(out, "|%:%:%:%:%", it.pos.x, it.pos.y, it.vel.x, it.vel.y, @as(u8) it.kind);
+    };
+    @fmt(out, ",");
     
     in := out.items(); 
     // @println("CopySaveFile(plain):  %", in);
@@ -901,6 +983,27 @@ fn read_save_file(sim: *Simulation, in: []u8) void = {
         f.max_time_multiplier = in[1].parse_int().intcast();
         I += 1;
     };
+    F :: fn(s: Str) f32 = { f, _ := parse_float(s); f.cast() };
+    q := sim.quarry&;
+    if in.len > I && in[I].starts_with("q=") {
+        in := in[I].rest(2).split("|", temp());
+        {
+            in := in[0].split(":", temp());
+            q.top_left = vec2(F(in[0]), F(in[1]));
+            q.bottom_right = vec2(F(in[2]), F(in[3]));
+            q.miner_speed = F(in[4]);
+        };
+        for in.items().rest(1) { in |
+            in := in.split(":", temp());
+            q.miners&.push((
+                pos = vec2(F(in[0]), F(in[1])),
+                vel = vec2(F(in[2]), F(in[3])),
+                kind = @as(Quarry.Kind) @as(u8) in[4].parse_int().trunc(),
+            ), f.gpa);
+        };
+        
+        I += 1;
+    };
     
     sim.end_warp();
     sim.time_since_reset = 1000000;  // only used for one achievement. not a big deal to require the 30 seconds to be in one sitting. 
@@ -931,7 +1034,7 @@ main :: fn() void = Easy'start(State);
 #use("@/graphics/lib.fr");
 Ui :: import("@/graphics/deps/nuklear.fr");
 
-// TODO: wtf, can't call the int pow() overload :compiler
+// TODO: #use(Nuklear) shadows my overloaded `fn pow` with the one from libc
 powI :: fn(base: i64, exp: i64) i64 = {  // :SLOW
     n := 1;
     range(0, exp) {_|
@@ -1004,7 +1107,7 @@ fn tick_factory(sim: *Simulation) void = {
     has_space := f.buildings.len != w*h;
     if !has_space && f.buildings.find(fn(it) => @is(it.kind, .Spawner, .Monster)).is_none() {
         sim.completed("EverythingTheLightTouches");
-        return();  // don't let the spawner level up. so you can use this as a way to disable the factory if you want
+        return();
     };
     
     clicker_i := f.buildings.index_of(fn(it) => it.kind == .Clicker).unwrap();
@@ -1165,6 +1268,7 @@ fn check_fusion(sim: *Simulation, monster: *Factory.Building, others: *Array(Nod
 Simulation :: @struct {
     clicker: Clicker;
     factory: Factory;
+    quarry: Quarry;
     
     achievements: []Achivement;
     total_hints: i64;
@@ -1188,6 +1292,7 @@ fn init_world(s: *Simulation, a: Alloc) void = {
     init_world(s.factory&, a);
     s.achievements = a.alloc_zeroed(Simulation.Achivement, achievements.len());
     s.notifications&.clear();
+    init_world(s.quarry&);
 }
 
 achievement_index :: fn($name: Str) i64 = 
@@ -1245,13 +1350,19 @@ achievements :: @const_slice(
     ("SpeedIsTheKeyHere", "let a spawner level up until it spawns a monster every second", "your turrets have longer range than spawners. try to kill them before they get too strong."),
     ("FastestHandsInTheWest", "unlock the world map within 30 seconds of a reset", ""),
     ("CompactMachines", "unlock the ability to upgrade buildings", ""),
-    ("AnEyeForAnEye", "defeat a spawner", "a new one will... spawn... eventually but destroying them is very profitable if there are collectors near by. spawners appear faster when there are more empty cells."),
+    ("AnEyeForAnEye", "defeat a spawner", "a new one will... spawn... eventually but destroying them is very profitable if there are collectors nearby. spawners appear faster when there are more empty cells."),
     ("GoldPlatedPickaxe", "upgrade your mine", "higher level mines multiply your earnings"),
     ("TimeWarpTonic", "unlock world speed slider", "upgrade to speed up time more. be careful! it's easy to lose as the spawners level up on high speeds if you're not paying attention"),
     ("Inspectigator", "unlock building stats", ""),
     ("TheWorldIsYourOyster", "unlock row/col expansion", "if you're feeling cramped, you can buy new rows/columns of the world grid (buttons at the bottom)"),
     ("EverythingMustGo", "unlock selling buildings", ""),
     ("Sneaky", "upgrade a miner while your mine is dead", "that won't do much"),
+    ("Quarrelsome", "unlock the quarry", ""),
+    ("WhatGoesUp", "buy an Expander", "these workers get lonely. they'll only move if you interact with the game. try moving your mouse around."),
+    ("MustComeDown", "buy a Compressor", "expanders are rewarded for hitting the walls so they earn more in smaller boxes"),
+    ("WarpSpeedAhead", "boost quarry speed", ""),
+    ("OffTheCharts", "let the quarry escape the screen entirely", "there's no disadvantage to your workers being out of sight but then you can't see the pretty animation"),
+    ("FourCornersOfTheWorld", "let the quarry cover the screen", ""),
 );
 
 upgrades :: @const_slice(@as(Ty(Str, Str, Clicker.Price))
@@ -1259,6 +1370,7 @@ upgrades :: @const_slice(@as(Ty(Str, Str, Clicker.Price))
     ("InvestingInYourFuture", "Altar Of Sacrifice", (amount = 300, currency = building_currency_index)),
     ("CompactMachines", "Building Upgrade Menu", (amount = 300, currency = collector_currency_index)),
     ("TimeWarpTonic", "World Speed Control", (amount = 45_000, currency = collector_currency_index)),
+    ("Quarrelsome", "The Quarry", (amount = 500_000, currency = collector_currency_index)),
     ///
     ("EverythingMustGo", "Building Sell Button", (amount = 1000, currency = 0)),
     ("TheWorldIsYourOyster", "Grid Expansion", (amount = 1, currency = collector_currency_index)),
@@ -1270,6 +1382,8 @@ upgrades :: @const_slice(@as(Ty(Str, Str, Clicker.Price))
 // TODO: if get stuck waiting in line behind other monsters, 
 //       change target (to an exposed turret/collector) if possible 
 //       and remember it for longer so don't keep going back and forth as the blockers move. 
+// TODO: this gets too slow when the grid is big and speed is high.
+//       should save the paths and just check if it still works next tick (i.e. no buildings placed). 
 
 // https://en.wikipedia.org/wiki/A*_search_algorithm#Pseudocode
 a_star :: fn(f: *Factory, start: Node, goal: Node) []Node = {
@@ -1380,4 +1494,79 @@ fn hash(h: *TrivialHasher, s: *Node) void = {
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     on_cleanup(state.ui&, sg);
     // TODO
+}
+
+Quarry :: @struct {
+    miners: RawList(Miner);
+    top_left: Vec2;
+    bottom_right: Vec2;
+    miner_speed: f32;
+    Kind :: @enum(u8) (Expander, Compressor);
+    Miner :: @struct(pos: Vec2, vel: Vec2, kind: Kind);
+};
+
+fn init_world(q: *Quarry) void = {
+    q.miners&.clear();
+    q.miner_speed = 1;
+    q.top_left = vec2(100);
+    q.bottom_right = q.top_left + vec2(10);
+}
+
+
+fn tick_quarry(sim: *Simulation) void = {
+    c, q := (sim.clicker&, sim.quarry&);
+    w, h := (q.bottom_right.x - q.top_left.x, q.bottom_right.y - q.top_left.y);
+    center := q.top_left.add(vec2(w,h)/2);
+    each q.miners& { it |
+        collide :: fn(p: f32, v: *f32, sign: f32, limit: *f32, $cmp) void => 
+            if cmp(p, limit[]) {
+                if cmp(v[], 0) {
+                    add_earnings(c, quarry_currency_index, 1);
+                    limit[] += -sign;
+                };
+                v[] = sign * abs(v[]);
+            };
+            it.pos += it.vel * q.miner_speed;
+            distance := it.pos - center;
+        @match(it.kind) {
+            fn Expander() => {
+                collide(it.pos.x, it.vel.x&, -1, q.bottom_right.x&, gt);
+                collide(it.pos.x, it.vel.x&, 1, q.top_left.x&, lt);
+                collide(it.pos.y, it.vel.y&, -1, q.bottom_right.y&, gt);
+                collide(it.pos.y, it.vel.y&, 1, q.top_left.y&, lt);
+                
+                if distance.x.abs() > w/2+q.miner_speed || distance.y.abs() > h/2+q.miner_speed {
+                    // if a compressor makes the wall move so this guy is outside, run back in
+                    it.vel = -normalize(distance);
+                };
+            }
+            fn Compressor() => {
+                dir := distance.normalize();
+                it.vel -= dir/10;
+                dir *= 2;
+                
+                force: f32 = 2;
+                if it.pos.y < q.bottom_right.y && it.pos.y > q.top_left.y {
+                    if it.pos.x < q.bottom_right.x && it.pos.x > q.top_left.x {
+                        it.vel = dir;
+                        q.bottom_right.x -= force;
+                    };
+                    if it.pos.x > q.top_left.x && it.pos.x < q.bottom_right.x {
+                        it.vel = dir;
+                        q.top_left.x += force;
+                    };
+                };
+                if it.pos.x < q.bottom_right.x && it.pos.x > q.top_left.x {
+                    if it.pos.y < q.bottom_right.y && it.pos.y > q.top_left.y {
+                        it.vel = dir;
+                        q.bottom_right.y -= force;
+                    };
+                    if it.pos.y > q.top_left.y && it.pos.y < q.bottom_right.y {
+                        it.vel = dir;
+                        q.top_left.y += force;
+                    };
+                };
+            }
+        };
+    };
 }
