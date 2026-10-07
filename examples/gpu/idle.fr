@@ -160,21 +160,22 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         now := timestamp_s();
         @if(now < c.prev_time) break();  // unreachable you'd hope
         
-        c.delta_time += now - c.prev_time;
+        delta := now - c.prev_time;
+        f.delta_time += delta * f.time_multiplier.intcast().float();
+        sim.time_since_reset += delta;
+        c.delta_time += delta;
         c.prev_time = now;
         @if(c.delta_time < 1) break();
         state.dirty = true;
         
-        // TODO: maybe an upgrade that lets you have this run in end_warp as well? 
-        //       probably don't run while saved so you don't just auto die but could run more efficiently without rendering when idle just because unfocused. 
-        dt := c.delta_time * f.time_multiplier.intcast().float();
-        sim.time_since_reset += dt;
-        while => dt >= 1 {
-            tick_factory(sim);
-            dt -= 1;
-        };
-        
         sim.consume_delta_time();
+    };
+    
+    if f.delta_time >= 1 {
+        f.delta_time -= 1;
+        if tick_factory(sim) {
+            state.dirty = true;
+        };
     };
     
     @match(state.action) {
@@ -390,6 +391,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
         if c.warp_start_time { _ |
             nk_layout_row_dynamic(ctx, 0, 1);
             text(ctx, "Warping To The Future!");
+            wrapping_text_row(ctx, "(resources will continue to be collected while you're away)");
             break();
         };
         
@@ -408,6 +410,9 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
         locked := false;
         enumerate c.generators { i, it |
             continue :: local_return;
+            if i >= 3 && !sim.completed_in_this_run("TheDarkForest") {
+                locked = true;
+            };
             @if(locked) continue(show_locked_button(true));
             locked = it.level == 0;
         
@@ -483,7 +488,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
             if f.ui_quick_buy_bar {
             nk_layout_row_dynamic(ctx, 0, placeable.len().intcast());
             for placeable { kind |
-                style.normal = nk_style_item_color(building_colours[@as(i64) kind]);
+                style.normal = nk_style_item_color(building_colours[kind.raw().zext()]);
                 
                 cur := c.currencies[f.templates&[kind].price.currency]&;
                 price := f.templates&[kind].price.amount;
@@ -517,7 +522,7 @@ fn draw_ui(state: *State) void #use(Ui.Nuklear) = {
                         level = f.buildings[i].level - 1;
                         i += 1;
                     };
-                    style.normal = nk_style_item_color(building_colours[@as(i64) kind]);
+                    style.normal = nk_style_item_color(building_colours[kind.raw().zext()]);
                     style.border = level.float().cast().div(2).min(5);
                     
                     can_sell := placeable.contains(fn(it) => it[] == kind) && sim.completed_in_this_run("EverythingMustGo");
@@ -853,7 +858,7 @@ fn write_save_file(sim: *Simulation) []u8 = {
     if have_world_map {
         @fmt(out, "f=");
         enumerate f.buildings { i, it |
-            @fmt(out, "%:%:%:%:%:%|", i, @as(i64) it.kind, it.pos.x, it.pos.y, it.hp, it.level);
+            @fmt(out, "%:%:%:%:%:%|", i, @as(u8) it.kind, it.pos.x, it.pos.y, it.hp, it.level);
         };
         @fmt(out, ",");
     };
@@ -875,11 +880,9 @@ fn write_save_file(sim: *Simulation) []u8 = {
     @fmt(out, ",");
     
     in := out.items(); 
-    // @println("CopySaveFile(plain):  %", in);
     flip_encrypt(in, true);
     out := @ref u8.list(temp());
     B64'encode(out, in);
-    // @println("CopySaveFile(cipher): %", out.items());
     out.items()
 }
 
@@ -890,13 +893,11 @@ fn read_save_file(sim: *Simulation, in: []u8) void = {
     while => in.len > 0 && in[0].is_ascii_whitespace() {
         in = in.rest(1);
     };
-    // @println("PasteSaveFile(cipher): %", in);
     out := @ref u8.list(temp());
     @if(in.len.umod(4) != 0) return();
     B64'base64_decode(out, in);
     in := out.items();
     flip_encrypt(in, false);
-    // @println("PasteSaveFile(plain):  %", in);
     
     c, f := (sim.clicker&, sim.factory&);
     sim.notifications&.clear();
@@ -936,11 +937,15 @@ fn read_save_file(sim: *Simulation, in: []u8) void = {
             if in.len != 0 {
                 in := in.split(":", temp());
                 it: Factory.Building = (
-                    kind = @as(Factory.Kind) @as(i64) in[1].parse_int(),
+                    kind = @as(Factory.Kind) @as(u8) in[1].parse_int().trunc(),
                     pos = vec2(in[2].parse_int().float().cast(), in[3].parse_int().float().cast()),
                     hp = in[4].parse_int(),
                     level = in[5].parse_int(),
                 );
+                if it.kind == .Monster {
+                    it.monster = f.gpa.boxed(Factory.MonsterData, (tick_spawned = 0, path = init(f.gpa, 4)));
+                };
+                
                 f.buildings&.push(it, f.gpa);
                 if it.kind == .Clicker {
                     c.earnings_multiplier += (it.level.float() - 1) / 4;
@@ -1044,14 +1049,16 @@ powI :: fn(base: i64, exp: i64) i64 = {  // :SLOW
 }
 
 Factory :: @struct {
-    Kind :: @enum(Empty, Clicker, Turret, Wall, Collector, Spawner, Monster);
+    Kind :: @enum(u8) (Empty, Clicker, Turret, Wall, Collector, Spawner, Monster);
     Building :: @struct {
         pos: Vec2;
-        kind: Kind;
         level: i64;
         hp: i64;
+        kind: Kind;
         trying_to_spawn := false;
+        monster := zeroed(*MonsterData);
     };
+    MonsterData :: @struct(tick_spawned: u32, path: RawDeque(Node));
     Template :: @struct(hp: i64, price := zeroed(Clicker.Price));
     // buildings are sorted by position for rendering. empty cells aren't in the list. 
     buildings: RawList(Building);
@@ -1066,6 +1073,8 @@ Factory :: @struct {
     trying_to_spawn_spawner: bool;
     ui_quick_buy_bar: bool;
     range_hover: ?Ty(Vec2, f32);
+    tick_count: u32; 
+    delta_time: f64;
 };
 
 building_colours :: @const_slice(@as(Ui.Nuklear.nk_color) 
@@ -1098,21 +1107,22 @@ fn init_world(f: *Factory, a: Alloc) void = {
     f.buildings&.push(f.init_building(vec2(2), .Clicker), f.gpa);
 }
 
-fn tick_factory(sim: *Simulation) void = {
-    @if(!sim.completed_in_this_run("TheDarkForest")) return();
-    @if(sim.completed_in_this_run("WasteOfAGoodSacrifice")) return();
+fn tick_factory(sim: *Simulation) bool = {
+    @if(!sim.completed_in_this_run("TheDarkForest")) return(false);
+    @if(sim.completed_in_this_run("WasteOfAGoodSacrifice")) return(false);
 
     c, f := (sim.clicker&, sim.factory&);
     w, h := (f.dimensions.x.cast().int(), f.dimensions.y.cast().int());
     has_space := f.buildings.len != w*h;
     if !has_space && f.buildings.find(fn(it) => @is(it.kind, .Spawner, .Monster)).is_none() {
         sim.completed("EverythingTheLightTouches");
-        return();
+        return(false);
     };
     
+    f.tick_count += 1;
     clicker_i := f.buildings.index_of(fn(it) => it.kind == .Clicker).unwrap();
     clicker_pos := f.buildings[clicker_i].pos;
-    moved, killed := (false, 0);
+    moved, killed, damaged := (false, 0, false);
     
     if f.buildings.find(fn(it) => it.kind == .Spawner).is_none() {
         if f.rng&.rand_float() < 1.0/32.0 + float(w*h)/75000 {
@@ -1131,18 +1141,41 @@ fn tick_factory(sim: *Simulation) void = {
     range(0, f.buildings.len) { i |
         continue :: local_return;
         it := f.buildings[i]&;
+        @if(it.hp <= 0) continue();
         node: Node = (pos=it.pos,i=i);
         @match(it.kind) {
             fn Monster() => {
-                path := a_star(f, node, (pos=clicker_pos,i=clicker_i));
-                @if(path.len < 2) continue();
-                if path[1].i == -1 {
-                    it.pos = path[1].pos;
-                    moved = true;
-                    continue();
+                blocker: ?*Factory.Building = .None;
+                saved_path := it.monster.path&;
+                if saved_path.len() > 2 && saved_path[0].pos == it.pos {
+                    node := saved_path[1];
+                    if node.i.ult(f.buildings.len) && f.buildings[node.i].pos == node.pos {
+                        blocker = (Some = f.buildings[node.i]&);
+                    } else {
+                        if node.i == -1 && f.buildings.find(fn(it) => it.pos == node.pos).is_none() {
+                            it.pos = node.pos;
+                            moved = true;
+                            saved_path.pop_front();
+                            continue();
+                        };
+                    };
                 };
                 
-                blocker := f.buildings[path[1].i]&;
+                blocker := blocker || {
+                    path := a_star(f, node, (pos=clicker_pos,i=clicker_i));
+                    saved_path.clear();
+                    saved_path.push_all_back(path, f.gpa);
+                    
+                    @if(path.len() < 2) continue();
+                    if path[1].i == -1 {
+                        it.pos = path[1].pos;
+                        moved = true;
+                        saved_path.pop_front();
+                        continue();
+                    };
+                    f.buildings[path[1].i]&
+                };
+                
                 if blocker.kind == .Monster {
                     // this would be unreachable if i didn't have it treat other monsters as passable but then it's too indecisive
                     others := get_neighbors(f, node);
@@ -1155,17 +1188,20 @@ fn tick_factory(sim: *Simulation) void = {
                 };
                 
                 if @is(blocker.kind, .Turret, .Wall, .Collector, .Clicker) {
+                    damaged = true;
                     deal_damage(sim, blocker, 10 * it.level, killed&);
+                    @if(blocker.kind != .Clicker) sim.completed("CollateralDamage");
                 };
             }
             fn Spawner() => {
                 if closest(f, it, fn(it) => @is(it.kind, .Turret, .Wall, .Collector, .Clicker)) { blocker |
                     deal_damage(sim, blocker, 20 * it.level, killed&);
                     sim.completed("SuspiciouslySpikey");
+                    damaged = true;
                 };
                 if closest(f, it, fn(it) => it.kind == .Monster) { target |
                     target.hp += it.level;
-                    if target.hp > f.templates&[target.kind].hp + it.level*2 {  // don't give the achivement if could move away the whole time
+                    if target.hp > f.templates&[target.kind].hp + it.level*5 {  // don't give the achivement if could move away the whole time
                         sim.completed("DidYouGoToMedicalSchool?MeNeither!");
                     };
                 };
@@ -1177,13 +1213,15 @@ fn tick_factory(sim: *Simulation) void = {
                     pos := it.pos + pos[f.rng&.rand_int(pos.len)];
                     if f.in_bounds(pos) && f.buildings.find(fn(it) => it.pos == pos).is_none() {
                         it.trying_to_spawn = false;
-                        f.buildings&.push(f.init_building(pos, .Monster), f.gpa);
+                        new := f.init_building(pos, .Monster);
+                        new.monster = f.gpa.boxed(Factory.MonsterData, (tick_spawned = f.tick_count, path = init(f.gpa, 4)));
+                        f.buildings&.push(new, f.gpa);
                         moved = true;
                     };
                     it := ();
                 } else {
                     // saved so if there's no space this tick it doesn't have to wait for the random to recharge before trying again
-                    spawn_chance := 1.0/8.0 + float(it.level)/40;
+                    spawn_chance := 1.0/10.0 + float(it.level)/35;
                     it.trying_to_spawn = f.rng&.rand_float() < spawn_chance;
                     @if(spawn_chance >= 1) sim.completed("SpeedIsTheKeyHere");
                 };
@@ -1191,7 +1229,11 @@ fn tick_factory(sim: *Simulation) void = {
             }
             fn Turret() => {
                 blocker := closest(f, it, fn(it) => @is(it.kind, .Monster, .Spawner)) || continue();
+                tick_spawned := @if(blocker.kind == .Monster, blocker.monster.tick_spawned, 0);
+                damaged = true;
                 @if(!deal_damage(sim, blocker, it.level, killed&)) continue();
+                @if(tick_spawned - f.tick_count <= 1) sim.completed("InstaKill");
+                
                 n := 0;
                 each f.buildings { it |
                     r := range(it);
@@ -1207,16 +1249,28 @@ fn tick_factory(sim: *Simulation) void = {
     
     @if(killed > 0) f.buildings&.ordered_retain(fn(it) => it.hp > 0);
     @if(moved) f.resort();
+    moved || killed > 0 || damaged
 }
 
 fn deal_damage(sim: *Simulation, target: *Factory.Building, amount: i64, killed: *i64) bool = {
+    @if(target.hp <= 0) return(false);
+    
     target.hp -= amount;
-    if target.kind == .Clicker {
-        sim.completed("SticksAndStonesMayBreakMyBonesButLowHpExcitesMe");
-        @if(target.hp <= 0) sim.completed("WasteOfAGoodSacrifice");
+    @if(target.kind == .Clicker) sim.completed("SticksAndStonesMayBreakMyBonesButLowHpExcitesMe");
+    
+    @if(target.hp <= 0) @match(target.kind) {
+        fn Wall() => sim.completed("ElevenFootLadder");
+        fn Spawner() => sim.completed("AnEyeForAnEye");
+        fn Clicker() => sim.completed("WasteOfAGoodSacrifice");
+        fn Monster() => {
+            a := sim.factory.gpa;
+            target.monster.path&.drop(a);
+            a.dealloc_one(Factory.MonsterData, target.monster);
+            target.monster = zeroed(@type target.monster);
+        };
+        @default => ();
     };
-    @if(target.kind == .Wall && target.hp <= 0) sim.completed("ElevenFootLadder");
-    @if(target.kind == .Spawner && target.hp <= 0) sim.completed("AnEyeForAnEye");
+    
     killed[] += int(target.hp <= 0);
     target.hp <= 0
 }
@@ -1322,7 +1376,7 @@ achievements :: @const_slice(
     ("IdleHandsDoTheDevilsWork", "return from being idle", "time in the mine keeps passing while the window is unfocused. you'll have plenty of resources to return to"),
     ("EtchedInStone", "create and restore a save file", "the save includes the time it was made so resources will continue being collected while the game isn't running"),
     ("TheDarkForest", "unlock the world map", "the world looks quite empty but you never know what might be lurking. build defences to be on the safe side. btw you can move/resize the windows."),
-    ("SticksAndStonesMayBreakMyBonesButLowHpExcitesMe", "let a monster damage your mine", "don't let your mine be destroyed"),
+    ("SticksAndStonesMayBreakMyBonesButLowHpExcitesMe", "let a monster damage your mine", "don't let your mine be destroyed. place more turrets to fight back"),
     ("WasteNotWantNot", "kill a monster without a collector", "each collector building grants resouces when a monster is defeated in its range"),
     ("SuspiciouslySpikey", "place a building close to a spawner", "spawners damage adjacent buildings, keep a safe distance"),
     ("DidYouGoToMedicalSchool?MeNeither!", "let a moster get healed", "spawners heal adjacent monsters. don't build walls too close or they'll get stuck and regen"),
@@ -1334,7 +1388,7 @@ achievements :: @const_slice(
     ("InstaKill", "kill a monster on the same tick it spawns", "i hope you share a reel with your followers"),
     ("VeritableCornucopia", "have some of every resource type in the game", ""),
     ("WhenISayJumpYouSayHowHigh", "buy a hint", "if you get stuck, trying buying your way to the answer. pace yourself, the more you buy the more they cost"),
-    ("LuckOfTheDice", "have a spawner appear inside your walls with your mine", "new spawners can appear in any empty cell"),
+    ("CollateralDamage", "let a monster attack a basic building", "monsters want your mine but they might attack other things if they can't reach it"),
     ("EverythingTheLightTouches", "fill every cell of the map with buildings", "now there's no space for monsters to spawn so if you want to collect more resources from them, you'll need to sell some buildings"),
     ("InvestingInYourFuture", "buy altar of sacrifice", "use the altar to reset your progress and restart the game with greatly boosted earnings. (the button is below the achievements tab)"),
     ("GentlyDownTheStream", "add a row to the world map", "square pastures hold the most sheep"),
@@ -1349,7 +1403,7 @@ achievements :: @const_slice(
     ("FusionReactor", "let 5 monsters fuse into one", "a monster that can't move because its surrounded by 4 others will absorb their hp and do extra damage (and be worth extra resources when collected)"),
     ("SpeedIsTheKeyHere", "let a spawner level up until it spawns a monster every second", "your turrets have longer range than spawners. try to kill them before they get too strong."),
     ("FastestHandsInTheWest", "unlock the world map within 30 seconds of a reset", ""),
-    ("CompactMachines", "unlock the ability to upgrade buildings", ""),
+    ("CompactMachines", "unlock building upgrades", ""),
     ("AnEyeForAnEye", "defeat a spawner", "a new one will... spawn... eventually but destroying them is very profitable if there are collectors nearby. spawners appear faster when there are more empty cells."),
     ("GoldPlatedPickaxe", "upgrade your mine", "higher level mines multiply your earnings"),
     ("TimeWarpTonic", "unlock world speed slider", "upgrade to speed up time more. be careful! it's easy to lose as the spawners level up on high speeds if you're not paying attention"),
@@ -1358,11 +1412,11 @@ achievements :: @const_slice(
     ("EverythingMustGo", "unlock selling buildings", ""),
     ("Sneaky", "upgrade a miner while your mine is dead", "that won't do much"),
     ("Quarrelsome", "unlock the quarry", ""),
-    ("WhatGoesUp", "buy an Expander", "these workers get lonely. they'll only move if you interact with the game. try moving your mouse around."),
-    ("MustComeDown", "buy a Compressor", "expanders are rewarded for hitting the walls so they earn more in smaller boxes"),
-    ("WarpSpeedAhead", "boost quarry speed", ""),
+    ("WhatGoesUp", "buy an Expander", "these workers get lonely. they only respond to movement. try waving your mouse around."),
+    ("MustComeDown", "buy a Compressor", ""),
+    ("WarpSpeedAhead", "boost quarry speed", "faster miners hit the walls more often"),
     ("OffTheCharts", "let the quarry escape the screen entirely", "there's no disadvantage to your workers being out of sight but then you can't see the pretty animation"),
-    ("FourCornersOfTheWorld", "let the quarry cover the screen", ""),
+    ("FourCornersOfTheWorld", "let the quarry cover the screen", "expanders are rewarded for hitting the walls so they earn more in smaller boxes. compressors will help you get it back under control"),
 );
 
 upgrades :: @const_slice(@as(Ty(Str, Str, Clicker.Price))
@@ -1377,13 +1431,9 @@ upgrades :: @const_slice(@as(Ty(Str, Str, Clicker.Price))
     ("Inspectigator", "Show Building Stats", (amount = 5_000, currency = collector_currency_index)),
 );
 
-// TODO: only return the one next step if that's all im using
-//       (maybe an upgrade that lets you see the path?)
 // TODO: if get stuck waiting in line behind other monsters, 
 //       change target (to an exposed turret/collector) if possible 
 //       and remember it for longer so don't keep going back and forth as the blockers move. 
-// TODO: this gets too slow when the grid is big and speed is high.
-//       should save the paths and just check if it still works next tick (i.e. no buildings placed). 
 
 // https://en.wikipedia.org/wiki/A*_search_algorithm#Pseudocode
 a_star :: fn(f: *Factory, start: Node, goal: Node) []Node = {
@@ -1512,7 +1562,6 @@ fn init_world(q: *Quarry) void = {
     q.bottom_right = q.top_left + vec2(10);
 }
 
-
 fn tick_quarry(sim: *Simulation) void = {
     c, q := (sim.clicker&, sim.quarry&);
     w, h := (q.bottom_right.x - q.top_left.x, q.bottom_right.y - q.top_left.y);
@@ -1570,3 +1619,5 @@ fn tick_quarry(sim: *Simulation) void = {
         };
     };
 }
+
+#use("@/lib/collections/deque.fr");

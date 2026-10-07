@@ -190,9 +190,10 @@ const toggle_worker = async (resolve) => {
         old_canvas.replaceWith(canvas);
         
         if (need_canvas && navigator.gpu === undefined) {
-            document.getElementById("out").value = "Your browser doesn't support WebGPU.\nTry one of the non-graphical examples.\n\n";
+            const msg = "Your browser doesn't support WebGPU.";
+            document.getElementById("out").value = msg + (aot ? "" : "\nTry one of the non-graphical examples.");
             enable_graphics(false);
-            document.getElementById("err").innerText = "Your browser doesn't support WebGPU.";
+            document.getElementById("err").innerText = msg;
             worker.terminate();
             worker = null;
             document.getElementById("btn").innerText = start_message;
