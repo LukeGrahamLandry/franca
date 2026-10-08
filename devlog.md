@@ -4,6 +4,9 @@
 - in browser renderpass depth format not matching on first frame but works in dawn? 
   if i fly away and come back the screens start working.
   was because i was creating depth in get_current_surface which is called on post_frame in browser but pre_frame native.
+- the chess program has a 2mb table in bss (filled at runtime) which i output as part of the normal data segment for wasm which is stilly. 
+  delay any Dat2.Template.Zeroes to the end so can just shorten the part that the memory.init covers because fresh pages start zeroed. 
+  that way still don't need multiple init_the_memory_code. chess: 2.6mb -> 461kb
 
 ## (Oct 6)
 

@@ -534,6 +534,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     // we need to know how many imports there are before we can start patching anything. 
     for_symbols m { id, symbol | // :SLOW  just keep list of pending symbols instead
         is_import := id != imports_symbol && @is(symbol.kind, .Pending, .DynamicPatched);
+        @if(!symbol.wasm_bss)
         if is_import && (symbol.fixups.len != 0 || symbol.referenced) && symbol.alias == Qbe.no_symbol_S {
             @debug_assert(symbol.jit_addr.is_null() && symbol.index_in_module == -1, "jit_addr too early: %", symbol.name);
             @debug_assert(symbol.segment == .Code, "% segment", symbol.name);
@@ -557,6 +558,9 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     data_size := data_seg.len() - global_base;
     data := data_seg.mmapped.slice(global_base, data_seg.len());
     memory_reserved += data_size;
+    
+    finish_wasm_bss(m);
+    memory_reserved += data_seg.len() - (data_size + global_base);
     
     // TODO: allow these, they're just the same. zeroinit can go at the end so you don't need to include the bytes to init it. 
     // (rn ensure_got_slot is only needed when jitting so this is fine. 
@@ -843,6 +847,16 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     @eprintln(">>> % bytes total module", total_size); 
     
     chunks.items()
+}
+
+finish_wasm_bss :: fn(m: *Qbe.Module) void = {
+    segment := m.segments&.index(.MutableData);
+    for m.wasm_bss { it |
+        segment.align_to(8);  // TODO: it.align.zext());
+        start := segment.len();
+        segment.next = segment.next.offset(it.size);
+        m.do_jit_fixups(it.id, .MutableData, start);
+    };
 }
 
 fn write_function_section(m: *Qbe.Module, buf: *List(u8)) void = {

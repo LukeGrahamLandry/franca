@@ -335,9 +335,6 @@ core; #reexport("@/tests/deps.fr");  // might just keep this one. idk.
   since my `-keep-names` isn't enough for Instruments to find the symbols (also should fix the actual problem there). 
   - detect missing frameworks better than stack overflowing inside os code in glue_environment 
     (probably not caught sooner because i have to pass the flag to ignore undefined symbols to make my #weak work)
-- wasm: don't put all the zeroes in the binary. 
-  put them after the data section and it's fine because linear memory starts zeroed. 
-  ex. chess/web is 2170kb but compresses to 28kb so it's all bss. 
 - @switch needs to compile error on duplicate values 
   (Expr.Switch from @match already does but @switch is just in user code)
 - make @is #fold somehow
