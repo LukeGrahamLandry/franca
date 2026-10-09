@@ -17,6 +17,10 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 
+- do something for caching the wasm module between runs for exec in the examples/os.
+  then reenable the c/ssa tests in tests/exe/wasm.fr/collect_tests
+- unload things from import_wasm/runtime/Engine.modules. 
+  could cheat and call an import for JitEvent.Close(close_modules)
 - do sync_local_storage_if_web for maze_game save file but need to cope with binary data
 - farm_game/chess zoom in based on window size
 - my dump_wasm doesn't see the custom name section written by -keep-names. it works in https://webassembly.github.io/wabt/demo/wasm2wat/ so the emit isn't the problem

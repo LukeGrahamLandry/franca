@@ -64,6 +64,7 @@ main :: fn() void = {
         };
         if arg == "-r" || arg == "-run" /* to match tinycc */ {
             cfg.target.type = .JitOnly;
+            cfg.target.wasm_shared_memory = true;  // i always have threads in the situation where i can jit wasm
             continue();
         };
         if arg == "-frc_inlinable" {
@@ -217,13 +218,19 @@ fn compile(src: Str, target: QbeTargetEnv, debug: Str, output_path: Str, no_buil
         r := Crash'push_resolver(QbeModule, m&, find_ip_in_module);
         f, _ := m&.get_addr(m&.intern("main")) 
             || @panic("missing function main()");
-        f := assume_types_fn(Arg = Ty(i64, *CStr), Ret = i64, ptr = f);
         args := CStr.list(temp());
         args&.push(@as(CStr) "thisisjittedcodegoodluckwiththat.exe");
         args&.push_all(jit_args);
         args&.push(zeroed CStr);
-        status := f(args.len - 1, args.maybe_uninit.ptr);
-        @if(status != 0) @panic("Returned status %", status);
+        if query_current_arch() == .wasm32 {
+            f := assume_types_fn(Arg = void, Ret = i32, ptr = f);
+            status := f();
+            @if(status != 0) @panic("Returned status %", status);
+        } else {
+            f := assume_types_fn(Arg = Ty(i64, *CStr), Ret = i64, ptr = f);
+            status := f(args.len - 1, args.maybe_uninit.ptr);
+            @if(status != 0) @panic("Returned status %", status);
+        };
         r.pop_resolver();
     } else {
         chunks := {m.target.finish_module}(m&);

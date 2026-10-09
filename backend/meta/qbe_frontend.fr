@@ -131,14 +131,20 @@ main :: fn() void = {
         m.make_exec();
         f := m.get_addr(m.goal.entry_point) 
             || @panic("couldn't find %", m.goal.entry_point);
-        f := assume_types_fn(Arg = Ty(i64, *CStr, *CStr), Ret = i64, ptr = f);
-        cli_args := CStr.list(args.child_args.len + 2, temp());
-        cli_args&.push("thisisjittedcodegoodluckwiththat.exe");
-        cli_args&.push_all(args.child_args);
-        cli_args&.push(zeroed(CStr));
-        envp := tls(.environment_variables)[];
-        status := f(cli_args.len - 1, cli_args.maybe_uninit.ptr, envp);
-        @if(status != 0) @panic("Returned status %", status);
+        if query_current_arch() == .wasm32 {
+            f := assume_types_fn(Arg = void, Ret = i32, ptr = f);
+            status := f();
+            @if(status != 0) @panic("Returned status %", status);
+        } else {
+            f := assume_types_fn(Arg = Ty(i64, *CStr, *CStr), Ret = i64, ptr = f);
+            cli_args := CStr.list(args.child_args.len + 2, temp());
+            cli_args&.push("thisisjittedcodegoodluckwiththat.exe");
+            cli_args&.push_all(args.child_args);
+            cli_args&.push(zeroed(CStr));
+            envp := tls(.environment_variables)[];
+            status := f(cli_args.len - 1, cli_args.maybe_uninit.ptr, envp);
+            @if(status != 0) @panic("Returned status %", status);
+        };
     };
     drop(m);
 }

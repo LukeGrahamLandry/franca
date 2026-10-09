@@ -25,6 +25,8 @@ driver :: fn(vtable: *ImportVTable) void = {
     };
         
     m := manifest(commit);
+    @assert_eq(m&.by_name("kaleidoscope")[0], kaleidoscope_demo);
+    @assert_eq(m&.by_name("lox")[0], lox_demo);
     
     ::DeriveJson(Manifest);
     ::DeriveJson(Manifest.Compiler);
@@ -74,7 +76,7 @@ driver :: fn(vtable: *ImportVTable) void = {
         copy(@tfmt("%/%.out", cache_path, hash), @tfmt("%/%", mirror_path, hash));
         
         if !cli_args().contains(fn(it) => it[] == "-dev") {
-            for m.compilers[4].examples { path |
+            for m&.by_name("aot") { path |
                 dest := @ref u8.list(temp());
                 @fmt(dest, "%/", target_dir);
                 for path.slice(0, path.len - 3) { c |
@@ -191,16 +193,12 @@ manifest :: fn(commit: Str) Manifest = (
         ),
     ), (
         name = "c",
-        about = "See also: https://github.com/rui314/chibicc",
+        about = "https://github.com/rui314/chibicc",
         examples = filenames("tests/c", ".c"),
     ), (
         name = "qbe",
-        about = "See also: https://c9x.me/compile",
+        about = "https://c9x.me/compile",
         examples = filenames("tests/ssa", ".ssa"),
-    ), (
-        name = "kaleidoscope",
-        about = "See also: https://llvm.org/docs/tutorial/MyFirstLanguageFrontend",
-        examples = @const_slice("target/mandel.txt"),
     ), (
         name = "aot",
         about = "precompiled franca programs",
@@ -223,9 +221,20 @@ manifest :: fn(commit: Str) Manifest = (
             // (but also it's too big, do the lazy jitting instead)
             // "examples/gpu/multiplexer.fr",
         ),
+    ), (
+        name = "kaleidoscope",
+        about = "https://llvm.org/docs/tutorial/MyFirstLanguageFrontend",
+        examples = @const_slice(kaleidoscope_demo),
+    ), (
+        name = "lox",
+        about = "https://craftinginterpreters.com",
+        examples = @const_slice(lox_demo),
     ))).shallow_copy(temp()),
     commit = commit,
 );
+
+fn by_name(m: *Manifest, name: Str) *[]Str = 
+    m.compilers.find(fn(it) => it.name == name).unwrap()[].examples&;
 
 // all numbers u32, offsets are relative to the blob (so start+8)
 // (length, off(indices), [blob; indices=[off(name), length(name), off(data), length(data)]])
@@ -248,6 +257,8 @@ flatten_fs :: fn(a: Alloc) []u8 = {
     out.items()
 }
 
+lox_demo :: "target/demo.lox";
+kaleidoscope_demo :: "target/mandel.txt";
 collect_fs :: fn(a: Alloc) Ty(Fs, List(u8)) = {
     paths := collect_paths(a, @const_slice("lib", "compiler", "backend", "examples", "graphics", "tests"));
     if file_exists("target/franca/webgpu.g.fr") {
@@ -263,8 +274,12 @@ collect_fs :: fn(a: Alloc) Ty(Fs, List(u8)) = {
         insert(fs&, s, (l, contents.len - l));
     };
     mandel := import("@/examples/kaleidoscope.fr").EXAMPLE_PROGRAM;
-    insert(fs&, "target/mandel.txt", (contents.len, mandel.len));
+    insert(fs&, kaleidoscope_demo, (contents.len, mandel.len));
     contents&.push_all(mandel);
+    lox := import("@/tests/external/lox.fr").demo;
+    insert(fs&, lox_demo, (contents.len, lox.len));
+    contents&.push_all(lox);
+    
     (fs.raw, contents)
 } 
 

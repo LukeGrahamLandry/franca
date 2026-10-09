@@ -1,4 +1,10 @@
 
+## (Oct 8)
+
+- time for tests/exe/wasm.fr: before: 13844ms, rejit the compilers every time: 87605ms. 
+  which is probably why i gave up last time i started to do this. 
+  but maybe it's good to have incentive to do some sane caching for programs that want to call exec in the web playground. 
+
 ## (Oct 7)
 
 - in browser renderpass depth format not matching on first frame but works in dawn? 

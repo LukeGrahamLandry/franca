@@ -1,32 +1,49 @@
 
 main :: fn() void = {
-    lang := "";
-    a := cli_args();
-    range(0, a.len - 1) { i |
-        value := a[i + 1].str();
-        if a[i] == "-lang" {
-            lang = value;
-        }
-    };
-    @switch(lang) {
-        @case("franca") => import("@/examples/web/b.fr")'main();
-        @case("c") => import("@/examples/web/c.fr")'main();
-        @case("qbe") => import("@/examples/web/d.fr")'main();
-        @case("kaleidoscope") => kaleidoscope_main();
-        @case("") => ();
-        @default => @panic("unknown -lang %", lang);
-    };
-    
-    did_something := lang != "";
-    range(0, a.len - 1) { i |
-        value := a[i + 1].str();
-        if a[i] == "-yield" {
-            bytes := read_entire_file_or_crash(temp(), value);
-            yield_file(bytes);
-            did_something = true;
+    // TODO: don't read+write if already a path
+    args := get_args();
+    lang := args.lang;
+    path := @match(args.input) {
+        fn None() => panic("missing -file or ---literal_input");
+        fn File(it) => it;
+        fn Src(it) => {
+            ext := @switch(args.lang) {
+                @case("franca") => "fr";
+                @case("qbe") => "ssa";
+                @default => args.lang;
+            };
+            path := @tfmt("target/demo_input.%", ext);
+            write_entire_file_or_crash(path, it);
+            path
         };
     };
-    @assert(did_something, "USAGE: -lang [franca, c, qbe] -file [examples/toy/hello.fr]");
+    @if(lang != "franca") @eprint(">>> to make an apple pie from scratch you must first jit the compiler.\n");
+    
+    dest_path := "target/a.out";
+    a := @ref Str.list(temp());
+    @switch(lang) {
+        @case("franca") => run_franca(args, path, dest_path, a);
+        @case("c") => run_c(args, path, dest_path, a);
+        @case("qbe") => run_qbe(args, path, dest_path, a);
+        @case("kaleidoscope") => {
+            @assert_eq(args.target.type, .JitOnly, "% aot not implemented", args.lang);
+            a.push_all(@slice("examples/kaleidoscope.fr", "-file", path));
+        };
+        @case("lox") => {
+            @assert_eq(args.target.type, .JitOnly, "% aot not implemented", args.lang);
+            a.push_all(@slice("examples/lox/lox_main.fr", "-file", path));
+        };
+        @case("") => panic("USAGE: -lang [franca, c, qbe] -file [examples/toy/hello.fr]");
+        @default => @panic("unknown -lang %", lang);
+    };
+    if a.len != 0 {
+        ok := run_cmd_blocking("franca", a.items());
+        @assert(ok);
+    };
+    if args.target.type != .JitOnly {
+        bytes := read_entire_file_or_crash(temp(), dest_path);
+        yield_file(bytes);
+    };
 }
 
 yield_file :: fn(bytes: Str) void = {
@@ -35,65 +52,36 @@ yield_file :: fn(bytes: Str) void = {
     @assert_eq(r, bytes.len, "failed yield_file");
 }
 
-#use("@/examples/kaleidoscope.fr")
-kaleidoscope_main :: fn() void = {
-    args := get_args(EXAMPLE_PROGRAM);
-    m := zeroed QbeModule;
-    init_default_module(m&, args.target);
-    c: *Ctx = init(general_allocator(), args.src, m&);
-    c.m.set_debug_types(args.logging, true);
-    
-    @match(c.compile_loop()) {
-        fn Ok() => ();
-        fn Err(s) => @panic("%\n before line %", s, c.line);
-    };
-    
-    // TODO: provide implementations of printd/putchard 
-    //       or only allow outputting libraries with imports, not exes (and then this main function wouldn't make sense). 
-    {
-        default_init(c.f, c.m);
-        c.f.lnk.id = c.m.intern("main");
-        c.f.ret_cls = .Kw;
-        c.f.lnk.export = true;
-        c.link = c.f.start&;
-        b := c.push_block();
-        for c.top_level { id |
-            c.f.emit(.call, .Kd, Qbe.Null, c.f.symcon(id), QbeNull);
-        };
-        c.f.copy_instructions_from_scratch_reversed_which_means_forwards(b);
-        b.jmp = (type = .retw, arg = Qbe.ConZero);
-        c.end_fn();
-    };
-    
-    yield_module_main(m&);
-    drop(c);
-    
-}
-
 CompileArgs :: @struct {
-    src: Str;
     logging: Str;
     target: QbeTargetEnv;
+    input: @tagged(None: void, File: Str, Src: Str);
+    lang: Str;
+    gfx: bool;
+    unsafe: bool;
 };
 
-get_args :: fn(default_src: Str) CompileArgs = {
+get_args :: fn() CompileArgs = {
     a := cli_args();
-    out: CompileArgs = (src = default_src, logging = "", target = (
+    out: CompileArgs = (logging = "", target = (
         arch = query_current_arch(), 
         os = query_current_os(), 
         type = .JitOnly,
-    ));
-    range(0, a.len - 1) { i |
-        value := a[i + 1].str();
+    ), lang = "", input = .None, gfx = false, unsafe = false);
+    range(0, a.len) { i |
+        value := @if(i + 1 < a.len, a[i + 1].str(), "");
         if a[i] == "---literal_input" {
-            out.src = value;
+            out.input = (Src = value);
         }
         if a[i] == "-d" {
             out.logging = value;
         }
+        if a[i] == "-lang" {| out.lang = value; };
+        if a[i] == "-gfx" {| out.gfx = true; };
+        if a[i] == "-unsafe" {| out.unsafe = true; };
         
         if a[i] == "-file" {
-                out.src = read_entire_file_or_crash(temp(), value);
+            out.input = (File = value);
         }
         if a[i] == "-target" {
             out.target.type = @if(value == "wasm-jit", .JitOnly, .Exe);
@@ -115,38 +103,118 @@ get_args :: fn(default_src: Str) CompileArgs = {
     out
 }
 
-FnTypeOf :: fn(fid: FuncId) Type #fold = {
-    func := get_function_ast(fid, true, false, true, false);
-    f_ty := func.finished_ty().unwrap();
-    intern_type(Fn = f_ty)
-}
-
-yield_module_main :: fn(m: *Qbe.Module) void = {
-    backend'compile_suspended(m);
-    if m.goal.type == .JitOnly {
-        Qbe'fill_from_libc(m);
-
-        m.make_exec();
-        f, _ := m.get_addr(m.intern("main")) 
-            || @panic("missing function main()");
-        f := assume_types_fn(Arg = void, Ret = i32, ptr = f);
-        status := f();
-        @if(status != 0) @panic("\n\nReturned status %", status);
-    } else {
-        m.seal_debug_info("", false, empty());  // TODO
-        chunks := {m.target.finish_module}(m);
-        bytes := concat(chunks&, temp());
-        
-        if query_current_arch() == .wasm32 {
-            @println("size = %;", bytes.len);
-            yield_file(bytes);
-        } else {
-            write_entire_file_or_crash("a.out", bytes);
-            @println("wrote % bytes to a.out", bytes.len);
+run_franca :: fn(args: CompileArgs, path: Str, dest_path: Str, a: *List(Str)) void = {
+    gfx := args.gfx;  // :HackyGraphicsDetection
+    if args.target.type != .JitOnly {
+        if !gfx {
+            a.push_all(@slice("examples/default_driver.fr", "build"));
+        }; // else: relies on it using graphics/easy.fr/build_for_graphics as the driver. 
+        a.push_all(@slice(path, "-arch", @tfmt("%", args.target.arch), "-os", @tfmt("%", args.target.os), "-o", dest_path, @if(args.unsafe, "-unsafe", "-safe")));
+        return();
+    };
+    
+    a := general_allocator();
+    vtable := init_driver_vtable();
+    opts := vtable.default_build_options();
+    opts.retain_function_names = true;
+    ;{
+        args := cli_args();
+        if args.index_of(fn(it) => it[] == "-D") { i |
+            if i < args.len() - 1 {
+                opts.frontend_logging = args[i + 1].str();
+            };
         };
     };
- 
+    set_unsafe(opts, args.unsafe);
+    comp := {vtable.init_compiler}(opts); // TODO: comptime get the current arch
+    c := vtable.with(comp);
+    
+    src := u8.list(c.get_alloc());
+    src&.push_all("""#include_std("lib/core.fr");""");
+    @fmt(src&, """#include_std("%");""", path);
+    if gfx {
+        src&.push_all("\n:: import(\"@/graphics/app.fr\").Wgpu;\n");
+        src&.push_all("\nSOKOL_BACKEND :: import(\"@/graphics/lib.fr\").RenderBackend.WGPU;");
+        src&.push_all("\nGRAPHICS_TARGET_WEB :: true;");
+    };
+    src := src.items();
+    
+    file := c.add_file("repl!", src);
+    self := c.data.cast()[][];
+    self.comptime_codegen.m.set_debug_types(args.logging, true);
+        
+    if gfx {
+        self.comptime_libraries&.insert(
+            self.pool.insert_owned("webgpu"), 
+            self.comptime_libraries&.get(self.pool.insert_owned("libc")).unwrap(),
+        );
+    };
+    
+    id := self.parser.push_parse(src, file);
+    stmts := self.parser.finish_pending_stmts(id);
+    stmts := self.unwrap_report_error(RawList(FatStmt), stmts);
+    stmts := stmts.items();
+    r := {c.vtable.make_and_resolve_and_compile_top_level}(c.data, stmts);
+    self.unwrap_report_error(void, r);
+    
+    fid := c.get_unique_named("main") || @panic("no function called 'main'");
+    
+    m := general_allocator().box_uninit(QbeModule);
+    name := c.fmt_fn_name(fid);
+
+    backend'init_module(m, args.target);
+    m.set_debug_types(args.logging, true);
+    self.other_module&.push(m, self.get_alloc());
+    shared := init_codegen(m, self.get_alloc(), true);
+    main_thread_pump(self, shared, @slice(fid), false);
+    each self.comptime_libraries& { _, lib |
+        Qbe'fill_pending_dynamic_imports(m, lib[]);
+    };
+    Qbe'seal_imports(m);
+    m.make_exec();
+    f := m.get_addr(name) || @panic("ICE: lost %", name);
+    f := bit_cast_unchecked(rawptr, @FnPtr() void, f);
+    
+    c'vtable'destroy_compiler(c.data);  // early because wasm is memory poor
+    push_tls_value(.cli_arguments, empty()) {
+        f();
+    };
     drop(m);
 }
 
-#use("@/lib/variadic.fr");
+run_c :: fn(args: CompileArgs, path: Str, dest_path: Str, a: *List(Str)) void = {
+    a.push_all(@slice("examples/import_c/cc.fr", path, 
+        "-arch", args.target.arch.name_str(), "-os", args.target.os.name_str()));
+    a.push_all(@slice("-Itests/c"));
+    @match(args.target.type) {
+        fn JitOnly() => a.push("-r");
+        fn Exe() => a.push_all(@slice("-o", dest_path));
+        @default => unreachable();
+    };
+}
+
+run_qbe :: fn(args: CompileArgs, path: Str, dest_path: Str, a: *List(Str)) void = {
+    a.push_all(@slice("backend/meta/qbe_frontend.fr", path, "-cc", "-t"));
+    if args.target.arch == .wasm32 {
+        a.push("wasm32");
+        a.push("-wasm_threads");
+    } else {
+        @match(args.target.arch) {
+            fn wasm32() => a.push("wasm32");
+            fn aarch64() => @match(args.target.os) {
+                fn macos() => a.push("arm64_apple");
+                fn linux() => a.push("arm64");
+            };
+            fn x86_64() => @match(args.target.os) {
+                fn macos() => a.push("amd64_apple");
+                fn linux() => a.push("amd64");
+            };
+            fn rv64() => a.push("rv64");
+        }
+    };
+    @match(args.target.type) {
+        fn JitOnly() => a.push("-r");
+        fn Exe() => a.push_all(@slice("-o", dest_path));
+        @default => unreachable();
+    };
+};

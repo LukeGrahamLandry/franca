@@ -162,21 +162,25 @@ const toggle_worker = async (resolve) => {
             if (!doing_test) history.replaceState(null, '', url);
         }
         
+        const edited = input !== selected_contents;
+        let need_canvas = input.includes("graphics/lib.fr") || aot;  // :HackyGraphicsDetection
         const args = [
             "demo.wasm",
-            "---literal_input",
-            input,
+            edited ? "---literal_input" : "-file",
+            edited ? input : selected_file,
             "-lang",
             compiler.name,
             "-target",
             document.getElementById("target").value,
             "-rootfs_hash",
             manifest_version,
+            ...(need_canvas ? ["-gfx"] : []),
+            ...(document.getElementById("arg_strace").checked ? ["-strace"] : []),
+            ...(document.getElementById("arg_unsafe").checked ? ["-unsafe"] : []),
             ...(dbg.length == 0 ? [] : (dbg.includes("-") ? dbg.split(" ") : ["-d", dbg])),
         ];
         worker = get_worker();
         worker.onmessage = handle(resolve, handle_app_request__);
-        let need_canvas = input.includes("graphics/lib.fr") || aot;  // :HackyGraphicsDetection
         
         if (aot) {
             const source_path = document.getElementById("example").value;
@@ -276,6 +280,7 @@ const get_file = (path) => {
     throw new Error(`file not found: ${path}`);
 };
 
+let [selected_file, selected_contents] = ["", ""];
 const load_example = async (path) => {
     document.getElementById("err").innerText = "SLOW\n";
     
@@ -284,15 +289,18 @@ const load_example = async (path) => {
     const aot = compiler.name == "aot";
     if (rootfs === null && !aot) await prefetch();
     
+    if (!aot)
     try {
-        document.getElementById("in").value = get_file(path);
+        selected_contents = get_file(path);
+        document.getElementById("in").value = selected_contents;
+        selected_file = path;
     } catch (s) {
         document.getElementById("in").value = `/*\n${s.toString()}\n\n${s.stack}\n*/`;
     }
     document.getElementById("err").innerText = "";
     document.getElementById("stale").hidden = false;
 };
-const show_examples = (lang_i) => {
+const show_examples = (lang_i, first) => {
     let src = `<option selected disabled> Load Example </option>`;
     let c = manifest.compilers[lang_i];
     for (let it of c.examples) {
@@ -300,6 +308,12 @@ const show_examples = (lang_i) => {
     }
     const it = document.getElementById("example");
     it.innerHTML = src;
+    
+    if (!first && selected_contents === document.getElementById("in").value) {
+        // they didn't edit it so won't be stomping on something important
+        it.value = c.examples[0];
+        load_example(c.examples[0]);
+    }
     
     document.getElementById("version").innerText = `${manifest.commit}\n${c.about}`;
 };
@@ -311,7 +325,7 @@ const show_compilers = () => {
     let it = document.getElementById("compiler");
     it.innerHTML = src;
     it.options.selectedIndex = 0;
-    show_examples(0);
+    show_examples(0, true);
 };
 
 document.getElementById("in").oninput = () => {
@@ -371,7 +385,7 @@ if (path !== null) {
         if (lang !== null && lang !== it.name) continue;
         let idx = it.examples.indexOf(path);
         if (idx != -1) {
-            show_examples(i);
+            show_examples(i, true);
             document.getElementById("compiler").options.selectedIndex = i;
             document.getElementById("example").options.selectedIndex = idx+1;
             break;
