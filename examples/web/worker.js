@@ -215,6 +215,18 @@ export const imports = {
                     }
                     return 0n;
                 }
+                case 0xBBBB0004n: {
+                    handle_app_request(["set_clipboard_string", get_wasm_string(ptr, len)]);
+                    return 0n;
+                }
+                case 0xBBBB0005n: {
+                    handle_app_request(["get_clipboard_string"]);
+                    return 0n;
+                }
+                case 0xBBBB0006n: {
+                    handle_app_request(["mouse_lock", len !== 0n]);
+                    return 0n;
+                }
                 default: {
                     // this is convoluted! 
                     // ex. paste event passes franca a handle the pasted string and it can then ask for the bytes here. 
@@ -247,8 +259,6 @@ export const imports = {
         js_worker_spawn: (userdata, stack, exit_futex) => {
             postMessage({ tag: "spawn", child: [userdata, stack, exit_futex], memory: imports.main.memory });
         },
-        js_set_clipboard_string: (ptr, len) => handle_app_request(["set_clipboard_string", get_wasm_string(ptr, len)]),
-        js_get_clipboard_string: () => handle_app_request(["get_clipboard_string"]),
     },
 };
 

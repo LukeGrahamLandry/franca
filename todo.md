@@ -17,12 +17,21 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 
+- the examples/emit_c.fr test now doesn't work on github actions' linux. 
+  - the one with import_c on the whole compiler to jit hello world, not the one using clang, 
+    so it is a problem with my program in some environment, i can't just ignore it.
+  - it also doesn't work in `franca examples/os/build.fr -vzf -append "tests/run_tests.fr emit-c"` (or -rv) 
+    (but that the aot hello world doesn't work so even more broken).
+    probably that's just because not inheriting StaticTls in the elf file correctly. 
+    because import_c wraps main in something else and doesn't pass through FRHOSTED_MAGIC from group.fr/posix_spawn/exec_worker. 
 - do something for caching the wasm module between runs for exec in the examples/os.
   then reenable the c/ssa tests in tests/exe/wasm.fr/collect_tests
 - unload things from import_wasm/runtime/Engine.modules. 
   could cheat and call an import for JitEvent.Close(close_modules)
+- for web aot, compile the os part once to frc and the guest program to .frc and then link it together with the rest. 
+  that way can see imports and remove them maybe. 
+  then also can cache everything seperately and not recompile as often. 
 - do sync_local_storage_if_web for maze_game save file but need to cope with binary data
-- farm_game/chess zoom in based on window size
 - my dump_wasm doesn't see the custom name section written by -keep-names. it works in https://webassembly.github.io/wabt/demo/wasm2wat/ so the emit isn't the problem
 - use nk_button_text instead of nk_button_label everywhere so don't have to make CStr
 - do the aot thing i was thinking about for web and make actually good seperate page 

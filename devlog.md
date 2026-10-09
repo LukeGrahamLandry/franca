@@ -4,6 +4,11 @@
 - time for tests/exe/wasm.fr: before: 13844ms, rejit the compilers every time: 87605ms. 
   which is probably why i gave up last time i started to do this. 
   but maybe it's good to have incentive to do some sane caching for programs that want to call exec in the web playground. 
+- i started doing the seperate compilations units for aot web but its like 50ms faster each (even without actually linking them)
+  which isn't really worth the self hate of being a linker to me. still should revisit because 
+  it can probably make the binaries smaller by making it easy to trim more libc which will be more worth it. 
+- mouse lock in web kinda works. it desperately wants to unfocus the canvas sometimes when the lockedness changes for some reason? 
+- weird shit with the sizes in web. going to have to fix that properly soon before it drives me crazy...
 
 ## (Oct 7)
 

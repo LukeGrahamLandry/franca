@@ -3,12 +3,6 @@ driver :: fn(vtable: *ImportVTable) void = {
     franca := get_executable_path(temp());
     ok := run_cmd_blocking(franca, @slice("graphics/web/webgpu_api.fr"));
     @assert(ok, "failed build");
-    ok := run_cmd_blocking(franca, @slice("examples/default_driver.fr", "build", 
-        "examples/os/host/web.fr", "-o", "target/demo.wasm",
-        "-arch", "wasm32", "-dynamiclib", "-keep-names", "-wasm_threads",
-        "-unsafe",
-    ));
-    @assert(ok, "failed build");
     
     commit := if ci {
         import("@/tests/run_tests.fr")'git_rev_parse()
@@ -70,27 +64,29 @@ driver :: fn(vtable: *ImportVTable) void = {
     };
     commit = hash;
     @eprint("rootfs_hash=%\n", hash);  // parsed by the test runner
+    tasks := @ref list(RunningProcess, temp());
     if need_write {
         write_entire_file_or_crash(hash_path, hash);
         write_entire_file_or_crash(@tfmt("%/%", mirror_path, hash), root_fs);
         copy(@tfmt("%/%.out", cache_path, hash), @tfmt("%/%", mirror_path, hash));
         
+        a := @slice(franca, "examples/default_driver.fr", "build", 
+            "examples/os/host/web.fr", "-o", Target("demo.wasm"),
+            "-arch", "wasm32", "-dynamiclib", "-keep-names", "-wasm_threads",
+            "-unsafe",
+        );
+        tasks.push(spawn(a));
+        
         if !cli_args().contains(fn(it) => it[] == "-dev") {
             for m&.by_name("aot") { path |
-                dest := @ref u8.list(temp());
-                @fmt(dest, "%/", target_dir);
-                for path.slice(0, path.len - 3) { c |
-                    dest.push(@if(c == "/".ascii(), "_".ascii(), c));
-                };
-                @fmt(dest, ".wasm");
-            
-                ok := run_cmd_blocking(franca, @slice("examples/default_driver.fr", "build", 
-                    "examples/os/host/web.fr", "-o", dest.items(),
+                dest := mangle_path(target_dir, path, "wasm");
+                a := @slice(franca, "examples/default_driver.fr", "build", 
+                    "examples/os/host/web.fr", "-o", dest,
                     "-arch", "wasm32", "-dynamiclib", "-keep-names", "-wasm_threads",
                     "-unsafe",
                     "-lightweb", path,
-                ));
-                @assert(ok, "failed build");
+                );
+                tasks.push(spawn(a));
             };
         };
     };
@@ -103,7 +99,6 @@ driver :: fn(vtable: *ImportVTable) void = {
     copy(Target("gfx.js"), "graphics/web/gfx.js");
     copy(Target("webgpu.g.js"), "target/franca/webgpu.g.js");
     copy(Target("worker.js"), "examples/web/worker.js");
-    copy(Target("demo.wasm"), "target/demo.wasm");
     copy("target/web/ls.html", "examples/web/ls.html");
     
     // TODO: this is slowly approching crazy town...
@@ -160,6 +155,10 @@ driver :: fn(vtable: *ImportVTable) void = {
         // i don't want to see github's logo on my website. 
         write_entire_file_or_crash("target/web/404.html", "404<br><a href='/'>index</a>")
     };
+    
+    each tasks { it |
+        sink_task(it, "");
+    };
 }
 
 manifest :: fn(commit: Str) Manifest = (
@@ -189,6 +188,7 @@ manifest :: fn(commit: Str) Manifest = (
             "examples/gpu/chip8.fr", 
             "examples/gpu/hctarcs/gui.fr", 
             "examples/gpu/multiplexer.fr", 
+            "examples/gpu/maze2d/gui.fr", 
             "tests/external/nuklear.fr", 
         ),
     ), (
@@ -202,24 +202,29 @@ manifest :: fn(commit: Str) Manifest = (
     ), (
         name = "aot",
         about = "precompiled franca programs",
-        // TODO: some say "hack_remove_imports: already compiled so might not work"
         examples = @const_slice(
             "examples/gpu/mandelbrot.fr",
             "examples/gpu/idle.fr",
             "examples/gpu/farm_game.fr", 
             "examples/chess/gui.fr",
+            
+            // TODO
+            // see `case "mouse_lock"` comment in app.js
+            // webgpu alpha_to_coverage_enabled need msaa. 
+            // both escape (exit full screen / mouse lock) and middle button (firefox autoscroll) are unplayable
+            "examples/gpu/maze_game/main.fr",
+            
             "examples/life/gui.fr", 
             "examples/gpu/stackie.fr",
-            // TODO
-            // mouse lock
-            // webgpu alpha_to_coverage_enabled need msaa. 
-            // both escape (exit full screen) and middle button (firefox puts arrows in a circle? idk) kinda do something else. 
-            "examples/gpu/maze_game/main.fr",
+            
             //
             // TODO
             // CompileError: wasm validation error: at offset 9148: expected signature index
             // (but also it's too big, do the lazy jitting instead)
             // "examples/gpu/multiplexer.fr",
+            // TODO
+            // make it configurable which apis are disabled (this wants threads and spawn)
+            // "examples/gpu/terminal.fr",
         ),
     ), (
         name = "kaleidoscope",
@@ -354,3 +359,22 @@ collect_paths :: fn(a: Alloc, root: []Str) List(Str) = {
 #use("@/examples/testing.fr");
 #use("@/lib/encoding/json_reflect.fr");
 #use("@/lib/collections/map.fr");
+
+mangle_path :: fn(target_dir: Str, path: Str, ext: Str) Str = {
+    dest := @ref u8.list(2 + target_dir.len + path.len + ext.len, temp());
+    @fmt(dest, "%/", target_dir);
+    for path.slice(0, path.len - 3) { c |
+        dest.push(@if(c == "/".ascii(), "_".ascii(), c));
+    };
+    @fmt(dest, ".%", ext);
+    dest.items()
+};
+
+spawn :: fn(a: []Str) RunningProcess = { r := spawn_nonblocking(a); r.or(fn(msg) => panic(msg)) };
+fn sink_task(p: *RunningProcess, debug: Str) void = {
+    mark := temp().mark();
+    out, err := (u8.list(temp()), u8.list(temp()));
+    status := poll_until_exit(p, out&, err&, "");
+    @assert(status == 0, "% % % %", debug, status, out.items(), err.items());
+    temp().reset(mark);
+}

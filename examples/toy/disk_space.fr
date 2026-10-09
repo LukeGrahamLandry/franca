@@ -1,0 +1,37 @@
+
+main :: fn() void = {
+    out := @ref u8.list(1_000_000, temp());
+    show_tree(out, ".", 0);
+    print(out.items());
+}
+
+show_tree :: fn(out: *List(u8), path: Str, depth: i64) i64 #use("@/lib/sys/fs.fr") = {
+    size_patch_offset := out.len;
+    max_size_chars :: 12;
+    out.push_repeated(max_size_chars, " ".ascii());
+    @fmt(out, "\n");
+    
+    entries := collect_directory_ordered(path, temp(), temp()) 
+        || @panic("failed walkdir %", path);
+    
+    size := 0;
+    for entries { it |
+        out.push_repeated(depth+1, " ".ascii());
+        @fmt(out, "- %: ", it.name);
+        @match(it.type) {
+            fn File() => {
+                stat := @uninitialized Posix.Stat;
+                Posix'stat(@fmt_cstr("%/%", path, it.name), stat&).unwrap();
+                @fmt(out, "%\n", stat.st_size);
+                size += stat.st_size;
+            }
+            fn Directory() => {
+                size += show_tree(out, @tfmt("%/%", path, it.name), depth + 1);
+            }
+            @default => ();
+        };
+    };
+    write_int_to_buffer(out.items().subslice(size_patch_offset, max_size_chars), size);
+        
+    size
+}

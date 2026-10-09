@@ -7,6 +7,7 @@ if (typeof Worker === "undefined")
 
 const p = new URLSearchParams(window.location.search);
 const lang = p.get("lang");
+if (p.get("full") !== null && lang === "aot" && navigator.gpu !== undefined) layout_sidebar(false);
 
 let thread_pool = []
 let running_threads = []
@@ -535,6 +536,11 @@ function layout_canvas(graphics_only) {
 
 document.getElementById("fullscreen").addEventListener("click", (event) => {
     if (document.fullscreenEnabled) document.getElementById("canvas").requestFullscreen();
+});
+
+document.getElementById("mouselock").addEventListener("click", (event) => {
+    canvas.requestPointerLock();
+    canvas.focus();
 });
 
 document.getElementById("hidebar").addEventListener("click", (event) => layout_sidebar(false));

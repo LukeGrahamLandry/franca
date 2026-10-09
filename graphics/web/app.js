@@ -86,7 +86,7 @@ export const add_events = (canvas, send) => {
     
     event("mouseenter", (e) => send("simple_event", I, 8));
     event("mouseleave", (e) => send("simple_event", I, 9));
-    document.addEventListener("visibilitychange", () => {
+    E(document, "visibilitychange", () => {
         // TODO: these both fire when going fullscreen which isn't really what i want but not worth hacking around
         if (document.hidden) send("simple_event", I, 11);  // ICONIFIED
         else                 send("simple_event", I, 12);  // RESTORED
@@ -137,9 +137,26 @@ export const add_events = (canvas, send) => {
                 Atomics.notify(buf, 0);
                 break
             }
+            case "mouse_lock": {
+                if (data[1]) {
+                    // TODO: annoying because it won't do it if you don't interact with the page
+                    //       so if you click a link right into maze_game it will be unplayable 
+                    //       (because i don't re-ask for lock until you exit a screen even once you start interacting). 
+                    //       also if you leave the tab and come back it won't re-ask to lock. 
+                    //       should report the pointerlockchange/pointerlockerror events so game can show a message if it doesn't work.
+                    /*await*/canvas.requestPointerLock();
+                } else {
+                    /*await*/document.exitPointerLock();
+                }
+                break
+            }
             default: console.error("bad handle_app_request", data);
         }
     };
+    
+    E(document, "pointerlockchange", (e) => {
+        if (document.pointerLockElement === canvas) canvas.focus();
+    });
     
     return [removers, handle_app_request];
 }
