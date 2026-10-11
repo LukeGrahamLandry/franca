@@ -1,0 +1,213 @@
+
+State :: @struct {
+    HIGH_DPI :: true;
+    ui: Ui.State;
+    dirty: bool;
+    draw: Sgl.Self;
+    pipe: Sgl.Pipeline;
+    grid: Grid;
+    
+    camera: import("@/examples/gpu/maze_game/camera.fr").Camera;
+    dt: f32;
+    
+    scale: f32;
+    output_pos: Ui.Nuklear.nk_rect_t;
+    prev_frame_time: f64;
+    enable_movement: bool;
+};
+
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    sapp.desc.enable_clipboard = true;
+    on_init(state.ui&, sg);
+    state.dirty = true;
+    
+    state.draw&.setup(
+        allocator = general_allocator(),
+        sg = sg,
+        max_vertices = 1_000_000,
+    );
+    
+    init_pipeline(state.draw&, state.pipe&, sg, (
+        depth = (
+            write_enabled = true,
+            compare = .LESS_EQUAL,
+        ),
+    ));
+    
+    state.grid = (cells = general_allocator().alloc_zeroed(u8, 16*16*16), dimensions = vec3(16));
+    evaluate(state.grid&);
+    
+    state.scale = 0.075;
+    state.camera.perspective = (aspect = 1, fovy = deg_to_rad(70), znear = 0.01, zfar = 100.0);
+    update_aspect(state.camera&, sapp);
+    state.camera.speed = (pos = 0.045 * 30.0, rot = 0.005 * 30.0);
+    state.camera.pos = vec3(0.7, 1, 2);
+    state.camera.rot = vec2(-0.307, -1.581);
+}
+
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    now := timestamp_s();
+    state.dt = (now - state.prev_frame_time).cast();
+    state.prev_frame_time = now;
+    
+    if Easy'should_skip_frame(sapp, state.dirty&) {
+        state.ui.idle_last_frame = true;
+        return();
+    };
+    sapp.lock_mouse(state.enable_movement);
+
+    w, h := (sapp.width().float().cast() / sapp.dpi_scale, sapp.height().float().cast() / sapp.dpi_scale);
+    input_end_with_idle(state.ui&, => draw_ui(state, w, h));
+    
+    sgl := state.draw&;
+    sgl.defaults();
+    r := state.output_pos;
+    aspect := r.w / r.h;
+    sgl.viewport(r.x.mul(sapp.dpi_scale).cast().int().intcast(), r.y.mul(sapp.dpi_scale).cast().int().intcast(), r.w.mul(sapp.dpi_scale).cast().int().intcast(), r.h.mul(sapp.dpi_scale).cast().int().intcast(), true);
+    sgl.load_pipeline(state.pipe);
+    sgl.load_identity();
+    
+    state.dirty = !(state.camera.delta_pos == vec3(0));
+    update_camera(state.camera&, state.dt);
+    write_camera(state.camera&, sgl);
+    sgl.scale(state.scale, state.scale * aspect, state.scale);
+    sgl.begin(.QUADS);
+    grid := state.grid&;
+    X, Y, Z := (grid.dimensions.x.cast().int(), grid.dimensions.y.cast().int(), grid.dimensions.z.cast().int());
+    range(0, X) { x |
+        range(0, Y) { y |
+            range(0, Z) { z |
+                i := x*Y*Z + y*Z + z;
+                if grid.cells[i] != 0 {
+                    colours := @const_slice(@as(u32)0, pack_rgba(255, 0, 0, 255), pack_rgba(0, 255, 0, 255), pack_rgba(0, 0, 255, 255), pack_rgba(255, 255, 0, 255), pack_rgba(0, 255, 255, 255), pack_rgba(255, 255, 0, 255), 0, 0, 0, 0, 0, 0, 0, 0, 0);
+                    sgl.color = colours[grid.cells[i].zext()];
+                    if sgl.color != 0 {
+                        pos := vec3(x.float().cast(), y.float().cast(), z.float().cast());
+                        for cube_vertices { v |
+                            sgl.v3f(pos + v*0.8);
+                        };
+                    };
+                };
+            }; 
+        }; 
+    }; 
+    sgl.end();
+    
+    Easy'glue_begin_pass(sapp, sg, zeroed(Sg.PassAction));
+    draw(state.ui&, sg, sapp);
+    sgl.draw_layer(sg, 0);
+    sg.end_pass();
+    sg.commit();
+}
+
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    on_event(state.ui&, sapp, event);
+    state.dirty = true;
+    
+    @match(event.type) {
+        fn MOUSE_SCROLL() => if state.enable_movement {
+            state.scale = clamp(state.scale + event.scroll_y / 300, 0.01, 10);
+        };
+        fn RESIZED() => update_aspect(state.camera&, sapp);
+        @default => ();
+    };
+    
+    if state.enable_movement {
+        fly_controller(state.camera&, event);
+        if event.type == .KEY_DOWN && event.key_code == .Q {
+            state.enable_movement = false;
+        }
+    };
+}
+
+fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
+    ctx := state.ui.ctx&;
+    flags := (@as(u32) nk_panel_flags.NK_WINDOW_MOVABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_SCALABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_MINIMIZABLE);
+
+    state.output_pos = zeroed(@type state.output_pos);
+    if begin(ctx, "Output", nk_rect(0, 0, 500, 500), flags) {
+        state.output_pos = nk_window_get_content_region(ctx);
+        draw := nk_window_get_canvas(ctx);
+        nk_fill_rect(draw, state.output_pos, 0, (r=10,g=10,b=10,a=255));
+    };
+    nk_end(ctx);
+    
+    if begin(ctx, "Input", nk_rect(500, 0, 500, 500), flags) {
+        size := nk_window_get_content_region(ctx);
+        nk_layout_row_dynamic(ctx, 0, 2);
+        run := button(ctx, "Run");
+        widget_disable(ctx, state.enable_movement) {
+            if button(ctx, @if(!state.enable_movement, "Enable Camera Controls", "Press Q to stop")) {
+                state.enable_movement = true;
+            };
+        };
+        //// TODO: this really needs paste
+        buf := @static_mut zeroed(Array(u8, 256));  // TODO: be thread safe if multiple *State embeded (like maze_game would)
+        length := @static_mut @as(i32) 0;
+        // TODO: need to make enum as flags like this less painful
+        flags := (@as(u32) nk_edit_flags.NK_EDIT_ALWAYS_INSERT_MODE).bit_or(@as(u32) nk_edit_flags.NK_EDIT_SELECTABLE).bit_or(@as(u32) nk_edit_flags.NK_EDIT_CLIPBOARD).bit_or(@as(u32) nk_edit_flags.NK_EDIT_MULTILINE).bit_or(@as(u32) nk_edit_flags.NK_EDIT_ALLOW_TAB);
+        nk_layout_row_static(ctx, 180, size.w.cast().int().intcast(), 1);
+        r := nk_edit_string(ctx, flags, bit_cast_unchecked(*u8, *i8, buf.as_ptr()), length, buf.items().len().intcast(), nk_filter_default);
+        //flags := @as(u32) nk_edit_events.NK_EDIT_COMMITTED;
+        //if nk_button_label(ctx, S"Load") || r.bit_and(flags) != 0 {
+        //    path := buf.items().slice(0, length[].intcast());
+        //};
+        if run {
+            src := buf.items().slice(0, length[].intcast());
+            println(src);
+        };
+    };
+    nk_end(ctx);
+}
+
+Grid :: @struct(cells: []u8, dimensions: Vec3);
+
+fn evaluate(grid: *Grid) void = {
+    X, Y, Z := (grid.dimensions.x.cast().int(), grid.dimensions.y.cast().int(), grid.dimensions.z.cast().int());
+    range(0, X) { x |
+        range(0, Y) { y |
+            range(0, Z) { z |
+                i := x*Y*Z + y*Z + z;
+                colour: u8 = 1 + i.mod(3).trunc();
+                grid.cells[i] = colour.bit_and(15);
+            }; 
+        }; 
+    };
+}
+
+driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics2(vtable, @source_file_name(), true);
+main :: fn() void = Easy'start(State);
+#use("@/graphics/lib.fr");
+Ui :: import("@/graphics/deps/nuklear.fr");
+
+cube_vertices :: @const_slice(
+    vec3(0, 1, 0),
+    vec3(1, 1, 0),
+    vec3(1, 0, 0),
+    vec3(0, 0, 0),
+
+    vec3(0, 0, 1),
+    vec3(1, 0, 1),
+    vec3(1, 1, 1),
+    vec3(0, 1, 1),
+
+    vec3(0, 0, 1),
+    vec3(0, 1, 1),
+    vec3(0, 1, 0),
+    vec3(0, 0, 0),
+
+    vec3(1, 0, 1),
+    vec3(1, 0, 0),
+    vec3(1, 1, 0),
+    vec3(1, 1, 1),
+
+    vec3(1, 0, 0),
+    vec3(1, 0, 1),
+    vec3(0, 0, 1),
+    vec3(0, 0, 0),
+
+    vec3(0, 1, 0),
+    vec3(0, 1, 1),
+    vec3(1, 1, 1),
+    vec3(1, 1, 0),
+);

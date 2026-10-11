@@ -17,6 +17,10 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 
+- web: include examples for stackie and life
+- multiplexer zoom controls on the window?
+- maze_game in multiplexer web doesn't get mouse input while locked
+- farm_game is too small in multiplexer native because doesn't respect !HIGH_DPI
 - the examples/emit_c.fr test now doesn't work on github actions' linux. 
   - the one with import_c on the whole compiler to jit hello world, not the one using clang, 
     so it is a problem with my program in some environment, i can't just ignore it.
@@ -162,7 +166,6 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
 - reusable gallery ui because many of the graphics programs have lots of example inputs to choose from
 - get_https_unsafe should hoist with_mbedtls out of the redirects loop but need to deal with the @try
 - pzkip.fr/write: scratch website accepts it but apple's archive utility doesn't ("Error 94: Bad message."... so true bestie!)
-- web: include examples for stackie and life
 - epicycles: don't hang if they draw slow so too many points
 - infer #fold from the body
 - do my tests not work in debian/trixie? https://builds.sr.ht/~lukegrahamlandry/job/1852278

@@ -14,6 +14,8 @@ State :: @struct(
     dirty: bool,
     prev_frame_time: f64,
     reset: @struct(v: @FnPtr(u: rawptr, w: *World) void, u: rawptr),  // for maze_game embedding
+    scale: f64,
+    stupid_hack_for_web_maze_game: bool,  // TODO: in web multiplexer needs this too
 );
 
 World :: @struct(
@@ -146,6 +148,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         allocator = allocator,
         sg = sg,
     );
+    fix_size(state, sapp);
     
     state.text&.setup(
         allocator = allocator,
@@ -345,8 +348,11 @@ SOILD :: 7;  // tex
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     // TODO: in web playground im not respecting when !HIGH_DPI or something like that. idk. same problem as nuklear tho. 
-    state.w = sapp.width() / @if(GRAPHICS_TARGET_WEB, 2, 1);
-    state.h = sapp.height() / @if(GRAPHICS_TARGET_WEB, 2, 1);
+    
+    S := state.scale;
+    hack_scale: f64 = @if(GRAPHICS_TARGET_WEB && !state.stupid_hack_for_web_maze_game, 0.5, 1);
+    state.w = int(sapp.width().float() * S * hack_scale);
+    state.h = int(sapp.height().float() * S * hack_scale);
     w := state.world&;
     if !w.paused {
         do_update(state);
@@ -359,7 +365,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sgl.viewport(0.intcast(), 0.intcast(), sapp.width().intcast(), sapp.height().intcast(), true);
     sgl.load_pipeline(state.pipe);
     
-    sdtx.canvas(sapp, 1/2);
+    sdtx.canvas(sapp, S.cast() * 0.5);
     sdtx.color = pack_rgba(0.5, 0.5, 0.2, 1.0);
     sdtx.pos.x = 0.0;
     sdtx.pos.y = 0.0;
@@ -385,7 +391,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sdtx.put("paused. press P to continue.");
     };
     
-    sdtx.canvas(sapp, 1);
+    sdtx.canvas(sapp, S.cast());
     each state.world.farm { planted |
         if planted.timer < 0 {
             rot_time := 2.0 * config.crops[planted.crop.type.raw()].time;
@@ -538,9 +544,19 @@ uv_for_texture :: fn(tex: i64) Ty(f32,f32,f32,f32) = {
     (u1, v1, u2, v2)
 }
 
+fn fix_size(state: *State, sapp: *Sapp.Self) void = {
+    limit := min(sapp.width(), sapp.height()).float() / @if(GRAPHICS_TARGET_WEB, 2, 1);
+    if limit < base_size * 11 {
+        state.scale = 1/(limit / base_size / 11);
+    } else {
+        state.scale = 1;
+    };
+}
+
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     if event.type == .RESIZED {
         state.dirty = true;
+        fix_size(state, sapp);
     };
     if event.type == .KEY_DOWN && !event.key_repeat {
         if event.key_code == .P {

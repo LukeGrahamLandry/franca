@@ -216,6 +216,7 @@ const toggle_worker = async (resolve) => {
             let [remove, handle_app_request_] = add_events(canvas, send);
             removers.push(remove);
             handle_app_request = handle_app_request_;
+            canvas.focus();
         }
         
         function handle_app_request__(data) {
