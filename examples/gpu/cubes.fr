@@ -14,12 +14,17 @@ State :: @struct {
     output_pos: Ui.Nuklear.nk_rect_t;
     prev_frame_time: f64;
     enable_movement: bool;
+    source: List(u8);
+    errors: List(u8);
 };
+Lox :: import("@/examples/lox/lox_main.fr").Lox;
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sapp.desc.enable_clipboard = true;
     on_init(state.ui&, sg);
     state.dirty = true;
+    state.source = list(4096, general_allocator());
+    state.errors = list(general_allocator());
     
     state.draw&.setup(
         allocator = general_allocator(),
@@ -35,7 +40,6 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     ));
     
     state.grid = (cells = general_allocator().alloc_zeroed(u8, 16*16*16), dimensions = vec3(16));
-    evaluate(state.grid&);
     
     state.scale = 0.075;
     state.camera.perspective = (aspect = 1, fovy = deg_to_rad(70), znear = 0.01, zfar = 100.0);
@@ -43,6 +47,8 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.camera.speed = (pos = 0.045 * 30.0, rot = 0.005 * 30.0);
     state.camera.pos = vec3(0.7, 1, 2);
     state.camera.rot = vec2(-0.307, -1.581);
+    
+    @fmt(state.source&, "var i = x*16*16 + y*16 + z;\nreturn 1 + mod(i, 3);")
 }
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -93,7 +99,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     }; 
     sgl.end();
     
-    Easy'glue_begin_pass(sapp, sg, zeroed(Sg.PassAction));
+    Easy'glue_begin_pass(sapp, sg, (colors = ((load_action = .CLEAR, clear_value = (r = 0, g = 0, b = 0, a = 1)), ..)));
     draw(state.ui&, sg, sapp);
     sgl.draw_layer(sg, 0);
     sg.end_pass();
@@ -125,54 +131,97 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
     flags := (@as(u32) nk_panel_flags.NK_WINDOW_MOVABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_SCALABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_MINIMIZABLE);
 
     state.output_pos = zeroed(@type state.output_pos);
-    if begin(ctx, "Output", nk_rect(0, 0, 500, 500), flags) {
+    if begin(ctx, "Output", nk_rect(0, 0, w/2, h), flags) {
         state.output_pos = nk_window_get_content_region(ctx);
         draw := nk_window_get_canvas(ctx);
         nk_fill_rect(draw, state.output_pos, 0, (r=10,g=10,b=10,a=255));
     };
     nk_end(ctx);
     
-    if begin(ctx, "Input", nk_rect(500, 0, 500, 500), flags) {
+    if begin(ctx, "Input", nk_rect(w/2, 0, w/2, h), flags) {
         size := nk_window_get_content_region(ctx);
         nk_layout_row_dynamic(ctx, 0, 2);
         run := button(ctx, "Run");
         widget_disable(ctx, state.enable_movement) {
-            if button(ctx, @if(!state.enable_movement, "Enable Camera Controls", "Press Q to stop")) {
+            if button(ctx, @if(!state.enable_movement, "Adjust Camera", "Press Q to stop")) {
                 state.enable_movement = true;
             };
         };
         //// TODO: this really needs paste
-        buf := @static_mut zeroed(Array(u8, 256));  // TODO: be thread safe if multiple *State embeded (like maze_game would)
-        length := @static_mut @as(i32) 0;
+        length: i32 = state.source.len.intcast();
         // TODO: need to make enum as flags like this less painful
         flags := (@as(u32) nk_edit_flags.NK_EDIT_ALWAYS_INSERT_MODE).bit_or(@as(u32) nk_edit_flags.NK_EDIT_SELECTABLE).bit_or(@as(u32) nk_edit_flags.NK_EDIT_CLIPBOARD).bit_or(@as(u32) nk_edit_flags.NK_EDIT_MULTILINE).bit_or(@as(u32) nk_edit_flags.NK_EDIT_ALLOW_TAB);
-        nk_layout_row_static(ctx, 180, size.w.cast().int().intcast(), 1);
-        r := nk_edit_string(ctx, flags, bit_cast_unchecked(*u8, *i8, buf.as_ptr()), length, buf.items().len().intcast(), nk_filter_default);
-        //flags := @as(u32) nk_edit_events.NK_EDIT_COMMITTED;
-        //if nk_button_label(ctx, S"Load") || r.bit_and(flags) != 0 {
-        //    path := buf.items().slice(0, length[].intcast());
-        //};
+        nk_layout_row_static(ctx, size.h - 50, size.w.cast().int().intcast(), 1);
+        r := nk_edit_string(ctx, flags, bit_cast_unchecked(*u8, *i8, state.source&.as_ptr()), length&, state.source.maybe_uninit.len.intcast(), nk_filter_default);
+        state.source.len = length.intcast();
+        @debug_assert_ult(state.source.len, state.source.maybe_uninit.len);
         if run {
-            src := buf.items().slice(0, length[].intcast());
-            println(src);
+            evaluate(state.grid&, state.source.items(), state.errors&);
         };
     };
     nk_end(ctx);
+    
+    if state.errors.len > 0 {
+        if begin(ctx, "Error", state.output_pos, flags) {
+            wrapping_text_row(ctx, state.errors.items());
+        };
+        nk_end(ctx);
+    };
 }
 
 Grid :: @struct(cells: []u8, dimensions: Vec3);
 
-fn evaluate(grid: *Grid) void = {
-    X, Y, Z := (grid.dimensions.x.cast().int(), grid.dimensions.y.cast().int(), grid.dimensions.z.cast().int());
-    range(0, X) { x |
-        range(0, Y) { y |
-            range(0, Z) { z |
-                i := x*Y*Z + y*Z + z;
-                colour: u8 = 1 + i.mod(3).trunc();
-                grid.cells[i] = colour.bit_and(15);
-            }; 
-        }; 
+fn evaluate(grid: *Grid, src: Str, errors: *List(u8)) void = {
+    errors.clear();
+    vm := @ref @zeroed Lox'Vm;
+    vm.init();
+    vm.print_callback = fn(vm, _, value) = @fmt(Lox.Vm.ptr_from_raw(vm)[].errors&, "%\n", value);
+    
+    vm.define_native("mod", fn(vm, a) = {
+        a[0].to_number().int().mod(a[1].to_number().int()).float().to_value()
+    });
+
+    src := @tfmt("fun update(x, y, z) {%\n}", src);
+    r := vm.interpret(src, true);
+    ::ptr_utils(Lox.ObjString);
+    update_fn := vm.globals&.get(vm.copy_string("update"));
+    @if(r == .Ok && update_fn.is_none()) @fmt(vm.errors&, "expected a function named 'update'");
+    if r != .Ok || update_fn.is_none() {
+        errors.push_all(vm.errors.items());
+        vm.drop();
+        return();
     };
+    update_fn := update_fn.unwrap();
+    
+    _ := try(vm) {
+        /*ugh*/ {
+            it := vm.Lox'allocate_obj(Lox.ObjFunction);
+            it.name = "toplevel";
+            it := vm.new_closure(it);
+            vm.push_frame(it, 0)
+        };
+        
+        X, Y, Z := (grid.dimensions.x.cast().int(), grid.dimensions.y.cast().int(), grid.dimensions.z.cast().int());
+        range(0, X) { x |
+            range(0, Y) { y |
+                range(0, Z) { z |
+                    vm.push(update_fn);
+                    vm.push(x.float().to_value());
+                    vm.push(y.float().to_value());
+                    vm.push(z.float().to_value());
+                    vm.call_value(vm.peek(3), 3);
+                    vm.run();
+                    colour := vm.pop();
+                    
+                    i := x*Y*Z + y*Z + z;
+                    grid.cells[i] = colour.to_number().int().bit_and(15).trunc();
+                }; 
+            }; 
+        };
+    };
+    
+    errors.push_all(vm.errors.items());
+    vm.drop();
 }
 
 driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics2(vtable, @source_file_name(), true);
