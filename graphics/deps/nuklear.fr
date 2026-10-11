@@ -14,6 +14,8 @@ State :: @struct {
     ctx: Nuklear.nk_context;
     atlas: Nuklear.nk_font_atlas;
     buffers: Array(Nuklear.nk_buffer, 3);
+    clipboard: List(u8);
+    want_copy: bool;
     
     idle_last_frame: bool;  // to use input_end_with_idle, set this when should_skip_frame returns true
 };
@@ -74,6 +76,22 @@ fn on_init(state: *State, sg: *Sg.Self) void #use(Nuklear) = {
     nk_init_default(ctx, font.handle&);
     nk_input_begin(ctx);
     each(state.buffers&, nk_buffer_init_default);
+    
+    state.clipboard = list(general_allocator());
+    ctx.clip = (
+        copy = fn(state, ptr, len) = {
+            state := State.ptr_from_raw(state.ptr);
+            state.clipboard&.clear();
+            state.clipboard&.push_all(bit_cast_unchecked(*i8, *u8, ptr).slice(len.intcast()));
+            state.want_copy = true;
+            // TODO: technically wrong if gets stomped by a paste on same frame
+        },
+        paste = fn(state, edit) = {
+            state := State.ptr_from_raw(state.ptr);
+            nk_textedit_paste(edit, nk_string(state.clipboard.items()), state.clipboard.len.intcast());
+        },
+        userdata = nk_handle_ptr(State.raw_from_ptr(state)),
+    );
 }
 
 // still have to call draw(state, _, _) after this 
@@ -96,6 +114,11 @@ fn input_end_with_idle(state: *State, $draw_ui: @Fn() void #duplicated) void = {
 
 // don't forget to call nk_input_end before doing your ui calls. 
 fn draw(state: *State, sg: *Sg.Self, sapp: *Sapp.Self) void #use(Nuklear) = {
+    if state.want_copy {
+        state.want_copy = false;
+        sapp.set_clipboard_string(state.clipboard.items());
+    };
+    
     dpi := sapp.dpi_scale;
     s := vec2(sapp.width().float().cast(), sapp.height().float().cast());
     
@@ -171,7 +194,6 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void #use(Nukle
     mx, my := (event.mouse_x.div(sapp.dpi_scale).cast().floor().int().intcast(), event.mouse_y.div(sapp.dpi_scale).cast().floor().int().intcast());
     ctx := state.ctx&;
     @match(event.type) {
-        // TODO: CLIPBOARD_PASTED
         fn CHAR() => {
             if event.char_code != "\r".ascii().zext() && event.char_code != "\t".ascii().zext() && event.modifiers.get(.super) == 0 && event.modifiers.get(.control) == 0 {
                 nk_input_unicode(ctx, event.char_code);
@@ -179,6 +201,11 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void #use(Nukle
         }
         fn MOUSE_SCROLL() => nk_input_scroll(ctx, (x = event.scroll_x, y = event.scroll_y));
         fn MOUSE_MOVE() => nk_input_motion(ctx, mx, my);
+        fn CLIPBOARD_PASTED() => {
+            state.clipboard&.clear();
+            state.clipboard&.push_all(event.pasted);
+            range(0, 2, fn(i) => nk_input_key(ctx, .NK_KEY_PASTE, i == 0));
+        }
         @default => {
             if @is(event.type, .MOUSE_DOWN, .MOUSE_UP) {
                 nk_input_button(ctx, @match(event.mouse_button) {
@@ -190,7 +217,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void #use(Nukle
             };
             
             if @is(event.type, .KEY_DOWN, .KEY_UP) {
-                nk_input_key(ctx, fix_key(event), event.type == .KEY_DOWN);
+                nk_input_key(ctx, fix_key(event), event.type == .KEY_DOWN);                
             };
         };
     };
@@ -207,7 +234,7 @@ fix_key :: fn(event: *Sapp.Event) Nuklear.nk_keys = @match(event.key_code) {
     fn BACKSPACE() => .NK_KEY_BACKSPACE;
     fn C() => @if(event.modifiers.get(.super) != 0, .NK_KEY_COPY, .NK_KEY_NONE);
     fn X() => @if(event.modifiers.get(.super) != 0, .NK_KEY_CUT, .NK_KEY_NONE);
-    fn V() => @if(event.modifiers.get(.super) != 0, .NK_KEY_PASTE, .NK_KEY_NONE);
+    fn V() => @if(event.modifiers.get(.super) != 0, /* delay until paste event .NK_KEY_PASTE*/ .NK_KEY_NONE, .NK_KEY_NONE);
     fn UP() => .NK_KEY_UP;
     fn DOWN() => .NK_KEY_DOWN;
     fn LEFT() => .NK_KEY_LEFT;
@@ -239,6 +266,7 @@ fn on_cleanup(state: *State, sg: *Sg.Self) void #use(Nuklear) = {
     each(state.buffers&, nk_buffer_free);
     nk_font_atlas_clear(state.atlas&);
     nk_free(state.ctx&);
+    state.clipboard&.drop();
 }
 
 #use("@/graphics/lib.fr");

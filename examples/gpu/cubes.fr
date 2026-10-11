@@ -16,8 +16,14 @@ State :: @struct {
     enable_movement: bool;
     source: List(u8);
     errors: List(u8);
+    
+    palette: []ColourPair;
+    lang: Language;
 };
+ColourPair :: @struct(rgb: Vec3, c: u32);
 Lox :: import("@/examples/lox/lox_main.fr").Lox;
+enable_languages :: @const_slice(true, true);
+Language :: @enum(i32) (Lox, Lil);
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sapp.desc.enable_clipboard = true;
@@ -25,6 +31,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.dirty = true;
     state.source = list(4096, general_allocator());
     state.errors = list(general_allocator());
+    state.palette = block_colours;
     
     state.draw&.setup(
         allocator = general_allocator(),
@@ -48,7 +55,9 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.camera.pos = vec3(0.7, 1, 2);
     state.camera.rot = vec2(-0.307, -1.581);
     
-    @fmt(state.source&, "var i = x*16*16 + y*16 + z;\nreturn 1 + mod(i, 3);")
+    state.lang = .Lox;
+    @fmt(state.source&, "var i = x*16*16 + y*16 + z;\nreturn 1 + mod(i, 3);");
+    evaluate(state.grid&, state.source.items(), state.errors&, state.lang);
 }
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -65,6 +74,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     w, h := (sapp.width().float().cast() / sapp.dpi_scale, sapp.height().float().cast() / sapp.dpi_scale);
     input_end_with_idle(state.ui&, => draw_ui(state, w, h));
     
+    // TODO: do it into a texture so the window can be behind another
     sgl := state.draw&;
     sgl.defaults();
     r := state.output_pos;
@@ -79,25 +89,18 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sgl.scale(state.scale, state.scale * aspect, state.scale);
     sgl.begin(.QUADS);
     grid := state.grid&;
-    X, Y, Z := (grid.dimensions.x.cast().int(), grid.dimensions.y.cast().int(), grid.dimensions.z.cast().int());
-    range(0, X) { x |
-        range(0, Y) { y |
-            range(0, Z) { z |
-                i := x*Y*Z + y*Z + z;
-                if grid.cells[i] != 0 {
-                    colours := @const_slice(@as(u32)0, pack_rgba(255, 0, 0, 255), pack_rgba(0, 255, 0, 255), pack_rgba(0, 0, 255, 255), pack_rgba(255, 255, 0, 255), pack_rgba(0, 255, 255, 255), pack_rgba(255, 255, 0, 255), 0, 0, 0, 0, 0, 0, 0, 0, 0);
-                    sgl.color = colours[grid.cells[i].zext()];
-                    if sgl.color != 0 {
+    colours := state.palette;
+    iter_grid(grid) { x, y, z, i |
+                if grid.cells[i] < 16 {
+                    sgl.color = colours[grid.cells[i].zext()].c;
                         pos := vec3(x.float().cast(), y.float().cast(), z.float().cast());
                         for cube_vertices { v |
                             sgl.v3f(pos + v*0.8);
                         };
-                    };
                 };
-            }; 
-        }; 
     }; 
     sgl.end();
+    @if(sgl.error.vertices_full && state.errors.len == 0) @fmt(state.errors&, "too many vertices");
     
     Easy'glue_begin_pass(sapp, sg, (colors = ((load_action = .CLEAR, clear_value = (r = 0, g = 0, b = 0, a = 1)), ..)));
     draw(state.ui&, sg, sapp);
@@ -138,25 +141,46 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
     };
     nk_end(ctx);
     
-    if begin(ctx, "Input", nk_rect(w/2, 0, w/2, h), flags) {
+    if begin(ctx, "Program", nk_rect(w/2, 0, w/2, h), flags) {
         size := nk_window_get_content_region(ctx);
         nk_layout_row_dynamic(ctx, 0, 2);
-        run := button(ctx, "Run");
+        run_pressed := button(ctx, "Run");
+        languages := @slice(Ui'nk_cstring("lox"), Ui'nk_cstring("lil"));
+        state.lang = @as(Language) @as(i32) nk_combo(ctx, languages.ptr, languages.len.intcast(), @as(i32) state.lang, 20, (x=200, y=200));
+        
         widget_disable(ctx, state.enable_movement) {
             if button(ctx, @if(!state.enable_movement, "Adjust Camera", "Press Q to stop")) {
                 state.enable_movement = true;
             };
         };
-        //// TODO: this really needs paste
+        
+        nk_layout_row_dynamic(ctx, 16, 16);
+        saved := ctx.style.combo;
+        ctx.style.combo.label_normal = (r=0,g=0,b=0,a=255);
+        ctx.style.combo.sym_hover = .NK_SYMBOL_NONE;
+        ctx.style.combo.sym_normal = .NK_SYMBOL_NONE;
+        range(0, 16) { i |
+            c := state.palette[i];
+            ctx.style.combo.normal = nk_style_item_color(nk_rgba_cf(r=c.rgb.x,g=c.rgb.y,b=c.rgb.z,a=1));
+            s := @tfmt("%", i);
+            if nk_combo_begin_text(ctx, Ui'nk_string(s), s.len.intcast(), (x = 200, y = 400)) {
+                nk_layout_row_dynamic(ctx, 120, 1);
+                c := nk_color_picker(ctx, (r=c.rgb.x,g=c.rgb.y,b=c.rgb.z,a=1), .NK_RGBA);
+                state.palette[i] = (rgb = vec3(c.r,c.g,c.b), c = pack_rgba(c.r, c.g, c.b, 1));
+                nk_combo_end(ctx);
+            };
+        };
+        ctx.style.combo = saved;
+        
         length: i32 = state.source.len.intcast();
         // TODO: need to make enum as flags like this less painful
         flags := (@as(u32) nk_edit_flags.NK_EDIT_ALWAYS_INSERT_MODE).bit_or(@as(u32) nk_edit_flags.NK_EDIT_SELECTABLE).bit_or(@as(u32) nk_edit_flags.NK_EDIT_CLIPBOARD).bit_or(@as(u32) nk_edit_flags.NK_EDIT_MULTILINE).bit_or(@as(u32) nk_edit_flags.NK_EDIT_ALLOW_TAB);
-        nk_layout_row_static(ctx, size.h - 50, size.w.cast().int().intcast(), 1);
+        nk_layout_row_static(ctx, size.h - 100, size.w.cast().int().intcast(), 1);
         r := nk_edit_string(ctx, flags, bit_cast_unchecked(*u8, *i8, state.source&.as_ptr()), length&, state.source.maybe_uninit.len.intcast(), nk_filter_default);
         state.source.len = length.intcast();
         @debug_assert_ult(state.source.len, state.source.maybe_uninit.len);
-        if run {
-            evaluate(state.grid&, state.source.items(), state.errors&);
+        if run_pressed {
+            evaluate(state.grid&, state.source.items(), state.errors&, state.lang);
         };
     };
     nk_end(ctx);
@@ -171,17 +195,32 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
 
 Grid :: @struct(cells: []u8, dimensions: Vec3);
 
-fn evaluate(grid: *Grid, src: Str, errors: *List(u8)) void = {
+fn evaluate(grid: *Grid, src: Str, errors: *List(u8), lang: Language) void = {
+    @run @assert_eq(enable_languages.len(), Language.enum_count(), "enable_languages.len");
     errors.clear();
+    if !enable_languages[intcast(@as(i32) lang)] {
+        return @fmt(errors, "% was disabled at compile time. edit enable_languages and recompile examples/gpu/cubes.fr", lang);
+    };
+    inline_for_enum_deref Language { $it |
+        @if(@run enable_languages[it.ordinal()]) if lang == it {
+            @if(it == .Lox) evaluate_lox(grid, src, errors);
+            @if(it == .Lil) evaluate_lil(grid, src, errors);
+        };
+    };
+}
+
+fn evaluate_lox(grid: *Grid, src: Str, errors: *List(u8)) void = {
     vm := @ref @zeroed Lox'Vm;
     vm.init();
     vm.print_callback = fn(vm, _, value) = @fmt(Lox.Vm.ptr_from_raw(vm)[].errors&, "%\n", value);
-    
+    vm.globals&.insert(vm.copy_string("exit"), Lox.nil_value, vm.gc);
+    vm.globals&.insert(vm.copy_string("getc"), Lox.nil_value, vm.gc);
+
     vm.define_native("mod", fn(vm, a) = {
         a[0].to_number().int().mod(a[1].to_number().int()).float().to_value()
     });
 
-    src := @tfmt("fun update(x, y, z) {%\n}", src);
+    src := @tfmt("fun update(x, y, z) {%}", src);
     r := vm.interpret(src, true);
     ::ptr_utils(Lox.ObjString);
     update_fn := vm.globals&.get(vm.copy_string("update"));
@@ -201,10 +240,7 @@ fn evaluate(grid: *Grid, src: Str, errors: *List(u8)) void = {
             vm.push_frame(it, 0)
         };
         
-        X, Y, Z := (grid.dimensions.x.cast().int(), grid.dimensions.y.cast().int(), grid.dimensions.z.cast().int());
-        range(0, X) { x |
-            range(0, Y) { y |
-                range(0, Z) { z |
+        iter_grid(grid) { x, y, z, i |
                     vm.push(update_fn);
                     vm.push(x.float().to_value());
                     vm.push(y.float().to_value());
@@ -213,15 +249,61 @@ fn evaluate(grid: *Grid, src: Str, errors: *List(u8)) void = {
                     vm.run();
                     colour := vm.pop();
                     
-                    i := x*Y*Z + y*Z + z;
-                    grid.cells[i] = colour.to_number().int().bit_and(15).trunc();
-                }; 
-            }; 
+                    grid.cells[i] = @if(colour.is_number(), colour.to_number().int().trunc(), 255);
         };
     };
     
     errors.push_all(vm.errors.items());
     vm.drop();
+}
+
+fn evaluate_lil(grid: *Grid, src: Str, errors: *List(u8)) void = {
+    C :: {
+        root := Foreign'decker();
+        src := import("@/tests/external/decker.fr")'lilt_src(root);
+        import("@/examples/import_c/ffi.fr")'include(src)
+    };
+    
+    env := @static_mut zeroed(*C.lv);
+    init_once ClearOnAotBake {
+       	C'init_interns();
+        env[] = C'lmenv(zeroed(*C.lv));
+        
+        C'dset(env[], lmistr("bits"), C'lmi(C'interface_bits, lmistr("bits"), zeroed(*C.lv)));
+    	C'dset(env[], lmistr("pi"), C'lmn(PI));
+    	C'dset(env[], lmistr("e" ), C'lmn(2.718281828459045));
+        // TODO: give it the colour names
+    };
+
+    program := C'parse(C'lmutf8(bit_cast_unchecked(CStr, *i8, src.as_cstr()))[].sv);
+    ::Array(i8, 1024);
+    if bit_cast_unchecked(i8, u8, C.par[].error&[0]) != 0 {
+        msg := C'drom_to_utf8(C'lmcstr(C.par[].error&.as_ptr()))[].sv;
+        msg := bit_cast_unchecked(*i8, CStr, msg);
+        @fmt(errors, "%", msg);
+        return();
+    };
+    lmistr :: fn(s: CStr) *C.lv = C'lmistr(bit_cast_unchecked(CStr, *i8, s));
+    X, Y, Z := (lmistr("x"), lmistr("y"), lmistr("z"));
+    callee := C'run(program, env[]);
+    iter_grid(grid) { x, y, z, i |
+        C'dset(env[], X, C'lmn(x.float()));
+        C'dset(env[], Y, C'lmn(y.float()));
+        C'dset(env[], Z, C'lmn(z.float()));
+        value := C'run(program, env[]);
+        grid.cells[i] = @if(C'linil(value) != 0, 255, C'ln(value).int().trunc());
+    };
+}
+
+fn iter_grid(grid: *Grid, $body: @Fn(x: i64, y: i64, z: i64, i: i64) void) void = {
+    X, Y, Z := (grid.dimensions.x.cast().int(), grid.dimensions.y.cast().int(), grid.dimensions.z.cast().int());
+    range(0, X) { x |
+        range(0, Y) { y |
+            range(0, Z) { z |
+                body(x, y, z, x*Y*Z + y*Z + z);
+            }; 
+        }; 
+    };
 }
 
 driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics2(vtable, @source_file_name(), true);
@@ -260,3 +342,21 @@ cube_vertices :: @const_slice(
     vec3(1, 1, 1),
     vec3(1, 1, 0),
 );
+
+block_colours :: {
+    // TODO: stop pasting this!
+    // 0.0 to 1.0
+    hsv2rgb :: fn(H: f64, S: f64, V: f64) Ty(f64, f64, f64) = {
+        H *= 360.0;
+        f :: fn(n: f64) => {
+            k := fmod(n + (H / 60.0), 6.0);
+            abs(V - V * S * max(0.0, min(min(k, 4 - k), 1.0)))
+        };
+        (f(5), f(3), f(1))
+    };
+    
+    ast_alloc().alloc_init(ColourPair, 16, fn(i) => {
+        r, g, b := hsv2rgb(i.float() / 16, 1, 1);
+        (rgb = vec3(r.cast(), g.cast(), b.cast()), c = pack_rgba(r, g, b, 1))
+    })
+};
