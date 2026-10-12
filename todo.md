@@ -17,6 +17,7 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 
+- make types_size_guess growable. need to cope with not reallocating under the cache pointers tho
 - web: include examples for stackie and life
 - multiplexer zoom controls on the window?
 - maze_game in multiplexer web doesn't get mouse input while locked

@@ -1,4 +1,53 @@
 
+## (Oct 12) cubes
+
+- web drawing no cubes is that LESS_EQUAL depth check doesn't work. 
+  works in native dawn. GREATER works, it's just backwards of what you want. there's no webgpu error in the console. 
+  the bindings have "less-equal" which matches what the docs say.  
+  depth_test draws stuff in browser which should be the same? no clue.
+- nuklear textbox really implies they have a horizontal scroll bar but they don't. (NK_EDIT_NO_HORIZONTAL_SCROLL is just about moving the cursor). 
+  - the halfass version is do like hctarcs did and make the width of the widget bigger than the window so the panel's scrollbar can be used. 
+    slightly less silly looking if i guess the width of the longest line. 
+  - you'd think i could just call nk_do_scrollbarh myself but it became infinite suffering somehow.
+    im not in the text widget anymore so like have to recalculate a bunch of shit. 
+    - have to extern NK_LIB
+    - there's like two edit structs, one for the active thing and one saved somewhere that are copied between at different times. 
+      so have to be careful to sync with the right one or it stomps my changes. 
+    - dragging only starts working once the mouse gets out of the text area. 
+      the bar needs to be in the widget's space but out of where it thinks its drawing the text
+      so it doesn't have clicking move the cursor and reset the position. 
+      so i have to extend the padding to shink where it draws but then it also pads the top which is annoying. 
+      if the bar is totally outside the widget, it's not active and ctx.text_edit doesn't have the scroll stuff copied in. 
+      and it doesn't store that state anywhere, like if you click another textbox it forgets where your cursor is in the first one. 
+  - aaa i need to stop doing this. i've wasted like hours. 
+- i don't really like the font, it would be nice to be able to use jetbrains mono but it's super blurry. 
+  it looks fine if i make the font size like 32 instead of 13 but that's not what i want. 
+  it's not that bad in my terminal. how do i ask it to render it bigger and then shrink when blitting the texture?
+  nk_font_config_t.(oversample_v, oversample_h) help a lot but it still doesn't feel quite right. 
+  i wonder if how im doing it in the terminal is equivilent to oversamling more than it will let me ask for. 
+- let you grow the area. auto recompiling as you type feels really nice
+- worker.js can just ask for the imports instead of enumeratings all the things to ignore to let the dynamic linking patch table entries
+
+## (Oct 11) cubes
+
+- making repl-ish thing for voxel fragment-shader-ish thing. 
+  im always on the hunt for projects that can unify all my random little experiments. 
+  tho its sad how many of my things are i see someone else do something cool and then i make the shitty version of it. 
+  but i dont know how to learn how to produce good ideas without just experimenting and hoping some fairy dust rubs off on me. 
+- fell for the classic blunder of not checking sgl.errors.vertices_full
+- started with lox
+- why am i spending my time writing down colours right now, just cycle hues is good enough for now
+- i kinda spent more time messing around with the colour picker and figuring out which style fields the combo buttons use than on the initial putting cubes on the screen
+- added lil,c,lua
+- camera was using the screen's aspect instead of the subwindow's
+- somehow this was the first program where 4k of types_size_guess wasnt enough. 
+
+## (Oct 9)
+
+was messing around with a platformer a bit.  
+stole from an old project of mine and got annoyed by the physics not working when objects were too different a size.  
+but i'll give it another attempt someday. 
+
 ## (Oct 8)
 
 - time for tests/exe/wasm.fr: before: 13844ms, rejit the compilers every time: 87605ms. 

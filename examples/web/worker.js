@@ -116,6 +116,7 @@ export const imports = {
         log: (a) => Math.log(a),
         asin: (a) => Math.asin(a),
         atan: (a) => Math.atan(a),
+        atan2: (a, b) => Math.atan2(a, b),
         round: (a) => Math.round(a),
         trunc: (a) => Math.trunc(a),
 
@@ -274,71 +275,14 @@ function yield_file(bytes, name) {
     });
 }
 
-let weak_imports = [
-    "malloc",
-    "free",
-    "__libc_start_main",
-    "__error",
-    "__errno_location",
-    "__clear_cache",
-    "pthread_jit_write_protect_np",
-    "unlinkat",
-    "poll",
-    "fork",
-    "close",
-    "wait4",
-    "pipe",
-    "nanosleep",
-    "execve",
-    "read",
-    "mkstemp",
-    "dup2",
-    "readdir$INODE64",
-    "dlsym",
-    "fstatat",
-    "fstatat$INODE64",
-    "renameat",
-    "readlinkat",
-    "_NSGetExecutablePath",
-    "mkdirat",
-    "pthread_attr_setstack",
-    "opendir$INODE64",
-    "closedir",
-    "readdir",
-    "lseek",
-    "pthread_create",
-    "pthread_join",
-    "opendir",
-    "dlopen",
-    "dlclose", "dlerror",
-    "sigaction",
-    "pthread_attr_init",
-    "pthread_attr_destroy",
-    "strtod", "localtime_r", "time",
-    "snprintf",
-    "ppoll", "execve",
-    "tcgetattr",
-    "tcsetattr",
-    "clock_gettime",
-    "yield_file",
-    "puts", "putchar", "abort", "exit", "munmap", "mprotect", "fsync", "fetch_file", "mmap", "write", "null",
-    "posix_getdents", "FR_openat", 
-    "FR_wasm_jit_event",
-    "getpid", "gettid", 
-    "pread", 
-    "posix_spawnp", 
-    "posix_spawn_file_actions_init", "posix_spawn_file_actions_destroy",
-    "posix_spawn_file_actions_adddup2", "posix_spawn_file_actions_addclose", 
-    "fdopendir", "fdopendir$INODE64",
-    "fabs", "memset", "qsort", "sqrt", "memcpy", 
-    "chdir", "kill", 
-];
-
-for (const it of weak_imports) {
-    if(imports.env[it] === undefined)
-    imports.env[it] = () => {
-        throw new Error("called weak function: " + it);
-    };
+function fill_weak_imports(module, imports) {
+    for (const it of WebAssembly.Module.imports(module)) {
+        if (it.kind === "function" && it.module == "env" && imports.env[it.name] === undefined) {
+            imports.env[it.name] = () => {
+                throw new Error("called weak function: " + it.name);
+            };
+        }
+    }
 }
 
 function handle(_msg) {
@@ -356,6 +300,7 @@ function handle(_msg) {
             get_G().show_error = show_error;
             canvas = msg.canvas;
             if (module === undefined) show_error("must setmodule before start"); 
+            fill_weak_imports(module, imports);
             WebAssembly.instantiate(module, imports)
                 .then(it => handleWasmLoaded(it, msg))
                 .catch(show_error);

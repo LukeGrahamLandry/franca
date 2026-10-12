@@ -5,10 +5,10 @@
 // if i was being more serious i'd probably put them in a bubblewrapped subprocess. 
 
 // you can disable some to compile faster and have fewer dependencies
-// - c/lox are my mine, lua/lil are the real ones but compiled by import_c
-// - c/lox/lua use longjmp for errors so won't work in web playground
-// - c are unsandboxed
-enable_languages :: @const_slice(true, true, true, true);
+DEP :: true;  // i didn't write the compiler
+MEM :: true;  // unsandboxed memory access
+JMP :: !GRAPHICS_TARGET_WEB;  // uses longjmp for errors so won't work in web playground
+enable_languages :: @const_slice(JMP&&MEM, JMP, DEP&&JMP, DEP);
 Language :: @enum(i32) (
     C,    // (../import_c)
     Lox,  // https://craftinginterpreters.com (../lox)
@@ -17,8 +17,23 @@ Language :: @enum(i32) (
 );
 
 // TODO: franca, kaleidoscope. janet? hare?
-// TODO: why don't the cubes draw in web
+// TODO: depth LESS_EQUAL doesn't work in browser ?? 
 // TODO: use the type of textbox with undo
+// TODO: wasm for c/franca so memory is in jail too? 
+//       franca is a pain in the ass because really i should run the compiler in wasm too. 
+//       need to list the math imports for that but i should do that for native c anyway. 
+// TODO: once you can do code its easy to reuse for other types of programs. 
+//       draw pictures, solve mazes, idk. 2d with much higher resolution. franca could do gpu. 
+// TODO: a thing where you can share levels. (program for expected output, initial code with hints, dimensions, palette, offset for the input numbers if you'd rather it be centered on zero). 
+//       and then show how close you get / how long it takes. 
+// TODO: would be cool to make a game where this is how you unlock stuff. 
+//       like to get a machine you have to program its shape out of voxels. 
+// TODO: eval in a thread so could do longer running things. 
+// TODO: some way to see the inside of the cube
+// TODO: stay centered on the mouse when zooming (and allow when not in camera mode)
+// TODO: build a more efficient mesh so i can make bigger shapes
+// TODO: when part of the output window is off the screen, it squishes because the reported y+h or whatever is off the screen so the aspect is wrong
+// TODO: draw output into a texture so the window can be behind another
 
 State :: @struct {
     HIGH_DPI :: true;
@@ -42,6 +57,7 @@ State :: @struct {
     palette: []ColourPair;
     lang: Language;
     run: bool;
+    auto_run: bool;
 };
 ColourPair :: @struct(rgb: Vec3, c: u32);
 Lox :: import("@/examples/lox/lox_main.fr").Lox;
@@ -58,7 +74,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.draw&.setup(
         allocator = general_allocator(),
         sg = sg,
-        max_vertices = 1_000_000,
+        max_vertices = 1,
         lazy_record = true,
     );
     
@@ -67,12 +83,12 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         face_winding = .CCW,
         depth = (
             write_enabled = true,
-            compare = .LESS_EQUAL,
+            compare = @if(GRAPHICS_TARGET_WEB, .ALWAYS, .LESS_EQUAL),
         ),
     ));
     
-    s :: 16;
-    state.grid = (cells = general_allocator().alloc_zeroed(u8, s*s*s), dimensions = vec3(s));
+    state.grid.dimensions = vec3(16);
+    resize_grid(state, sg);
     
     state.scale = 0.065;
     state.camera.perspective = (aspect = 1, fovy = deg_to_rad(70), znear = 0.01, zfar = 100.0);
@@ -80,8 +96,8 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.camera.pos = vec3(0.7, 1, 2);
     state.camera.rot = vec2(-0.3, -1.7);
     
-    state.lang = .Lox;
-    @fmt(state.source&, "var i = x*16*16 + y*16 + z;\nreturn 1 + mod(i, 3);");
+    state.lang = @if(GRAPHICS_TARGET_WEB, .Lil, .Lox);
+    state.source&.push_all(initial_program[intcast(@as(i32) state.lang)]);
     evaluate(state.grid&, state.source.items(), state.errors&, state.lang);
 }
 
@@ -99,9 +115,12 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     w, h := (sapp.width().float().cast() / sapp.dpi_scale, sapp.height().float().cast() / sapp.dpi_scale);
     input_end_with_idle(state.ui&, => draw_ui(state, w, h));
     
-    // TODO: do it into a texture so the window can be behind another
     sgl := state.draw&;
     if state.grid_dirty {
+        state.dirty = !(state.camera.delta_pos == vec3(0));
+        state.grid_dirty = state.dirty;
+        resize_grid(state, sg);
+    
     sgl.rewind();
     sgl.defaults();
     r := state.output_pos;
@@ -110,8 +129,6 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sgl.load_pipeline(state.pipe);
     sgl.load_identity();
     
-    state.dirty = !(state.camera.delta_pos == vec3(0));
-    state.grid_dirty = state.dirty;
     state.camera.perspective.aspect = aspect;
     update_camera(state.camera&, state.dt);
     write_camera(state.camera&, sgl);
@@ -120,13 +137,14 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     grid := state.grid&;
     colours := state.palette;
     iter_grid(grid) { x, y, z, i |
-                if grid.cells[i] < 16 {
-                    sgl.color = colours[grid.cells[i].zext()].c;
+        c: i64 = grid.cells[i].zext();
+        if c < colours.len {
+            sgl.color = colours[c].c;
                         pos := vec3(x.float().cast(), y.float().cast(), z.float().cast());
                         for cube_vertices { v |
-                            sgl.v3f(pos + v*0.955);
+                            sgl.v3f(pos + v*0.975);
                         };
-                };
+        };
     }; 
     sgl.end();
     @if(sgl.error.vertices_full && state.errors.len == 0) @fmt(state.errors&, "too many vertices");
@@ -150,8 +168,12 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         fn MOUSE_SCROLL() => if state.enable_movement {
             state.scale = clamp(state.scale + event.scroll_y / 300, 0.01, 10);
         };
-        fn KEY_DOWN() => if event.key_code == .R && (event.modifiers.get(.control) == 1 || event.modifiers.get(.super) == 1) {
-            state.run = true;
+        fn KEY_DOWN() => {
+            xx := event.modifiers.get(.control) == 1 || event.modifiers.get(.super) == 1;
+            yy := @is(event.key_code, .R, .S);
+            if xx && yy {
+                state.run = true;
+            };
         }
         @default => ();
     };
@@ -159,7 +181,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     if state.enable_movement {
         state.grid_dirty = true;
         fly_controller(state.camera&, event);
-        if event.type == .KEY_DOWN && event.key_code == .Q {
+        if event.type == .KEY_DOWN && @is(event.key_code, .Q, .ESCAPE) {
             state.enable_movement = false;
         }
     };
@@ -186,14 +208,28 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
         nk_layout_row_dynamic(ctx, 0, 2);
         run_pressed := button(ctx, "Run") || state.run;
         state.run = false;
-        languages := @slice(Ui'nk_cstring("c"), Ui'nk_cstring("lox"), Ui'nk_cstring("lua"), Ui'nk_cstring("lil"));
-        state.lang = @as(Language) @as(i32) nk_combo(ctx, languages.ptr, languages.len.intcast(), @as(i32) state.lang, 20, (x=200, y=200));
-        
-        nk_layout_row_dynamic(ctx, 0, 1);
         widget_disable(ctx, state.enable_movement) {
             if button(ctx, @if(!state.enable_movement, "Adjust Camera", "Press Q to stop")) {
                 state.enable_movement = true;
             };
+        };
+        
+        hack: f32 = 0;
+        if tree_push(ctx, .NK_TREE_NODE, "Settings", .NK_MINIMIZED) {
+            nk_layout_row_dynamic(ctx, 0, 1);
+            hack = 8;  // TODO: why is at_y wrong when tree is open?
+        
+        languages := @slice(Ui'nk_cstring("c"), Ui'nk_cstring("lox"), Ui'nk_cstring("lua"), Ui'nk_cstring("lil"));
+        new := @as(Language) @as(i32) nk_combo(ctx, languages.ptr, languages.len.intcast(), @as(i32) state.lang, 20, (x=200, y=200));
+        if new != state.lang {
+            if state.source.items() == initial_program[intcast(@as(i32) state.lang)] {
+                state.source&.clear();
+                state.source&.push_all(initial_program[intcast(@as(i32) new)]);
+            }
+            state.lang = new;
+        }
+        if checkbox(ctx, "Auto Run", state.auto_run&) {
+            run_pressed = state.auto_run;
         };
         
         nk_layout_row_dynamic(ctx, 16, 16);
@@ -215,15 +251,89 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
                     state.grid_dirty = true;
                 };
             };
+            // TODO: let you edit the numbers directly
         };
         ctx.style.combo = saved;
         
+        nk_layout_row_dynamic(ctx, 0, 3);
+        // ugh, somehow this has become super verbose
+        range(0, 3) { i |
+            it := state.grid.dimensions&[i]&;
+            v := it[].cast().int().intcast();
+            prev := v;
+            if nk_property_int(ctx, Ui'nk_cstring("X\0Y\0Z\0".rest(i*2)), 1, v&, 48, 1, 1) {
+                if v != prev {
+                    it[] = v.intcast().float().cast();
+                    state.grid_dirty = true;
+                };
+            };
+        };
+        
+        nk_tree_pop(ctx);
+        };
+    
         length: i32 = state.source.len.intcast();
         // TODO: need to make enum as flags like this less painful
         flags := (@as(u32) nk_edit_flags.NK_EDIT_ALWAYS_INSERT_MODE).bit_or(@as(u32) nk_edit_flags.NK_EDIT_SELECTABLE).bit_or(@as(u32) nk_edit_flags.NK_EDIT_CLIPBOARD).bit_or(@as(u32) nk_edit_flags.NK_EDIT_MULTILINE).bit_or(@as(u32) nk_edit_flags.NK_EDIT_ALLOW_TAB);
-        nk_layout_row_static(ctx, size.h - 100, size.w.cast().int().intcast(), 1);
+     
+        text_width := {
+            prev := 0;
+            width: f32 = 0;
+            max_line: f32 = 0;
+            font := ctx.style.font;
+            range(0, state.source.len) { i |
+                width += font'width(font.userdata, font.height, Ui'nk_string(state.source.items().rest(i)), 1);
+                if state.source[i] == "\n".ascii() {
+                    max_line = max(max_line, width);
+                    prev = i;
+                    width = 0;
+                };
+            };
+            max(max_line, width) + 20
+        };
+        
+        used := ctx.current.layout.at_y + hack;
+        box_height := max(size.h - used, 60);
+        nk_layout_row_static(ctx, box_height, size.w.cast().int().intcast(), 1);
+        hash := ctx.current.edit.seq;
+        // TODO: i so wish i could do this seperatly for top and bottom. 
+        //       the problem is mouse on scroll bar only works if it's not in the text zone. 
+        //       but it can't be off the whole text box widget because then state isn't active so gets cleared. 
+        ctx.style.edit.padding.y += ctx.style.edit.scrollbar_size.y;
+        prev_source := @if(state.auto_run, state.source.items().shallow_copy(temp()), "");  // :SLOW
         r := nk_edit_string(ctx, flags, bit_cast_unchecked(*u8, *i8, state.source&.as_ptr()), length&, state.source.maybe_uninit.len.intcast(), nk_filter_default);
         state.source.len = length.intcast();
+        
+        if state.auto_run && ctx.text_edit.active != 0 && prev_source != state.source.items() {
+            run_pressed = true;
+        };
+        
+        /**/{
+            edit := ctx.text_edit&;
+            scroll: nk_rect_t = (
+                x = size.x + ctx.style.edit.padding.x,
+                // TODO: this doesn't scroll with the window contents
+                y = (size.y + size.h - ctx.style.edit.border - ctx.style.edit.padding.y),// - ctx.style.edit.scrollbar_size.y,
+                w = size.w - 2*ctx.style.edit.border - 2*ctx.style.edit.padding.x,
+                h = ctx.style.edit.scrollbar_size.y,
+            );
+            
+            is_hovered: i32 = int(r.bit_and(@as(u32) nk_widget_states.NK_WIDGET_STATE_HOVERED) != 0).intcast();
+            ws: u32 = 0;
+            edit.scrollbar.x = nk_do_scrollbarh(ws&, nk_window_get_canvas(ctx), scroll, is_hovered,
+                    edit.scrollbar.x, text_width, scroll.w * 0.10, scroll.w * 0.01,
+                    ctx.style.edit.scrollbar&, ctx.input&, ctx.style.font);
+            if edit.active != 0 {
+                trunc :: fn(v: i64) u32 #ir(.copy, .Kw);  // TODO: going to lose my fucking mind. fix math.h shadowing
+                ctx.current.edit.scrollbar.x = edit.scrollbar.x.cast().int().trunc();
+            };
+            // TODO: horizontal scroll by mouse wheel while holding shift doesn't work. unfocuses and loses state when you release the key. 
+            if is_hovered != 0 && ctx.input.mouse.scroll_delta.x != 0 {
+                ctx.input.mouse.scroll_delta.x = 0;
+            };
+        };
+        ctx.style.edit.padding.y -= ctx.style.edit.scrollbar_size.y;
+        
         @debug_assert_ult(state.source.len, state.source.maybe_uninit.len);
         if run_pressed {
             evaluate(state.grid&, state.source.items(), state.errors&, state.lang);
@@ -246,7 +356,7 @@ fn evaluate(grid: *Grid, src: Str, errors: *List(u8), lang: Language) void = {
     @run @assert_eq(enable_languages.len(), Language.enum_count(), "enable_languages.len");
     errors.clear();
     if !enable_languages[intcast(@as(i32) lang)] {
-        return @fmt(errors, "% was disabled at compile time. edit enable_languages and recompile examples/gpu/cubes.fr", lang);
+        return @fmt(errors, "% was disabled at compile time. choose a different language in the settings menu or edit enable_languages and recompile examples/gpu/cubes.fr", lang);
     };
     inline_for_enum_deref Language { $it |
         @if(@run enable_languages[it.ordinal()]) if lang == it {
@@ -266,7 +376,7 @@ fn evaluate_lox(grid: *Grid, src: Str, errors: *List(u8)) void = {
     vm.globals&.insert(vm.copy_string("getc"), Lox.nil_value, vm.gc);
 
     vm.define_native("mod", fn(vm, a) = {
-        a[0].to_number().int().mod(a[1].to_number().int()).float().to_value()
+        @if(a.len != 2, Lox.nil_value, a[0].to_number().int().mod(a[1].to_number().int()).float().to_value())
     });
 
     src := @tfmt("fun fragment(x, y, z) {%}", src);
@@ -348,7 +458,11 @@ fn evaluate_c(grid: *Grid, src: Str, errors: *List(u8)) void = {
     @if(!src.contains("return")) return(@fmt(errors, "missing return statement"));
     @if(src.contains("#discard_static_scope")) return(@fmt(errors, "dont do that"));  // because it removes from guards list so won't filter the include
     
-    src := @tfmt("long fragment(long x, long y, long z) {\n%\n;return -1;}", src);
+    // hack since c doesn't allow nested functions. if you want to define your own functions you have to write the entry point yourself too. 
+    if !src.contains("fragment(") {
+        src = @tfmt("long fragment(long x, long y, long z) {\n%\n;return -1;}", src);
+    };
+    
     C :: import("@/examples/import_c/lib.fr");
     import_c :: import_module("@/examples/import_c/ffi.fr");
     m := @uninitialized C'Qbe.Module;
@@ -381,8 +495,11 @@ fn evaluate_c(grid: *Grid, src: Str, errors: *List(u8)) void = {
     
     @if(is_linking_libc()) C'Qbe'fill_from_libc(m&);
     m&.make_exec();
-    callee, _ := m&.get_addr(m&.intern("fragment")) 
-        || @panic("missing function fragment()");
+    callee, _ := m&.get_addr(m&.intern("fragment")) || {
+        @fmt(errors, "missing function: long fragment(long x, long y, long z) { ... }");
+        drop(m&);
+        return();
+    };
     callee := bit_cast_unchecked(rawptr, @FnPtr(x: i64, y: i64, z: i64) i64, callee);
     iter_grid(grid) { x, y, z, i |
         grid.cells[i] = callee(x, y, z).trunc();
@@ -423,7 +540,7 @@ fn evaluate_lua(grid: *Grid, src: Str, errors: *List(u8)) void = {
 }
 
 fn iter_grid(grid: *Grid, $body: @Fn(x: i64, y: i64, z: i64, i: i64) void) void = {
-    X, Y, Z := (grid.dimensions.x.cast().int(), grid.dimensions.y.cast().int(), grid.dimensions.z.cast().int());
+    X, Y, Z := grid.dimensions();
     range(0, X) { x |
         range(0, Y) { y |
             range(0, Z) { z |
@@ -433,10 +550,35 @@ fn iter_grid(grid: *Grid, $body: @Fn(x: i64, y: i64, z: i64, i: i64) void) void 
     };
 }
 
+fn dimensions(grid: *Grid) Ty(i64, i64, i64) = 
+    (grid.dimensions.x.cast().int(), grid.dimensions.y.cast().int(), grid.dimensions.z.cast().int());
+
+fn resize_grid(state: *State, sg: *Sg.Self) void = {
+    grid := state.grid&;
+    X, Y, Z := grid.dimensions();
+    n := X*Y*Z;
+    if n > grid.cells.len {
+        resize_vertex_buffer(state.draw&, sg, general_allocator(), n*6*6);
+        a := general_allocator();
+        @if(grid.cells.len != 0) a.dealloc(u8, grid.cells);
+        grid.cells = a.alloc_uninit(u8, n);
+        grid.cells.set_bytes(0xff);
+        state.grid_dirty = true;
+        evaluate(state.grid&, state.source.items(), state.errors&, state.lang);
+    };
+}
+
 driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics2(vtable, @source_file_name(), true);
 main :: fn() void = Easy'start(State);
 #use("@/graphics/lib.fr");
 Ui :: import("@/graphics/deps/nuklear.fr");
+
+initial_program :: @const_slice(
+    "long i = x*16*16 + y*16 + z;\nreturn 1 + i % 3;",
+    "var i = x*16*16 + y*16 + z;\nreturn 1 + mod(i, 3);",
+    "local i = x*16*16 + y*16 + z;\nreturn 1 + i % 3;",
+    "i: (x*16*16) + (y*16) + z\n1 + 3 % i",
+);
 
 cube_vertices :: @const_slice(
     vec3(0, 1, 0),
