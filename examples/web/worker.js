@@ -228,6 +228,10 @@ export const imports = {
                     handle_app_request(["mouse_lock", len !== 0n]);
                     return 0n;
                 }
+                case 0xBBBB0007n: {
+                    handle_app_request(["set_title", get_wasm_string(ptr, len)]);
+                    return 0n;
+                }
                 default: {
                     // this is convoluted! 
                     // ex. paste event passes franca a handle the pasted string and it can then ask for the bytes here. 

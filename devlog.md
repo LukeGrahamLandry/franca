@@ -1,4 +1,21 @@
 
+## (Oct 13) 
+
+continuing nuklear debug quest...  
+tried updating to 9f77502. nope. 
+cmd->next is junk and dereferencing random memory eventually leads back to a real command and it loops. 
+cmd->type being junk happens even before the problem. 
+ah!! but it happens reliably every time i make a selection in the combo. 
+it just only leads to the crash if next happens to look valid and get in a loop. 
+presumably this is also why the screen flickered while i was spamming it for crashes, 
+sometimes you get a frame of junk without it crashing. 
+i really don't like that buf->last in nk_build is 8 away from the last good cmd->next. 
+it works if i call nk_convert an extra time in input_end_with_idle. 
+calling nk_build also fixes it and is less offensively wasteful. 
+this also fixes the flickering i was complaining about in idle.fr's building upgrade popups. 
+i should really figure out the actual problem or maybe ask the nuklear people / update the comment there about running the ui twice. 
+but i need a break from this rn so maybe later. 
+
 ## (Oct 12) cubes
 
 - web drawing no cubes is that LESS_EQUAL depth check doesn't work. 
@@ -27,6 +44,14 @@
   i wonder if how im doing it in the terminal is equivilent to oversamling more than it will let me ask for. 
 - let you grow the area. auto recompiling as you type feels really nice
 - worker.js can just ask for the imports instead of enumeratings all the things to ignore to let the dynamic linking patch table entries
+
+added another combo thing and now it hangs often. that seems bad. 
+it seems like it goes away if i don't do the double run for idle_last_frame
+the fail state is the loop in nk_convert goes forever. 
+ctx->memory.allocated isn't big. so cmd->next is a loop. 
+tried NK_ZERO_COMMAND_MEMORY,init_fixed.
+tried making NK_DEFAULT_COMMAND_BUFFER_SIZE,NK_BUFFER_DEFAULT_INITIAL_SIZE much bigger. 
+noticed nk_buffer_total is capacity, only have to update buf.allocated of the vertices. 
 
 ## (Oct 11) cubes
 

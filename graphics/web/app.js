@@ -150,6 +150,10 @@ export const add_events = (canvas, send) => {
                 }
                 break
             }
+            case "set_title": {
+                if (data[1].length !== 0) document.title = data[1];
+                break
+            }
             default: console.error("bad handle_app_request", data);
         }
     };

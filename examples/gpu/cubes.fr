@@ -34,6 +34,7 @@ Language :: @enum(i32) (
 // TODO: build a more efficient mesh so i can make bigger shapes
 // TODO: when part of the output window is off the screen, it squishes because the reported y+h or whatever is off the screen so the aspect is wrong
 // TODO: draw output into a texture so the window can be behind another
+// TODO: pasting tabs shows as '?' (tab key inserts spaces)
 
 State :: @struct {
     HIGH_DPI :: true;
@@ -55,6 +56,7 @@ State :: @struct {
     errors: List(u8);
     
     palette: []ColourPair;
+    palette_index: i32;
     lang: Language;
     run: bool;
     auto_run: bool;
@@ -69,7 +71,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.grid_dirty = true;
     state.source = list(4096, general_allocator());
     state.errors = list(general_allocator());
-    state.palette = block_colours;
+    state.palette = block_colours.shallow_copy(general_allocator());  // :leak
     
     state.draw&.setup(
         allocator = general_allocator(),
@@ -216,10 +218,14 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
         
         hack: f32 = 0;
         if tree_push(ctx, .NK_TREE_NODE, "Settings", .NK_MINIMIZED) {
-            nk_layout_row_dynamic(ctx, 0, 1);
+            nk_layout_row_dynamic(ctx, 0, 2);
             hack = 8;  // TODO: why is at_y wrong when tree is open?
         
-        languages := @slice(Ui'nk_cstring("c"), Ui'nk_cstring("lox"), Ui'nk_cstring("lua"), Ui'nk_cstring("lil"));
+        languages := temp().alloc_init(*i8, Language.enum_count(), fn(i) => {
+            it := @as(Language) @as(i32) i.intcast();
+            it := it.name_str();
+            it.Ui'nk_cstring()
+        });
         new := @as(Language) @as(i32) nk_combo(ctx, languages.ptr, languages.len.intcast(), @as(i32) state.lang, 20, (x=200, y=200));
         if new != state.lang {
             if state.source.items() == initial_program[intcast(@as(i32) state.lang)] {
@@ -230,6 +236,14 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
         }
         if checkbox(ctx, "Auto Run", state.auto_run&) {
             run_pressed = state.auto_run;
+        };
+
+        colours := temp().alloc_init(*i8, palettes.len(), fn(i) => palettes[i]._0.Ui'nk_cstring());
+        new := nk_combo(ctx, colours.ptr, colours.len.intcast(), state.palette_index, 20, (x=200, y=200));
+        if new != state.palette_index {
+            state.palette_index = new;
+            state.grid_dirty = true;
+            state.palette.copy_from(palettes[new.intcast()]._1);
         };
         
         nk_layout_row_dynamic(ctx, 16, 16);
@@ -261,7 +275,7 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
             it := state.grid.dimensions&[i]&;
             v := it[].cast().int().intcast();
             prev := v;
-            if nk_property_int(ctx, Ui'nk_cstring("X\0Y\0Z\0".rest(i*2)), 1, v&, 48, 1, 1) {
+            if nk_property_int(ctx, Ui'nk_cstring("X\0Y\0Z\0".rest(i*2)), 1, v&, 48, 1, 0.5) {
                 if v != prev {
                     it[] = v.intcast().float().cast();
                     state.grid_dirty = true;
@@ -581,35 +595,12 @@ initial_program :: @const_slice(
 );
 
 cube_vertices :: @const_slice(
-    vec3(0, 1, 0),
-    vec3(1, 1, 0),
-    vec3(1, 0, 0),
-    vec3(0, 0, 0),
-
-    vec3(0, 0, 1),
-    vec3(1, 0, 1),
-    vec3(1, 1, 1),
-    vec3(0, 1, 1),
-
-    vec3(0, 0, 1),
-    vec3(0, 1, 1),
-    vec3(0, 1, 0),
-    vec3(0, 0, 0),
-
-    vec3(1, 0, 1),
-    vec3(1, 0, 0),
-    vec3(1, 1, 0),
-    vec3(1, 1, 1),
-
-    vec3(1, 0, 0),
-    vec3(1, 0, 1),
-    vec3(0, 0, 1),
-    vec3(0, 0, 0),
-
-    vec3(0, 1, 0),
-    vec3(0, 1, 1),
-    vec3(1, 1, 1),
-    vec3(1, 1, 0),
+    vec3(0, 1, 0), vec3(1, 1, 0), vec3(1, 0, 0), vec3(0, 0, 0),
+    vec3(0, 0, 1), vec3(1, 0, 1), vec3(1, 1, 1), vec3(0, 1, 1),
+    vec3(0, 0, 1), vec3(0, 1, 1), vec3(0, 1, 0), vec3(0, 0, 0),
+    vec3(1, 0, 1), vec3(1, 0, 0), vec3(1, 1, 0), vec3(1, 1, 1),
+    vec3(1, 0, 0), vec3(1, 0, 1), vec3(0, 0, 1), vec3(0, 0, 0),
+    vec3(0, 1, 0), vec3(0, 1, 1), vec3(1, 1, 1), vec3(1, 1, 0),
 );
 
 block_colours :: {
@@ -637,3 +628,16 @@ fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.source&.drop();
     state.errors&.drop();
 }
+
+decker_colours_ :: @const_slice(0xFFFFFFFF,0xFFFFFF00,0xFFFF6500,0xFFDC0000,0xFFFF0097,0xFF360097,0xFF0000CA,0xFF0097FF,0xFF00A800,0xFF006500,0xFF653600,0xFF976536,0xFFB9B9B9,0xFF868686,0xFF454545,0xFF000000);
+decker_colours :: ast_alloc().alloc_init(ColourPair, 16, fn(i) => repack_argb(decker_colours_[i]));
+
+repack_argb :: fn(x: u32) ColourPair = {
+    r, g, b := (x.shift_right_logical(16).bit_and(255).int(), x.shift_right_logical(8).bit_and(255).int(), x.bit_and(255).int());
+    (rgb = vec3(r.float().div(255).cast(), g.float().div(255).cast(), b.float().div(255).cast()), c = pack_rgba(r, g, b, 255))
+}
+
+palettes :: @const_slice(
+    ("ColourWheel", block_colours),
+    ("Decker", decker_colours),
+);

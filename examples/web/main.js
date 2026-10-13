@@ -164,6 +164,7 @@ const toggle_worker = async (resolve) => {
         }
         
         const edited = input !== selected_contents;
+        if (!edited || aot) document.title = selected_file;
         let need_canvas = input.includes("graphics/lib.fr") || aot;  // :HackyGraphicsDetection
         const args = [
             "demo.wasm",
@@ -241,6 +242,7 @@ const toggle_worker = async (resolve) => {
         document.getElementById("err").innerText += "KILLED";
         document.getElementById("btn").innerText = start_message;
         real_start_time = undefined;
+        document.title = "Franca Playground";
     }
 };
 function new_memory() {
@@ -291,11 +293,12 @@ const load_example = async (path) => {
     const aot = compiler.name == "aot";
     if (rootfs === null && !aot) await prefetch();
     
+    selected_contents = "";
+    selected_file = path;
     if (!aot)
     try {
         selected_contents = get_file(path);
         document.getElementById("in").value = selected_contents;
-        selected_file = path;
     } catch (s) {
         document.getElementById("in").value = `/*\n${s.toString()}\n\n${s.stack}\n*/`;
     }
