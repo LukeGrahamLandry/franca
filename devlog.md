@@ -16,6 +16,13 @@ this also fixes the flickering i was complaining about in idle.fr's building upg
 i should really figure out the actual problem or maybe ask the nuklear people / update the comment there about running the ui twice. 
 but i need a break from this rn so maybe later. 
 
+- couple more languages. franca is really janky to embed when you don't trust the source. 
+  until now i've been using it with generators (ex. circuits,hctarcs) where you don't need to handle errors gracefully. 
+  especially that the *CodegenShared is internal so even if catch the panic, need it to not be threaded or can't free it. 
+  jit_loader always using _AlsoSingleThreadCodegen doesn't really make circuits feel slower so its fine for now i guess. 
+- draw the cubes in a texture so it doesn't look stupid if the windows overlap. 
+  don't need to reallocate for collapsed/moved. first frame woes. 
+
 ## (Oct 12) cubes
 
 - web drawing no cubes is that LESS_EQUAL depth check doesn't work. 
