@@ -20,7 +20,6 @@ Language :: @enum(i32) (
 );
 
 // TODO: depth LESS_EQUAL doesn't work in browser ?? 
-// TODO: use the type of textbox with undo
 // TODO: wasm for c/franca so memory is in jail too? 
 //       franca is a pain in the ass because really i should run the compiler in wasm too. 
 //       need to list the math imports for that but i should do that for native c anyway. 
@@ -55,7 +54,7 @@ State :: @struct {
     output_resized: bool;
     prev_frame_time: f64;
     enable_movement: bool;
-    source: List(u8);
+    source: RawList(u8);
     errors: List(u8);
     
     palette: []ColourPair;
@@ -63,9 +62,11 @@ State :: @struct {
     lang: Language;
     run: bool;
     auto_run: bool;
+    animate: @struct(enable: bool, t: i64);
     
     view: View;
     prev_view: ?View;
+    edit: Ui.Nuklear.nk_text_edit;
 };
 View :: @struct {
     img: Sg.Image;
@@ -73,16 +74,15 @@ View :: @struct {
     d_img: Sg.Image;
 };
 ColourPair :: @struct(rgb: Vec3, c: u32);
-Lox :: import("@/examples/lox/lox_main.fr").Lox;
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sapp.desc.enable_clipboard = true;
     on_init(state.ui&, sg);
+    Ui'Nuklear'nk_textedit_init_default(state.edit&);
     state.dirty = true;
     state.grid_dirty = true;
-    state.source = list(4096, general_allocator());
     state.errors = list(general_allocator());
-    state.palette = block_colours.shallow_copy(general_allocator());  // :leak
+    state.palette = block_colours.shallow_copy(general_allocator());
     state.prev_view = .None; 
     
     state.draw&.setup(
@@ -111,8 +111,16 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.camera.rot = vec2(-0.3, -1.7);
     
     state.lang = @if(GRAPHICS_TARGET_WEB, .Lil, .Lox);
-    state.source&.push_all(initial_program[intcast(@as(i32) state.lang)]);
-    evaluate(state.grid&, state.source.items(), state.errors&, state.lang);
+    state.set_source(initial_program[intcast(@as(i32) state.lang)]);
+    evaluate(state);
+}
+
+fn set_source(state: *State, s: Str) void = {
+    state.edit.mode = 1;  // zero init is VIEW which makes _paste a nop when setting default program on the first frame 
+    Ui'Nuklear'nk_textedit_select_all(state.edit&);
+    Ui'Nuklear'nk_textedit_paste(state.edit&, Ui'nk_string(s), s.len.intcast());
+    state.source&.clear();
+    state.source&.push_all(s, general_allocator());
 }
 
 Headless :: import("@/tests/gpu.fr")'local_scope;
@@ -120,6 +128,11 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     now := timestamp_s();
     state.dt = (now - state.prev_frame_time).cast();
     state.prev_frame_time = now;
+    
+    if state.animate.enable && state.errors.len == 0 {
+        state.animate.t += 1;
+        evaluate(state);
+    };
     
     if Easy'should_skip_frame(sapp, state.dirty&) {
         state.ui.idle_last_frame = true;
@@ -270,10 +283,11 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
         });
         new := @as(Language) @as(i32) nk_combo(ctx, languages.ptr, languages.len.intcast(), @as(i32) state.lang, 20, (x=200, y=200));
         if new != state.lang {
+            run_pressed = state.auto_run;
             @run @assert_eq(initial_program.len(), Language.enum_count(), "initial_program.len");
             if state.source.items() == initial_program[intcast(@as(i32) state.lang)] {
-                state.source&.clear();
-                state.source&.push_all(initial_program[intcast(@as(i32) new)]);
+                state.set_source(initial_program[intcast(@as(i32) new)]);
+                run_pressed = true;
             }
             state.lang = new;
         }
@@ -291,6 +305,12 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
         
         if checkbox(ctx, "Center On Zero", state.grid.center_on_zero&) {
             run_pressed = state.auto_run;
+        };
+        
+        // optional so don't have to run every frame if you're working on something static. 
+        // would be nice to auto detect if you use `t` like how stackie does but that's nontrivial for real languages. 
+        if checkbox(ctx, "Animate", state.animate.enable&) {
+            run_pressed = true;
         };
         
         nk_layout_row_dynamic(ctx, 16, 16);
@@ -342,9 +362,10 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
             width: f32 = 0;
             max_line: f32 = 0;
             font := ctx.style.font;
-            range(0, state.source.len) { i |
-                width += font'width(font.userdata, font.height, Ui'nk_string(state.source.items().rest(i)), 1);
-                if state.source[i] == "\n".ascii() {
+            source := get_buf(state.edit.string.buffer&);
+            range(0, source.len) { i |
+                width += font'width(font.userdata, font.height, Ui'nk_string(source.rest(i)), 1);
+                if source[i] == "\n".ascii() {
                     max_line = max(max_line, width);
                     prev = i;
                     width = 0;
@@ -354,51 +375,42 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
         };
         
         used := ctx.current.layout.at_y + hack;
-        box_height := max(size.h - used, 60);
+        box_height := max(size.h - used - ctx.style.edit.scrollbar_size.y - ctx.style.window.spacing.y, 60);
         nk_layout_row_static(ctx, box_height, size.w.cast().int().intcast(), 1);
-        hash := ctx.current.edit.seq;
-        // TODO: i so wish i could do this seperatly for top and bottom. 
-        //       the problem is mouse on scroll bar only works if it's not in the text zone. 
-        //       but it can't be off the whole text box widget because then state isn't active so gets cleared. 
-        ctx.style.edit.padding.y += ctx.style.edit.scrollbar_size.y;
-        prev_source := @if(state.auto_run, state.source.items().shallow_copy(temp()), "");  // :SLOW
-        r := nk_edit_string(ctx, flags, bit_cast_unchecked(*u8, *i8, state.source&.as_ptr()), length&, state.source.maybe_uninit.len.intcast(), nk_filter_default);
-        state.source.len = length.intcast();
         
-        if state.auto_run && ctx.text_edit.active != 0 && prev_source != state.source.items() {
+        r := nk_edit_buffer(ctx, flags, state.edit&, nk_filter_default);
+        source := get_buf(state.edit.string.buffer&);
+        if state.auto_run && state.edit.active != 0 && source != state.source.items() {
             run_pressed = true;
         };
         
-        /**/{
-            edit := ctx.text_edit&;
-            scroll: nk_rect_t = (
-                x = size.x + ctx.style.edit.padding.x,
-                // TODO: this doesn't scroll with the window contents
-                y = (size.y + size.h - ctx.style.edit.border - ctx.style.edit.padding.y),// - ctx.style.edit.scrollbar_size.y,
-                w = size.w - 2*ctx.style.edit.border - 2*ctx.style.edit.padding.x,
-                h = ctx.style.edit.scrollbar_size.y,
-            );
+        // TODO: shift+wheel to horizontal scroll works if hovering the text but not if clicked in the cursor
+        // TODO: using the scroll bar eats your undo state?? same for the builtin vertical one. 
+        //       can never undo if type while too wide even if i dont do hbar at all. 
+        if text_width > size.w {
+            edit := state.edit&;
+            nk_layout_row_static(ctx, ctx.style.edit.scrollbar_size.y, size.w.cast().int().intcast(), 1);
             
+            scroll := zeroed(nk_rect_t);
+            state := nk_widget(scroll&, ctx);
+            
+            if bit_cast_unchecked(@type state, u32, state) != 0 {
             is_hovered: i32 = int(r.bit_and(@as(u32) nk_widget_states.NK_WIDGET_STATE_HOVERED) != 0).intcast();
             ws: u32 = 0;
             edit.scrollbar.x = nk_do_scrollbarh(ws&, nk_window_get_canvas(ctx), scroll, is_hovered,
                     edit.scrollbar.x, text_width, scroll.w * 0.10, scroll.w * 0.01,
                     ctx.style.edit.scrollbar&, ctx.input&, ctx.style.font);
-            if edit.active != 0 {
-                trunc :: fn(v: i64) u32 #ir(.copy, .Kw);  // TODO: going to lose my fucking mind. fix math.h shadowing
-                ctx.current.edit.scrollbar.x = edit.scrollbar.x.cast().int().trunc();
-            };
-            // TODO: horizontal scroll by mouse wheel while holding shift doesn't work. unfocuses and loses state when you release the key. 
             if is_hovered != 0 && ctx.input.mouse.scroll_delta.x != 0 {
                 ctx.input.mouse.scroll_delta.x = 0;
             };
+            };
         };
-        ctx.style.edit.padding.y -= ctx.style.edit.scrollbar_size.y;
         
-        @debug_assert_ult(state.source.len, state.source.maybe_uninit.len);
         if run_pressed {
-            evaluate(state.grid&, state.source.items(), state.errors&, state.lang);
-            state.grid_dirty = true;
+            state.animate.t = 0;
+            state.source&.clear();
+            state.source&.push_all(source, general_allocator());
+            evaluate(state);
         };
     };
     nk_end(ctx);
@@ -413,14 +425,17 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
 
 Grid :: @struct(cells: []u8, dimensions: Vec3, center_on_zero: bool);
 
-fn evaluate(grid: *Grid, src: Str, errors: *List(u8), lang: Language) void = {
+CubesFn :: @FnPtr(x: i64, y: i64, z: i64, t: i64) i64;
+fn evaluate(state: *State) void = {
     @run @assert_eq(enable_languages.len(), Language.enum_count(), "enable_languages.len");
+    lang, errors := (state.lang, state.errors&);
     errors.clear();
     if !enable_languages[intcast(@as(i32) lang)] {
         return @fmt(errors, "% was disabled at compile time. choose a different language in the settings menu or edit enable_languages and recompile examples/gpu/cubes.fr", lang);
     };
     vtable :: {  // note that this not being := makes shims so doesn't compile the filtered out ones
-        v := @const_slice(@as(AsFnPtr(evaluate_c)) evaluate_c,evaluate_lox,evaluate_lua,evaluate_lil,evaluate_franca,evaluate_kaleidoscope);
+        F :: @FnPtr(grid: *Grid, src: Str, errors: *List(u8), t: i64) void;
+        v := @const_slice(@as(F) evaluate_c,evaluate_lox,evaluate_lua,evaluate_lil,evaluate_franca,evaluate_kaleidoscope);
         @assert_eq(v.len, enable_languages.len(), "vtable.len");
         range(0, v.len) { i |
             v[i] = @if(!enable_languages[i], zeroed(@type v[0]), v[i]);
@@ -428,10 +443,14 @@ fn evaluate(grid: *Grid, src: Str, errors: *List(u8), lang: Language) void = {
         v
     };
     f := vtable[intcast(@as(i32) lang)];
-    f(grid, src, errors);
+    source := state.source.items();
+    f(state.grid&, source, errors, state.animate.t);
+    state.grid_dirty = true;
+    state.dirty = true;
 }
 
-fn evaluate_lox(grid: *Grid, src: Str, errors: *List(u8)) void = {
+evaluate_lox :: fn(grid, src, errors, t) void = {
+    Lox :: import("@/examples/lox/lox_main.fr").Lox;
     vm := @ref @zeroed Lox'Vm;
     vm.init();
     vm.print_callback = fn(vm, _, value) = @fmt(Lox.Vm.ptr_from_raw(vm)[].errors&, "%\n", value);
@@ -442,7 +461,7 @@ fn evaluate_lox(grid: *Grid, src: Str, errors: *List(u8)) void = {
         @if(a.len != 2, Lox.nil_value, a[0].to_number().int().mod(a[1].to_number().int()).float().to_value())
     });
 
-    src := @tfmt("fun fragment(x, y, z) {%}", src);
+    src := @tfmt("fun fragment(x, y, z, t) {%}", src);
     r := vm.interpret(src, true);
     ::ptr_utils(Lox.ObjString);
     callee := vm.globals&.get(vm.copy_string("fragment"));
@@ -467,7 +486,8 @@ fn evaluate_lox(grid: *Grid, src: Str, errors: *List(u8)) void = {
                     vm.push(x.float().to_value());
                     vm.push(y.float().to_value());
                     vm.push(z.float().to_value());
-                    vm.call_value(vm.peek(3), 3);
+                    vm.push(t.float().to_value());
+                    vm.call_value(4);
                     vm.run();
                     colour := vm.pop();
                     
@@ -479,7 +499,7 @@ fn evaluate_lox(grid: *Grid, src: Str, errors: *List(u8)) void = {
     vm.drop();
 }
 
-fn evaluate_lil(grid: *Grid, src: Str, errors: *List(u8)) void = {
+evaluate_lil :: fn(grid, src, errors, t) void = {
     C :: {
         root := Foreign'decker();
         src := import("@/tests/external/decker.fr")'lilt_src(root);
@@ -494,9 +514,8 @@ fn evaluate_lil(grid: *Grid, src: Str, errors: *List(u8)) void = {
         C'dset(env[], lmistr("bits"), C'lmi(C'interface_bits, lmistr("bits"), zeroed(*C.lv)));
     	C'dset(env[], lmistr("pi"), C'lmn(PI));
     	C'dset(env[], lmistr("e" ), C'lmn(2.718281828459045));
-        names :: @const_slice(@as(CStr) "white", "yellow", "orange", "red", "magenta", "purple", "blue", "cyan", "green","darkgreen","brown","tan","lightgray","mediumgray","darkgray","black");
         colors := C'lmd();
-        enumerate names { i, n |
+        enumerate decker_names { i, n |
            	C'dset(colors, lmistr(n[]), C'lmn(i.float() + 1));
         };
     	C'dset(env[], lmistr("colors"), colors);
@@ -511,24 +530,26 @@ fn evaluate_lil(grid: *Grid, src: Str, errors: *List(u8)) void = {
         return();
     };
     lmistr :: fn(s: CStr) *C.lv = C'lmistr(bit_cast_unchecked(CStr, *i8, s));
-    X, Y, Z := (lmistr("x"), lmistr("y"), lmistr("z"));
+    X, Y, Z, T := (lmistr("x"), lmistr("y"), lmistr("z"), lmistr("t"));
     iter_grid(grid) { x, y, z, i |
         C'dset(env[], X, C'lmn(x.float()));
         C'dset(env[], Y, C'lmn(y.float()));
         C'dset(env[], Z, C'lmn(z.float()));
+        C'dset(env[], T, C'lmn(t.float()));
         value := C'run(program, env[]);
         grid.cells[i] = @if(C'linil(value) != 0, 255, C'ln(value).int().trunc());
     };
 }
 
 // TODO: `return;` in non void is backend debug error
-evaluate_c :: fn(grid: *Grid, src: Str, errors: *List(u8)) void = {
+evaluate_c :: fn(grid, src, errors, t) void = {
     @if(!src.contains("return")) return(@fmt(errors, "missing return statement"));
     @if(src.contains("#discard_static_scope")) return(@fmt(errors, "dont do that"));  // because it removes from guards list so won't filter the include
     
+    sig :: "long fragment(long x, long y, long z, long t)";
     // hack since c doesn't allow nested functions. if you want to define your own functions you have to write the entry point yourself too. 
     if !src.contains("fragment(") {
-        src = @tfmt("long fragment(long x, long y, long z) {\n%\n;return -1;}", src);
+        src = @tfmt("% {\n%\n;return -1;}", sig, src);
     };
     
     C :: import("@/examples/import_c/lib.fr");
@@ -564,24 +585,29 @@ evaluate_c :: fn(grid: *Grid, src: Str, errors: *List(u8)) void = {
     @if(is_linking_libc()) C'Qbe'fill_from_libc(m&);
     m&.make_exec();
     callee, _ := m&.get_addr(m&.intern("fragment")) || {
-        @fmt(errors, "missing function: long fragment(long x, long y, long z) { ... }");
+        @fmt(errors, "missing function:% { ... }", sig);
         drop(m&);
         return();
     };
-    callee := bit_cast_unchecked(rawptr, @FnPtr(x: i64, y: i64, z: i64) i64, callee);
+    callee := bit_cast_unchecked(rawptr, CubesFn, callee);
     iter_grid(grid) { x, y, z, i |
-        grid.cells[i] = callee(x, y, z).trunc();
+        grid.cells[i] = callee(x, y, z, t).trunc();
     };
     
     drop(m&);
 }
 
-fn evaluate_lua(grid: *Grid, src: Str, errors: *List(u8)) void = {
+evaluate_lua :: fn(grid, src, errors, t) void = {
     Lua :: import("@/examples/disassemble.fr").Lua;
     L := Lua'luaL_newstate();
     L.open_and_pop("math", Lua'luaopen_math);
     
-    src := @tfmt("return (function(x,y,z) % end)", src);
+    enumerate replicube_names { i, name |
+        Lua'lua_pushnumber(L, i.float());
+        Lua'lua_setglobal(L, bit_cast_unchecked(CStr, *i8, name[]));
+    };
+    
+    src := @tfmt("return (function(x,y,z,t) % end)", src);
     r := Lua'luaL_loadbufferx(L, bit_cast_unchecked(*u8, *i8, src.ptr), src.len.bitcast(), zeroed(*i8), zeroed(*i8));
     check_error(r);
     check_error :: fn(r) => if r != 0 {
@@ -597,7 +623,8 @@ fn evaluate_lua(grid: *Grid, src: Str, errors: *List(u8)) void = {
         Lua'lua_pushnumber(L, x.float());
         Lua'lua_pushnumber(L, y.float());
         Lua'lua_pushnumber(L, z.float());
-        r := Lua'lua_pcall(L, 3, 1, 0);
+        Lua'lua_pushnumber(L, t.float());
+        r := Lua'lua_pcall(L, 4, 1, 0);
         check_error(r);
         value := Lua'lua_tonumberx(L, -1, @ref @as(i32) 0);
         grid.cells[i] = @if(Lua'lua_isnumber(L, -1) == 0, 255, value.int().trunc());
@@ -607,7 +634,7 @@ fn evaluate_lua(grid: *Grid, src: Str, errors: *List(u8)) void = {
     Lua'lua_close(L);
 }
 
-fn evaluate_franca(grid: *Grid, src: Str, errors: *List(u8)) void = {
+evaluate_franca :: fn(grid, src, errors, t) void = {
     #use("@/lib/sys/jump.fr");
     // bad because not reenterant for multiplexer.fr, but rn its syncronous in one frame so doesn't matter
     jumpbuf :: @static_mut zeroed(JumpBuf);
@@ -617,7 +644,7 @@ fn evaluate_franca(grid: *Grid, src: Str, errors: *List(u8)) void = {
         throw(jumpbuf);
     };
 
-    src = @tfmt("{ fragment :: @as(rawptr) fn(x: i64, y: i64, z: i64) i64 = {\n%\n}; };", src);
+    src = @tfmt("{ fragment :: @as(rawptr) fn(x: i64, y: i64, z: i64, t: i64) i64 = {\n%\n}; };", src);
     #use("@/examples/jit_loader.fr");
     slot: CachedCompilerEnv = (it = .None);
     reset_jit(slot&);
@@ -626,10 +653,10 @@ fn evaluate_franca(grid: *Grid, src: Str, errors: *List(u8)) void = {
         @match(try(jumpbuf)) {
             fn Try() => {
                 callee := jit_value(slot&, src, "fragment");
-                callee := bit_cast_unchecked(rawptr, @FnPtr() (@FnPtr(i64,i64,i64) i64), callee);
+                callee := bit_cast_unchecked(rawptr, @FnPtr() CubesFn, callee);
                 callee := callee();
                 iter_grid(grid) { x, y, z, i |
-                    grid.cells[i] = callee(x, y, z).trunc();
+                    grid.cells[i] = callee(x, y, z, t).trunc();
                 };
             }
             fn Catch() => errors.push_all(message[]);
@@ -638,11 +665,11 @@ fn evaluate_franca(grid: *Grid, src: Str, errors: *List(u8)) void = {
     destroy_jit(slot&);
 }
 
-fn evaluate_kaleidoscope(grid: *Grid, src: Str, errors: *List(u8)) void = {
+evaluate_kaleidoscope :: fn(grid, src, errors, t) void = {
     #use("@/examples/kaleidoscope.fr");
     Qbe :: import("@/backend/lib.fr").Qbe;
     if !src.contains("def") {
-        src = @tfmt("def fragment(x y z)\n%;", src);
+        src = @tfmt("def fragment(x y z t)\n%;", src);
     };
       
     m := zeroed Qbe.Module;
@@ -662,9 +689,9 @@ fn evaluate_kaleidoscope(grid: *Grid, src: Str, errors: *List(u8)) void = {
     
     callee, _ := m&.get_addr(m&.intern("fragment")) 
         || end("missing function: def fragment(x y z)");
-    callee := bit_cast_unchecked(rawptr, @FnPtr(x: f64, y: f64, z: f64) f64, callee);
+    callee := bit_cast_unchecked(rawptr, @FnPtr(x: f64, y: f64, z: f64, t: f64) f64, callee);
     iter_grid(grid) { x, y, z, i |
-        grid.cells[i] = callee(x.float(), y.float(), z.float()).int().trunc();
+        grid.cells[i] = callee(x.float(), y.float(), z.float(), t.float()).int().trunc();
     };
     
     @if(c.top_level.len > 0) @fmt(errors, "% top level expressions will not be run", c.top_level.len);
@@ -697,8 +724,7 @@ fn resize_grid(state: *State, sg: *Sg.Self) void = {
         grid.cells = a.alloc_uninit(u8, n);
         grid.cells.set_bytes(0xff);
         // TODO: should do this if the dimensions changed at all since last evaluate
-        state.grid_dirty = true;
-        evaluate(state.grid&, state.source.items(), state.errors&, state.lang);
+        evaluate(state);
     };
 }
 
@@ -734,17 +760,7 @@ cube_vertices :: @const_slice(
 );
 
 block_colours :: {
-    // TODO: stop pasting this!
-    // 0.0 to 1.0
-    hsv2rgb :: fn(H: f64, S: f64, V: f64) Ty(f64, f64, f64) = {
-        H *= 360.0;
-        f :: fn(n: f64) => {
-            k := fmod(n + (H / 60.0), 6.0);
-            abs(V - V * S * max(0.0, min(min(k, 4 - k), 1.0)))
-        };
-        (f(5), f(3), f(1))
-    };
-    
+    hsv2rgb :: import("@/examples/gpu/hctarcs/runtime.fr").hsv2rgb;
     ast_alloc().alloc_init(ColourPair, 16, fn(i) => {
         r, g, b := hsv2rgb(i.float() / 16, 1, 1);
         (rgb = vec3(r.cast(), g.cast(), b.cast()), c = pack_rgba(r, g, b, 1))
@@ -752,11 +768,16 @@ block_colours :: {
 };
 
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    a := general_allocator();
+    Headless'drop_offscreen_att(sg, state.view&);
     sg.destroy_pipeline(state.pipe&);
-    state.draw&.destroy(sg, general_allocator());
+    state.draw&.destroy(sg, a);
+    Ui'Nuklear'nk_textedit_free(state.edit&);
     on_cleanup(state.ui&, sg);
-    state.source&.drop();
     state.errors&.drop();
+    state.source&.drop(a);
+    a.dealloc(u8, state.grid.cells);
+    a.dealloc(@type state.palette[0], state.palette);
 }
 
 palettes :: @const_slice(
@@ -764,6 +785,9 @@ palettes :: @const_slice(
     ("Decker", repack(@const_slice(0x00FFFFFF,0xFFFF00,0xFF6500,0xDC0000,0xFF0097,0x360097,0x0000CA,0x0097FF,0x00A800,0x006500,0x653600,0x976536,0xB9B9B9,0x868686,0x454545,0x000000))),
     ("Replicube", repack(@const_slice(0x00dfe9f5,0x697594,0x101517,0xf7aaa8,0xd4689a,0x782c96,0xe83562,0xf2825c,0xffc76e,0x88c44d,0x3f9e59,0x373461,0x4854a8,0x7199d9,0x9e5252,0x4d2536))),  // https://lospec.com/palette-list/anb16 with grey swapped around
 );
+
+decker_names :: @const_slice(@as(CStr) "white", "yellow", "orange", "red", "magenta", "purple", "blue", "cyan", "green","darkgreen","brown","tan","lightgray","mediumgray","darkgray","black");
+replicube_names :: @const_slice(@as(CStr)"EMPTY","WHITE","GREY","BLACK","PEACH","PINK","PURPLE","RED","ORANGE","YELLOW","LIGHTGREEN","GREEN","DARKBLUE","BLUE","LIGHTBLUE","BROWN","DARKBROWN");
 
 repack :: fn(x: []u32) []ColourPair = {
     ast_alloc().alloc_init(ColourPair, 16, fn(i) => {

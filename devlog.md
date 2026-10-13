@@ -22,6 +22,7 @@ but i need a break from this rn so maybe later.
   jit_loader always using _AlsoSingleThreadCodegen doesn't really make circuits feel slower so its fine for now i guess. 
 - draw the cubes in a texture so it doesn't look stupid if the windows overlap. 
   don't need to reallocate for collapsed/moved. first frame woes. 
+- storing the nk_textedit struct myself so i get undo also nicely lets it remember where the cursor is and i can make the horizontal scroll less convoluted. the undo isn't super impressive tho
 
 ## (Oct 12) cubes
 
