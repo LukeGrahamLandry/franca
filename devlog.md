@@ -1,4 +1,8 @@
 
+## (Oct 14)
+
+- unify eval a bit. kinda more camera controls. kaleidoscope arity assertions.
+
 ## (Oct 13) 
 
 continuing nuklear debug quest...  

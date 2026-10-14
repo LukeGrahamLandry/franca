@@ -5,11 +5,13 @@
 // if i was being more serious i'd probably put them in a bubblewrapped subprocess. 
 
 // you can disable some to compile faster and have fewer dependencies
+enable_languages :: {
 DEP :: true;  // i didn't write the compiler
 MEM :: true;  // unsandboxed memory access
 JMP :: !GRAPHICS_TARGET_WEB;  // uses longjmp for errors so won't work in web playground
 JIT :: true;  // not an interpreter
-enable_languages :: @const_slice(JMP&&MEM&&JIT, JMP, DEP&&JMP, DEP, JMP&&MEM&&JIT, JIT);
+@const_slice(JMP&&MEM&&JIT, JMP, DEP&&JMP, DEP, JMP&&MEM&&JIT, JIT)
+};
 Language :: @enum(i32) (
     C,    // (../import_c)
     Lox,  // https://craftinginterpreters.com (../lox)
@@ -34,7 +36,6 @@ Language :: @enum(i32) (
 // TODO: stay centered on the mouse when zooming (and allow when not in camera mode)
 //       doing it with the cameras fov stays centered but then zooming out a lot distorts the edges. 
 // TODO: build a more efficient mesh so i can make bigger shapes
-// TODO: when part of the output window is off the screen, it squishes because the reported y+h or whatever is off the screen so the aspect is wrong
 // TODO: pasting tabs shows as '?' (tab key inserts spaces)
 
 State :: @struct {
@@ -67,12 +68,15 @@ State :: @struct {
     view: View;
     prev_view: ?View;
     edit: Ui.Nuklear.nk_text_edit;
+    files: FileBrowser;
 };
 View :: @struct {
     img: Sg.Image;
     att: Sg.Attachments;
     d_img: Sg.Image;
 };
+
+// need to keep the floats because nuklear colour picker adjusts them at higher precision than 8bit and truncating it too soon breaks the ui
 ColourPair :: @struct(rgb: Vec3, c: u32);
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -110,9 +114,15 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.camera.pos = vec3(0.7, 1, 2);
     state.camera.rot = vec2(-0.3, -1.7);
     
-    state.lang = @if(GRAPHICS_TARGET_WEB, .Lil, .Lox);
-    state.set_source(initial_program[intcast(@as(i32) state.lang)]);
+    state.lang = .Lox;
+    range(0, Language.enum_count()) { i |
+        if !enable_languages[state.lang.ordinal()] {
+            state.lang = @as(Language) @as(i32) i.intcast();
+        };
+    };
+    state.set_source(initial_program[state.lang.ordinal()]);
     evaluate(state);
+    init(state.files&, general_allocator(), get_working_directory(temp()).items());
 }
 
 fn set_source(state: *State, s: Str) void = {
@@ -192,10 +202,9 @@ fn render_cubes(state: *State, sg: *Sg.Self, sgl: *Sgl.Self, dpi_scale: f32) voi
     sgl.begin(.QUADS);
     grid := state.grid&;
     colours := state.palette;
-    prev := grid.center_on_zero&.take();
     iter_grid(grid) { x, y, z, i |
-        c: i64 = grid.cells[i].zext() - 1;
-        if c.ult(colours.len) {
+        c: i64 = grid.cells[i].zext();
+        if c < colours.len {
             sgl.color = colours[c].c;
             pos := vec3(x.float().cast(), y.float().cast(), z.float().cast());
             for cube_vertices { v |
@@ -203,7 +212,6 @@ fn render_cubes(state: *State, sg: *Sg.Self, sgl: *Sgl.Self, dpi_scale: f32) voi
             };
         };
     };
-    grid.center_on_zero = prev;
     sgl.end();
     @if(sgl.error.vertices_full && state.errors.len == 0) @fmt(state.errors&, "too many vertices");
     
@@ -242,6 +250,12 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
     ctx := state.ui.ctx&;
     flags := (@as(u32) nk_panel_flags.NK_WINDOW_MOVABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_SCALABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_MINIMIZABLE);
 
+    // done first so it starts behind the other windows so it only shows when you click the button to summon it
+    if begin(ctx, "Files", nk_rect(100, 100, 200, 300), flags.bit_or(@as(u32) nk_panel_flags.NK_WINDOW_CLOSABLE)) {
+        file_browser(ctx, state.files&);
+    };
+    nk_end(ctx);
+
     prev := state.output_size;
     output_pos := zeroed(nk_rect_t);
     if begin(ctx, "Output", nk_rect(0, 0, w/2, h), flags) {
@@ -253,6 +267,16 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
             img := nk_image_handle(pack_nk_handle(state.view.img, state.ui.smp));
             nk_draw_image(draw, output_pos, img&, (r=255,g=255,b=255,a=255));
         }
+        
+        // TODO: is_hovered use first click position so it keeps moving if you drag out of the window
+        // TODO: move the camera to keep the rotation centered on the object instead of the camera but im too bad at math to think about how to do that and keep the controls relative to the camera's position
+        in := ctx.input&;
+        is_hovered := nk_input_is_mouse_hovering_rect(in, output_pos) && nk_window_has_focus(ctx);
+        if is_hovered && nk_input_is_mouse_down(in, .NK_BUTTON_LEFT) && nk_input_is_mouse_moved(in) {
+            m := vec2(in.mouse.delta.x, in.mouse.delta.y);
+            state.camera.delta_rot += vec2(-m.y, m.x);
+            state.grid_dirty = true;
+        };
     };
     nk_end(ctx);
     if !(prev == state.output_size) {
@@ -260,10 +284,19 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
         state.output_resized = true;
     };
     
+    run_pressed := false;
+    if state.files.selected_file&.take() { i |
+        path := @tfmt("%/%", state.files.root&.items(), state.files.files[i].name);
+        if read_entire_file(temp(), path) { src |
+            state.set_source(src);
+            run_pressed = state.auto_run;
+        };
+    };
+    
     if begin(ctx, "Program", nk_rect(w/2, 0, w/2, h), flags) {
         size := nk_window_get_content_region(ctx);
         nk_layout_row_dynamic(ctx, 0, 2);
-        run_pressed := button(ctx, "Run") || state.run;
+        run_pressed := button(ctx, "Run") || state.run || run_pressed;
         state.run = false;
         widget_disable(ctx, state.enable_movement) {
             if button(ctx, @if(!state.enable_movement, "Adjust Camera", "Press Q to stop")) {
@@ -285,8 +318,8 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
         if new != state.lang {
             run_pressed = state.auto_run;
             @run @assert_eq(initial_program.len(), Language.enum_count(), "initial_program.len");
-            if state.source.items() == initial_program[intcast(@as(i32) state.lang)] {
-                state.set_source(initial_program[intcast(@as(i32) new)]);
+            if state.source.items() == initial_program[state.lang.ordinal()] {
+                state.set_source(initial_program[new.ordinal()]);
                 run_pressed = true;
             }
             state.lang = new;
@@ -311,6 +344,12 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
         // would be nice to auto detect if you use `t` like how stackie does but that's nontrivial for real languages. 
         if checkbox(ctx, "Animate", state.animate.enable&) {
             run_pressed = true;
+        };
+        
+        if button(ctx, "Files") {
+            nk_window_show(ctx, Ui'nk_cstring("Files"), .NK_SHOWN);
+            nk_window_collapse(ctx, Ui'nk_cstring("Files"), .NK_MAXIMIZED);
+            nk_window_set_focus(ctx, Ui'nk_cstring("Files"));
         };
         
         nk_layout_row_dynamic(ctx, 16, 16);
@@ -430,7 +469,7 @@ fn evaluate(state: *State) void = {
     @run @assert_eq(enable_languages.len(), Language.enum_count(), "enable_languages.len");
     lang, errors := (state.lang, state.errors&);
     errors.clear();
-    if !enable_languages[intcast(@as(i32) lang)] {
+    if !enable_languages[lang.ordinal()] {
         return @fmt(errors, "% was disabled at compile time. choose a different language in the settings menu or edit enable_languages and recompile examples/gpu/cubes.fr", lang);
     };
     vtable :: {  // note that this not being := makes shims so doesn't compile the filtered out ones
@@ -442,7 +481,7 @@ fn evaluate(state: *State) void = {
         };
         v
     };
-    f := vtable[intcast(@as(i32) lang)];
+    f := vtable[lang.ordinal()];
     source := state.source.items();
     f(state.grid&, source, errors, state.animate.t);
     state.grid_dirty = true;
@@ -481,7 +520,7 @@ evaluate_lox :: fn(grid, src, errors, t) void = {
             vm.push_frame(it, 0)
         };
         
-        iter_grid(grid) { x, y, z, i |
+        eval_loop(grid) { x, y, z |
                     vm.push(callee);
                     vm.push(x.float().to_value());
                     vm.push(y.float().to_value());
@@ -490,8 +529,7 @@ evaluate_lox :: fn(grid, src, errors, t) void = {
                     vm.call_value(4);
                     vm.run();
                     colour := vm.pop();
-                    
-                    grid.cells[i] = @if(colour.is_number(), colour.to_number().int().trunc(), 255);
+                    @if(colour.is_number(), colour.to_number().int(), -1)
         };
     };
     
@@ -531,13 +569,13 @@ evaluate_lil :: fn(grid, src, errors, t) void = {
     };
     lmistr :: fn(s: CStr) *C.lv = C'lmistr(bit_cast_unchecked(CStr, *i8, s));
     X, Y, Z, T := (lmistr("x"), lmistr("y"), lmistr("z"), lmistr("t"));
-    iter_grid(grid) { x, y, z, i |
+    eval_loop(grid) { x, y, z |
         C'dset(env[], X, C'lmn(x.float()));
         C'dset(env[], Y, C'lmn(y.float()));
         C'dset(env[], Z, C'lmn(z.float()));
         C'dset(env[], T, C'lmn(t.float()));
         value := C'run(program, env[]);
-        grid.cells[i] = @if(C'linil(value) != 0, 255, C'ln(value).int().trunc());
+        @if(C'linil(value) != 0, -1, C'ln(value).int())
     };
 }
 
@@ -590,8 +628,8 @@ evaluate_c :: fn(grid, src, errors, t) void = {
         return();
     };
     callee := bit_cast_unchecked(rawptr, CubesFn, callee);
-    iter_grid(grid) { x, y, z, i |
-        grid.cells[i] = callee(x, y, z, t).trunc();
+    eval_loop(grid) { x, y, z |
+        callee(x, y, z, t)
     };
     
     drop(m&);
@@ -618,7 +656,7 @@ evaluate_lua :: fn(grid, src, errors, t) void = {
     r := Lua'lua_pcall(L, 0, 1, 0);
     check_error(r);
     
-    iter_grid(grid) { x, y, z, i |
+    eval_loop(grid) { x, y, z |
         Lua'lua_pushvalue(L, -1);
         Lua'lua_pushnumber(L, x.float());
         Lua'lua_pushnumber(L, y.float());
@@ -627,8 +665,9 @@ evaluate_lua :: fn(grid, src, errors, t) void = {
         r := Lua'lua_pcall(L, 4, 1, 0);
         check_error(r);
         value := Lua'lua_tonumberx(L, -1, @ref @as(i32) 0);
-        grid.cells[i] = @if(Lua'lua_isnumber(L, -1) == 0, 255, value.int().trunc());
+        empty := Lua'lua_isnumber(L, -1) == 0;
         Lua'lua_pop(L, 1);
+        @if(empty, -1, value.int())
     };
     
     Lua'lua_close(L);
@@ -655,8 +694,8 @@ evaluate_franca :: fn(grid, src, errors, t) void = {
                 callee := jit_value(slot&, src, "fragment");
                 callee := bit_cast_unchecked(rawptr, @FnPtr() CubesFn, callee);
                 callee := callee();
-                iter_grid(grid) { x, y, z, i |
-                    grid.cells[i] = callee(x, y, z, t).trunc();
+                eval_loop(grid) { x, y, z |
+                    callee(x, y, z, t)
                 };
             }
             fn Catch() => errors.push_all(message[]);
@@ -676,6 +715,7 @@ evaluate_kaleidoscope :: fn(grid, src, errors, t) void = {
     init_default_module(m&, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly, no_data_segment=true));
     c: *Ctx = init(general_allocator(), src, m&);
     c.export_all_symbols = true;
+    c.add_extern("mod", 2, fn(a: f64, b: f64) f64 = fmod(a, b));
     
     end :: fn(msg: Str) => {
         errors.push_all(msg);
@@ -690,21 +730,28 @@ evaluate_kaleidoscope :: fn(grid, src, errors, t) void = {
     callee, _ := m&.get_addr(m&.intern("fragment")) 
         || end("missing function: def fragment(x y z)");
     callee := bit_cast_unchecked(rawptr, @FnPtr(x: f64, y: f64, z: f64, t: f64) f64, callee);
-    iter_grid(grid) { x, y, z, i |
-        grid.cells[i] = callee(x.float(), y.float(), z.float(), t.float()).int().trunc();
+    eval_loop(grid) { x, y, z |
+        callee(x.float(), y.float(), z.float(), t.float()).int()
     };
     
     @if(c.top_level.len > 0) @fmt(errors, "% top level expressions will not be run", c.top_level.len);
     end("");
 }
 
+fn eval_loop(grid: *Grid, $body: @Fn(x: i64, y: i64, z: i64) i64) void = {
+    x0, y0, z0 := @if(grid.center_on_zero, grid.dimensions.neg().div(2).ints(), (0, 0, 0));
+    iter_grid(grid) { x, y, z, i |
+        value := body(x + x0, y + y0, z + z0);
+        grid.cells[i] = @if(value <= 0, 255, value.sub(1).umod(16).trunc());
+    };
+}
+
 fn iter_grid(grid: *Grid, $body: @Fn(x: i64, y: i64, z: i64, i: i64) void) void = {
     X, Y, Z := grid.dimensions();
-    x0, y0, z0 := @if(grid.center_on_zero, grid.dimensions.neg().div(2).ints(), (0, 0, 0));
     range(0, X) { x |
         range(0, Y) { y |
             range(0, Z) { z |
-                body(x + x0, y + y0, z + z0, x*Y*Z + y*Z + z);
+                body(x, y, z, x*Y*Z + y*Z + z);
             }; 
         }; 
     };
@@ -739,7 +786,7 @@ initial_program :: @const_slice(
     "local i = x*16*16 + y*16 + z;\nreturn 1 + i % 3;",
     "i: (x*16*16) + (y*16) + z\n1 + 3 % i",
     "i := x*16*16 + y*16 + z;\n1 + i.mod(3)",
-    "x+y",
+    "var i = x*16*16 + y*16 + z in\n1 + mod(i, 3);",
 );
 
 /*
@@ -795,4 +842,86 @@ repack :: fn(x: []u32) []ColourPair = {
         r, g, b := (x.shift_right_logical(16).bit_and(255).int(), x.shift_right_logical(8).bit_and(255).int(), x.bit_and(255).int());
         (rgb = vec3(r.float().div(255).cast(), g.float().div(255).cast(), b.float().div(255).cast()), c = pack_rgba(r, g, b, 255))
     })
+}
+
+// TODO: could extract this and use it for other programs that let you run things
+// TODO: for web have button to pick something to upload from the real file system
+
+FileBrowser :: @struct {
+    root: RawList(u8);
+    files: RawList(Entry);
+    a: Alloc;
+    Entry :: @struct(name: Str, is_dir: bool);
+    selected_file: ?i64;
+};
+
+fn init(self: *FileBrowser, a: Alloc, root: Str) void = {
+    self[] = zeroed(@type self[]);
+    self.a = general_allocator();
+    self.root&.push_all(root, self.a);
+    self.root&.reserve(1024, self.a);
+    self.open_root();
+    self.selected_file = .None;
+}
+
+fn file_browser(ctx: *Ui'Nuklear'nk_context, self: *FileBrowser) void = {
+    #use(Ui.Nuklear);
+    
+    nk_layout_row_dynamic(ctx, 0, 1);
+    // TODO: keep a seperate stashed_root so the open buttons use the old one even if you've edited the field
+    length := self.root.len.intcast();
+    flags := (@as(u32) nk_edit_flags.NK_EDIT_ALWAYS_INSERT_MODE).bit_or(@as(u32) nk_edit_flags.NK_EDIT_SIG_ENTER).bit_or(@as(u32) nk_edit_flags.NK_EDIT_SELECTABLE).bit_or(@as(u32) nk_edit_flags.NK_EDIT_CLIPBOARD);
+    r := nk_edit_string(ctx, flags, Ui'nk_string(self.root.items()), length&, self.root.cap.intcast(), nk_filter_default);
+    self.root.len = length.intcast();
+    @debug_assert_ule(self.root.len, self.root.cap);
+    if r.bit_and(@as(u32) nk_edit_events.NK_EDIT_COMMITTED) != 0 {
+        self.open_root();
+    };
+    
+    nk_layout_row_dynamic(ctx, 0, 2);
+    widget_disable(ctx, self.root.len <= 1) {
+        if button(ctx, "Parent") {
+            self.root.len -= (self.root.len - self.root.items().pop_path_segment().len());
+            self.root.len -= int(self.root.len > 1 && self.root.items().ends_with("/"));
+            self.open_root();
+        };
+    };
+    if button(ctx, "CWD") {
+        self.root&.clear();
+        self.root&.push_all(get_working_directory(temp()).items(), self.a);
+        self.open_root();
+    };
+    
+    nk_layout_row_dynamic(ctx, ctx.style.font.height + 6, 1);
+    prev_align := ctx.style.button.text_alignment;
+    ctx.style.button.text_alignment = @as(u32) nk_text_alignment.NK_TEXT_LEFT;
+    select: ?i64 = .None;
+    enumerate self.files { i, it |
+        if button(ctx, it.name) {
+            select = (Some = i);
+        }
+    };
+    ctx.style.button.text_alignment = prev_align;
+    if select { i |
+        it := self.files[i];
+        if it.is_dir {
+            @if(!self.root.items().ends_with("/")) self.root&.push_all("/", self.a);
+            self.root&.push_all(it.name, self.a);
+            self.open_root();
+        } else {
+            self.selected_file = select;
+        }
+    };
+}
+
+fn open_root(self: *FileBrowser) void = {
+    @if_let(collect_directory_ordered(self.root.items(), temp(), self.a)) fn Ok(files) => {
+        each self.files { it |
+            self.a.dealloc(u8, it.name);
+        };
+        self.files&.clear();
+        for files { it |
+            self.files&.push((name = it.name, is_dir = it.type == .Directory), self.a);
+        };
+    };
 }

@@ -507,7 +507,12 @@ fn compile_loop(c: *Ctx) Result(void, Str) = {
             fn extern() => {
                 @try(c.consume(.extern)) return;
                 proto := @try(c.parse_prototype()) return;
-                c.arity&.insert(proto.id.id, proto.args.len);
+                if c.arity&.insert(proto.id.id, proto.args.len) { prev |
+                    if prev != proto.args.len {
+                        return E(@tfmt("redeclared '%' with different arity % -> %", 
+                            c.m.str(proto.id), prev, proto.args.len));
+                    }
+                };
             }
             fn eof() => return(.Ok);  
             @default => {
@@ -598,12 +603,12 @@ fn init(a: Alloc, src: Str, m: *QbeModule) *Ctx = {
     };
     // assignment has special handling (so I don't provide an implementation here). 
     c.binary_precedence&.insert(tok("="), 2);
-    c.m.put_jit_addr(c.m.intern("putchard"), fn(d: f64) f64 = {
+    c.add_extern("putchard", 1, fn(d: f64) f64 = {
         c: u8 = d.int().trunc();
         print(@as(Str) (ptr = c&, len = 1));  // :SLOW (unbuffered)
         0.0
     });
-    c.m.put_jit_addr(c.m.intern("printd"), fn(d: f64) f64 = {
+    c.add_extern("printd", 1, fn(d: f64) f64 = {
         @println("%", d);  // :SLOW (unbuffered)
         0.0
     });
@@ -615,7 +620,7 @@ fn init(a: Alloc, src: Str, m: *QbeModule) *Ctx = {
 fn add_builtin(c: *Ctx, $t: Str, prec: i64, $body: @Fn(f: *Qbe.Fn, r: Qbe.Ref, a0: Qbe.Ref, a1: Qbe.Ref) void) void = {
     c.start_fn(c.m.intern(operator_name(false, tok(t))));
     c.binary_precedence&.insert(tok(t), prec);
-    c.arity&.insert(c.f.lnk.id.id, 2);
+    @assert(c.arity&.insert(c.f.lnk.id.id, 2).is_none(), "redeclared builtin %", c.m.str(c.f.lnk.id));
     a0, a1, r := (c.f.newtmp("a0", .Kd), c.f.newtmp("a0", .Kd), c.f.newtmp("result", .Kd));
     c.f.emit(.par, .Kd, a0, QbeNull, QbeNull);
     c.f.emit(.par, .Kd, a1, QbeNull, QbeNull);
@@ -623,6 +628,13 @@ fn add_builtin(c: *Ctx, $t: Str, prec: i64, $body: @Fn(f: *Qbe.Fn, r: Qbe.Ref, a
     c.f.copy_instructions_from_scratch_reversed_which_means_forwards(c.b);
     c.f.start.jmp = (type = .retd, arg = r);
     c.end_fn();
+}
+
+// different from the llvm tutorial, now extern keyword is just an arity assertion, you can call it without declaring it
+fn add_extern(c: *Ctx, name: Str, arity: i64, callee: rawptr) void = {
+    id := c.m.intern(name);
+    c.m.put_jit_addr(id, callee);
+    @assert(c.arity&.insert(id.id, arity).is_none(), "redeclared add_extern %", name);
 }
 
 fn start_fn(c: *Ctx, id: Qbe.Sym) void = {
