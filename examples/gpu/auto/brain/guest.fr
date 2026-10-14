@@ -1,0 +1,107 @@
+
+Lua :: import("@/examples/disassemble.fr").Lua;
+Guest :: @struct {
+    input: QRing'Tube(Input);
+    output: QRing'Tube(Output);
+    worker: *Thread;
+    lua: *Lua'lua_State;
+};
+
+Input :: @tagged(
+    Key: @struct(char: i64, down: bool),
+    Recompile: Str,
+);
+Output :: @tagged(
+    Move: import("@/graphics/vec.fr")'Vec2,
+    CompileErr: @struct(source: Str, error: Str),
+    CompileOk: Str,
+    RuntimeErr: Str,
+);
+
+fn init(self: *Guest) void = {
+    n := 128;
+    a := general_allocator();
+    self.input = (ring = a.alloc_zeroed(Input, n));
+    self.output = (ring = a.alloc_zeroed(Output, n));
+    self.worker = start_thread(Guest, guest_main, self);
+}
+
+fn send(self: *Guest, msg: Input) void = {
+    self.input&.push(msg);
+}
+
+fn listen(self: *Guest) ?Output = {
+    @if(self.output.claimed.kiki == self.output.committed.bouba) return(.None);
+    (Some = self.output&.pop())
+}
+
+guest_main :: fn(self: *Guest) void = {
+    L := Lua'luaL_newstate();
+    L.open_and_pop("math", Lua'luaopen_math);
+    L.open_and_pop("string", Lua'luaopen_string);
+    L.open_and_pop("table", Lua'luaopen_table);
+
+    on_event_global_name: CStr = "__on_event"; 
+    on_event_global_name := bit_cast_unchecked(CStr, *i8, on_event_global_name);
+    a := general_allocator();
+    loop {
+        continue :: local_return;
+        input := self.input&.pop();
+        @match(input) {
+            fn Recompile(src) => {
+                check_error :: fn(r) => if r != 0 {
+                    msg := Lua'lua_tolstring(L, -1, zeroed(*u64));
+                    msg := bit_cast_unchecked(*i8, CStr, msg).str().shallow_copy(a);
+                    self.output&.push(CompileErr = (source = src, error = msg));
+                    Lua'lua_pop(L, 1);
+                    continue();
+                };
+                r := Lua'luaL_loadbufferx(L, bit_cast_unchecked(*u8, *i8, src.ptr), src.len.bitcast(), zeroed(*i8), zeroed(*i8));
+                check_error(r);
+                r := Lua'lua_pcall(L, 0, 1, 0);
+                check_error(r);
+                Lua'lua_setglobal(L, on_event_global_name);
+                self.output&.push(CompileOk = src);
+            }
+            fn Key(it) => {
+                Lua'lua_getglobal(L, on_event_global_name);
+                Lua'lua_pushnumber(L, 1);
+                Lua'lua_pushnumber(L, it.char.float());
+                Lua'lua_pushnumber(L, it.down.int().float());
+                r := Lua'lua_pcall(L, 3, 2, 0);
+                if r != 0 {
+                    msg := Lua'lua_tolstring(L, -1, zeroed(*u64));
+                    msg := bit_cast_unchecked(*i8, CStr, msg).str().shallow_copy(a);
+                    self.output&.push(RuntimeErr = msg);
+                    Lua'lua_pop(L, 1);
+                    continue();
+                };
+                
+                x := @if(Lua'lua_isnumber(L, -2) == 0, 0.0, Lua'lua_tonumberx(L, -2, @ref @as(i32) 0));
+                y := @if(Lua'lua_isnumber(L, -1) == 0, 0.0, Lua'lua_tonumberx(L, -1, @ref @as(i32) 0));
+                Lua'lua_pop(L, 2);
+                if x != 0 || y != 0 {
+                    self.output&.push(Move = vec2(x.cast(), y.cast()));
+                };
+            }
+        }
+    };
+    Lua'lua_close(L);
+}
+
+initial_program :: """
+local keys = {
+    [string.byte("W")] = { 0, -1},
+    [string.byte("S")] = { 0,  1},
+    [string.byte("A")] = {-1,  0},
+    [string.byte("D")] = { 1,  0},
+}
+return (function(event_type, char, is_down)
+    if is_down == 1 and keys[char] ~= nil then 
+        return table.unpack(keys[char]) 
+    end
+end)
+""";
+
+QRing :: import("@/lib/sys/sync/qring.fr");
+#use("@/lib/sys/threads.fr");

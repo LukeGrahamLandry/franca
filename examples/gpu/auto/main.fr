@@ -1,0 +1,129 @@
+
+State :: @struct {
+    HIGH_DPI :: true;
+    ui: Ui.State;
+    dirty: bool;
+    pos: Vec2;
+    edit: Ui.Nuklear.nk_text_edit;
+    error: RawList(u8);
+    game_focused: bool;
+    brain: Guest.Guest;
+};
+
+Guest :: import("@/examples/gpu/auto/brain/guest.fr");
+
+fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    sapp.desc.enable_clipboard = true;
+    on_init(state.ui&, sg);
+    Ui'Nuklear'nk_textedit_init_default(state.edit&);
+    init(state.brain&);
+    set_all(state.edit&, Guest.initial_program);
+    state.recompile();
+}
+
+fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    a := general_allocator();
+    while => state.brain&.listen() { output |
+        state.dirty = true;
+        @match(output) {
+            fn Move(it) => {
+                state.pos += it;
+            }
+            fn CompileErr(it) => {
+                state.error&.clear();
+                state.error&.push_all(it.error, a);
+                a.dealloc(u8, it.source);
+                a.dealloc(u8, it.error);
+            }
+            fn CompileOk(src) => {
+                state.error&.clear();
+                a.dealloc(u8, src);
+            }
+            fn RuntimeErr(msg) => {
+                state.error&.push_all(msg, a);
+                state.error&.push_all("\n", a);
+                a.dealloc(u8, msg);
+            }
+        }
+    };
+    
+    if Easy'should_skip_frame(sapp, state.dirty&) {
+        state.ui.idle_last_frame = true;
+        return();
+    };
+    
+    Easy'glue_begin_pass(sapp, sg, ClearAction(r = 0, g = 0, b = 0));
+    w, h := (sapp.width().float().cast() / sapp.dpi_scale, sapp.height().float().cast() / sapp.dpi_scale);
+    input_end_with_idle(state.ui&, => draw_ui(state, w, h));
+    draw(state.ui&, sg, sapp);
+    sg.end_pass();
+    sg.commit();
+}
+
+fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    on_event(state.ui&, sapp, event);
+    state.dirty = true;
+    if @is(event.type, .KEY_DOWN, .KEY_UP) {
+        special := event.modifiers.get(.control) == 1 || event.modifiers.get(.super) == 1;
+        down := event.type == .KEY_DOWN;
+        if !special && state.game_focused {
+            // TODO: don't block if the other guy isn't servicing the pipe
+            state.brain&.send(Key = (char = event.key_code.raw().zext(), down = down));
+        };
+        
+        if special && down && !event.key_repeat && @is(event.key_code, .R, .S) {
+            state.recompile();
+        };
+    }
+}
+
+fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
+    ctx := state.ui.ctx&;
+    
+    flags := (@as(u32) nk_panel_flags.NK_WINDOW_MOVABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_SCALABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_MINIMIZABLE);
+    state.game_focused = false;
+    if begin(ctx, "Output", nk_rect(0, 0, w/2, h), flags) {
+        state.game_focused = nk_window_has_focus(ctx);
+        draw := nk_window_get_canvas(ctx);
+        nk_fill_rect(draw, draw.clip, 0, (r=10,g=10,b=10,a=255));
+        size: f32 = 20;
+        p := state.pos * size + vec2(draw.clip.x, draw.clip.y);
+        nk_fill_rect(draw, nk_rect(p.x, p.y, size, size), 0, (r=255,g=0,b=0,a=255));
+    };
+    nk_end(ctx);
+    
+    if state.error.len > 0 {
+        if begin(ctx, "Error", nk_rect(0, 0, w/2, h), flags) {
+            wrapping_text_row(ctx, state.error.items());
+        };
+        nk_end(ctx);
+    };
+    
+    if begin(ctx, "Program", nk_rect(w/2, 0, w/2, h), flags) {
+        wrapping_text_row(ctx, @tfmt("pos=(%, %)", state.pos.x, state.pos.y));
+        
+        nk_layout_row_dynamic(ctx, 0, 1);
+        if button(ctx, "Recompile") {
+            state.recompile();
+        };
+        
+        size := nk_window_get_content_region(ctx);
+        box_height := max(size.h - ctx.current.layout.at_y - ctx.style.edit.scrollbar_size.y - ctx.style.window.spacing.y, 60);
+        import("@/examples/gpu/cubes.fr")'text_box(ctx, state.edit&, box_height, size.w);
+    };
+    nk_end(ctx);
+}
+
+fn recompile(state: *State) void = {
+    a := general_allocator();
+    state.error&.clear();
+    state.error&.push_all("compiling", a);
+    source := get_buf(state.edit.string.buffer&);
+    state.brain&.send(Recompile = source.shallow_copy(a));
+    state.dirty = true;
+}
+
+driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics2(vtable, @source_file_name(), true);
+main :: fn() void = Easy'start(State);
+#use("@/graphics/lib.fr");
+Ui :: import("@/graphics/deps/nuklear.fr");

@@ -2,6 +2,11 @@
 ## (Oct 14)
 
 - unify eval a bit. kinda more camera controls. kaleidoscope arity assertions.
+- minimal file explorer thingy so i don't have to type in the box
+- the cubes don't have a fun continuity of building up a program.
+  i want to try making something like Pragma Twice. 
+  having analysis paralisis hour with wasm to make using franca as the guest program more sane. 
+  need to follow the rules and start with putting a square on the screen for morale. 
 
 ## (Oct 13) 
 

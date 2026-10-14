@@ -126,12 +126,16 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 }
 
 fn set_source(state: *State, s: Str) void = {
-    state.edit.mode = 1;  // zero init is VIEW which makes _paste a nop when setting default program on the first frame 
-    Ui'Nuklear'nk_textedit_select_all(state.edit&);
-    Ui'Nuklear'nk_textedit_paste(state.edit&, Ui'nk_string(s), s.len.intcast());
+    set_all(state.edit&, s);
     state.source&.clear();
     state.source&.push_all(s, general_allocator());
 }
+
+fn set_all(edit: *Ui.Nuklear.nk_text_edit, s: Str) void = {
+    edit.mode = 1;  // zero init is VIEW which makes _paste a nop when setting default program on the first frame 
+    Ui'Nuklear'nk_textedit_select_all(edit);
+    Ui'Nuklear'nk_textedit_paste(edit, Ui'nk_string(s), s.len.intcast());
+} 
 
 Headless :: import("@/tests/gpu.fr")'local_scope;
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -391,60 +395,14 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
         
         nk_tree_pop(ctx);
         };
-    
-        length: i32 = state.source.len.intcast();
-        // TODO: need to make enum as flags like this less painful
-        flags := (@as(u32) nk_edit_flags.NK_EDIT_ALWAYS_INSERT_MODE).bit_or(@as(u32) nk_edit_flags.NK_EDIT_SELECTABLE).bit_or(@as(u32) nk_edit_flags.NK_EDIT_CLIPBOARD).bit_or(@as(u32) nk_edit_flags.NK_EDIT_MULTILINE).bit_or(@as(u32) nk_edit_flags.NK_EDIT_ALLOW_TAB);
-     
-        text_width := {
-            prev := 0;
-            width: f32 = 0;
-            max_line: f32 = 0;
-            font := ctx.style.font;
-            source := get_buf(state.edit.string.buffer&);
-            range(0, source.len) { i |
-                width += font'width(font.userdata, font.height, Ui'nk_string(source.rest(i)), 1);
-                if source[i] == "\n".ascii() {
-                    max_line = max(max_line, width);
-                    prev = i;
-                    width = 0;
-                };
-            };
-            max(max_line, width) + 20
-        };
-        
+
         used := ctx.current.layout.at_y + hack;
         box_height := max(size.h - used - ctx.style.edit.scrollbar_size.y - ctx.style.window.spacing.y, 60);
-        nk_layout_row_static(ctx, box_height, size.w.cast().int().intcast(), 1);
-        
-        r := nk_edit_buffer(ctx, flags, state.edit&, nk_filter_default);
+        text_box(ctx, state.edit&, box_height, size.w);
         source := get_buf(state.edit.string.buffer&);
         if state.auto_run && state.edit.active != 0 && source != state.source.items() {
             run_pressed = true;
         };
-        
-        // TODO: shift+wheel to horizontal scroll works if hovering the text but not if clicked in the cursor
-        // TODO: using the scroll bar eats your undo state?? same for the builtin vertical one. 
-        //       can never undo if type while too wide even if i dont do hbar at all. 
-        if text_width > size.w {
-            edit := state.edit&;
-            nk_layout_row_static(ctx, ctx.style.edit.scrollbar_size.y, size.w.cast().int().intcast(), 1);
-            
-            scroll := zeroed(nk_rect_t);
-            state := nk_widget(scroll&, ctx);
-            
-            if bit_cast_unchecked(@type state, u32, state) != 0 {
-            is_hovered: i32 = int(r.bit_and(@as(u32) nk_widget_states.NK_WIDGET_STATE_HOVERED) != 0).intcast();
-            ws: u32 = 0;
-            edit.scrollbar.x = nk_do_scrollbarh(ws&, nk_window_get_canvas(ctx), scroll, is_hovered,
-                    edit.scrollbar.x, text_width, scroll.w * 0.10, scroll.w * 0.01,
-                    ctx.style.edit.scrollbar&, ctx.input&, ctx.style.font);
-            if is_hovered != 0 && ctx.input.mouse.scroll_delta.x != 0 {
-                ctx.input.mouse.scroll_delta.x = 0;
-            };
-            };
-        };
-        
         if run_pressed {
             state.animate.t = 0;
             state.source&.clear();
@@ -460,6 +418,53 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
         };
         nk_end(ctx);
     };
+}
+
+fn text_box(ctx: *nk_context, edit: *nk_text_edit, box_height: f32, box_width: f32) void #use(Ui.Nuklear) = {
+        // TODO: need to make enum as flags like this less painful
+        flags := (@as(u32) nk_edit_flags.NK_EDIT_ALWAYS_INSERT_MODE).bit_or(@as(u32) nk_edit_flags.NK_EDIT_SELECTABLE).bit_or(@as(u32) nk_edit_flags.NK_EDIT_CLIPBOARD).bit_or(@as(u32) nk_edit_flags.NK_EDIT_MULTILINE).bit_or(@as(u32) nk_edit_flags.NK_EDIT_ALLOW_TAB);
+        
+        text_width := {
+            prev := 0;
+            width: f32 = 0;
+            max_line: f32 = 0;
+            font := ctx.style.font;
+            source := get_buf(edit.string.buffer&);
+            range(0, source.len) { i |
+                width += font'width(font.userdata, font.height, Ui'nk_string(source.rest(i)), 1);
+                if source[i] == "\n".ascii() {
+                    max_line = max(max_line, width);
+                    prev = i;
+                    width = 0;
+                };
+            };
+            max(max_line, width) + 20
+        };
+        
+        nk_layout_row_static(ctx, box_height, box_width.cast().int().intcast(), 1);
+        
+        r := nk_edit_buffer(ctx, flags, edit, nk_filter_default);
+        
+        // TODO: shift+wheel to horizontal scroll works if hovering the text but not if clicked in the cursor
+        // TODO: using the scroll bar eats your undo state?? same for the builtin vertical one. 
+        //       can never undo if type while too wide even if i dont do hbar at all. 
+        if text_width > box_width {
+            nk_layout_row_static(ctx, ctx.style.edit.scrollbar_size.y, box_width.cast().int().intcast(), 1);
+            
+            scroll := zeroed(nk_rect_t);
+            state := nk_widget(scroll&, ctx);
+            
+            if bit_cast_unchecked(@type state, u32, state) != 0 {
+            is_hovered: i32 = int(r.bit_and(@as(u32) nk_widget_states.NK_WIDGET_STATE_HOVERED) != 0).intcast();
+            ws: u32 = 0;
+            edit.scrollbar.x = nk_do_scrollbarh(ws&, nk_window_get_canvas(ctx), scroll, is_hovered,
+                    edit.scrollbar.x, text_width, scroll.w * 0.10, scroll.w * 0.01,
+                    ctx.style.edit.scrollbar&, ctx.input&, ctx.style.font);
+            if is_hovered != 0 && ctx.input.mouse.scroll_delta.x != 0 {
+                ctx.input.mouse.scroll_delta.x = 0;
+            };
+            };
+        };
 }
 
 Grid :: @struct(cells: []u8, dimensions: Vec3, center_on_zero: bool);
