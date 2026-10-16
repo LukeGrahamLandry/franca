@@ -13,9 +13,9 @@ Input :: @tagged(
 );
 Output :: @tagged(
     Move: import("@/graphics/vec.fr")'Vec2,
-    CompileErr: @struct(source: Str, error: Str),
-    CompileOk: Str,
-    RuntimeErr: Str,
+    Plant: Sim.CropType,
+    Error: Str,
+    CompileOk,
 );
 
 fn init(self: *Guest) void = {
@@ -35,54 +35,81 @@ fn listen(self: *Guest) ?Output = {
     (Some = self.output&.pop())
 }
 
-guest_main :: fn(self: *Guest) void = {
+guest_main :: fn(self: *Guest) void #use(Lua) = {
     L := Lua'luaL_newstate();
     L.open_and_pop("math", Lua'luaopen_math);
     L.open_and_pop("string", Lua'luaopen_string);
     L.open_and_pop("table", Lua'luaopen_table);
-
-    on_event_global_name: CStr = "__on_event"; 
-    on_event_global_name := bit_cast_unchecked(CStr, *i8, on_event_global_name);
+    
+    S :: fn(s: CStr) = bit_cast_unchecked(CStr, *i8, s);
+    get_str :: fn(L: *lua_State, i: i32) Str = {
+        length: u64 = 0;
+        p := lua_tolstring(L, i, length&);
+        bit_cast_unchecked(*i8, *u8, p).slice(length.bitcast())
+    };
+    get_number :: fn(L: *lua_State, i: i32) f64 = {
+        ok: i32 = 0;
+        v := lua_tonumberx(L, i, ok&);
+        @if(ok == 1, v, NaN)
+    };
+    send_fn :: fn(L: *lua_State) i32 = {
+        self := Guest.ptr_from_raw(lua_topointer(L, lua_upvalueindex(1)));
+        action := get_str(L, 1);
+        @switch(action) {
+            @case("move") => {
+                x := get_number(L, 2);
+                y := get_number(L, 3);
+                @if((x == 0 || x == 1 || x == -1) && (y == 0 || y == 1 || y == -1)) {
+                    self.output&.push(Move = vec2(x.cast(), y.cast()));
+                };
+            };
+            @case("plant") => {
+                type := get_str(L, 2);
+                if Sim.CropType.from_name(type) { type |
+                    self.output&.push(Plant = type);
+                };
+            };
+            @case("print") => {
+                msg := get_str(L, 2).shallow_copy(general_allocator());
+                self.output&.push(Error = msg);
+            };
+            @default => @eprintln("invalid send '%'", action);
+        };
+        0
+    };
+    
     a := general_allocator();
     loop {
         continue :: local_return;
+        check_error :: fn(r) => if r != 0 {
+            msg := get_str(L, -1).shallow_copy(a);
+            self.output&.push(Error = msg);
+            lua_pop(L, 1);
+            continue();
+        };
         input := self.input&.pop();
         @match(input) {
             fn Recompile(src) => {
-                check_error :: fn(r) => if r != 0 {
-                    msg := Lua'lua_tolstring(L, -1, zeroed(*u64));
-                    msg := bit_cast_unchecked(*i8, CStr, msg).str().shallow_copy(a);
-                    self.output&.push(CompileErr = (source = src, error = msg));
-                    Lua'lua_pop(L, 1);
-                    continue();
-                };
-                r := Lua'luaL_loadbufferx(L, bit_cast_unchecked(*u8, *i8, src.ptr), src.len.bitcast(), zeroed(*i8), zeroed(*i8));
+                lua_pushnil(L);
+                lua_setglobal(L, S"on_key_event");
+                
+                lua_pushlightuserdata(L, Guest.raw_from_ptr(self));
+                lua_pushcclosure(L, send_fn, /*#upvalues*/ 1);
+                lua_setglobal(L, S"send");
+                
+                r := luaL_loadbufferx(L, bit_cast_unchecked(*u8, *i8, src.ptr), src.len.bitcast(), zeroed(*i8), S"t");
+                general_allocator().dealloc(u8, src);
                 check_error(r);
-                r := Lua'lua_pcall(L, 0, 1, 0);
+                r := lua_pcall(L, 0, 0, 0);
                 check_error(r);
-                Lua'lua_setglobal(L, on_event_global_name);
-                self.output&.push(CompileOk = src);
+                self.output&.push(.CompileOk);
             }
             fn Key(it) => {
-                Lua'lua_getglobal(L, on_event_global_name);
-                Lua'lua_pushnumber(L, 1);
+                Lua'lua_getglobal(L, S"on_key_event");
                 Lua'lua_pushnumber(L, it.char.float());
                 Lua'lua_pushnumber(L, it.down.int().float());
-                r := Lua'lua_pcall(L, 3, 2, 0);
-                if r != 0 {
-                    msg := Lua'lua_tolstring(L, -1, zeroed(*u64));
-                    msg := bit_cast_unchecked(*i8, CStr, msg).str().shallow_copy(a);
-                    self.output&.push(RuntimeErr = msg);
-                    Lua'lua_pop(L, 1);
-                    continue();
-                };
-                
-                x := @if(Lua'lua_isnumber(L, -2) == 0, 0.0, Lua'lua_tonumberx(L, -2, @ref @as(i32) 0));
-                y := @if(Lua'lua_isnumber(L, -1) == 0, 0.0, Lua'lua_tonumberx(L, -1, @ref @as(i32) 0));
-                Lua'lua_pop(L, 2);
-                if x != 0 || y != 0 {
-                    self.output&.push(Move = vec2(x.cast(), y.cast()));
-                };
+                r := Lua'lua_pcall(L, 2, 0, 0);
+                check_error(r);
             }
         }
     };
@@ -90,18 +117,26 @@ guest_main :: fn(self: *Guest) void = {
 }
 
 initial_program :: """
+function print(s) send("print", s) end
+
 local keys = {
     [string.byte("W")] = { 0, -1},
     [string.byte("S")] = { 0,  1},
     [string.byte("A")] = {-1,  0},
     [string.byte("D")] = { 1,  0},
 }
-return (function(event_type, char, is_down)
-    if is_down == 1 and keys[char] ~= nil then 
-        return table.unpack(keys[char]) 
+
+function on_key_event(char, is_down)
+    if is_down == 0 then return nil end
+    if keys[char] ~= nil then 
+        send("move", table.unpack(keys[char]));
     end
-end)
+    if char == string.byte("Q") then 
+        send("plant", "fib");
+    end
+end
 """;
 
 QRing :: import("@/lib/sys/sync/qring.fr");
 #use("@/lib/sys/threads.fr");
+Sim :: import("@/examples/gpu/auto/world.fr");

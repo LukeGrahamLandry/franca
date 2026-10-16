@@ -1,4 +1,10 @@
 
+## (Oct 16)
+
+- be responsible and don't let you input bytecode
+- trivial entity system and draw them. seperated stuff out so i can have multiple robots. allow multiple responses. 
+- even terrible textures makes it feel much more alive
+
 ## (Oct 14)
 
 - unify eval a bit. kinda more camera controls. kaleidoscope arity assertions.

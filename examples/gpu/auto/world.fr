@@ -1,0 +1,93 @@
+
+World :: @struct { 
+    entities: List(*Entity);
+    dirty: bool;
+};
+
+Entity :: @struct {
+    pos: Vec2;
+    info: EntityInfo;
+};
+
+Player :: @struct {
+    brain: Guest.Guest;
+    errors: List(u8);
+    edit: Ui.Nuklear.nk_text_edit;
+};
+
+EntityInfo :: @tagged(
+    Player: Player,
+    Crop: @struct {
+        type: CropType;
+        level := 0;
+        age := 0;
+    },
+);
+
+CropType :: @enum(fib, fac, prime);
+
+fn init(w: *World) void = {
+    a := general_allocator();
+    w.entities = list(a);
+    w.entities&.push(a.box_zeroed(Entity));
+    it := w.entities[0].info.Player&;
+    it.errors = list(a);
+    init(it.brain&);
+    Ui'Nuklear'nk_textedit_init_default(it.edit&);
+    set_all(it.edit&, Guest.initial_program);
+    it.recompile();
+}
+
+fn update(w: *World) void = {
+    range(0, w.entities.len) { i |
+        e := w.entities[i];
+        @match(e.info&) {
+            fn Player(it) => {
+                host_pipe(w, e, it);
+            }
+            fn Crop(it) => {
+                it.age += 1;
+            }
+        };
+    };
+}
+
+fn host_pipe(w: *World, e: *Entity, it: *Player) void = {
+    a := general_allocator();
+    while => it.brain&.listen() { output |
+        w.dirty = true;
+        @match(output) {
+            fn Move(it) => {
+                e.pos += it;
+            }
+            fn Error(msg) => {
+                @fmt(it.errors&, "%\n", msg);
+                a.dealloc(u8, msg);
+            }
+            fn CompileOk() => it.errors&.clear();
+            fn Plant(type) => {
+                new := a.boxed(Entity, (pos = e.pos, info = (Crop = (type = type))));
+                w.entities&.push(new);
+            }
+        }
+    };
+}
+
+fn recompile(it: *Player) void = {
+    it.errors&.clear();
+    a := general_allocator();
+    it.errors&.push_all("compiling");
+    source := get_buf(it.edit.string.buffer&);
+    it.brain&.send(Recompile = source.shallow_copy(a));
+}
+
+fn sprite(e: *Entity) i64 = {
+    @match(e.info&) {
+        fn Player() => 0;
+        fn Crop(it) => 1 + mod(it.type.raw(), 3);
+    }
+}
+
+#use("@/graphics/vec.fr");
+Guest :: import("@/examples/gpu/auto/brain/guest.fr");
+Ui :: import("@/graphics/deps/nuklear.fr");

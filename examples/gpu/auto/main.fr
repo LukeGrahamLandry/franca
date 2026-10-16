@@ -3,50 +3,39 @@ State :: @struct {
     HIGH_DPI :: true;
     ui: Ui.State;
     dirty: bool;
-    pos: Vec2;
-    edit: Ui.Nuklear.nk_text_edit;
-    error: RawList(u8);
     game_focused: bool;
-    brain: Guest.Guest;
+    sprites_img: Sg.Image;
+    sprites: []Ui.Nuklear.nk_image_t;
+    world: Sim.World;
+    selected_player: i64;
 };
 
-Guest :: import("@/examples/gpu/auto/brain/guest.fr");
+Sim :: import("@/examples/gpu/auto/world.fr");
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sapp.desc.enable_clipboard = true;
     on_init(state.ui&, sg);
-    Ui'Nuklear'nk_textedit_init_default(state.edit&);
-    init(state.brain&);
-    set_all(state.edit&, Guest.initial_program);
-    state.recompile();
+    state.load_sprites(sg);
+    init(state.world&);
+}
+
+load_sprites :: fn(state: *State, sg: *Sg.Self) void = {
+    Viewer :: import("@/examples/gpu/viewer.fr"); 
+    pixels, w, h := Viewer'stbi_load(sprites_png).unwrap();
+    state.sprites_img = sg.make(width = w, height = h, pixel_format = .RGBA8, data = SubImage(pixels));
+    Viewer'Stb'stbi_image_free(u8.raw_from_ptr(pixels.ptr));
+    handle := Ui'Nuklear'pack_nk_handle(state.sprites_img, state.ui.smp);
+    state.sprites = general_allocator().alloc_init(@type state.sprites[0], intcast(w/32 * h/32)) { i |
+        y, x := i.div_mod(w.intcast() / 32);
+        Ui'Nuklear'nk_subimage_handle(handle, w.trunc(), h.trunc(), (x = x.float().cast()*32, y = y.float().cast()*32, w = 32, h = 32))
+    };
 }
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
-    a := general_allocator();
-    while => state.brain&.listen() { output |
+    update(state.world&);
+    if state.world.dirty&.take() {
         state.dirty = true;
-        @match(output) {
-            fn Move(it) => {
-                state.pos += it;
-            }
-            fn CompileErr(it) => {
-                state.error&.clear();
-                state.error&.push_all(it.error, a);
-                a.dealloc(u8, it.source);
-                a.dealloc(u8, it.error);
-            }
-            fn CompileOk(src) => {
-                state.error&.clear();
-                a.dealloc(u8, src);
-            }
-            fn RuntimeErr(msg) => {
-                state.error&.push_all(msg, a);
-                state.error&.push_all("\n", a);
-                a.dealloc(u8, msg);
-            }
-        }
     };
-    
     if Easy'should_skip_frame(sapp, state.dirty&) {
         state.ui.idle_last_frame = true;
         return();
@@ -66,15 +55,25 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     if @is(event.type, .KEY_DOWN, .KEY_UP) {
         special := event.modifiers.get(.control) == 1 || event.modifiers.get(.super) == 1;
         down := event.type == .KEY_DOWN;
+        if state.selected_player() { it |
         if !special && state.game_focused {
             // TODO: don't block if the other guy isn't servicing the pipe
-            state.brain&.send(Key = (char = event.key_code.raw().zext(), down = down));
+            it.brain&.send(Key = (char = event.key_code.raw().zext(), down = down));
         };
         
         if special && down && !event.key_repeat && @is(event.key_code, .R, .S) {
-            state.recompile();
+            it.recompile();
+        };
         };
     }
+}
+
+fn selected_player(state: *State) ?*Sim.Player = {
+    i, e := (state.selected_player, state.world.entities&);
+    if i.ult(e.len) {
+        @if_let(e[i].info&) fn Player(it) => return(Some = it);
+    };
+    .None
 }
 
 fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
@@ -87,43 +86,38 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
         draw := nk_window_get_canvas(ctx);
         nk_fill_rect(draw, draw.clip, 0, (r=10,g=10,b=10,a=255));
         size: f32 = 20;
-        p := state.pos * size + vec2(draw.clip.x, draw.clip.y);
-        nk_fill_rect(draw, nk_rect(p.x, p.y, size, size), 0, (r=255,g=0,b=0,a=255));
-    };
+        for state.world.entities& { it |
+            p := it.pos * size + vec2(draw.clip.x, draw.clip.y);
+            nk_draw_image(draw, nk_rect(p.x, p.y, size, size), state.sprites[it.sprite()]&, (r=255,g=255,b=255,a=255));
+        };
+      };
     nk_end(ctx);
     
-    if state.error.len > 0 {
+    if state.selected_player() { it |
+    if it.errors.len > 0 {
         if begin(ctx, "Error", nk_rect(0, 0, w/2, h), flags) {
-            wrapping_text_row(ctx, state.error.items());
+            wrapping_text_row(ctx, it.errors.items());
         };
         nk_end(ctx);
     };
     
     if begin(ctx, "Program", nk_rect(w/2, 0, w/2, h), flags) {
-        wrapping_text_row(ctx, @tfmt("pos=(%, %)", state.pos.x, state.pos.y));
-        
         nk_layout_row_dynamic(ctx, 0, 1);
         if button(ctx, "Recompile") {
-            state.recompile();
+            it.recompile();
         };
         
         size := nk_window_get_content_region(ctx);
         box_height := max(size.h - ctx.current.layout.at_y - ctx.style.edit.scrollbar_size.y - ctx.style.window.spacing.y, 60);
-        import("@/examples/gpu/cubes.fr")'text_box(ctx, state.edit&, box_height, size.w);
+        import("@/examples/gpu/cubes.fr")'text_box(ctx, it.edit&, box_height, size.w);
+    };
     };
     nk_end(ctx);
-}
-
-fn recompile(state: *State) void = {
-    a := general_allocator();
-    state.error&.clear();
-    state.error&.push_all("compiling", a);
-    source := get_buf(state.edit.string.buffer&);
-    state.brain&.send(Recompile = source.shallow_copy(a));
-    state.dirty = true;
 }
 
 driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics2(vtable, @source_file_name(), true);
 main :: fn() void = Easy'start(State);
 #use("@/graphics/lib.fr");
 Ui :: import("@/graphics/deps/nuklear.fr");
+
+sprites_png :: include_bytes("examples/gpu/auto/sprites.png");
