@@ -3,13 +3,16 @@ World :: @rec @struct {
     entities: List(*Entity);
     dirty: bool;
     next_id: i64;
+    dt: f64;
+    is_client: bool;
 };
 
 EntityId :: @struct(id: i64, hint: i64);
 Entity :: @rec @struct {
+    info: EntityInfo;
     pos: Vec2;
     id: EntityId;
-    info: EntityInfo;
+    dead: bool;
 };
 
 Player :: @struct {
@@ -29,13 +32,13 @@ EntityInfo :: @tagged(
     Chest: Inventory,
 );
 
-CropType :: @enum(fib, fac, prime);
+CropType :: @enum(nat, prime, fib);
 Inventory :: @struct(slots: []ItemStack);
 ItemStack :: @struct(item: Item, count: i64);
 Item :: @tagged(
     Empty: void,
     Crop: CropType,
-    Disk: @struct(limit: i64),
+    Disk,
     Keyboard,
 );
 
@@ -45,9 +48,9 @@ fn init(w: *World) void = {
     it := w.add_player();
     s := it.inventory.slots&;
     s[0] = (item = .Keyboard, count = 1);
-    s[1] = (item = (Disk = (limit = 4096)), count = 1);
+    s[1] = (item = .Disk, count = 1);
     s[2] = (item = (Crop = .fib), count = 5);
-    s[3] = (item = (Crop = .fac), count = 5);
+    s[3] = (item = (Crop = .nat), count = 5);
 }
 
 fn add_player(w: *World) *Player = {
@@ -74,17 +77,32 @@ fn add_entity(w: *World) *Entity = {
 }
 
 fn update(w: *World) void = {
+    tick := w.dt > 1;
+    if tick {
+        w.dt -= 1;
+    };
     range(0, w.entities.len) { i |
         e := w.entities[i];
+        @if(tick) tick_entity(w, e);
         @match(e.info&) {
             fn Player(it) => {
+                @if(tick) it.brain.send(.Tick);
                 host_pipe(w, e, it);
             }
-            fn Crop(it) => {
-                it.age += 1;
-            }
-            fn Chest() => ();
+            @default => ();
         };
+    };
+}
+
+fn tick_entity(w: *World, e: *Entity) void = {
+    @match(e.info&) {
+        fn Crop(it) => {
+            it.age += 1;
+            if it.age > (it.level + 1) * 10 {
+                e.dead = true;
+            };
+        }
+        @default => ();
     };
 }
 
@@ -101,15 +119,71 @@ fn host_pipe(w: *World, e: *Entity, p: *Player) void = {
                 a.dealloc(u8, msg);
             }
             fn CompileOk() => {
-                p.errors&.clear();
-                sync(p.brain, e);
+                if p.errors&.items() == compiling_message {
+                    p.errors&.clear();
+                };  // don't clear if there was a print at top level
+                sync(w, p.brain, e);
             }
             fn Place(it) => {
                 place(w, e, p, it.inventory_index);
             }
+            fn Water(it) => {
+                water(w, w.get(it.target), p, it.answer);
+            }
+            fn Harvest(it) => {
+                harvest(w, w.get(it), p);
+            }
         };
         w.dirty = true;
     };
+}
+
+fn water(w: *World, e: *Entity, p: *Player, answer: f64) bool = {
+    @if(e.dead) return(false);
+    @match(e.info&) {
+        fn Crop(it) => {
+            ok := it.age >= it.level && it.level < max_crop_level;
+            in_range := norm_sq(w.get(p.brain.id)[].pos - e.pos) < 2;
+            ok := in_range && ok && answer == sequence(it.type, it.level).float();
+            it.level += int(ok);
+            sync(w, p.brain, e);
+            ok
+        };
+        @default => false;
+    }
+}
+
+fn harvest(w: *World, e: *Entity, p: *Player) bool = {
+    @if(e.dead) return(false);
+    pe := w.get(p.brain.id);
+    @match(e.info&) {
+        fn Crop(it) => {
+            ok := it.level > 0 && norm_sq(w.get(p.brain.id)[].pos - e.pos) < 2;
+            if ok {
+                ok = insert_item(p.inventory&, (item = (Crop = it.type), count = it.level));
+                if ok {
+                    e.dead = true;
+                };
+            };
+            sync(w, p.brain, e);
+            sync(w, p.brain, pe);
+            ok
+        };
+        @default => false;
+    }
+}
+
+fn insert_item(inventory: *Inventory, new: ItemStack) bool = {
+    ::AutoEq(Item);::DerefEq(CropType);
+    if inventory.slots.find(fn(it) => it.item& == new.item&) { slot |
+        slot.count += new.count;
+        return true;
+    };
+    if inventory.slots.find(fn(it) => it.item&.is(.Empty)) { slot |
+        slot[] = new;
+        return true;
+    };
+    false
 }
 
 fn place(w: *World, e: *Entity, p: *Player, inventory_index: i64) bool = {
@@ -128,7 +202,7 @@ fn place(w: *World, e: *Entity, p: *Player, inventory_index: i64) bool = {
             new := w.add_entity();
             new.pos = e.pos;
             new.info = (Crop = (type = type[]));
-            sync(p.brain, new);
+            sync(w, p.brain, new);
         }
         @default => return(false);
     };
@@ -136,7 +210,7 @@ fn place(w: *World, e: *Entity, p: *Player, inventory_index: i64) bool = {
     if slot.count <= 0 {
         slot.item = .Empty;
     };
-    sync(p.brain, e);
+    sync(w, p.brain, e);
     true
 }
 
@@ -146,7 +220,8 @@ fn move(e: *Entity, delta: Vec2) bool = {
     true
 }
 
-fn sync(self: *Guest.Guest, e: *Entity) void = {
+fn sync(w: *World, self: *Guest.Guest, e: *Entity) void = {
+    @if(w.is_client) return();
     e := e[];
     a := general_allocator();
     @match(e.info&) {
@@ -158,10 +233,11 @@ fn sync(self: *Guest.Guest, e: *Entity) void = {
     self.send(SyncEntity = (shallow = e));
 }
 
+compiling_message :: "compiling\n";
 fn recompile(it: *Player) void = {
     it.errors&.clear();
     a := general_allocator();
-    it.errors&.push_all("compiling");
+    it.errors&.push_all(compiling_message);
     source := get_buf(it.edit.string.buffer&);
     it.brain.send(Recompile = source.shallow_copy(a));
 }
@@ -197,6 +273,61 @@ fn sprite(e: *Item) i64 = {
         fn Disk() => 7;
         fn Keyboard() => 8;
         fn Empty() => 9;
+    }
+}
+
+fn display_name(e: *Item) Str = {
+    @match(e) {
+        fn Crop(it) => @match(it[]) {
+            fn nat() => "Natural Carrots";
+            fn fib() => "Leonardo 'Fibonacci' Bonacci's Beets";
+            fn prime() => "Prime Protatoes";
+        };
+        fn Empty() => "";
+        @default => {
+            t := e.tag();
+            t.name_str()
+        };
+    }
+}
+
+max_crop_level :: 100;
+fn sequence(type: CropType, i: i64) i64 = {
+    @assert(i >= 0 && i < max_crop_level);
+    @match(type) {
+        fn nat() => i;
+        fn prime() => {
+            #use("@/lib/collections/bit_set.fr");
+            n := 100;
+            loop {
+                // eratosthenes
+                unprime: DynamicBitSet = empty(temp());
+                k, primes := (2, 0);
+                loop {
+                    if !unprime&.get(k) {
+                        primes += 1;
+                        @if(primes == i) return(k);
+                        j := k * k;
+                        while => j < n {
+                            unprime&.set(j);
+                            j += i;
+                        };
+                    };
+                    k += 1;
+                };
+                n *= n;
+            };
+            unreachable()
+        }
+        fn fib() => {
+            a, b := (1, 1);
+            range(0, i) { _ |
+                c := a + b;
+                a = b;
+                b = c;
+            };
+            a
+        }
     }
 }
 

@@ -17,6 +17,7 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 
+- its implied that `S :: @struct(f :: fn(s: Str) void = ()); S'f"foo"` would work because "foo".S'f() works
 - make types_size_guess growable. need to cope with not reallocating under the cache pointers tho
 - web: include examples for stackie and life
 - multiplexer zoom controls on the window?

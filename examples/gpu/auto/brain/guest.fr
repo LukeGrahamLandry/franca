@@ -13,12 +13,15 @@ Input :: @tagged(
     Key: @struct(char: i64, down: bool),
     Recompile: Str,
     SyncEntity: @struct(shallow: Sim.Entity),
+    Tick,
 );
 Output :: @tagged(
     Move: import("@/graphics/vec.fr")'Vec2,
     Place: @struct(inventory_index: i64),
     Error: Str,
     CompileOk,
+    Water: @struct(target: Sim.EntityId, answer: f64),
+    Harvest: Sim.EntityId,
 );
 
 fn init(self: *Guest, id: Sim.EntityId) void = {
@@ -28,6 +31,7 @@ fn init(self: *Guest, id: Sim.EntityId) void = {
     self.output = (ring = a.alloc_zeroed(Output, n));
     self.worker = start_thread(Guest, guest_main, self);
     self.client = a.box_zeroed(Sim.World);
+    self.client.is_client = true;
     self.client.entities = list(a);
     e := a.box_zeroed(Sim.Entity);
     self.id = e.id;
@@ -74,6 +78,12 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
     };
     lua_pop(L, 1);
     
+    src := world_api;
+    r := luaL_loadbufferx(L, bit_cast_unchecked(*u8, *i8, src.ptr), src.len.bitcast(), zeroed(*i8), S"t");
+    @assert(r == 0, "%", get_str(L, -1));
+    r := lua_pcall(L, 0, 0, 0);
+    @assert(r == 0, "%", get_str(L, -1));
+    
     S :: fn(s: CStr) = bit_cast_unchecked(CStr, *i8, s);
     get_str :: fn(L: *lua_State, i: i32) Str = {
         length: u64 = 0;
@@ -113,7 +123,7 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
         @match(slot.item&) {
             fn Crop(it) => {
                 pushlstring(L, it[].name_str());
-                lua_setfield(L, -2, S"type");
+                lua_setfield(L, -2, S"kind");
             }
             @default => ();
         };
@@ -141,15 +151,37 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
         lua_pushnil(L);
         1
     };
-    get_pos_fn :: fn(L: *lua_State) i32 = {
+    entity_index_fn :: fn(L: *lua_State) i32 = {
         self := Guest.ptr_from_raw(lua_topointer(L, lua_upvalueindex(1)));
         entity_id := get_number(L, 1).int();
+        key := get_str(L, 2);
         if self.client.try_get((id = entity_id, hint = 0)) { e |
-            lua_createtable(L, 0, 0);
-            lua_pushnumber(L, e.pos.x.cast());
-            lua_setfield(L, -2, S"x");
-            lua_pushnumber(L, e.pos.y.cast());
-            lua_setfield(L, -2, S"y");
+            @switch(key) {
+                @case("pos") => {
+                    lua_createtable(L, 0, 0);
+                    lua_pushnumber(L, e.pos.x.cast());
+                    lua_setfield(L, -2, S"x");
+                    lua_pushnumber(L, e.pos.y.cast());
+                    lua_setfield(L, -2, S"y");
+                };
+                @case("age") => @match(e.info&) {
+                    fn Crop(it) => lua_pushnumber(L, it.age.float());
+                    @default => lua_pushnil(L);
+                };
+                @case("level") => @match(e.info&) {
+                    fn Crop(it) => lua_pushnumber(L, it.level.float());
+                    @default => lua_pushnil(L);
+                };
+                @case("kind") => @match(e.info&) {
+                    fn Crop(it) => pushlstring(L, it.type.name_str());
+                    @default => lua_pushnil(L);
+                };
+                @case("type") => {
+                    it := e.info&.tag();
+                    pushlstring(L, it.name_str());
+                };
+                @default => lua_pushnil(L);
+            };
             return 1;
         };
         lua_pushnil(L);
@@ -174,6 +206,48 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
                 msg := get_str(L, 2).shallow_copy(general_allocator());
                 self.client(Error = msg);
             };
+            @case("water") => {
+                answer := get_number(L, 3);
+                entity_id := get_number(L, 2).int();
+                p := self.client.get(self.id);
+                ok := false;
+                if self.client.try_get((id = entity_id, hint = 0)) { e |
+                    ok = water(self.client, e, p.info.Player&, answer);
+                    if ok {
+                        self.client(Water = (target = e.id, answer = answer));
+                    };
+                };
+                lua_pushboolean(L, ok.int().intcast());
+                return 1;
+            };
+            @case("look") => {
+                p := self.client.get(self.id);
+                for self.client.entities { e |
+                    if e.pos == p.pos && e.id.id != p.id.id && !e.dead {
+                        lua_getglobal(L, S"entities");
+                        lua_pushnumber(L, e.id.id.float());
+                        get_or_new(L, -2);
+                        lua_pushnumber(L, e.id.id.float());
+                        lua_setfield(L, -2, S"id");
+                        lua_getglobal(L, S"entity_metatable");
+                        lua_setmetatable(L, -2);
+                        return 1;
+                    };
+                };
+            };
+            @case("harvest") => {
+                entity_id := get_number(L, 2).int();
+                p := self.client.get(self.id);
+                ok := false;
+                if self.client.try_get((id = entity_id, hint = 0)) { e |
+                    ok = harvest(self.client, e, p.info.Player&);
+                    if ok {
+                        self.client(Harvest = e.id);
+                    };
+                };
+                lua_pushboolean(L, ok.int().intcast());
+                return 1;
+            };
             @default => @eprintln("invalid send '%'", action);
         };
         0
@@ -190,21 +264,24 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
         };
         input := self.input&.pop();
         @match(input) {
+            fn Tick() => {
+                w := self.client;
+                range(0, w.entities.len) { i |
+                    e := w.entities[i];
+                    tick_entity(w, e);
+                };
+            }
             fn Recompile(src) => {
                 lua_pushnil(L);
                 lua_setglobal(L, S"on_key_event");
                 
-                lua_createtable(L, 0, 0);
-                pushlstring(L, "id");
-                lua_pushnumber(L, self.id.id.float());
-                lua_settable(L, -3);
-                lua_setglobal(L, S"self");
-                
-                lua_createtable(L, 0, 0);
+                lua_getglobal(L, S"entities");
                 lua_pushnumber(L, self.id.id.float());
                 lua_getglobal(L, S"self");
+                lua_pushnumber(L, self.id.id.float());
+                lua_setfield(L, -2, S"id");
                 lua_settable(L, -3);
-                lua_setglobal(L, S"entities");
+                lua_pop(L, 1);
                 
                 extern :: fn(name: CStr, f: @FnPtr(L: *lua_State) i32) void => {
                     lua_pushlightuserdata(L, Guest.raw_from_ptr(self));
@@ -213,9 +290,9 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
                 };
                 extern("send", send_fn);
                 extern("get_inventory_slot", get_inventory_fn);
-                extern("get_entity_pos", get_pos_fn);
+                extern("get_entity_field", entity_index_fn);
                 
-                r := luaL_loadbufferx(L, bit_cast_unchecked(*u8, *i8, src.ptr), src.len.bitcast(), zeroed(*i8), S"t");
+                r := luaL_loadbufferx(L, bit_cast_unchecked(*u8, *i8, src.ptr), src.len.bitcast(), S"Program", S"t");
                 general_allocator().dealloc(u8, src);
                 check_error(r);
                 r := lua_pcall(L, 0, 0, 0);
@@ -232,12 +309,25 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
             fn SyncEntity(it) => {
                 src := it.shallow&;
                 dest := self.client.try_get(src.id) || {
+                    @if(src.dead) continue();   // :leak if it has inventory
                     e := self.client.add_entity();
                     e.info&.tag_ptr()[] = src.info&.tag();
                     e.id.id = src.id.id;
                     e
                 };
                 dest.pos = src.pos;
+                dest.dead = src.dead;
+                if dest.dead {
+                    // in case the lua is holding a reference to it already
+                    lua_getglobal(L, S"entities");
+                    lua_pushnumber(L, dest.id.id.float());
+                    lua_gettable(L, -2);
+                    if lua_istable(L, -1) {
+                        lua_pushboolean(L, 1);
+                        lua_setfield(L, -2, S"dead");
+                    };
+                    lua_pop(L, 1);
+                };
                 
                 @match(dest.info&) {
                     fn Player(it) => sync_inventory(it.inventory&, src.info.Player.inventory&);
@@ -263,19 +353,78 @@ sync_inventory :: fn(dest: *Sim.Inventory, src: *Sim.Inventory) void = {
     src.slots = empty();
 };
 
-initial_program :: """
-function print(s) send("print", s) end
+world_api :: """
+entities = {}
+self = {}
+
+function print(s) 
+    local function str(seen, s) 
+        local t = type(s);
+        local prim = t == "string" or t == "number";
+        if prim then return s end
+        if t == "table" then
+            if seen[s] then return "<rec>" end
+            seen[s] = true;
+            local out = "{";
+            for k, v in pairs(s) do 
+                out = out .. str(seen, k) .. "=" .. str(seen, v) .. ",";
+            end
+            return out .. "}"
+        end
+        if t == "boolean" then return s and "true" or "false" end
+        return t
+    end
+    send("print", str({}, s));
+end
 
 self.place = function(self, i) send("place", i) end
 self.move = function(self, dx, dy) send("move", dx, dy) end
+self.look = function(self) return send("look") end
 
-self.inventory = setmetatable({}, { __index = function(_, i) 
-    return get_inventory_slot(self.id, i) 
-end });
-self.pos = setmetatable({}, { __index = function(_, key) 
-    return get_entity_pos(self.id)[key] 
-end });
+function inventory_metatable(id) return { 
+    __index = function(_, i) 
+        return get_inventory_slot(id, i) 
+    end,
+    __len = function(inventory) return 16 end,
+    __pairs = function(inventory) 
+        return function(inventory, i)
+            if inventory[i+1] ~= nil then return i+1, inventory[i+1] else return nil end
+        end, inventory, 0;
+    end,
+} end;
 
+function water_entity(it, answer) return send("water", it.id, answer) end
+function harvest_entity(it) return send("harvest", it.id) end
+
+local entity_keys = {"type","pos","inventory","age","level","kind"};
+entity_metatable = {
+    __index = function(self, key)
+        if key == "inventory" and (self.type == "Player" or self.type == "Chest") then 
+            return setmetatable({}, inventory_metatable(self.id)) 
+        end
+        if key == "water" and self.type == "Crop" then return water_entity end
+        if key == "harvest" and self.type == "Crop" then return harvest_entity end
+        return get_entity_field(self.id, key);
+    end,
+    __pairs = function(self) 
+        local i = 1
+        local function f(self)
+            local key = entity_keys[i]
+            i = i + 1
+            if key == nil then return nil end
+            local value = self[key]
+            if value ~= nil then return key, value end
+            return f(self);
+        end
+        return f, self, entity_keys[0];
+    end,
+};
+
+setmetatable(self, entity_metatable);
+
+""";
+
+initial_program :: """
 local keys = {
     [string.byte("W")] = { 0, -1},
     [string.byte("S")] = { 0,  1},
@@ -283,13 +432,42 @@ local keys = {
     [string.byte("D")] = { 1,  0},
 }
 
+local crop_solutions = {
+    nat = function(i) return i end,
+    fib = function(i) 
+        a, b = 1, 1
+        for j=1,i do a, b = b, a+b end
+        return a
+    end,
+};
+
+local function solve_crop(it)
+    assert(it ~= nil and it.type == "Crop");
+    local f = crop_solutions[it.kind]
+    assert(f ~= nil, "solve_crop " .. it.kind);
+    local ok = it:water(f(it.level));
+    if not ok then print({ "solve_crop failed", it }) end
+end
+
 function on_key_event(char, is_down)
     if is_down == 0 then return nil end
     if keys[char] ~= nil then 
        self:move(table.unpack(keys[char]));
     end
     if char >= string.byte("1") and char <= string.byte("9") then 
-        self:place(char - string.byte("1") + 1);
+        local i = char - string.byte("1") + 1;
+        if self.inventory[i].item ~= "Crop" then 
+            print("can't plant a " .. self.inventory[i].item);
+        end
+        self:place(i);
+    end
+    if char == string.byte("Q") then 
+        local it = self:look();
+        if it ~= nil then solve_crop(it); end
+    end
+    if char == string.byte("E") then 
+        local it = self:look();
+        if it ~= nil then it:harvest(); end
     end
 end
 """;

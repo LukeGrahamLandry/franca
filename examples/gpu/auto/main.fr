@@ -7,7 +7,8 @@ State :: @struct {
     sprites_img: Sg.Image;
     sprites: []Ui.Nuklear.nk_image_t;
     world: Sim.World;
-    selected_player: i64;
+    selected_player: Sim.EntityId;
+    prev_timestamp: f64;
 };
 
 Sim :: import("@/examples/gpu/auto/world.fr");
@@ -16,7 +17,9 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sapp.desc.enable_clipboard = true;
     on_init(state.ui&, sg);
     state.load_sprites(sg);
+    state.prev_timestamp = timestamp_s();
     init(state.world&);
+    state.world.is_client = false;
 }
 
 load_sprites :: fn(state: *State, sg: *Sg.Self) void = {
@@ -32,6 +35,9 @@ load_sprites :: fn(state: *State, sg: *Sg.Self) void = {
 }
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    t := timestamp_s();
+    state.world.dt += t - state.prev_timestamp;
+    state.prev_timestamp = t;
     update(state.world&);
     if state.world.dirty&.take() {
         state.dirty = true;
@@ -65,13 +71,15 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             it.recompile();
         };
         };
-    }
+    };
+    if @is(event.type, .FOCUSED, .RESTORED, .MOUSE_ENTER) {
+        state.prev_timestamp = timestamp_s();
+    };
 }
 
 fn selected_player(state: *State) ?*Sim.Player = {
-    i, e := (state.selected_player, state.world.entities&);
-    if i.ult(e.len) {
-        @if_let(e[i].info&) fn Player(it) => return(Some = it);
+    if state.world&.try_get(state.selected_player) { e |
+        @if_let(e.info&) fn Player(it) => return(Some = it);
     };
     .None
 }
@@ -81,6 +89,7 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
     
     flags := (@as(u32) nk_panel_flags.NK_WINDOW_MOVABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_SCALABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_MINIMIZABLE);
     game_focused, edit_active := (false, false);
+    white: nk_color = (r=255,g=255,b=255,a=255);
     if begin(ctx, "Output", nk_rect(0, 0, w/2, h), flags) {
         game_focused = nk_window_has_focus(ctx);
         draw := nk_window_get_canvas(ctx);
@@ -88,15 +97,33 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
         size: f32 = 20;
         for state.world.entities& { it |
             p := it.pos * size + vec2(draw.clip.x, draw.clip.y);
-            nk_draw_image(draw, nk_rect(p.x, p.y, size, size), state.sprites[it.sprite()]&, (r=255,g=255,b=255,a=255));
+            if !it.dead {
+                at: nk_rect_t = nk_rect(p.x, p.y, size, size);
+                nk_draw_image(draw, at, state.sprites[it.sprite()]&, white);
+                @match(it.info&) {
+                    fn Crop(it) => {
+                        s := @tfmt("%", it.level);
+                        nk_draw_text(draw, at, Ui'nk_string(s), s.len.intcast(), ctx.style.font, white, white);
+                        if it.age > (it.level + 1) * 10 - 5 {
+                            nk_draw_text(draw, at, Ui'nk_string("!"), 1, ctx.style.font, white, white);
+                        };
+                    }
+                    @default => ();
+                }
+            };
         };
     };
     nk_end(ctx);
     
     if state.selected_player() { it |
     if it.errors.len > 0 {
+        flags := flags.bit_or(@as(u32) nk_panel_flags.NK_WINDOW_CLOSABLE);
         if begin(ctx, "Error", nk_rect(0, 0, w/2, h), flags) {
             wrapping_text_row(ctx, it.errors.items());
+        } else {
+            if nk_window_is_hidden(ctx, Ui'nk_cstring("Error")) {
+                it.errors&.clear();
+            }
         };
         nk_end(ctx);
     };
@@ -110,10 +137,13 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
             nk_widget(area&, ctx);
             slot := it.inventory.slots[i]&;
             if slot.count != 0 {
-                nk_draw_image(draw, area, state.sprites[slot.item&.sprite()]&, (r=255,g=255,b=255,a=255));
+                nk_draw_image(draw, area, state.sprites[slot.item&.sprite()]&, white);
                 if slot.count != 1 {
                     s := @tfmt("%", slot.count);
-                    nk_draw_text(draw, area, Ui'nk_string(s), s.len.intcast(), ctx.style.font, (r=255,g=255,b=255,a=255), (r=255,g=255,b=255,a=255));
+                    nk_draw_text(draw, area, Ui'nk_string(s), s.len.intcast(), ctx.style.font, white, white);
+                };
+                if nk_input_is_mouse_hovering_rect(ctx.input&, area) {
+                    nk_tooltip(ctx, Ui'nk_cstring(slot.item&.display_name()));
                 };
             };
         };
@@ -124,7 +154,7 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
         };
         
         size := nk_window_get_content_region(ctx);
-        box_height := max(size.h - ctx.current.layout.at_y - ctx.style.edit.scrollbar_size.y - ctx.style.window.spacing.y, 60);
+        box_height := max(size.h - ctx.current.layout.at_y - ctx.style.edit.scrollbar_size.y - ctx.style.window.spacing.y - 20, 60);
         import("@/examples/gpu/cubes.fr")'text_box(ctx, it.edit&, box_height, size.w);
         edit_active = it.edit.active == 1;
     };
