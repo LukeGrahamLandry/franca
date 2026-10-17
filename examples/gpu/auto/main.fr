@@ -1,4 +1,6 @@
 
+// TODO: draw with sgl and sync the program with a file so nuklear can be optional
+
 State :: @struct {
     HIGH_DPI :: true;
     ui: Ui.State;
@@ -9,6 +11,8 @@ State :: @struct {
     world: Sim.World;
     selected_player: Sim.EntityId;
     prev_timestamp: f64;
+    next_entity_id: i64;
+    edit: Ui.Nuklear.nk_text_edit;
 };
 
 Sim :: import("@/examples/gpu/auto/world.fr");
@@ -18,8 +22,11 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     on_init(state.ui&, sg);
     state.load_sprites(sg);
     state.prev_timestamp = timestamp_s();
-    init(state.world&);
+    init(state.world&, state.next_entity_id&);
+    state.world.camera.size = 20;
     state.world.is_client = false;
+    Ui'Nuklear'nk_textedit_init_default(state.edit&);
+    Cubes'set_all(state.edit&, Sim.Guest.initial_program);
 }
 
 load_sprites :: fn(state: *State, sg: *Sg.Self) void = {
@@ -63,12 +70,13 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         down := event.type == .KEY_DOWN;
         if state.selected_player() { it |
         if !special && state.game_focused {
-            // TODO: don't block if the other guy isn't servicing the pipe
+            @if(it.inventory.slots.contains(fn(it) => it.item&.is(.Keyboard)))
             it.brain.send(Key = (char = event.key_code.raw().zext(), down = down));
         };
         
         if special && down && !event.key_repeat && @is(event.key_code, .R, .S) {
-            it.recompile();
+            source := get_buf(state.edit.string.buffer&);
+            it.recompile(source);
         };
         };
     };
@@ -94,9 +102,10 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
         game_focused = nk_window_has_focus(ctx);
         draw := nk_window_get_canvas(ctx);
         nk_fill_rect(draw, draw.clip, 0, (r=10,g=10,b=10,a=255));
-        size: f32 = 20;
+        off, size := (state.world.camera.offset, state.world.camera.size);
         for state.world.entities& { it |
-            p := it.pos * size + vec2(draw.clip.x, draw.clip.y);
+            rel := (it.pos - off) * size;
+            p := rel + vec2(draw.clip.x, draw.clip.y);
             if !it.dead {
                 at: nk_rect_t = nk_rect(p.x, p.y, size, size);
                 nk_draw_image(draw, at, state.sprites[it.sprite()]&, white);
@@ -106,6 +115,24 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
                         nk_draw_text(draw, at, Ui'nk_string(s), s.len.intcast(), ctx.style.font, white, white);
                         if it.age > (it.level + 1) * 10 - 5 {
                             nk_draw_text(draw, at, Ui'nk_string("!"), 1, ctx.style.font, white, white);
+                        };
+                    }
+                    fn Player(it) => {
+                        if nk_input_mouse_clicked(ctx.input&, .NK_BUTTON_LEFT, at) {
+                            if state.selected_player() { it |
+                                disk := it.inventory&[it.source_disk_slot]&;
+                                @if_let(disk.item&) fn Disk(d) => {
+                                    source := get_buf(state.edit.string.buffer&);
+                                    d.data&.clear();
+                                    d.data&.push_all(source, general_allocator());
+                                };
+                            };
+                            state.selected_player = it.brain.id;
+                            disk := it.inventory&[it.source_disk_slot]&;
+                            Cubes'set_all(state.edit&, "");
+                            @if_let(disk.item&) fn Disk(d) => {
+                                Cubes'set_all(state.edit&, d.data.items());
+                            };
                         };
                     }
                     @default => ();
@@ -130,8 +157,8 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
     
     if begin(ctx, "Program", nk_rect(w/2, 0, w/2, h), flags) {
         n := it.inventory.slots.len;
-        nk_layout_row_dynamic(ctx, 0, n.intcast());
         draw := nk_window_get_canvas(ctx);
+        nk_layout_row_dynamic(ctx, draw.clip.w / n.float().cast(), n.intcast());
         range(0, n) { i |
             area := zeroed(nk_rect_t);
             nk_widget(area&, ctx);
@@ -150,23 +177,37 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
     
         nk_layout_row_dynamic(ctx, 0, 1);
         if button(ctx, "Recompile") {
-            it.recompile();
+            source := get_buf(state.edit.string.buffer&);
+            it.recompile(source);
         };
         
         size := nk_window_get_content_region(ctx);
         box_height := max(size.h - ctx.current.layout.at_y - ctx.style.edit.scrollbar_size.y - ctx.style.window.spacing.y - 20, 60);
-        import("@/examples/gpu/cubes.fr")'text_box(ctx, it.edit&, box_height, size.w);
-        edit_active = it.edit.active == 1;
+        Cubes'text_box(ctx, state.edit&, box_height, size.w);
+        edit_active = state.edit.active == 1;
     };
+    nk_end(ctx);
+    } else {
+        if begin(ctx, "No Robot Selected", nk_rect(w/2, 0, w/2, h), flags) {
+            wrapping_text_row(ctx, "click a robot to edit its program");
+        };
+        nk_end(ctx);
     };
     state.game_focused = game_focused || !edit_active;
     
-    nk_end(ctx);
 }
 
+Cubes :: import("@/examples/gpu/cubes.fr");
 driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics2(vtable, @source_file_name(), true);
 main :: fn() void = Easy'start(State);
 #use("@/graphics/lib.fr");
 Ui :: import("@/graphics/deps/nuklear.fr");
 
 sprites_png :: include_bytes("examples/gpu/auto/sprites.png");
+
+fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    Ui'Nuklear'nk_textedit_free(state.edit&);
+    on_cleanup(state.ui&, sg);
+    sg.destroy(state.sprites_img);
+    // TODO: world
+}

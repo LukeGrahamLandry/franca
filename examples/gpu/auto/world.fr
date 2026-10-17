@@ -2,10 +2,13 @@
 World :: @rec @struct { 
     entities: List(*Entity);
     dirty: bool;
-    next_id: i64;
+    next_id: *i64;
     dt: f64;
     is_client: bool;
+    players: RawList(*Guest.Guest);
+    camera: CameraPos;
 };
+CameraPos :: @struct(offset: Vec2, size: f32);
 
 EntityId :: @struct(id: i64, hint: i64);
 Entity :: @rec @struct {
@@ -18,7 +21,7 @@ Entity :: @rec @struct {
 Player :: @struct {
     brain: *Guest.Guest;
     errors: List(u8);
-    edit: Ui.Nuklear.nk_text_edit;
+    source_disk_slot: i64;
     inventory: Inventory;
 };
 
@@ -38,41 +41,52 @@ ItemStack :: @struct(item: Item, count: i64);
 Item :: @tagged(
     Empty: void,
     Crop: CropType,
-    Disk,
+    Disk: @struct(data: RawList(u8), limit: i64),
     Keyboard,
+    Robot,
+    Chest,
 );
 
-fn init(w: *World) void = {
+fn init(w: *World, next_id: *i64) void = {
     a := general_allocator();
     w.entities = list(a);
+    w.next_id = next_id;
     it := w.add_player();
     s := it.inventory.slots&;
     s[0] = (item = .Keyboard, count = 1);
-    s[1] = (item = .Disk, count = 1);
+    s[1] = (item = (Disk = (data = empty(), limit = 1.shift_left(14))), count = 1);
     s[2] = (item = (Crop = .fib), count = 5);
     s[3] = (item = (Crop = .nat), count = 5);
+    s[4] = (item = .Robot, count = 1);
+    s[5] = (item = .Chest, count = 1);
+    it.source_disk_slot = 1;
+    it.recompile(Guest.initial_program);
+    w.dirty = true;
 }
 
 fn add_player(w: *World) *Player = {
+    e := w.add_entity(i64.atomic_inc(w.next_id));
+    init_player(w, e)
+}
+
+fn init_player(w: *World, e: *Entity) *Player = {
     a := general_allocator();
-    e := w.add_entity();
     e.info = (Player = zeroed(Player));
     it := e.info.Player&;
     it.inventory = (slots = a.alloc_zeroed(ItemStack, 16));
-    it.errors = list(a);
-    it.brain = a.box_zeroed(Guest.Guest);
-    init(it.brain, e.id);
-    Ui'Nuklear'nk_textedit_init_default(it.edit&);
-    set_all(it.edit&, Guest.initial_program);
-    it.recompile();
+    if !w.is_client {
+        it.errors = list(a);
+        it.brain = a.box_zeroed(Guest.Guest);
+        init(it.brain, e.id, w.next_id);
+        w.players&.push(it.brain, a);
+    };
     it
 }
 
-fn add_entity(w: *World) *Entity = {
+fn add_entity(w: *World, id: i64) *Entity = {
     e := w.entities.gpa.box_zeroed(Entity);
     w.entities&.push(e);
-    e.id = (id = w.next_id, hint = w.entities.len - 1);
-    w.next_id += 1;
+    e.id = (id = id, hint = w.entities.len);
     e
 }
 
@@ -80,6 +94,21 @@ fn update(w: *World) void = {
     tick := w.dt > 1;
     if tick {
         w.dt -= 1;
+        
+        a := general_allocator();
+        w.entities&.unordered_retain(fn(it) => {
+            dead := it.dead;
+            if dead {
+                if it[].inventory() { it |
+                    each it.slots { it |
+                        @if_let(it.item&) fn Disk(it) => it.data&.drop(a);
+                    };
+                    a.dealloc(ItemStack, it.slots);
+                };
+                a.dealloc_one(Entity, it[]);
+            };
+            !dead
+        });
     };
     range(0, w.entities.len) { i |
         e := w.entities[i];
@@ -95,11 +124,13 @@ fn update(w: *World) void = {
 }
 
 fn tick_entity(w: *World, e: *Entity) void = {
+    @if(e.dead) return();
     @match(e.info&) {
         fn Crop(it) => {
             it.age += 1;
             if it.age > (it.level + 1) * 10 {
                 e.dead = true;
+                w.dirty = true;
             };
         }
         @default => ();
@@ -125,7 +156,7 @@ fn host_pipe(w: *World, e: *Entity, p: *Player) void = {
                 sync(w, p.brain, e);
             }
             fn Place(it) => {
-                place(w, e, p, it.inventory_index);
+                place(w, e, p, it.inventory_index, it.new_id.id);
             }
             fn Water(it) => {
                 water(w, w.get(it.target), p, it.answer);
@@ -133,20 +164,54 @@ fn host_pipe(w: *World, e: *Entity, p: *Player) void = {
             fn Harvest(it) => {
                 harvest(w, w.get(it), p);
             }
+            fn Camera(it) => {
+                w.camera = it;
+            }
+            fn MoveItem(it) => {
+                other := w.get(it.other);
+                move_item(e, it.self_slot, other, it.other_slot, it.count);
+                sync(w, e);
+                sync(w, other);
+            }
         };
         w.dirty = true;
     };
 }
+
+// positive count means other<-self
+fn move_item(self: *Entity, self_slot: i64, other: *Entity, other_slot: i64, count: i64) bool = {
+    @if(!within_range(self, other)) return(false);    
+    self := self.inventory() || return(false);
+    other := other.inventory() || return(false);
+    @if(!self_slot.ult(self.slots.len) || !other_slot.ult(other.slots.len)) return(false);
+    dest, src, d, s := (other, self, other_slot, self_slot);
+    if count < 0 {| count = -count; t := src; src = dest; dest = t; t := s; s = d; d = t; };
+    @if(src[s].count < count) return(false);
+    if dest[d].item&.is(.Empty) {
+        dest[d] = (item = src[s].item, count = count);
+    } else {
+        @if(dest[d].item& != src[s].item&) return(false);
+        @if(dest[d].count + count > dest[d].item&.stack_limit()) return(false);
+        dest[d].count += count;
+    };
+    src[s].count -= count;
+    if src[s].count <= 0 {
+        src[s].item = .Empty;
+    };
+    true
+}
+
+fn within_range(a: *Entity, b: *Entity) bool = norm_sq(a.pos - b.pos) < 2;
 
 fn water(w: *World, e: *Entity, p: *Player, answer: f64) bool = {
     @if(e.dead) return(false);
     @match(e.info&) {
         fn Crop(it) => {
             ok := it.age >= it.level && it.level < max_crop_level;
-            in_range := norm_sq(w.get(p.brain.id)[].pos - e.pos) < 2;
+            in_range := within_range(w.get(p.brain.id&), e);
             ok := in_range && ok && answer == sequence(it.type, it.level).float();
             it.level += int(ok);
-            sync(w, p.brain, e);
+            sync(w, e);
             ok
         };
         @default => false;
@@ -155,18 +220,18 @@ fn water(w: *World, e: *Entity, p: *Player, answer: f64) bool = {
 
 fn harvest(w: *World, e: *Entity, p: *Player) bool = {
     @if(e.dead) return(false);
-    pe := w.get(p.brain.id);
+    pe := w.get(p.brain.id&);
     @match(e.info&) {
         fn Crop(it) => {
-            ok := it.level > 0 && norm_sq(w.get(p.brain.id)[].pos - e.pos) < 2;
+            ok := it.level > 0 && within_range(w.get(p.brain.id&), e);
             if ok {
                 ok = insert_item(p.inventory&, (item = (Crop = it.type), count = it.level));
                 if ok {
                     e.dead = true;
                 };
             };
-            sync(w, p.brain, e);
-            sync(w, p.brain, pe);
+            sync(w, e);
+            sync(w, pe);
             ok
         };
         @default => false;
@@ -174,10 +239,11 @@ fn harvest(w: *World, e: *Entity, p: *Player) bool = {
 }
 
 fn insert_item(inventory: *Inventory, new: ItemStack) bool = {
-    ::AutoEq(Item);::DerefEq(CropType);
     if inventory.slots.find(fn(it) => it.item& == new.item&) { slot |
-        slot.count += new.count;
-        return true;
+        if slot.count + new.count < slot.item&.stack_limit() {
+            slot.count += new.count;
+            return true;
+        };
     };
     if inventory.slots.find(fn(it) => it.item&.is(.Empty)) { slot |
         slot[] = new;
@@ -186,7 +252,9 @@ fn insert_item(inventory: *Inventory, new: ItemStack) bool = {
     false
 }
 
-fn place(w: *World, e: *Entity, p: *Player, inventory_index: i64) bool = {
+fn stack_limit(it: *Item) i64 = @if(it.is(.Disk), 1, 1000);
+
+fn place(w: *World, e: *Entity, p: *Player, inventory_index: i64, new_id: i64) bool = {
     @if(!inventory_index.ult(p.inventory.slots.len)) return(false);
     slot := p.inventory.slots[inventory_index]&;
     @if(slot.count <= 0) return(false);
@@ -197,20 +265,33 @@ fn place(w: *World, e: *Entity, p: *Player, inventory_index: i64) bool = {
         };
     };
     
-    @match(slot.item&) {
+    a := general_allocator();
+    new := @match(slot.item&) {
         fn Crop(type) => {
-            new := w.add_entity();
-            new.pos = e.pos;
+            new := w.add_entity(new_id);
             new.info = (Crop = (type = type[]));
-            sync(w, p.brain, new);
+            new
+        }
+        fn Chest() => {
+            new := w.add_entity(new_id);
+            new.info = (Chest = (slots = a.alloc_zeroed(ItemStack, 64)));
+            new
+        }
+        fn Robot() => {
+            new := w.add_entity(new_id);
+            init_player(w, new);
+            new
         }
         @default => return(false);
     };
+    new.pos = e.pos;
+    sync(w, new);
+    
     slot.count -= 1;
     if slot.count <= 0 {
         slot.item = .Empty;
     };
-    sync(w, p.brain, e);
+    sync(w, e);
     true
 }
 
@@ -220,44 +301,75 @@ fn move(e: *Entity, delta: Vec2) bool = {
     true
 }
 
+fn sync(w: *World, e: *Entity) void = {
+    for w.players { it |
+        sync(w, it, e);
+    };
+}
+
 fn sync(w: *World, self: *Guest.Guest, e: *Entity) void = {
     @if(w.is_client) return();
     e := e[];
     a := general_allocator();
-    @match(e.info&) {
-        fn Player(p) => {
-            p.inventory.slots = p.inventory.slots.shallow_copy(a);
-        }
-        @default => ();
+    if e&.inventory() { it |
+        it.slots = it.slots.shallow_copy(a);
+        each it.slots& { it |
+            @if_let(it.item&) fn Disk(it) => {
+                it.data = it.data.items().clone(a).as_raw();
+            };
+        };
     };
     self.send(SyncEntity = (shallow = e));
 }
 
 compiling_message :: "compiling\n";
-fn recompile(it: *Player) void = {
+fn recompile(it: *Player, source: Str) void = {
     it.errors&.clear();
     a := general_allocator();
-    it.errors&.push_all(compiling_message);
-    source := get_buf(it.edit.string.buffer&);
-    it.brain.send(Recompile = source.shallow_copy(a));
+    disk := it.inventory&[it.source_disk_slot]&;
+    @if_let(disk.item&) fn Disk(d) => {
+        if source.len < d.limit {
+            it.errors&.push_all(compiling_message);
+            d.data&.clear();
+            d.data&.push_all(source, a);
+            it.brain.send(Recompile = source.shallow_copy(a));
+            return();
+        };
+        return it.errors&.push_all("program too large for this disk");
+    };
+    it.errors&.push_all("disk not selected");
 }
 
-fn get(w: *World, id: EntityId) *Entity = {
+fn get(w: *World, id: EntityId) *Entity = get(w, id&);
+fn get(w: *World, id: *EntityId) *Entity = {
     it := w.try_get(id); 
     it || @panic("invalid entity id %", id.id)
 }
 
-fn try_get(w: *World, id: EntityId) ?*Entity = {
+fn try_get(w: *World, id: EntityId) ?*Entity = try_get(w, id&);
+fn try_get(w: *World, id: *EntityId) ?*Entity = {
     if id.hint.ult(w.entities.len) && w.entities[id.hint].id.id == id.id {
         return(Some = w.entities[id.hint]);
     };
-    for w.entities { it |
+    enumerate w.entities { i, it |
         if it.id.id == id.id {
-            return(Some = it);
+            it.id.hint = i;
+            id.hint = i;
+            return(Some = it[]);
         };
     };
     .None
 }
+
+fn inventory(e: *Entity) ?*Inventory = {
+    (Some = @match(e.info&) {
+        fn Chest(it) => it;
+        fn Player(it) => it.inventory&;
+        @default => return(.None);
+    })
+}
+
+fn index(e: *Inventory, i: i64) *ItemStack = e.slots.index(i);
 
 fn sprite(e: *Entity) i64 = {
     @match(e.info&) {
@@ -273,6 +385,8 @@ fn sprite(e: *Item) i64 = {
         fn Disk() => 7;
         fn Keyboard() => 8;
         fn Empty() => 9;
+        fn Robot() => 0;
+        fn Chest() => 6;
     }
 }
 
@@ -328,6 +442,15 @@ fn sequence(type: CropType, i: i64) i64 = {
             };
             a
         }
+    }
+}
+
+fn ne(a: *Item, b: *Item) bool = !eq(a, b);
+fn eq(a: *Item, b: *Item) bool = {
+    @if(a.tag() != b.tag()) return(false);
+    @match(a) {
+        fn Crop(aa) => aa[] == b.Crop;
+        @default => true;
     }
 }
 

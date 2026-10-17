@@ -1,5 +1,17 @@
 
-## (Oct 16)
+## (Oct 17) auto
+
+- should the lua side have its own model of the world or always call host functions to get info?
+  its hard to decide how tightly to keep the two in sync. 
+  if they only communicate with the pipe, you don't get responses to your actions within the event handler. 
+  could give up on that and put a mutex around the world, or give up on the two threads altogether. 
+  maybe more fun is have a seperate copy of the world and run the logic on both threads and then extra syncing with the pipe,
+  because that should make multiplayer on different computers doable by "just" making the pipe be packets instead.
+- little puzzle where you have to water the plants based on a number sequence to harvest more. 
+- camera. move items between chests. 
+- working towards multiple robots. 
+
+## (Oct 16) auto
 
 - be responsible and don't let you input bytecode
 - trivial entity system and draw them. seperated stuff out so i can have multiple robots. allow multiple responses. 
