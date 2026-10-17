@@ -1,11 +1,13 @@
 
-World :: @struct { 
+World :: @rec @struct { 
     entities: List(*Entity);
     dirty: bool;
+    next_id: i64;
 };
 
-Entity :: @struct {
+Entity :: @rec @struct {
     pos: Vec2;
+    id: i64;
     info: EntityInfo;
 };
 
@@ -13,6 +15,7 @@ Player :: @struct {
     brain: Guest.Guest;
     errors: List(u8);
     edit: Ui.Nuklear.nk_text_edit;
+    inventory: Inventory;
 };
 
 EntityInfo :: @tagged(
@@ -22,20 +25,51 @@ EntityInfo :: @tagged(
         level := 0;
         age := 0;
     },
+    Chest: Inventory,
 );
 
 CropType :: @enum(fib, fac, prime);
+Inventory :: @struct(slots: []ItemStack);
+ItemStack :: @struct(item: Item, count: i64);
+Item :: @tagged(
+    Empty: void,
+    Crop: CropType,
+    Disk: @struct(data: RawList(u8), limit: i64),
+    Keyboard,
+);
 
 fn init(w: *World) void = {
     a := general_allocator();
     w.entities = list(a);
-    w.entities&.push(a.box_zeroed(Entity));
-    it := w.entities[0].info.Player&;
+    it := w.add_player();
+    s := it.inventory.slots&;
+    s[0] = (item = .Keyboard, count = 1);
+    s[1] = (item = (Disk = (data = empty(), limit = 4096)), count = 1);
+    s[2] = (item = (Crop = .fib), count = 5);
+    s[3] = (item = (Crop = .fac), count = 5);
+}
+
+fn add_player(w: *World) *Player = {
+    a := general_allocator();
+    e := w.add_entity();
+    e.info = (Player = zeroed(Player));
+    it := e.info.Player&;
+    it.inventory = (slots = a.alloc_zeroed(ItemStack, 16));
     it.errors = list(a);
     init(it.brain&);
+    it.brain.id = e.id;
     Ui'Nuklear'nk_textedit_init_default(it.edit&);
     set_all(it.edit&, Guest.initial_program);
     it.recompile();
+    it
+}
+
+fn add_entity(w: *World) *Entity = {
+    e := w.entities.gpa.box_zeroed(Entity);
+    w.entities&.push(e);
+    e.id = w.next_id;
+    w.next_id += 1;
+    e
 }
 
 fn update(w: *World) void = {
@@ -48,29 +82,65 @@ fn update(w: *World) void = {
             fn Crop(it) => {
                 it.age += 1;
             }
+            fn Chest() => ();
         };
     };
 }
 
-fn host_pipe(w: *World, e: *Entity, it: *Player) void = {
+fn host_pipe(w: *World, e: *Entity, p: *Player) void = {
     a := general_allocator();
-    while => it.brain&.listen() { output |
-        w.dirty = true;
+    while => p.brain&.listen() { output |
+        continue :: local_return;
         @match(output) {
             fn Move(it) => {
                 e.pos += it;
             }
             fn Error(msg) => {
-                @fmt(it.errors&, "%\n", msg);
+                @fmt(p.errors&, "%\n", msg);
                 a.dealloc(u8, msg);
             }
-            fn CompileOk() => it.errors&.clear();
-            fn Plant(type) => {
-                new := a.boxed(Entity, (pos = e.pos, info = (Crop = (type = type))));
-                w.entities&.push(new);
+            fn CompileOk() => {
+                p.errors&.clear();
+                sync(p.brain&, e);
             }
-        }
+            fn Place(it) => {
+                place(w, e, p, it.inventory_index);
+            }
+        };
+        w.dirty = true;
     };
+}
+
+fn place(w: *World, e: *Entity, p: *Player, inventory_index: i64) bool = {
+    @if(!inventory_index.ult(p.inventory.slots.len)) return(false);
+    slot := p.inventory.slots[inventory_index]&;
+    @if(slot.count <= 0) return(false);
+    @match(slot.item&) {
+        fn Crop(type) => {
+            new := w.add_entity();
+            new.pos = e.pos;
+            new.info = (Crop = (type = type[]));
+        }
+        @default => return(false);
+    };
+    slot.count -= 1;
+    if slot.count <= 0 {
+        slot.item = .Empty;
+    };
+    sync(p.brain&, e);
+    true
+}
+
+fn sync(self: *Guest.Guest, e: *Entity) void = {
+    e := e[];
+    a := general_allocator();
+    @match(e.info&) {
+        fn Player(p) => {
+            p.inventory.slots = p.inventory.slots.shallow_copy(a);
+        }
+        @default => ();
+    };
+    self.send(SyncEntity = (shallow = e));
 }
 
 fn recompile(it: *Player) void = {
@@ -85,6 +155,16 @@ fn sprite(e: *Entity) i64 = {
     @match(e.info&) {
         fn Player() => 0;
         fn Crop(it) => 1 + mod(it.type.raw(), 3);
+        fn Chest() => 6;
+    }
+}
+
+fn sprite(e: *Item) i64 = {
+    @match(e) {
+        fn Crop(it) => 1 + mod(it[].raw(), 3);
+        fn Disk() => 7;
+        fn Keyboard() => 8;
+        fn Empty() => 9;
     }
 }
 

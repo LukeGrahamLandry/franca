@@ -1,19 +1,21 @@
 
 Lua :: import("@/examples/disassemble.fr").Lua;
-Guest :: @struct {
+Guest :: @rec @struct {
     input: QRing'Tube(Input);
     output: QRing'Tube(Output);
     worker: *Thread;
     lua: *Lua'lua_State;
+    id: i64;
 };
 
 Input :: @tagged(
     Key: @struct(char: i64, down: bool),
     Recompile: Str,
+    SyncEntity: @struct(shallow: Sim.Entity),
 );
 Output :: @tagged(
     Move: import("@/graphics/vec.fr")'Vec2,
-    Plant: Sim.CropType,
+    Place: @struct(inventory_index: i64),
     Error: Str,
     CompileOk,
 );
@@ -47,11 +49,30 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
         p := lua_tolstring(L, i, length&);
         bit_cast_unchecked(*i8, *u8, p).slice(length.bitcast())
     };
+    pushlstring :: fn(L: *lua_State, s: Str) void = {
+        lua_pushlstring(L, bit_cast_unchecked(*u8, *i8, s.ptr), s.len.bitcast());
+    };
     get_number :: fn(L: *lua_State, i: i32) f64 = {
         ok: i32 = 0;
         v := lua_tonumberx(L, i, ok&);
         @if(ok == 1, v, NaN)
     };
+    get_or_new :: fn(L: *lua_State, i: i32) void = {
+        lua_pushvalue(L, -1);
+        lua_gettable(L, i-1);
+        
+        if lua_istable(L, -1) {
+            lua_pop(L, 1);
+            lua_gettable(L, i);
+        } else {  // TODO: rotate?
+            lua_pop(L, 1);
+            lua_pushvalue(L, -1);
+            lua_createtable(L, 0, 0);
+            lua_settable(L, i-2);
+            lua_gettable(L, i);
+        }
+    };
+    
     send_fn :: fn(L: *lua_State) i32 = {
         self := Guest.ptr_from_raw(lua_topointer(L, lua_upvalueindex(1)));
         action := get_str(L, 1);
@@ -63,10 +84,10 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
                     self.output&.push(Move = vec2(x.cast(), y.cast()));
                 };
             };
-            @case("plant") => {
-                type := get_str(L, 2);
-                if Sim.CropType.from_name(type) { type |
-                    self.output&.push(Plant = type);
+            @case("place") => {
+                i := get_number(L, 2).int() - 1;
+                if i.ult(16) {
+                    self.output&.push(Place = (inventory_index = i));
                 };
             };
             @case("print") => {
@@ -93,6 +114,18 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
                 lua_pushnil(L);
                 lua_setglobal(L, S"on_key_event");
                 
+                lua_createtable(L, 0, 0);
+                pushlstring(L, "id");
+                lua_pushnumber(L, self.id.float());
+                lua_settable(L, -3);
+                lua_setglobal(L, S"self");
+                
+                lua_createtable(L, 0, 0);
+                lua_pushnumber(L, self.id.float());
+                lua_getglobal(L, S"self");
+                lua_settable(L, -3);
+                lua_setglobal(L, S"entities");
+                
                 lua_pushlightuserdata(L, Guest.raw_from_ptr(self));
                 lua_pushcclosure(L, send_fn, /*#upvalues*/ 1);
                 lua_setglobal(L, S"send");
@@ -111,6 +144,47 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
                 r := Lua'lua_pcall(L, 2, 0, 0);
                 check_error(r);
             }
+            fn SyncEntity(it) => {
+                it := it.shallow&;
+                lua_getglobal(L, S"entities");
+                lua_pushnumber(L, it.id.float());
+                get_or_new(L, -2);
+                @match(it.info&) {
+                    fn Player(it) => {
+                        slots := it.inventory.slots;
+                        pushlstring(L, "inventory");
+                        get_or_new(L, -2);
+                        enumerate slots { i, slot |
+                            lua_pushnumber(L, i.float() + 1);
+                            get_or_new(L, -2);
+                            
+                            pushlstring(L, "i");
+                            lua_pushnumber(L, i.float() + 1);
+                            lua_settable(L, -3);
+                            pushlstring(L, "count");
+                            lua_pushnumber(L, slot.count.float());
+                            lua_settable(L, -3);
+                            pushlstring(L, "item");
+                            t := slot.item&.tag();
+                            pushlstring(L, t.name_str());
+                            lua_settable(L, -3);
+                            @match(slot.item&) {
+                                fn Crop(it) => {
+                                    pushlstring(L, "type");
+                                    pushlstring(L, it[].name_str());
+                                    lua_settable(L, -3);
+                                }
+                                @default => ();
+                            };
+                            lua_pop(L, 1);
+                        };
+                        lua_pop(L, 1);
+                        a.dealloc(Sim.ItemStack, slots);
+                    }
+                    @default => ();
+                };
+                lua_pop(L, 2);
+            }
         }
     };
     Lua'lua_close(L);
@@ -118,6 +192,14 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
 
 initial_program :: """
 function print(s) send("print", s) end
+
+self.place = function(self, i)
+    -- inventory will be resynced on the next frame but we can guess what it will be so dont have to wait
+    local it = self.inventory[i];
+    if (it.item ~= "Crop") or (it.count < 1) then return nil end
+    it.count = it.count - 1;
+    send("place", i);
+end
 
 local keys = {
     [string.byte("W")] = { 0, -1},
@@ -131,8 +213,8 @@ function on_key_event(char, is_down)
     if keys[char] ~= nil then 
         send("move", table.unpack(keys[char]));
     end
-    if char == string.byte("Q") then 
-        send("plant", "fib");
+    if char >= string.byte("1") and char <= string.byte("9") then 
+        self:place(char - string.byte("1") + 1);
     end
 end
 """;
