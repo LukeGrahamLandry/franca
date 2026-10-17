@@ -5,14 +5,15 @@ World :: @rec @struct {
     next_id: i64;
 };
 
+EntityId :: @struct(id: i64, hint: i64);
 Entity :: @rec @struct {
     pos: Vec2;
-    id: i64;
+    id: EntityId;
     info: EntityInfo;
 };
 
 Player :: @struct {
-    brain: Guest.Guest;
+    brain: *Guest.Guest;
     errors: List(u8);
     edit: Ui.Nuklear.nk_text_edit;
     inventory: Inventory;
@@ -34,7 +35,7 @@ ItemStack :: @struct(item: Item, count: i64);
 Item :: @tagged(
     Empty: void,
     Crop: CropType,
-    Disk: @struct(data: RawList(u8), limit: i64),
+    Disk: @struct(limit: i64),
     Keyboard,
 );
 
@@ -44,7 +45,7 @@ fn init(w: *World) void = {
     it := w.add_player();
     s := it.inventory.slots&;
     s[0] = (item = .Keyboard, count = 1);
-    s[1] = (item = (Disk = (data = empty(), limit = 4096)), count = 1);
+    s[1] = (item = (Disk = (limit = 4096)), count = 1);
     s[2] = (item = (Crop = .fib), count = 5);
     s[3] = (item = (Crop = .fac), count = 5);
 }
@@ -56,8 +57,8 @@ fn add_player(w: *World) *Player = {
     it := e.info.Player&;
     it.inventory = (slots = a.alloc_zeroed(ItemStack, 16));
     it.errors = list(a);
-    init(it.brain&);
-    it.brain.id = e.id;
+    it.brain = a.box_zeroed(Guest.Guest);
+    init(it.brain, e.id);
     Ui'Nuklear'nk_textedit_init_default(it.edit&);
     set_all(it.edit&, Guest.initial_program);
     it.recompile();
@@ -67,7 +68,7 @@ fn add_player(w: *World) *Player = {
 fn add_entity(w: *World) *Entity = {
     e := w.entities.gpa.box_zeroed(Entity);
     w.entities&.push(e);
-    e.id = w.next_id;
+    e.id = (id = w.next_id, hint = w.entities.len - 1);
     w.next_id += 1;
     e
 }
@@ -89,11 +90,11 @@ fn update(w: *World) void = {
 
 fn host_pipe(w: *World, e: *Entity, p: *Player) void = {
     a := general_allocator();
-    while => p.brain&.listen() { output |
+    while => p.brain.listen() { output |
         continue :: local_return;
         @match(output) {
             fn Move(it) => {
-                e.pos += it;
+                move(e, it);
             }
             fn Error(msg) => {
                 @fmt(p.errors&, "%\n", msg);
@@ -101,7 +102,7 @@ fn host_pipe(w: *World, e: *Entity, p: *Player) void = {
             }
             fn CompileOk() => {
                 p.errors&.clear();
-                sync(p.brain&, e);
+                sync(p.brain, e);
             }
             fn Place(it) => {
                 place(w, e, p, it.inventory_index);
@@ -115,11 +116,19 @@ fn place(w: *World, e: *Entity, p: *Player, inventory_index: i64) bool = {
     @if(!inventory_index.ult(p.inventory.slots.len)) return(false);
     slot := p.inventory.slots[inventory_index]&;
     @if(slot.count <= 0) return(false);
+    
+    for w.entities { it |
+        if it.pos == e.pos && it.id.id != e.id.id {
+            return false;
+        };
+    };
+    
     @match(slot.item&) {
         fn Crop(type) => {
             new := w.add_entity();
             new.pos = e.pos;
             new.info = (Crop = (type = type[]));
+            sync(p.brain, new);
         }
         @default => return(false);
     };
@@ -127,7 +136,13 @@ fn place(w: *World, e: *Entity, p: *Player, inventory_index: i64) bool = {
     if slot.count <= 0 {
         slot.item = .Empty;
     };
-    sync(p.brain&, e);
+    sync(p.brain, e);
+    true
+}
+
+fn move(e: *Entity, delta: Vec2) bool = {
+    @if(delta.x.is_nan() || delta.y.is_nan() || abs(delta.x) > 1 || abs(delta.y) > 1) return(false);
+    e.pos += delta;
     true
 }
 
@@ -148,7 +163,24 @@ fn recompile(it: *Player) void = {
     a := general_allocator();
     it.errors&.push_all("compiling");
     source := get_buf(it.edit.string.buffer&);
-    it.brain&.send(Recompile = source.shallow_copy(a));
+    it.brain.send(Recompile = source.shallow_copy(a));
+}
+
+fn get(w: *World, id: EntityId) *Entity = {
+    it := w.try_get(id); 
+    it || @panic("invalid entity id %", id.id)
+}
+
+fn try_get(w: *World, id: EntityId) ?*Entity = {
+    if id.hint.ult(w.entities.len) && w.entities[id.hint].id.id == id.id {
+        return(Some = w.entities[id.hint]);
+    };
+    for w.entities { it |
+        if it.id.id == id.id {
+            return(Some = it);
+        };
+    };
+    .None
 }
 
 fn sprite(e: *Entity) i64 = {

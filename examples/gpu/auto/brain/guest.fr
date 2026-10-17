@@ -5,7 +5,8 @@ Guest :: @rec @struct {
     output: QRing'Tube(Output);
     worker: *Thread;
     lua: *Lua'lua_State;
-    id: i64;
+    id: Sim.EntityId;
+    client: *Sim.World;
 };
 
 Input :: @tagged(
@@ -20,12 +21,21 @@ Output :: @tagged(
     CompileOk,
 );
 
-fn init(self: *Guest) void = {
+fn init(self: *Guest, id: Sim.EntityId) void = {
     n := 128;
     a := general_allocator();
     self.input = (ring = a.alloc_zeroed(Input, n));
     self.output = (ring = a.alloc_zeroed(Output, n));
     self.worker = start_thread(Guest, guest_main, self);
+    self.client = a.box_zeroed(Sim.World);
+    self.client.entities = list(a);
+    e := a.box_zeroed(Sim.Entity);
+    self.id = e.id;
+    e.id = id;
+    e.info = (Player = zeroed(Sim.Player));
+    e.info.Player.brain = self;
+    e.info.Player.inventory.slots = a.alloc_zeroed(Sim.ItemStack, 16);
+    self.client.entities&.push(e);
 }
 
 fn send(self: *Guest, msg: Input) void = {
@@ -37,11 +47,32 @@ fn listen(self: *Guest) ?Output = {
     (Some = self.output&.pop())
 }
 
+fn client(self: *Guest, it: Output) void = {
+    @match(it&) {
+        fn Move(delta) => @if(!move(self.client.get(self.id), delta[])) return();
+        fn Place(it) => {
+            e := self.client.get(self.id);
+            @if(!place(self.client, e, e.info.Player&, it.inventory_index)) return();
+        }
+        @default => ();
+    };
+    self.output&.push(it);
+}
+
 guest_main :: fn(self: *Guest) void #use(Lua) = {
     L := Lua'luaL_newstate();
     L.open_and_pop("math", Lua'luaopen_math);
     L.open_and_pop("string", Lua'luaopen_string);
     L.open_and_pop("table", Lua'luaopen_table);
+    L.open_and_pop("_G", luaopen_base);
+    
+    no := @const_slice(@as(CStr) "collectgarbage", "dofile", "loadfile", "load");
+    lua_getglobal(L, S"_G");
+    for no { it |
+        lua_pushnil(L);
+        lua_setfield(L, -2, S(it));
+    };
+    lua_pop(L, 1);
     
     S :: fn(s: CStr) = bit_cast_unchecked(CStr, *i8, s);
     get_str :: fn(L: *lua_State, i: i32) Str = {
@@ -72,6 +103,58 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
             lua_gettable(L, i);
         }
     };
+    // [table] -> [table]
+    write_item :: fn(L: *lua_State, slot: *Sim.ItemStack) void = {
+        lua_pushnumber(L, slot.count.float());
+        lua_setfield(L, -2, S"count");
+        t := slot.item&.tag();
+        pushlstring(L, t.name_str());
+        lua_setfield(L, -2, S"item");
+        @match(slot.item&) {
+            fn Crop(it) => {
+                pushlstring(L, it[].name_str());
+                lua_setfield(L, -2, S"type");
+            }
+            @default => ();
+        };
+    }
+    
+    // TODO: make id on the lua side be {id,hint} so its faster
+    // TODO: have get() take *EntityId so it can update the hint if it changed
+    get_inventory_fn :: fn(L: *lua_State) i32 = {
+        self := Guest.ptr_from_raw(lua_topointer(L, lua_upvalueindex(1)));
+        entity_id := get_number(L, 1).int();
+        slot_index := get_number(L, 2).int() - 1;
+        if self.client.try_get((id = entity_id, hint = 0)) { e |
+            break :: local_return;
+            inventory := @match(e.info&) {
+                fn Chest(it) => it;
+                fn Player(it) => it.inventory&;
+                @default => break();
+            }
+            if slot_index.ult(inventory.slots.len) {
+                lua_createtable(L, 0, 0);
+                write_item(L, inventory.slots[slot_index]&);
+                return 1;
+            };
+        };
+        lua_pushnil(L);
+        1
+    };
+    get_pos_fn :: fn(L: *lua_State) i32 = {
+        self := Guest.ptr_from_raw(lua_topointer(L, lua_upvalueindex(1)));
+        entity_id := get_number(L, 1).int();
+        if self.client.try_get((id = entity_id, hint = 0)) { e |
+            lua_createtable(L, 0, 0);
+            lua_pushnumber(L, e.pos.x.cast());
+            lua_setfield(L, -2, S"x");
+            lua_pushnumber(L, e.pos.y.cast());
+            lua_setfield(L, -2, S"y");
+            return 1;
+        };
+        lua_pushnil(L);
+        1
+    };
     
     send_fn :: fn(L: *lua_State) i32 = {
         self := Guest.ptr_from_raw(lua_topointer(L, lua_upvalueindex(1)));
@@ -80,19 +163,16 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
             @case("move") => {
                 x := get_number(L, 2);
                 y := get_number(L, 3);
-                @if((x == 0 || x == 1 || x == -1) && (y == 0 || y == 1 || y == -1)) {
-                    self.output&.push(Move = vec2(x.cast(), y.cast()));
-                };
+                self.client(Move = vec2(x.cast(), y.cast()));
             };
             @case("place") => {
                 i := get_number(L, 2).int() - 1;
-                if i.ult(16) {
-                    self.output&.push(Place = (inventory_index = i));
-                };
+                e := self.client.get(self.id);
+                self.client(Place = (inventory_index = i));
             };
             @case("print") => {
                 msg := get_str(L, 2).shallow_copy(general_allocator());
-                self.output&.push(Error = msg);
+                self.client(Error = msg);
             };
             @default => @eprintln("invalid send '%'", action);
         };
@@ -104,7 +184,7 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
         continue :: local_return;
         check_error :: fn(r) => if r != 0 {
             msg := get_str(L, -1).shallow_copy(a);
-            self.output&.push(Error = msg);
+            self.client(Error = msg);
             lua_pop(L, 1);
             continue();
         };
@@ -116,26 +196,31 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
                 
                 lua_createtable(L, 0, 0);
                 pushlstring(L, "id");
-                lua_pushnumber(L, self.id.float());
+                lua_pushnumber(L, self.id.id.float());
                 lua_settable(L, -3);
                 lua_setglobal(L, S"self");
                 
                 lua_createtable(L, 0, 0);
-                lua_pushnumber(L, self.id.float());
+                lua_pushnumber(L, self.id.id.float());
                 lua_getglobal(L, S"self");
                 lua_settable(L, -3);
                 lua_setglobal(L, S"entities");
                 
-                lua_pushlightuserdata(L, Guest.raw_from_ptr(self));
-                lua_pushcclosure(L, send_fn, /*#upvalues*/ 1);
-                lua_setglobal(L, S"send");
+                extern :: fn(name: CStr, f: @FnPtr(L: *lua_State) i32) void => {
+                    lua_pushlightuserdata(L, Guest.raw_from_ptr(self));
+                    lua_pushcclosure(L, f, /*#upvalues*/ 1);
+                    lua_setglobal(L, S(name));
+                };
+                extern("send", send_fn);
+                extern("get_inventory_slot", get_inventory_fn);
+                extern("get_entity_pos", get_pos_fn);
                 
                 r := luaL_loadbufferx(L, bit_cast_unchecked(*u8, *i8, src.ptr), src.len.bitcast(), zeroed(*i8), S"t");
                 general_allocator().dealloc(u8, src);
                 check_error(r);
                 r := lua_pcall(L, 0, 0, 0);
                 check_error(r);
-                self.output&.push(.CompileOk);
+                self.client(.CompileOk);
             }
             fn Key(it) => {
                 Lua'lua_getglobal(L, S"on_key_event");
@@ -145,61 +230,51 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
                 check_error(r);
             }
             fn SyncEntity(it) => {
-                it := it.shallow&;
-                lua_getglobal(L, S"entities");
-                lua_pushnumber(L, it.id.float());
-                get_or_new(L, -2);
-                @match(it.info&) {
-                    fn Player(it) => {
-                        slots := it.inventory.slots;
-                        pushlstring(L, "inventory");
-                        get_or_new(L, -2);
-                        enumerate slots { i, slot |
-                            lua_pushnumber(L, i.float() + 1);
-                            get_or_new(L, -2);
-                            
-                            pushlstring(L, "i");
-                            lua_pushnumber(L, i.float() + 1);
-                            lua_settable(L, -3);
-                            pushlstring(L, "count");
-                            lua_pushnumber(L, slot.count.float());
-                            lua_settable(L, -3);
-                            pushlstring(L, "item");
-                            t := slot.item&.tag();
-                            pushlstring(L, t.name_str());
-                            lua_settable(L, -3);
-                            @match(slot.item&) {
-                                fn Crop(it) => {
-                                    pushlstring(L, "type");
-                                    pushlstring(L, it[].name_str());
-                                    lua_settable(L, -3);
-                                }
-                                @default => ();
-                            };
-                            lua_pop(L, 1);
-                        };
-                        lua_pop(L, 1);
-                        a.dealloc(Sim.ItemStack, slots);
-                    }
-                    @default => ();
+                src := it.shallow&;
+                dest := self.client.try_get(src.id) || {
+                    e := self.client.add_entity();
+                    e.info&.tag_ptr()[] = src.info&.tag();
+                    e.id.id = src.id.id;
+                    e
                 };
-                lua_pop(L, 2);
+                dest.pos = src.pos;
+                
+                @match(dest.info&) {
+                    fn Player(it) => sync_inventory(it.inventory&, src.info.Player.inventory&);
+                    fn Chest(it) => sync_inventory(it, src.info.Chest&);
+                    fn Crop(_) => {
+                        dest.info = src.info;
+                    }
+                };
             }
         }
     };
     Lua'lua_close(L);
 }
 
+sync_inventory :: fn(dest: *Sim.Inventory, src: *Sim.Inventory) void = {
+    a := general_allocator();
+    if src.slots.len != dest.slots.len {
+        a.dealloc(Sim.ItemStack, dest.slots);
+        dest.slots = a.alloc_uninit(Sim.ItemStack, src.slots.len);
+    };
+    dest.slots.copy_from(src.slots);
+    a.dealloc(Sim.ItemStack, src.slots);
+    src.slots = empty();
+};
+
 initial_program :: """
 function print(s) send("print", s) end
 
-self.place = function(self, i)
-    -- inventory will be resynced on the next frame but we can guess what it will be so dont have to wait
-    local it = self.inventory[i];
-    if (it.item ~= "Crop") or (it.count < 1) then return nil end
-    it.count = it.count - 1;
-    send("place", i);
-end
+self.place = function(self, i) send("place", i) end
+self.move = function(self, dx, dy) send("move", dx, dy) end
+
+self.inventory = setmetatable({}, { __index = function(_, i) 
+    return get_inventory_slot(self.id, i) 
+end });
+self.pos = setmetatable({}, { __index = function(_, key) 
+    return get_entity_pos(self.id)[key] 
+end });
 
 local keys = {
     [string.byte("W")] = { 0, -1},
@@ -211,7 +286,7 @@ local keys = {
 function on_key_event(char, is_down)
     if is_down == 0 then return nil end
     if keys[char] ~= nil then 
-        send("move", table.unpack(keys[char]));
+       self:move(table.unpack(keys[char]));
     end
     if char >= string.byte("1") and char <= string.byte("9") then 
         self:place(char - string.byte("1") + 1);
