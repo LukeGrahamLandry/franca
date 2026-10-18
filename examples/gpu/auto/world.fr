@@ -7,6 +7,7 @@ World :: @rec @struct {
     is_client: bool;
     players: RawList(*Guest.Guest);
     camera: CameraPos;
+    disk_dirty: bool;
 };
 CameraPos :: @struct(offset: Vec2, size: f32);
 
@@ -94,21 +95,7 @@ fn update(w: *World) void = {
     tick := w.dt > 1;
     if tick {
         w.dt -= 1;
-        
-        a := general_allocator();
-        w.entities&.unordered_retain(fn(it) => {
-            dead := it.dead;
-            if dead {
-                if it[].inventory() { it |
-                    each it.slots { it |
-                        @if_let(it.item&) fn Disk(it) => it.data&.drop(a);
-                    };
-                    a.dealloc(ItemStack, it.slots);
-                };
-                a.dealloc_one(Entity, it[]);
-            };
-            !dead
-        });
+        free_dead_entities(w);
     };
     range(0, w.entities.len) { i |
         e := w.entities[i];
@@ -121,6 +108,23 @@ fn update(w: *World) void = {
             @default => ();
         };
     };
+}
+
+fn free_dead_entities(w: *World) void = {
+    a := general_allocator();
+    w.entities&.unordered_retain(fn(it) => {
+        dead := it.dead;
+        if dead {
+            if it[].inventory() { it |
+                each it.slots { it |
+                    @if_let(it.item&) fn Disk(it) => it.data&.drop(a);
+                };
+                a.dealloc(ItemStack, it.slots);
+            };
+            a.dealloc_one(Entity, it[]);
+        };
+        !dead
+    });
 }
 
 fn tick_entity(w: *World, e: *Entity) void = {
@@ -156,7 +160,7 @@ fn host_pipe(w: *World, e: *Entity, p: *Player) void = {
                 sync(w, p.brain, e);
             }
             fn Place(it) => {
-                place(w, e, p, it.inventory_index, it.new_id.id);
+                place(w, p, it.inventory_index, it.new_id.id);
             }
             fn Water(it) => {
                 water(w, w.get(it.target), p, it.answer);
@@ -173,6 +177,16 @@ fn host_pipe(w: *World, e: *Entity, p: *Player) void = {
                 sync(w, e);
                 sync(w, other);
             }
+            fn DiskWrite(it) => {
+                if e.get_disk(it.slot) { d |
+                    if it.data.len <= d.limit {
+                        d.data&.clear();
+                        d.data&.push_all(it.data, a);
+                        w.disk_dirty = true;
+                    };
+                };
+                a.dealloc(u8, it.data);
+            };
         };
         w.dirty = true;
     };
@@ -254,13 +268,14 @@ fn insert_item(inventory: *Inventory, new: ItemStack) bool = {
 
 fn stack_limit(it: *Item) i64 = @if(it.is(.Disk), 1, 1000);
 
-fn place(w: *World, e: *Entity, p: *Player, inventory_index: i64, new_id: i64) bool = {
+fn place(w: *World, p: *Player, inventory_index: i64, new_id: i64) bool = {
     @if(!inventory_index.ult(p.inventory.slots.len)) return(false);
     slot := p.inventory.slots[inventory_index]&;
     @if(slot.count <= 0) return(false);
     
+    e := w.get(p.brain.id);
     for w.entities { it |
-        if it.pos == e.pos && it.id.id != e.id.id {
+        if it.pos == e.pos && it.id.id != e.id.id && !it.dead {
             return false;
         };
     };
@@ -335,7 +350,7 @@ fn recompile(it: *Player, source: Str) void = {
             it.brain.send(Recompile = source.shallow_copy(a));
             return();
         };
-        return it.errors&.push_all("program too large for this disk");
+        return it.errors&.push_all(@tfmt("program too large for this disk %/% bytes", source.len, d.limit));
     };
     it.errors&.push_all("disk not selected");
 }
@@ -397,6 +412,7 @@ fn display_name(e: *Item) Str = {
             fn fib() => "Leonardo 'Fibonacci' Bonacci's Beets";
             fn prime() => "Prime Protatoes";
         };
+        fn Disk(it) => @tfmt("Disk (%/%)", it.data.len, it.limit);
         fn Empty() => "";
         @default => {
             t := e.tag();
@@ -457,3 +473,18 @@ fn eq(a: *Item, b: *Item) bool = {
 #use("@/graphics/vec.fr");
 Guest :: import("@/examples/gpu/auto/brain/guest.fr");
 Ui :: import("@/graphics/deps/nuklear.fr");
+
+fn get_disk(e: *Entity, slot: i64) ?*get_variant_type(Item, .Disk) = {
+    get_disk(e.inventory() || return(.None), slot)
+}
+
+fn get_disk(e: *Inventory, slot: i64) ?*get_variant_type(Item, .Disk) = {
+    @if(slot.ult(e.slots.len)) @if_let(e[slot].item&) fn Disk(it) =>
+        return(Some = it);
+    .None
+}
+
+fn get_disk(w: *World, e: EntityId) ?*get_variant_type(Item, .Disk) = {
+    @if_let(w.get(e)[].info&) fn Player(it) => return(get_disk(it.inventory&, it.source_disk_slot));
+    .None
+}

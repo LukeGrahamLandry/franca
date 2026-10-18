@@ -95,6 +95,14 @@ fn selected_player(state: *State) ?*Sim.Player = {
 fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
     ctx := state.ui.ctx&;
     
+    // TODO: this is bad because if some other robot is writing its disk, 
+    //       it will make your own keep stomping out your edits
+    if state.world.disk_dirty&.take() {
+        if get_disk(state.world&, state.selected_player) { d |
+            Cubes'set_all(state.edit&, d.data.items());
+        };
+    };
+    
     flags := (@as(u32) nk_panel_flags.NK_WINDOW_MOVABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_SCALABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_MINIMIZABLE);
     game_focused, edit_active := (false, false);
     white: nk_color = (r=255,g=255,b=255,a=255);
@@ -119,18 +127,14 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
                     }
                     fn Player(it) => {
                         if nk_input_mouse_clicked(ctx.input&, .NK_BUTTON_LEFT, at) {
-                            if state.selected_player() { it |
-                                disk := it.inventory&[it.source_disk_slot]&;
-                                @if_let(disk.item&) fn Disk(d) => {
+                            if get_disk(state.world&, state.selected_player) { d |
                                     source := get_buf(state.edit.string.buffer&);
                                     d.data&.clear();
                                     d.data&.push_all(source, general_allocator());
-                                };
                             };
                             state.selected_player = it.brain.id;
-                            disk := it.inventory&[it.source_disk_slot]&;
                             Cubes'set_all(state.edit&, "");
-                            @if_let(disk.item&) fn Disk(d) => {
+                            if get_disk(state.world&, state.selected_player) { d |
                                 Cubes'set_all(state.edit&, d.data.items());
                             };
                         };
@@ -206,8 +210,16 @@ Ui :: import("@/graphics/deps/nuklear.fr");
 sprites_png :: include_bytes("examples/gpu/auto/sprites.png");
 
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    for state.world.players { it |
+        it.halt_requested = true;
+        it.send(Recompile = "");
+    };
     Ui'Nuklear'nk_textedit_free(state.edit&);
     on_cleanup(state.ui&, sg);
     sg.destroy(state.sprites_img);
-    // TODO: world
+    general_allocator().dealloc(@type state.sprites[0], state.sprites);
+    each state.world.players { it |
+        it.worker.join();
+    };
+    // TODO: free world
 }
