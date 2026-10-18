@@ -14,7 +14,7 @@ Input :: @tagged(
     Key: @struct(char: i64, down: bool),
     Recompile: Str,
     SyncEntity: @struct(shallow: Sim.Entity),
-    Tick,
+    Tick: i64,
 );
 Output :: @tagged(
     Move: Vec2,
@@ -30,7 +30,7 @@ Output :: @tagged(
     // TODO: let it ask to recompile
 );
 
-fn init(self: *Guest, id: Sim.EntityId, next_id: *i64) void = {
+fn init(self: *Guest, id: Sim.EntityId, next_id: *i64, ticks: i64) void = {
     n := 128;
     a := general_allocator();
     self.input = (ring = a.alloc_zeroed(Input, n));
@@ -40,6 +40,7 @@ fn init(self: *Guest, id: Sim.EntityId, next_id: *i64) void = {
     self.client.next_id = next_id;
     self.client.is_client = true;
     self.client.entities = list(a);
+    self.client.ticks = ticks;
     e := a.box_zeroed(Sim.Entity);
     self.id = id;
     e.id = id;
@@ -62,7 +63,7 @@ fn client(self: *Guest, it: Output) bool = {
     e := self.client.get(self.id&);
     p := e.info.Player&;
     ok := @match(it&) {
-        fn Move(delta) => move(e, delta[]);
+        fn Move(delta) => move(self.client, e, delta[]);
         fn Water(it) => {
             e := self.client.try_get(it.target) || return(false);
             water(self.client, e, p, it.answer)
@@ -200,6 +201,10 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
                     it := e.info&.tag();
                     pushlstring(L, it.name_str());
                 };
+                @case("source_disk_slot") => @match(e.info&) {
+                    fn Player(it) => lua_pushnumber(L, it.source_disk_slot.float() + 1);
+                    @default => lua_pushnil(L);
+                };
                 @default => lua_pushnil(L);
             };
             1
@@ -244,8 +249,11 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
             };
             look :: fn(L, self) = {
                 p := self.client.get(self.id);
+                x := get_number(L, 1);
+                y := get_number(L, 2);
+                pos := p.pos + vec2(x.cast(), y.cast());
                 for self.client.entities { e |
-                    if e.pos == p.pos && e.id.id != p.id.id && !e.dead {
+                    if e.pos == pos && e.id.id != p.id.id && !e.dead {
                         lua_pushnumber(L, e.id.id.float());
                         return 1;
                     };
@@ -301,7 +309,7 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
                 0
             };
             t :: fn(L, self) = {
-                lua_pushnumber(L, self.client.dt);
+                lua_pushnumber(L, self.client.ticks.float());
                 1
             };
             poll :: fn(L, self) = 0;
@@ -353,13 +361,9 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
             return();
         };
         @match(input) {
-            fn Tick() => {
-                w := self.client;
-                w.dt += 1;
-                free_dead_entities(w);
-                range(0, w.entities.len) { i |
-                    e := w.entities[i];
-                    tick_entity(w, e);
+            fn Tick(tick) => {
+                while => self.client.ticks < tick {
+                    tick_world(self.client);
                 };
             }
             fn Recompile(src) => {
@@ -389,8 +393,10 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
             }
             fn SyncEntity(it) => {
                 src := it.shallow&;
+                first := false;
                 dest := self.client.try_get(src.id) || {
                     @if(src.dead) return();   // :leak if it has inventory
+                    first = true;
                     e := self.client.add_entity(src.id.id);
                     e.info&.tag_ptr()[] = src.info&.tag();
                     e
@@ -414,10 +420,11 @@ guest_main :: fn(self: *Guest) void #use(Lua) = {
                     sync_inventory(it, src.inventory().unwrap());
                 };
                 
+                if @is(dest.info&, .Crop, .Maze) {
+                    dest.info = src.info;
+                };
+                
                 @match(dest.info&) {
-                    fn Crop(_) => {
-                        dest.info = src.info;
-                    }
                     fn Player(it) => {
                         it.source_disk_slot = src.info.Player.source_disk_slot;
                     }
@@ -494,10 +501,22 @@ local function entity_proxy(id)
     return e;
 end
 
+local directions = { left={-1,0}, right={1,0}, up={0,-1}, down={0,1} }
+local function to_direction(arg) 
+    if type(arg) == "string" then arg = directions[arg] end
+    if type(arg) == "table" then 
+        if arg.x then arg = { arg.x, arg.y } end
+        return table.unpack(arg)
+    end
+    return 0, 0
+end
+
 extern.self = {
     place = function(self, i) return extern.place(i) end,
-    move = function(self, dx, dy) extern.move(dx, dy) end,
-    look = function(self) return entity_proxy(extern.look()) end,
+    move = function(self, where) extern.move(to_direction(where)) end,
+    look = function(self, where) 
+        return entity_proxy(extern.look(to_direction(where))) 
+    end,
     give_item = function(self, self_index, other, other_index, count) 
         return extern.move_item(other.id, other_index, self_index, count)
     end,
@@ -524,11 +543,13 @@ local function inventory_metatable(id) return {
 local function water_entity(it, answer) return extern.water(it.id, answer) end
 local function harvest_entity(it) return extern.harvest(it.id) end
 
-local entity_keys = {"type","pos","inventory","age","level","kind"};
+local entity_keys = {"type","pos","inventory","age","level","kind","source_disk_slot"};
 extern.entity_metatable = {
     __index = function(self, key)
         if key == "inventory" then 
-            return setmetatable({}, inventory_metatable(self.id)) 
+            local it = setmetatable({}, inventory_metatable(self.id));
+            if it.n == nil then return nil end
+            return it;
         end
         if key == "water" then return water_entity end
         if key == "harvest" then return harvest_entity end
@@ -584,7 +605,7 @@ end
 function handle_key(char, is_down)
     if is_down == 0 then return nil end
     if keys[char] ~= nil then 
-       self:move(table.unpack(keys[char]));
+       self:move(keys[char]);
     end
     if char >= string.byte("1") and char <= string.byte("9") then 
         local i = char - string.byte("1") + 1;
@@ -604,8 +625,37 @@ function handle_key(char, is_down)
         extern.camera(self.pos.x - 12, self.pos.y - 12, 20);
     end
     if char == string.byte("T") then 
-        self:place(6);
-        self:give_item(2, self:look(), 1, 1);
+        self:place(5);
+        self:give_item(7, self:look(), 1, 1);
+    end
+    if char == string.byte("M") then
+        local dir = { "right", "down", "left", "up" };
+        local facing = 0;
+        -- todo: be less convoluted
+        for i=0,10000 do
+            local forward_e = self:look(dir[facing+1]);
+            local right_dir = (facing + 1) % #dir;
+            local right_e = self:look(dir[right_dir+1]);
+            if forward_e ~= nil then 
+                if forward_e.type == "Wall" then 
+                    if right_e ~= nil then 
+                        facing = right_dir;
+                    else
+                        self:move(dir[right_dir+1]);
+                    end
+                else 
+                    self:move(dir[facing+1]);
+                    return
+                end
+            else
+                if right_e == nil then 
+                    self:move(dir[facing+1]);
+                    facing = (facing - 1) % #dir;
+                else 
+                    facing = (facing + 1) % #dir;
+                end
+            end
+        end
     end
 end
 

@@ -4,6 +4,7 @@ World :: @rec @struct {
     dirty: bool;
     next_id: *i64;
     dt: f64;
+    ticks: i64;
     is_client: bool;
     players: RawList(*Guest.Guest);
     camera: CameraPos;
@@ -24,6 +25,7 @@ Player :: @struct {
     errors: List(u8);
     source_disk_slot: i64;
     inventory: Inventory;
+    // TODO: error_mode: @enum(Silent, Log, Throw);
 };
 
 EntityInfo :: @tagged(
@@ -34,6 +36,11 @@ EntityInfo :: @tagged(
         age := 0;
     },
     Chest: Inventory,
+    // rn walls are owned by mazes and ignored by sync() since 
+    // the client knows the see to regenerate them. creating reserves 
+    // a range of entity ids so its easy to reuse them when updating. 
+    Wall: void,
+    Maze: @struct(pos: Vec2, size: Vec2, first_wall: EntityId, reserved_walls: i64),
 );
 
 CropType :: @enum(nat, prime, fib);
@@ -58,11 +65,24 @@ fn init(w: *World, next_id: *i64) void = {
     s[1] = (item = (Disk = (data = empty(), limit = 1.shift_left(14))), count = 1);
     s[2] = (item = (Crop = .fib), count = 5);
     s[3] = (item = (Crop = .nat), count = 5);
-    s[4] = (item = .Robot, count = 1);
-    s[5] = (item = .Chest, count = 1);
     it.source_disk_slot = 1;
     it.recompile(Guest.initial_program);
     w.dirty = true;
+    
+    maze_position := vec2(10, -11);
+    e := w.add_entity(i64.atomic_inc(w.next_id));
+    e.pos = maze_position + vec2(15, 19);
+    s := a.alloc_zeroed(ItemStack, 64);
+    e.info = (Chest = (slots = s));
+    s[1] = (item = .Robot, count = 1);
+    s[2] = (item = .Chest, count = 1);
+    s[3] = (item = (Disk = (data = empty(), limit = 1.shift_left(14))), count = 1);
+    create_maze(w, maze_position, vec2(10));
+    
+    // TODO: relying on this is bad because will drop messages if other guy doesnt do the pipe fast enough (if there were lots of entities at startup)
+    for w.entities { e |
+        sync(w, it.brain, e);
+    };
 }
 
 fn add_player(w: *World) *Player = {
@@ -78,7 +98,7 @@ fn init_player(w: *World, e: *Entity) *Player = {
     if !w.is_client {
         it.errors = list(a);
         it.brain = a.box_zeroed(Guest.Guest);
-        init(it.brain, e.id, w.next_id);
+        init(it.brain, e.id, w.next_id, w.ticks);
         w.players&.push(it.brain, a);
     };
     it
@@ -95,18 +115,22 @@ fn update(w: *World) void = {
     tick := w.dt > 1;
     if tick {
         w.dt -= 1;
-        free_dead_entities(w);
-    };
-    range(0, w.entities.len) { i |
-        e := w.entities[i];
-        @if(tick) tick_entity(w, e);
-        @match(e.info&) {
-            fn Player(it) => {
-                @if(tick) it.brain.send(.Tick);
-                host_pipe(w, e, it);
-            }
-            @default => ();
+        tick_world(w);
+        for w.players { it |
+            it.send(Tick = w.ticks);
         };
+    };
+    range(0, w.players.len) { i |
+        e := w.get(w.players[i].id);
+        host_pipe(w, e, e.info.Player&);
+    };
+}
+
+fn tick_world(w: *World) void = {
+    free_dead_entities(w);
+    w.ticks += 1;
+    range(0, w.entities.len) { i |
+        tick_entity(w, w.entities[i]);
     };
 }
 
@@ -137,6 +161,7 @@ fn tick_entity(w: *World, e: *Entity) void = {
                 w.dirty = true;
             };
         }
+        fn Maze(it) => update_maze(w, it);
         @default => ();
     };
 }
@@ -147,7 +172,7 @@ fn host_pipe(w: *World, e: *Entity, p: *Player) void = {
         continue :: local_return;
         @match(output) {
             fn Move(it) => {
-                move(e, it);
+                move(w, e, it);
             }
             fn Error(msg) => {
                 @fmt(p.errors&, "%\n", msg);
@@ -192,6 +217,7 @@ fn host_pipe(w: *World, e: *Entity, p: *Player) void = {
     };
 }
 
+// TODO: either don't allow giving away your active disk or have a way to recover if you accidently put it in a chest and cant see any other robots
 // positive count means other<-self
 fn move_item(self: *Entity, self_slot: i64, other: *Entity, other_slot: i64, count: i64) bool = {
     @if(!within_range(self, other)) return(false);    
@@ -294,7 +320,10 @@ fn place(w: *World, p: *Player, inventory_index: i64, new_id: i64) bool = {
         }
         fn Robot() => {
             new := w.add_entity(new_id);
-            init_player(w, new);
+            it := init_player(w, new);
+            for w.entities { e |
+                sync(w, it.brain, e);
+            };
             new
         }
         @default => return(false);
@@ -310,8 +339,15 @@ fn place(w: *World, p: *Player, inventory_index: i64, new_id: i64) bool = {
     true
 }
 
-fn move(e: *Entity, delta: Vec2) bool = {
-    @if(delta.x.is_nan() || delta.y.is_nan() || abs(delta.x) > 1 || abs(delta.y) > 1) return(false);
+fn move(w: *World, e: *Entity, delta: Vec2) bool = {
+    @if(delta.x.is_nan() || delta.y.is_nan()) return(false);
+    @if(abs(delta.x) != 1 && delta.x != 0) return(false);
+    @if(abs(delta.y) != 1 && delta.y != 0) return(false);
+    
+    pos := e.pos + delta;
+    if w.entities.contains(fn(e) => e.info&.is(.Wall) && e.pos == pos && !e.dead) {
+        return false;
+    };
     e.pos += delta;
     true
 }
@@ -324,6 +360,7 @@ fn sync(w: *World, e: *Entity) void = {
 
 fn sync(w: *World, self: *Guest.Guest, e: *Entity) void = {
     @if(w.is_client) return();
+    @if(e.info&.is(.Wall)) return();
     e := e[];
     a := general_allocator();
     if e&.inventory() { it |
@@ -391,6 +428,8 @@ fn sprite(e: *Entity) i64 = {
         fn Player() => 0;
         fn Crop(it) => 1 + mod(it.type.raw(), 3);
         fn Chest() => 6;
+        fn Wall() => 5;
+        fn Maze() => 9
     }
 }
 
@@ -419,6 +458,78 @@ fn display_name(e: *Item) Str = {
             t.name_str()
         };
     }
+}
+
+narnia :: vec2(-10000);
+
+fn create_maze(w: *World, pos: Vec2, size: Vec2) void = {
+    @assert(!w.is_client, "create_maze");
+    count := 400;
+    id_base := i64.atomic_add(w.next_id, count+1);
+    e := w.add_entity(id_base);
+    id: EntityId = (id = id_base+1, hint = w.entities.len);
+    e.info = (Maze = (pos = pos, size = size, first_wall = id, reserved_walls = count));
+    e.pos = narnia;
+}
+
+// dont need to sync because everyone knows the seed
+// TODO: don't place a wall on a robot? or don't regnerate while robot in the maze?
+// TODO: dont need to bother regenterating if no robots are near
+fn update_maze(w: *World, it: *get_variant_type(EntityInfo, .Maze)) void = {
+    start, size := (it.pos, it.size);
+    old_walls := @ref list(*Entity, temp());
+    
+    seed := (w.ticks + start.x.cast().int().shift_left(32) + start.y.cast().int().shift_left(48));
+    w.dirty = true;
+    for_rev w.entities { e |
+        @if(e.info&.is(.Wall))
+        @if((e.id.id - it.first_wall.id).ult(it.reserved_walls))
+        old_walls.push(e);
+    };
+    
+    n := old_walls.len;
+    put_wall :: fn(col: i64, row: i64) void => {
+        break :: local_return;
+        e := old_walls.pop() || {
+            @if(n >= it.reserved_walls) break(eprintln("TODO: allow bigger mazes"));
+            e := w.add_entity(it.first_wall.id + i64.atomic_inc(n&));
+            e.info = .Wall;
+            e
+        };
+        e.pos = start + vec2(col.float().cast(), row.float().cast());
+    };
+    
+    #use("@/examples/gpu/maze2d/gen.fr");
+    grid := @ref new_grid(temp(), size.x.cast().int(), size.y.cast().int());
+    binary_tree(grid, @ref Random.xoshiro256SS.new(seed.bitcast()));
+    
+    range(0, grid.w*3+1) { i |
+        put_wall(1+i, 0);
+    };
+    
+    range(0, grid.h) { row |
+        put_wall(1, row*2);
+        if row != grid.h/2 {
+            put_wall(1, row*2+1);
+        };
+        range(0, grid.w) { col |
+            if !grid.get(col, row, .east) {
+                put_wall(1+col*3+3, 1+row*2);
+            }
+        };
+        range(0, grid.w) { col |
+            put_wall(1+col*3+3, 1+row*2+1);
+            if !grid.get(col, row, .south) {
+                range(0, 3) { i |
+                    put_wall(1+col*3+i, 1+row*2+1);
+                };
+            };
+        };
+    };
+    
+    for old_walls { e |
+        e.pos = narnia;
+    };
 }
 
 max_crop_level :: 100;
