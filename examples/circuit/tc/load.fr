@@ -23,10 +23,7 @@ Circuit :: @struct {
     has_arch_pins := false;
     v2: bool;
     is_arch := false;
-    is_campaign := false;
-    is_level := false;  // just to avoid name conflicts with custom components
     default_tick_rate: i64;
-    level_test_si: ?Str = .None;
     
     compiled: ?ComponentId = .None;
     // used when referenced as a Custom Gate in another Circuit. 
@@ -73,7 +70,6 @@ CustomId :: @struct(id: i64);
 #use("@/lib/sys/fs.fr");
 Builtin :: import("@/examples/circuit/tc/builtin.fr");
 Asm :: import("@/examples/circuit/tc/asm.fr");
-Si :: import("@/examples/circuit/tc/si.fr");
 
 load_builtins :: fn(components: *List(Component), a: Alloc) void = {
     add_templates(components, a, Builtin.templates);
@@ -92,16 +88,6 @@ load_builtins :: fn(components: *List(Component), a: Alloc) void = {
         c.bit_width = it.bit_width;
         c.is_switch = it.name.starts_with("Switch");
         components.push(c);
-    };
-}
-
-load_level_tests :: fn(circuits: []Circuit, campaign_root: Str, a: Alloc) void = {
-    each circuits { c |
-        continue :: local_return;
-        @if(!c.is_level) continue();
-        path := @tfmt("%/%/test.si", campaign_root, safe_name(c.name, temp()));
-        src := read_entire_file(a, path) || continue();
-        c.level_test_si = (Some = src);
     };
 }
 
@@ -137,8 +123,6 @@ load_all_circuits :: fn(original_root: Str, a: Alloc, warn: *List(u8)) Ty([]Circ
             continue();
         });
         info.is_arch = path.contains("architecture");
-        info.is_level = path.ends_with("Default/circuit.data") && info.v2;
-        info.is_campaign = info.is_level && name == "main";
         dir := path.pop_path_segment();
         @debug_assert(dir.ends_with("/"));
         has_path_escapes :: import("@/examples/fetch.fr")'has_path_escapes;
@@ -1119,17 +1103,6 @@ collect_schematics :: fn(tc_save_root: Str, a: Alloc) List(Str) = {
             };
         });
     };
-    
-    // save files for other campaign levels
-    // TODO: link these with the fixed campaign level files too
-    _ := (walk_directory_unordered(as_cstr tc_save_root) { e |
-        continue :: local_return;
-        if e.is(.Directory) {
-            @if(e.name.starts_with(".")) continue();
-            @if(e.name == "architecture" || e.name == "foundery" || e.name == "component_factory") continue();
-            files&.push(@tfmt("%/%/Default/circuit.data", tc_save_root, e.name));
-        };
-    });
     
     files
 }

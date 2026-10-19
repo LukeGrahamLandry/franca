@@ -1,4 +1,20 @@
 
+## (Oct 19) circuit
+
+- i keep thinking it would be cool if i could have the circuits control my guy 
+  - circuits in cubes.fr would be better starting point maybe because there the io is nice small numbers.
+    for auto it might have to be a coprocessor you call from lua for sanity and just incentivise using it by limiting how many vm ops you're allowed.
+  - but i only made an evaluator not an editor and having it only work if you buy turing complete and use that as the ui is boring. so i want to revisit that. 
+- i dont need to be the shitty version of someone else's compiler. not worth it just for a few free tests. 
+  i dont care enough to keep up as they turn it into a real language. can always bring it back if i change my mind. 
+
+## (Oct 18) auto
+
+- wasted some time making a maze. avoiding syncing by sharing the seed feels cute 
+  but it still has some situation where the robot position gets desynced with the view. 
+  i think i dont recover well if you fail a move because it ticked on the other side first. 
+  anyway maybe its time for a break. 
+
 ## (Oct 17) auto
 
 - should the lua side have its own model of the world or always call host functions to get info?

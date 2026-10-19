@@ -112,11 +112,6 @@ it works well enough to run my overture/leg in the maze and a few things from th
   - components have configurable (sometimes auto?) wire size
     - some of the logic ones can go up to 2048 bit but the concatenators don't seem to work so i don't really understand
   - isa: assembly parser generator thingy https://github.com/Stuffe/isa_spec
-  - si: language the level tests are written in. 
-    - not needed for just running circuits but makes the whole thing much more inspiring because 
-      i could auto test it by just pointing it at my own solutions to the game. 
-    - also then could run other people's custom levels. 
-      i like the idea of my thing being a way to have headless ci tests for user campaigns. 
   - have to decide if i care about keeping support for the old version
 ```
 // TODO: don't always recompile everything when loading a new circuit. it might reuse some custom components. 
