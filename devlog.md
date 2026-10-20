@@ -1,5 +1,5 @@
 
-## (Oct 19) circuit
+## (Oct 19,20) circuit
 
 - i keep thinking it would be cool if i could have the circuits control my guy 
   - circuits in cubes.fr would be better starting point maybe because there the io is nice small numbers.
@@ -7,6 +7,7 @@
   - but i only made an evaluator not an editor and having it only work if you buy turing complete and use that as the ui is boring. so i want to revisit that. 
 - i dont need to be the shitty version of someone else's compiler. not worth it just for a few free tests. 
   i dont care enough to keep up as they turn it into a real language. can always bring it back if i change my mind. 
+- need to make the rendering less unintelligable before i start adding shit. 
 
 ## (Oct 18) auto
 

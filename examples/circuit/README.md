@@ -59,11 +59,10 @@ it works well enough to run my overture/leg in the maze and a few things from th
 - pre_read mistakes would be a lot easier to debug if they were made explicit seperate operations in the trace display. 
 - dropping file doesn't work in franca-web-playground (even when fixed will be annoying because need to feed it all the custom components individually)
 - needs the franca library folder available at runtime
-- "str scratch frame"
 - from schematic hub
+  - 3D Engine: "str scratch frame"
   - screenvurture: "H" as char literal in expression
   - ASM computer 64 bit: Hdd, RamLatency
-  - matrix display playground: fails safety check
   - ploter: SR-Latch: use-before-def ("Allow circular recipies")
 - the game has a setting ("Allow circular recipies") to idiom-regognise a few shapes of circular dependencies and convert to (AndOrLatch,NandNandLatch,NorNorLatch)
 - i don't think im doing the keyboard right. ex. mandelbrot is behind a key sometimes?

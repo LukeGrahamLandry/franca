@@ -18,7 +18,6 @@ l: fetch schematic archive.
 
 State :: @rec @struct {
     HIGH_DPI :: true;
-    WIDTH :: 500; HEIGHT :: 500;
     text: Sdtx.Self;
     draw: Sgl.Self;
     pipe: Sgl.Pipeline;
@@ -88,8 +87,6 @@ main_use_output :: fn(state: *State, in: LoaderT.I, out: Result(void, void)) voi
     state.load_time = timestamp() - state.loader.start_time;
 }
 
-// :UGLY this whole thing needs to be rewritten. 
-// for now i just care about having enough visuals to see what's going on while debugging the evaluator. 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.check_movement();
     if !state.auto_eval && Easy'should_skip_frame(sapp, state.dirty&) {
@@ -107,18 +104,15 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             fn Path(it) => it.path;
             fn Index(it) => state.circuit[it.root_index].name;
         };
-            sdtx.desc.char_height = 8;
-            sdtx.desc.char_width = sdtx.desc.char_height / 2;
-            sdtx.canvas(sapp, 1);
-            sdtx.color = pack_rgba(255, 255, 255, 255);
-            sdtx.put(@tfmt("compiling %\nit's been % ms\nif you can read all this it's too slow!", name, timestamp() - state.loader.start_time));
-            state.dirty = true;
+        msg := @tfmt("compiling %\nit's been % ms\nif you can read all this it's too slow!", name, timestamp() - state.loader.start_time);
+        show_alert(msg, sdtx, sapp);
+        state.dirty = true;
     };
     
     world := state.world&;
     halted_without_wire_values := false;
-    have_logic := state.loader.progress == .Idle && state.tree.len > 0 && state.tree[0].component.is_some();
-    show_the_maze := !state.is_new_overture;
+    have_logic := state.loader.progress == .Idle && state.tree.len > 0 && state.tree[0].component.is_some() 
+        && world[state.tree[0].component.Some].gates.len > 2;  // HACK for load unimplemented
     
     eval_this_frame := have_logic && (state.want_eval || state.auto_eval);
     eval_last_frame := state.eval_last_frame;
@@ -153,6 +147,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         
         state.service_keyboard_device();
         state.tick += 1;
+        // TODO: don't do this every tick if not doing one of the few hacked maze ones
         input := state.maze&.input();
         OUT: ?u8 = .None;
         save_wire_values := i == count - 1;
@@ -195,503 +190,100 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     
     app_w, app_h := (sapp.width().float().cast(), sapp.height().float().cast());
-    screen_aspect := app_w / app_h;
     screen_scale := vec2(500 * sapp.dpi_scale) / vec2(app_w, app_h);
+    self: Draw = (
+        state = state, 
+        screen_scale = screen_scale,
+        sdtx = sdtx,
+        have_logic = have_logic,
+        mouse_world_pos = (state.mouse_pos - state.pos) / state.scale / screen_scale,
+        out = @ref u8.list(32, temp()),
+    ); self := self&;
     
     if state.gfx_error_last_frame {
-        sdtx.desc.char_height = 8;
-        sdtx.desc.char_width = sdtx.desc.char_height / 2;
-        sdtx.canvas(sapp, 1);
-        sdtx.color = pack_rgba(255, 255, 255, 255);
-        sdtx.put("TOO MANY VERTICES");
+        show_alert("TOO MANY VERTICES", sdtx, sapp);
     };
-    
-    p := (state.mouse_pos - state.pos) / state.scale;
-    p /= screen_scale;
     
     sdtx.desc.char_height = 10 * state.scale;
     sdtx.desc.char_width = sdtx.desc.char_height / 2;
     
-    text_scale :f32= 1.0 / sapp.dpi_scale;
+    text_scale := 1.0 / sapp.dpi_scale;
     text_w, text_h := (app_w * text_scale, app_h * text_scale);
     sdtx.canvas(text_w, text_h);
     
-    wire_offset := 0;
-    
-    world_to_text_pos :: fn(pos) => ((pos*state.scale*screen_scale + state.pos)*vec2(1, -1) + vec2(1)) / sdtx.glyph_size / 2;
-    text_to_world_pos :: fn(pos) => (((pos * 2 * sdtx.glyph_size) - vec2(1)) * vec2(1, -1) - state.pos) / state.scale / screen_scale;
-    
-    width, height := {
-        a := text_to_world_pos(vec2(0, 0)); 
-        b := text_to_world_pos(vec2(1, 1));
+    self.text_spacing = {
+        a := self.text_to_world_pos(vec2(0, 0)); 
+        b := self.text_to_world_pos(vec2(1, 1));
         c := abs(b - a);
-        (c.x, c.y * 1.5)
+        vec2(c.x, c.y * 1.5)
     };
     
-    sdtx.color = pack_rgba(255, 255, 255, 255);
-    sdtx.pos = world_to_text_pos(vec2(0, height*3));
-    frame_time := state.frame_time_history_sum / max(1, state.frame_time_history&.len());
-    sdtx.put(@tfmt("(paused=%, tick_rate=%, tick=%, keyboard=%, frame_time=%ms) ", !state.auto_eval, state.ticks_per_eval, state.tick, state.keyboard_device_focused, frame_time/1000));
-    @if(state.load_time != 0) sdtx.put(@tfmt("load_time=%ms", state.load_time));
-    
-    sdtx.color = pack_rgba(0, 0, 0, 255);
-    sdtx.pos = vec2(0);
-    sdtx.origin = world_to_text_pos(vec2(-width * 90, height * 12));
-    sdtx.put(HELP);
-    sdtx.origin = vec2(0);
-    
-    sdtx.color = pack_rgba(255, 255, 255, 255);
-    arch_list_count: f32 = 0;
-    selected_circuit := @if(state.tree.len == 0, -1, state.tree[0].diagram_circuit || -1);
-    // TODO: list them from the save dir even if don't ask for a specific one on cli
-    enumerate state.circuit { i, c |
-        continue :: local_return;
-        @if(!c.is_arch) continue();
-        
-        sdtx.pos = world_to_text_pos(vec2(0 * width, height * (7 + arch_list_count)));
-        p := world_to_text_pos(p);
-        hover := p.x > sdtx.pos.x && p.x < sdtx.pos.x + c.name.len.float().cast() && p.y > sdtx.pos.y && p.y < sdtx.pos.y + 1;
-        sdtx.color = pack_rgba(200, 200*int(i != selected_circuit), 200*int(!hover), 255);
-        sdtx.put(c.name);
-        arch_list_count += 1;
-        
-        if state.clicked && hover && state.loader.progress == .Idle {
-            state.clicked = false;
-            state.dirty = true;
-            have_logic = false;
-            load_circuit_index_async(state, i, state.world.tc_file_loader_device);
-        };
+    self.put_text(self.text_spacing * vec2(0, 3), pack_rgba(255, 255, 255, 255)) { out |
+        frame_time := state.frame_time_history_sum / max(1, state.frame_time_history&.len());
+        @fmt(out, "(paused=%, tick_rate=%, tick=%, keyboard=%, frame_time=%ms) ", 
+            !state.auto_eval, state.ticks_per_eval, state.tick, state.keyboard_device_focused, frame_time/1000);
+        @if(state.load_time != 0) @fmt(out, "load_time=%ms", state.load_time);
     };
+    self.put_text(HELP, self.text_spacing * vec2(-90, 12), pack_rgba(0, 0, 0, 255));
     
-    sdtx.color = pack_rgba(255, 255, 255, 255);
-    sdtx.pos = world_to_text_pos(vec2(0, height));
-    wires: []WireValue = empty();
-    out := @ref u8.list(2, temp());
-    colour: Array(u32, 2) = (pack_rgba(150, 150, 255, 255), pack_rgba(255, 0, 150, 255));
-    
-    all_wire_positions: []RawList(Vec2) = empty();
-    hovered_wire_index: ?Ty(WireId, i64) = .None;
-    
-    show :: fn(id: WireId, force_hover: bool) => if have_logic {
-        if state.show_wire_ref_lines && all_wire_positions.len != 0 {
-            start := sdtx.pos;
-            end := start + vec2(6, 1);
-            p := world_to_text_pos(p);
-            hover := p.x > start.x && p.x < end.x && p.y > start.y && p.y < end.y;
-            positions := all_wire_positions[id.id.zext()]&;
-            // collecting all these is a bit unreasonably :SLOW but here we are. it's only when holding shift so maybe it's fine 
-            positions.push(sdtx.pos, temp());
-            if hovered_wire_index.is_none() && (hover || force_hover) {
-                hovered_wire_index = (Some = (id, positions.len - 1));
-            };
-        };
-    
-        ok := id.id.zext().ult(wires.len);
-        value := @if(!ok, 0, wires[id.id.zext()]);
-        sdtx.color = colour&[int(value != 0)];
-        sdtx.put(@tfmt("w%", id.id));
-        sdtx.color = pack_rgba(150, 150, 150, 255);
-        sdtx.put("=");
-        // TODO: need to keep track of data size of each wire
-        @if(ok) 
-        if state.is_new_overture {
-            for_rev i64.cast_to_bytes(value&) { c |
-                push_hex_byte(out, c, false);
-            };
-        } else {
-            push_hex_byte(out, value.trunc(), true);
-        };
-        sdtx.put(out.items());
-        out.clear();
-        sdtx.put(" ");
+    if self.arch_selection() { i |
+        state.clicked = false;
+        state.dirty = true;
+        have_logic = false;
+        load_circuit_index_async(state, i, state.world.tc_file_loader_device);
     };
     
     if have_logic {
-        break :: local_return;
-    root_component := state.tree[0].component.unwrap();
-    c := world[root_component]&;
-    
-    instance := 0;
-    parent_wire_offset := 0;
-    for state.tree { it |
-        if it.logical_gate { it |
-            if c.gates.len == 2 {  // HACK for load unimplemented
-                break();
-            };
-            parent_wire_offset = wire_offset;
-        wire_offset += c.wire_count;
-        range(0, it) { i |
-            child := state.world&[c.gates[i].kind]&;
-            wire_offset += child.wire_sum;
-        };
-        sdtx.put(@tfmt("%[%], ", c.name, it));
-        instance += c.instance_offset_by_gate[it];
-        c = state.world&[c.gates[it].kind]&;
-        };
-    };
-    
-    pos := vec2(0, 0);
-    if !state.halted_without_wire_values {
-        wires = world.scratch.items().subslice(wire_offset, c.wire_count);
-    };
-    if state.show_wire_ref_lines {
-        all_wire_positions = temp().alloc_zeroed(RawList(Vec2), c.wire_count);
-    };
-    
-    sdtx.put(c.name);
-    sdtx.color = pack_rgba(0, 0, 0, 255);
-    if c.gates.len == 0 {
-        hover := p.y < pos.y && p.y > pos.y - height && p.x > 0 && p.x < 100;
-        sdtx.origin = world_to_text_pos(vec2(0, 0));
-        sdtx.pos = vec2(0);
-        sdtx.color = @if(hover, pack_rgba(0, 255, 0, 255), pack_rgba(255, 255, 0, 255));
-        sdtx.put("output(intrinsic(input()));\n");
+        root_component := state.tree[0].component.unwrap();
+        c := world[root_component]&;
+        instance, parent_wire_offset, wire_offset := self.walk_component_tree(c&);
         
-        if state.tree.len >= 2 {
-            if state.tree[state.tree.len - 2].component { parent_kind |
-                if state.tree[state.tree.len - 1].logical_gate { gate_i |
-                    parent := world[parent_kind]&;
-                    it := parent.gates[gate_i]&;
-                    n := get_storage_count(world.components, it);
-                    if !state.halted_without_wire_values {
-                        wires = world.scratch.items().subslice(parent_wire_offset, parent.wire_count);
-                        for(it.outputs, fn(it) => show(it, false));
-                        @if(it.outputs.len > 0) sdtx.put("= ");
-                        sdtx.put(@tfmt("%( ", c.name));
-                        for(it.inputs, fn(it) => show(it, false));
-                        sdtx.put(");");
-                        wires = empty();
-                    };
-                    // TODO: unpack `param` in a readable way
-                    sdtx.color = pack_rgba(255, 255, 255, 255);
-                    sdtx.put(@tfmt("\n(storage_count=%, instance=%, param=%)\n", n, instance, fmt_hex(it.param)));
-                    data := world.storage.subslice(instance, n.min(4096)).interpret_as_bytes();
-                    enumerate data { i, c |
-                        @if(i.umod(16) == 0) sdtx.put("\n");
-                        push_hex_byte(out, c[], true);
-                        sdtx.put(out.items());
-                        sdtx.pos.x += 1;
-                        out.clear();
-                    };
-                };
-            };
-        }
-        
-        if state.clicked && hover {
-            state.pop_tree_node();
-            state.clicked = false;
+        if !state.halted_without_wire_values {
+            self.wires = world.scratch.items().subslice(wire_offset, c.wire_count);
+        };
+        if state.show_wire_ref_lines {
+            self.all_wire_positions = temp().alloc_zeroed(RawList(Vec2), c.wire_count);
         };
         
-        sdtx.origin = vec2(0);
-    };
-    enumerate c.gates { i, it |
-        hover := p.y < pos.y && p.y > pos.y - height && p.x > 0 && p.x < 100;
-        sdtx.pos = world_to_text_pos(pos);
-        
-        base_colour := @if(hover, pack_rgba(0, 255, 0, 255), pack_rgba(255, 255, 0, 255));
-        for(it.outputs, fn(it) => show(it, false));
-        sdtx.color = base_colour;
-        child := world[it.kind]&;
-        name := child.name;
-        @if(it.outputs.len > 0) sdtx.put("= ");
-        sdtx.put(@tfmt("%( ", name));
-        if child.has_param {
-            sdtx.color = colour&[int(it.param != 0)];
-            sdtx.put(@tfmt("% ", it.param));
+        self.draw_component_code(c, instance, parent_wire_offset);
+        if has_dis.contains(world[root_component].name) {
+            self.debug_known_arch();
         };
-        for(it.inputs, fn(it) => show(it, false));
-        sdtx.color = base_colour;
-        sdtx.put(");");
-        
-        pos.y -= height;
-        
-        if state.clicked && hover {
-            // TODO: move this into open_gate
-            is_io := i == 0 || i == c.gates.len - 1;
-            if is_io {
-                state.pop_tree_node();
-            } else {
-                state.open_gate((Some = i), .None);
-            };
-            state.clicked = false;
-            state.dirty = true;
-        };
-    };
-    
-    // kinda hack: colours being useful relies on ordering in defs.fr: (program, ip, registers). 
-    // TODO: use the other labels for colours as well
-    instruction_width := @if(state.arch_is_leg, 4, 1);
-    ip_index := MAX_i64;
-    memory := read_memory(state.world&, root_component);
-    if state.is_new_overture {
-        memory = state.world.storage.interpret_as_bytes();
-    };
-    memory.len = min(memory.len, 512);
-    root_component := state.world&[root_component]&;
-    for root_component.labels { label |
-        if label.name == "ip" && label.bit_size == 8 {
-            byte, bit := root_component.instance_offset_by_gate[label.gate_index].udiv_mod(8);
-            if byte < memory.len && bit == 0 {
-                ip_index = byte;
-            };
-        };
-    };
-    
-    ram_start := 0;
-    if state.is_new_overture {
-        ip_index = 0;
-        ram_start = 8;
-    };
-    pos := vec2(-60 * width, 2*height);
-    b := 1;
-    current_instruction_colour := pack_rgba(255, 0, 0, 255);
-    show_the_maze = has_dis.contains(c.name);
-    @if(show_the_maze)
-    range(0, memory.len) { i |
-        y, x := i.udiv_mod(16);
-        if x == 0 && y.umod(16) == 0 {
-            b += 1;
-        };
-        sdtx.color = pack_rgba(255, 150, b*40, 255);
-        if memory.len > ip_index {
-            drawing := i.align_back(instruction_width);
-            ip_raw: i64 = memory[ip_index].zext() + ram_start;
-            ip := ip_raw.align_back(instruction_width);
-            if drawing == ip {
-                sdtx.color = pack_rgba(200, 0, 0, 255);
-            };
-            if i == ip_raw {
-                sdtx.color = pack_rgba(255, 0, 0, 255);
-            };
-        };
-        if i == ip_index {
-            sdtx.color = pack_rgba(255, 200, 200, 255);
-        };
-        push_hex_byte(out, memory[i], true);
-        sdtx.pos = world_to_text_pos(pos);
-        sdtx.put(out.items());
-        out.clear();
-        pos.x += width*3;
-        
-        if x == 15 {
-            pos.y -= height;
-            pos.x -= width * 16*3;
-        };
-    };
-    
-    // TODO: let the component declare that it uses this disassembler
-    pos := vec2(-80 * width, 2*height);
-    @if(show_the_maze)
-    if state.arch_is_leg {
-        dis_iter(u32.reinterpret_bytes(memory), 4, AsmLeg);
-    } else {
-        dis_iter(memory, 1, AsmOverture);
-    };
-    
-    dis_iter :: fn(instructions, alignment, $Arch) void => {
-        end := min(instructions.len.align_back(alignment), 256/alignment);
-        while => end > 0 && instructions[end - 1] == 0 {
-            end -= 1;
-        };
-        pos := vec2(-80 * width, 2*height);
-        range(ram_start/alignment, end) { i |
-            sdtx.color = pack_rgba(255, 255, 255, 255);
-            sdtx.pos = world_to_text_pos(pos);
-            if memory.len > ip_index && i*alignment == memory[ip_index].zext().add(ram_start).align_back(alignment) {
-                ip_raw: i64 = memory[ip_index].zext() + ram_start;
-                sdtx.color = pack_rgba(@if(ip_raw.mod(alignment) == 0, 255, 200), 0, 0, 255);
-            };
-            Arch'disassemble(out, instructions[i]);
-            sdtx.put(out.items());
-            out.clear();
-            pos.y -= width*2;
-        };
-    }
-    };
-    
-    if show_the_maze {
-    maze_text := u8.list(temp());
-    state.maze&.render(maze_text&);
-    sdtx.color = pack_rgba(@if(state.maze.win, 255, 50), 200, 150, 255);
-    sdtx.origin = world_to_text_pos(vec2(-38 * width, (state.maze.map.len().float().cast())*width*2 + height*3));
-    sdtx.pos = vec2(0);
-    sdtx.put(maze_text.items());
     };
     
     if state.halt_message.len != 0 {
-        sdtx.origin = world_to_text_pos(vec2(0, height*4));
-        sdtx.pos = vec2(0);
-        sdtx.color = pack_rgba(50, 200, 150, 255);
-        sdtx.put(state.halt_message.items());
+        self.put_text(state.halt_message.items(), self.text_spacing * vec2(0, 4), pack_rgba(50, 200, 150, 255));
     };
     
-    sdtx.origin = vec2(0);
+    sgl.defaults();
+    sgl.viewport(0, 0, app_w, app_h, true);
+    if state.atlas.enable {
+        sgl.load_pipeline(state.pipe);
+        sgl.texture(state.atlas.img, (id = 0));
+        sgl.texturing_enabled = true;
+        sgl.u = 0; sgl.v = 0;  // :WhitePixelForDrawingSolidColours
+    };
+    sgl.begin(.QUADS);
+    sgl.load_identity();
+    sgl.translate(state.pos.x, state.pos.y, 0.0);
+    sgl.scale(state.scale * screen_scale.x, state.scale * screen_scale.y, 1.0);
     
-        sgl.defaults();
-        sgl.viewport(0, 0, app_w, app_h, true);
-        if state.atlas.enable {
-            sgl.load_pipeline(state.pipe);
-            sgl.texture(state.atlas.img, (id = 0));
-            sgl.texturing_enabled = true;
-            sgl.u = 0; sgl.v = 0;  // :WhitePixelForDrawingSolidColours
-        };
-        sgl.begin(.QUADS);
-        sgl.load_identity();
-        sgl.translate(state.pos.x, state.pos.y, 0.0);
-        sgl.scale(state.scale * screen_scale.x, state.scale * screen_scale.y, 1.0);
-        
-    off := vec2(0);
-    tc_to_world_pos :: fn(pos) => (pos) / 30 * vec2(1, -1) + vec2(-1, -4) + off;
-        
     @if(state.tree.len > 0)
     @if(FEAT_TC_CIRCUIT) if state.tree[state.tree.len - 1].diagram_circuit { circuit_i |
         need_draw = true;
         circuit := state.circuit[circuit_i]&;
-        {
-            hi, lo := (circuit.max + vec2(1), circuit.min - vec2(1));
-            size := abs(hi - lo);
-            circuit_top_right := tc_to_world_pos(lo + vec2(size.x, 0));
-            goal_top_right := vec2(-100 * width, height*3);
-            off = goal_top_right - circuit_top_right;
-            
-            if state.loader.progress == .Idle {
-                sdtx.color = pack_rgba(255, 255, 255, 255);
-                sdtx.origin = world_to_text_pos(tc_to_world_pos(vec2(lo.x, hi.y + 5)));
-                sdtx.pos = vec2(0);
-                sdtx.put(state.warnings.items());
-                sdtx.origin = vec2(0);
-            };
-            
-            {  // vaguely the grid for custom component pins
-                grid_size :: 8;
-                sgl.color = pack_rgba(40, 40, 40, 255);
-                start := lo.x.cast().int().align_back(grid_size).float().cast();
-                p := vec2(start, lo.y);
-                while => p.x < hi.x {
-                    a, b := (tc_to_world_pos(p), tc_to_world_pos(p + vec2(0, size.y)));
-                    sgl.line(a, b, 0.01);
-                    p.x += grid_size.float().cast();
-                };
-                start := lo.y.cast().int().align_back(grid_size).float().cast();
-                p := vec2(lo.x, start);
-                while => p.y < hi.y {
-                    a, b := (tc_to_world_pos(p), tc_to_world_pos(p + vec2(size.x, 0)));
-                    sgl.line(a, b, 0.01);
-                    p.y += grid_size.float().cast();
-                };
-            };
-            
-            a, b := (tc_to_world_pos(lo), tc_to_world_pos(hi));
-            s := abs(a - b);
-            w: f32 = 0.03;
-            sgl.color = pack_rgba(20, 20, 20, 255);
-            sgl.line(a, a + vec2(s.x, 0), w);
-            sgl.line(a, a - vec2(0, s.y), w);
-            sgl.line(b, a + vec2(s.x, 0), w);
-            sgl.line(b, a - vec2(0, s.y), w);
-            
-            sdtx.color = pack_rgba(50, 200, 150, 255);
-            sdtx.pos = world_to_text_pos(goal_top_right) + vec2(-circuit.name.len().float().cast(), -2);
-            sdtx.put(circuit.name);
-        };
-        
-        W: f32 = 0.025;
-        wire_hover_count: f32 = 1;
-        enumerate circuit.gates { g_gate_index, it |
-            b := tc_to_world_pos(it.pos);
-            hover := p.y < b.y + W/2 && p.y > b.y - W/2 && p.x > b.x - W/2 && p.x < b.x + W/2;
-            sgl.color = pack_rgba(100, 100, 100, 255);
-            info := Tc'get_builtin_shape(it.kind);
-            if hover {
-                sgl.color = pack_rgba(200, 200, 200, 255);
-                sdtx.color = pack_rgba(255, 255, 255, 255);
-                name := info.display_name(it, state.circuit);
-                sdtx.pos = world_to_text_pos(b) + vec2(0, wire_hover_count);
-                sdtx.put(@tfmt("(%, %) %", it.pos.x, it.pos.y, name));
-                if it.logical_gate_index != -1 {
-                    sdtx.put(@tfmt(" [%]", it.logical_gate_index));
-                };
-                wire_hover_count += 1;
-                
-                if state.clicked {
-                    state.open_gate(.None, (Some = g_gate_index));
-                };
-            };
-            sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
-        };
-        
-        enumerate circuit.wires { wire_i, wire |
-            teleport := wire.path[0].length == 0;
-            enumerate wire.path { i, it |
-                sgl.color = pack_rgba(100, 50, 50 * int(!teleport), 255);
-                b := tc_to_world_pos(it.pos);
-                if i != 0 && !teleport {
-                    a := tc_to_world_pos(wire.path[i - 1].pos);
-                    sgl.line(a, b, W/2.5);
-                };
-                hover := p.y < b.y + W/2 && p.y > b.y - W/2 && p.x > b.x - W/2 && p.x < b.x + W/2;
-                if hovered_wire_index.is_some() && hovered_wire_index.Some._0.id == wire.logical.id && (i == 0 || i == wire.path.len - 1) {
-                    // TODO: these will be kinda useless because it doesn't reset wire_hover_count when for the next wire that's at a different x position. 
-                    hover = true;
-                };
-                if hover {
-                    sgl.color = pack_rgba(200, 50, 50, 255);
-                    sdtx.pos = world_to_text_pos(b) + vec2(0, wire_hover_count);
-                    sdtx.color = pack_rgba(255, 255, 255, 255);
-                    sdtx.put(@tfmt("% (%, %) ", wire_i, it.pos.x, it.pos.y));
-                    if !circuit.has_bidirectional_pins {
-                        @if(wire.logical.id != 0xFFFFFFFF) show(wire.logical, true);
-                    };
-                    wire_hover_count += 1;
-                };
-                sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
-            };
-        };
-        @if(state.loader.progress != .Loading)
-        each circuit.gates { it |
-            info := Tc'get_builtin_shape(it.kind);
-            for_pins(info, it, state.circuit) { i, dx, dy |
-                a := tc_to_world_pos(it.pos);
-                b := tc_to_world_pos(it.pos + vec2(dx.float().cast(), dy.float().cast()));
-                
-                out_arity, in_arity := get_arity(info, it, state.circuit, @static u8.list(panicking_allocator));
-                is_input := i >= out_arity;
-                sgl.color = pack_rgba(0, 100 * int(in_arity + out_arity > 0), 100 * int(!is_input), 255);
-                sgl.line(a, b, W/4);
-                
-                hover := p.y < b.y + W/2 && p.y > b.y - W/2 && p.x > b.x - W/2 && p.x < b.x + W/2;
-                if hover {
-                    sdtx.pos = world_to_text_pos(b) + vec2(0, wire_hover_count);
-                    sdtx.color = pack_rgba(255, 255, 255, 255);
-                    name := info.display_name(it, state.circuit);
-                    sdtx.put(@tfmt("% %[%]", name, @if(is_input, "in", "out"), @if(is_input, i - out_arity, i)));
-                    if it.logical_gate_index != -1 {
-                        sdtx.put(@tfmt(" [%]", it.logical_gate_index));
-                    };
-                    wire_hover_count += 1;
-                };
-            };
-        };
-        
-        display_name :: fn(info: *Builtin.Template, it: *Tc.Circuit.Gate, circuit: []Tc.Circuit) Str = {
-            name := info.name;
-            @if(it.kind.group() == .Loaded)
-            if circuit.find(fn(check) => check.id == it.custom_id) { it |
-                name = @tfmt("Custom (%)", it.name);
-            };
-            if it.kind.group() == .Tc2 && it.kind.Tc'gate_name(.Tc2) == .Level_gate {
-                name = @tfmt("% (%)", name, it.label);
-            };
-            name
-        }
+        self.draw_circuit_background(circuit);
+        self.draw_gate_squares(circuit);
+        self.draw_wires(circuit);
+        self.draw_pin_lines(circuit);
     };
-        
-    if hovered_wire_index { wire, position_index |
+    
+    if self.hovered_wire_index { wire, position_index |
         need_draw = true;
-        positions := all_wire_positions[wire.id.zext()];
-        a := text_to_world_pos(positions[position_index]);
+        positions := self.all_wire_positions[wire.id.zext()];
+        a := self.text_to_world_pos(positions[position_index]);
         for positions { b |
-            b := text_to_world_pos(b);
+            b := self.text_to_world_pos(b);
             sgl.color = pack_rgba(255, 255, 255, 255);
             sgl.line(a, b, 0.005);
         };
@@ -699,16 +291,16 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
 
     @if(state.tree.len == 1 || state.split_graphics_and_wires)
     if have_logic && FEAT_TC_CIRCUIT && state.tree[0].diagram_circuit.is_some() {
+        need_draw = true;
         circuit := state.circuit[state.tree[0].diagram_circuit.unwrap()]&;
         // TODO: allow console in custom component too (use last element in the tree and offset by its base instance)
         c := world[state.tree[0].component.unwrap()]&;
         if state.split_graphics_and_wires {
-            off += tc_to_world_pos(vec2(0, 0)) - tc_to_world_pos(vec2(0, abs(circuit.max.y - circuit.min.y)));
+            self.diagram_pos += self.tc_to_world_pos(vec2(0, 0)) - self.tc_to_world_pos(vec2(0, abs(circuit.max.y - circuit.min.y)));
         };
 
         sdtx.desc.char_height /= 1.5;
         sdtx.desc.char_width /= 1.5;
-        text_scale :f32= 1.0 / sapp.dpi_scale;
         sdtx.canvas(text_w, text_h);
         
         each circuit.gates { gate |
@@ -717,159 +309,16 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             @if(i == -1) continue();
             it := c.gates[i]&;
             @if(it.kind.group() != .Tc1) continue();
-            gate_kind := it.kind.name(.Tc1);
             
-            sdtx.pos = vec2(0);
-            sdtx.origin = world_to_text_pos(tc_to_world_pos(gate.pos));
-        
-            if gate_kind == .Console {
-                sdtx.origin = world_to_text_pos(tc_to_world_pos(gate.pos + vec2(-16, -8)));
-            
-                a, b := (text_to_world_pos(sdtx.origin + sdtx.pos), text_to_world_pos(sdtx.origin + sdtx.pos + vec2(80, 24)));
-                s := abs(a - b);
-                sgl.color = pack_rgba(0, 0, 0, 255);
-                sgl.line(vec2(a.x, b.y + s.y/2), vec2(b.x, b.y + s.y/2), s.y);
-            
-                T :: Builtin.Settings.Console;
-                param: T = (repr = it.param.bitcast());
-                @if(param.get(.linked) == 0) continue();
-                // TODO: font https://int10h.org/oldschool-pc-fonts/fontlist/font?ibm_bios-2y
-                // TODO: need to bounds check offset against the size of the ram so maybe delay the instance conversion to here
-                offset := world.storage[c.instance_offset_by_gate[i]];
-                
-                bytes_per_char := @if(param.get(.colour) == 0, 1, 8);
-                data := world.storage.interpret_as_bytes();
-                data := data.subslice(param.get(.linked_ram_instance)*8 + offset*bytes_per_char, 80*24*bytes_per_char);
-                
-                if param.get(.colour) == 0 {
-                        sdtx.color = pack_rgba(255, 255, 255, 255);
-                        range(0, 24) { y |
-                            range(0, 80) { x |
-                                value := data[y*80 + x];
-                                if value == 0 || value == "\n".ascii() || value == "\t".ascii() || value == "\r".ascii() {
-                                    sdtx.pos.x += 1;
-                                } else {
-                                    sdtx.put(value);
-                                };
-                            };
-                            sdtx.pos.x = 0;
-                            sdtx.pos.y += 1;
-                        };
-                } else {
-                        data := i64.reinterpret_bytes(data);
-                        range(0, 24) { y |
-                            range(0, 80) { x |
-                                value := data[y*80 + x];
-                                sdtx.color = pack_rgba(value.shift_right_logical(48).bit_and(0xFF), value.shift_right_logical(40).bit_and(0xFF), value.shift_right_logical(32).bit_and(0xFF), 255);
-                                my_solid_char := "\x8F".index(0)[];
-                                if sdtx.color != 0xff000000 {  // there's already a black background, don't bother
-                                    sdtx.put(my_solid_char);
-                                    sdtx.pos.x -= 1;
-                                }
-                                char: u8 = value.trunc();
-                                if char == 220 { // HACK bottom half square that tetris uses
-                                    char = my_solid_char - 3;
-                                };
-                                if char == 0xDB {
-                                    char = my_solid_char;
-                                };
-                                if char != 0 && char != "\n".ascii() && char != "\t".ascii() && char != "\r".ascii() && char != 255 {
-                                    sdtx.color = pack_rgba(value.shift_right_logical(24).bit_and(0xFF), value.shift_right_logical(16).bit_and(0xFF), value.shift_right_logical(8).bit_and(0xFF), 255);
-                                    sdtx.put(char);
-                                } else {
-                                    sdtx.pos.x += 1;
-                                }
-                            };
-                            sdtx.pos.x = 0;
-                            sdtx.pos.y += 1;
-                        };
-                };
-            };
-            
-            if gate_kind == .SegmentDisplay {
-                sdtx.origin = world_to_text_pos(tc_to_world_pos(gate.pos + vec2(-1, -1.5)));
-                w: f32 = 0.02;
-                s: f32 = 0.06;
-                colour_index := it.param.clamp(0, 3);
-                mask := world.storage[c.instance_offset_by_gate[i]];
-                base := text_to_world_pos(sdtx.origin + sdtx.pos);
-                empty := pack_rgba(0, 0, 0, 255);
-                // TODO: don't have the lines overlap
-                range(0, 8) { i |  // TODO: make calling for_bits more convenient
-                    on := mask.bit_and(1.shift_left(i)) != 0;
-                    sgl.color = @if(on, segment_colours[colour_index], empty);
-                    da, db := segment_lines[i];
-                    a, b := (base + da*s * vec2(1, -1), base + db*s * vec2(1, -1));
-                    sgl.line(a, b, w);
-                };
-                sdtx.pos.y += 6;
-            };
-            
-            if gate_kind == .DotMatrixDisplay {
-                sdtx.origin = world_to_text_pos(tc_to_world_pos(gate.pos + vec2(-1.5, -1.5)));
-                buf := world.storage.subslice(c.instance_offset_by_gate[i], 7*8*32/64);
-                buf := u32.reinterpret_bytes(buf.interpret_as_bytes());
-                
-                i := 0;
-                w: f32 = 0.017;
-                p := text_to_world_pos(sdtx.pos + sdtx.origin);
-                range(0, 8) { y |
-                    range(0, 6) { x |
-                        r, g, b := (buf[i].shift_right_logical(24).bit_and(0xFF), buf[i].shift_right_logical(16).bit_and(0xFF), buf[i].shift_right_logical(8).bit_and(0xFF));
-                        sgl.color = pack_rgba(r.zext(), g.zext(), b.zext(), 255);
-                        sgl.line(p + vec2(0, w/2), p + vec2(w, w/2), w);
-                        p.x += w;
-                        i += 1;
-                    };
-                    p += vec2(-6 * w, -w);
-                };
-            };
-            
-            if gate_kind == .SpriteDisplay {
-                continue :: local_return;
-                sdtx.origin = world_to_text_pos(tc_to_world_pos(gate.pos + vec2(-16.5, 12)));
-                data := world.storage.subslice(c.instance_offset_by_gate[i], size_of(Tc.Builtin.SpriteData) * 256);
-                data := Tc.Builtin.SpriteData.reinterpret_bytes(data.interpret_as_bytes());
-                p := text_to_world_pos(sdtx.pos + sdtx.origin);
-                uv0, uv1, texture_size := state.atlas.uvs&.get(it.param) || continue();
-                uv_size := abs(uv0 - uv1);
-                sgl.color = 0xFFFFFFFF;
-                w: f32 = 1.08;
-                logical_screen_size := vec2(640, 480);
-                
-                aspect := logical_screen_size.y/logical_screen_size.x;
-                p0 := p; p1 := p0 + vec2(w, w*aspect);
-                sgl.v2f(p0.x, p0.y);
-                sgl.v2f(p1.x, p0.y);
-                sgl.v2f(p1.x, p1.y);
-                sgl.v2f(p0.x, p1.y);
-                
-                enumerate data { sprite_i, it |
-                    continue :: local_return;
-                    @if(it.w * it.h == 0) continue();
-                    V :: fn(x: u16, y: u16) Vec2 = vec2(x.int().float().cast(), y.int().float().cast());
-                    src, dest, size := (
-                        V(it.src_x, it.src_y).min(texture_size), 
-                        V(it.dest_x, it.dest_y).min(texture_size), 
-                        V(it.w, it.h).min(logical_screen_size),
-                    );
-                    dest.y = logical_screen_size.y - dest.y - size.y;
-                    
-                    uv0 := uv0 + src/texture_size * uv_size;
-                    uv1 := min(uv1, uv0 + size/texture_size * uv_size);
-                    p0 := p + dest/logical_screen_size * w;
-                    p1 := p0 + size/logical_screen_size * w * vec2(1, aspect);
-                    
-                    sgl.v2f_t2f(p0.x, p0.y, uv0.x, uv1.y);
-                    sgl.v2f_t2f(p1.x, p0.y, uv1.x, uv1.y);
-                    sgl.v2f_t2f(p1.x, p1.y, uv1.x, uv0.y);
-                    sgl.v2f_t2f(p0.x, p1.y, uv0.x, uv0.y);
-                };
-                
-            };
             // TODO: all these need to know the thing's rotation
+            @match(it.kind.name(.Tc1)) {
+                fn Console() => self.console(gate, c, i, it);
+                fn SegmentDisplay() => self.segment_display(gate, c, i, it);
+                fn DotMatrixDisplay() => self.dot_matrix_display(gate, c, i, it);
+                fn SpriteDisplay() => self.sprite_display(gate, c, i, it);
+                @default => ();
+            };
         };
-        sdtx.origin = vec2(0);
     };
     
     sgl.end();
@@ -879,27 +328,538 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.gfx_error_last_frame = gfx_error;
     
     state.clicked = false;
-    Easy'glue_begin_pass(sapp, sg, (colors = ((
-        load_action = .CLEAR,
-        clear_value = (r = 0.15, g = 0.15, b = 0.15, a = 1),
-    ), ..)));
+    Easy'glue_begin_pass(sapp, sg, ClearAction(r = 0.15, g = 0.15, b = 0.15, a = 1));
     @if(need_draw) sgl.draw_layer(sg, 0);
     sdtx.draw_layer(0);
     sg.end_pass();
     sg.commit();
 };
 
-// TODO: ugh this needs to not be so verbose
-fn open_gate(state: *State, logical_gate_index: ?i64, diagram_gate_index: ?i64) void = {
-    old_circuit: ?*Tc.Circuit = .None;
-    new_diagram_circuit: ?i64 = .None;
-    is_io := false;
-    new_component: ?ComponentId = .None;
-    @if(state.tree.len > 0) if state.tree[state.tree.len - 1].diagram_circuit { i |
-        old_circuit = (Some = state.circuit[i]&);
+Draw :: @struct {
+    state: *State #use;
+    diagram_pos: Vec2 = vec2(0);
+    screen_scale: Vec2;
+    sdtx: *Sdtx.Context;
+    have_logic: bool;
+    all_wire_positions: []RawList(Vec2) = empty();
+    hovered_wire_index: ?Ty(WireId, i64) = .None;
+    mouse_world_pos: Vec2;
+    wires: []WireValue = empty();
+    wire_value_colour: Array(u32, 2) = (pack_rgba(150, 150, 255, 255), pack_rgba(255, 0, 150, 255));
+    out: *List(u8);
+    text_spacing := vec2(0);
+    wire_node_width: f32 = 0.025;
+    wire_hover_count: f32 = 1;
+};
+
+fn arch_selection(self: *Draw) ?i64 = {
+    state, sdtx := (self.state, self.sdtx);
+    new: ?i64 = .None;
+    arch_list_count: f32 = 0;
+    selected_circuit := @if(state.tree.len == 0, -1, state.tree[0].diagram_circuit || -1);
+    // TODO: list them from the save dir even if don't ask for a specific one on cli
+    enumerate state.circuit { i, c |
+        continue :: local_return;
+        @if(!c.is_arch) continue();
+        
+        sdtx.pos = self.world_to_text_pos(self.text_spacing * vec2(0, (7 + arch_list_count)));
+        p := self.world_to_text_pos(self.mouse_world_pos);
+        hover := p.x > sdtx.pos.x && p.x < sdtx.pos.x + c.name.len.float().cast() && p.y > sdtx.pos.y && p.y < sdtx.pos.y + 1;
+        sdtx.color = pack_rgba(200, 200*int(i != selected_circuit), 200*int(!hover), 255);
+        sdtx.put(c.name);
+        arch_list_count += 1;
+        if state.clicked && hover && state.loader.progress == .Idle {
+            new = (Some = i);
+        };
+    };
+    new
+}
+
+fn walk_component_tree(self: *Draw, c: **Component) Ty(i64, i64, i64) = {
+    state := self.state;
+    instance, parent_wire_offset, wire_offset := (0, 0, 0);
+    self.put_text(self.text_spacing * vec2(0, 1), pack_rgba(255, 255, 255, 255)) { out |
+        for state.tree { it |
+            if it.logical_gate { it |
+                parent_wire_offset = wire_offset;
+                wire_offset += c.wire_count;
+                range(0, it) { i |
+                    child := state.world&[c.gates[i].kind]&;
+                    wire_offset += child.wire_sum;
+                };
+                @fmt(out, "%[%], ", c.name, it);
+                instance += c.instance_offset_by_gate[it];
+                c[] = state.world&[c.gates[it].kind]&;
+            };
+        };
+        out.push_all(c.name);
+    };
+    (instance, parent_wire_offset, wire_offset)
+}
+
+fn draw_component_code(self: *Draw, c: *Component, instance: i64, parent_wire_offset: i64) void = {
+    sdtx, state := (self.sdtx, self.state);
+    pos := vec2(0, 0);
+    if c.gates.len == 0 {
+        p := self.mouse_world_pos;
+        hover := p.y < pos.y && p.y > pos.y - self.text_spacing.y && p.x > 0 && p.x < 100;
+        sdtx.origin = self.world_to_text_pos(vec2(0, 0));
+        sdtx.pos = vec2(0);
+        self.draw_primitive_code(instance, parent_wire_offset, hover);
+        if state.clicked && hover {
+            state.pop_tree_node();
+            state.clicked = false;
+        };
+        sdtx.origin = vec2(0);
+    };
+    enumerate c.gates { i, it |
+        p := self.mouse_world_pos;
+        hover := p.y < pos.y && p.y > pos.y - self.text_spacing.y && p.x > 0 && p.x < 100;
+        sdtx.pos = self.world_to_text_pos(pos);
+        self.draw_gate_code(it, hover);
+        pos.y -= self.text_spacing.y;
+        
+        if state.clicked && hover {
+            state.open_gate((Some = i), .None, i == 0 || i == c.gates.len - 1);
+        };
+    };
+};
+
+fn draw_gate_code(self: *Draw, it: *Component.Gate, hover: bool) void = {
+    sdtx, world := (self.sdtx, self.world&);
+    base_colour := @if(hover, pack_rgba(0, 255, 0, 255), pack_rgba(255, 255, 0, 255));
+    for(it.outputs, fn(it) => self.show_wire_value(it, false));
+    sdtx.color = base_colour;
+    child := world[it.kind]&;
+    name := child.name;
+    @if(it.outputs.len > 0) sdtx.put("= ");
+    sdtx.put(@tfmt("%( ", name));
+    if child.has_param {
+        sdtx.color = self.wire_value_colour&[int(it.param != 0)];
+        sdtx.put(@tfmt("% ", it.param));
+    };
+    for(it.inputs, fn(it) => self.show_wire_value(it, false));
+    sdtx.color = base_colour;
+    sdtx.put(");");
+}
+
+fn draw_primitive_code(self: *Draw, instance: i64, parent_wire_offset: i64, hover: bool) void = {
+    sdtx, state, world, out := (self.sdtx, self.state, self.world&, self.out);
+    
+    sdtx.color = @if(hover, pack_rgba(0, 255, 0, 255), pack_rgba(255, 255, 0, 255));
+    sdtx.put("output(intrinsic(input()));\n");
+    
+    @assert(self.have_logic && state.tree.len >= 2);
+    parent_kind := state.tree[state.tree.len - 2].component.unwrap();
+    gate_i := state.tree[state.tree.len - 1].logical_gate.unwrap();
+    
+    parent := world[parent_kind]&;
+    it := parent.gates[gate_i]&;
+    n := get_storage_count(world.components, it);
+    if !state.halted_without_wire_values {
+        // show callsite in the parent
+        self.wires = world.scratch.items().subslice(parent_wire_offset, parent.wire_count);
+        self.draw_gate_code(it, false);
+        self.wires = empty();
+    };
+    
+    @if(n == 0 && !world[it.kind].has_param) return();
+    
+    // TODO: unpack `param` in a readable way
+    sdtx.color = pack_rgba(255, 255, 255, 255);
+    sdtx.put(@tfmt("\n(storage_count=%, instance=%, param=%)\n", n, instance, fmt_hex(it.param)));
+    
+    // show contents of the memory this gate owns
+    data := world.storage.subslice(instance, n.min(4096)).interpret_as_bytes();
+    enumerate data { i, c |
+        @if(i.umod(16) == 0) sdtx.put("\n");
+        push_hex_byte(out, c[], true);
+        sdtx.put(out.items());
+        sdtx.pos.x += 1;
+        out.clear();
+    };
+}
+
+fn show_wire_value(self: *Draw, id: WireId, force_hover: bool) = {
+    sdtx, state, wires, out := (self.sdtx, self.state, self.wires, self.out);
+    @if(!self.have_logic) return();
+    if state.show_wire_ref_lines && self.all_wire_positions.len != 0 {
+        start := sdtx.pos;
+        end := start + vec2(6, 1);
+        p := self.world_to_text_pos(self.mouse_world_pos);
+        hover := p.x > start.x && p.x < end.x && p.y > start.y && p.y < end.y;
+        positions := self.all_wire_positions[id.id.zext()]&;
+        // collecting all these is a bit unreasonably :SLOW but here we are. it's only when holding shift so maybe it's fine 
+        positions.push(sdtx.pos, temp());
+        if self.hovered_wire_index.is_none() && (hover || force_hover) {
+            self.hovered_wire_index = (Some = (id, positions.len - 1));
+        };
     };
 
-    if old_circuit { c |
+    ok := id.id.zext().ult(self.wires.len);
+    value := @if(!ok, 0, self.wires[id.id.zext()]);
+    sdtx.color = self.wire_value_colour&[int(value != 0)];
+    sdtx.put(@tfmt("w%", id.id));
+    sdtx.color = pack_rgba(150, 150, 150, 255);
+    sdtx.put("=");
+    // TODO: need to keep track of data size of each wire
+    @if(ok) 
+    if state.is_new_overture {
+        for_rev i64.cast_to_bytes(value&) { c |
+            push_hex_byte(out, c, false);
+        };
+    } else {
+        push_hex_byte(out, value.trunc(), true);
+    };
+    sdtx.put(out.items());
+    out.clear();
+    sdtx.put(" ");
+};
+
+fn draw_circuit_background(self: *Draw, circuit: *Tc.Circuit) void = {
+    sdtx, state, sgl := (self.sdtx, self.state, self.draw&);
+    hi, lo := (circuit.max + vec2(1), circuit.min - vec2(1));
+    size := abs(hi - lo);
+    circuit_top_right := self.tc_to_world_pos(lo + vec2(size.x, 0));
+    goal_top_right := self.text_spacing * vec2(-30, 2);
+    self.diagram_pos = goal_top_right - circuit_top_right;
+    
+    if state.loader.progress == .Idle {
+        self.put_text(state.warnings.items(), self.tc_to_world_pos(vec2(lo.x, hi.y + 5)), pack_rgba(255, 255, 255, 255));
+    };
+    
+    {  // vaguely the grid for custom component pins
+        grid_size :: 8;
+        sgl.color = pack_rgba(40, 40, 40, 255);
+        start := lo.x.cast().int().align_back(grid_size).float().cast();
+        p := vec2(start, lo.y);
+        while => p.x < hi.x {
+            a, b := (self.tc_to_world_pos(p), self.tc_to_world_pos(p + vec2(0, size.y)));
+            sgl.line(a, b, 0.01);
+            p.x += grid_size.float().cast();
+        };
+        start := lo.y.cast().int().align_back(grid_size).float().cast();
+        p := vec2(lo.x, start);
+        while => p.y < hi.y {
+            a, b := (self.tc_to_world_pos(p), self.tc_to_world_pos(p + vec2(size.x, 0)));
+            sgl.line(a, b, 0.01);
+            p.y += grid_size.float().cast();
+        };
+    };
+    
+    // border around the whole diagram
+    a, b := (self.tc_to_world_pos(lo), self.tc_to_world_pos(hi));
+    s := abs(a - b);
+    w: f32 = 0.03;
+    sgl.color = pack_rgba(20, 20, 20, 255);
+    sgl.line(a, a + vec2(s.x, 0), w);
+    sgl.line(a, a - vec2(0, s.y), w);
+    sgl.line(b, a + vec2(s.x, 0), w);
+    sgl.line(b, a - vec2(0, s.y), w);
+    
+    sdtx.color = pack_rgba(50, 200, 150, 255);
+    sdtx.pos = self.world_to_text_pos(goal_top_right) + vec2(-circuit.name.len().float().cast(), -2);
+    sdtx.put(circuit.name);
+};
+
+fn hovering_node(self: *Draw, b: Vec2) bool = {
+    W, p := (self.wire_node_width, self.mouse_world_pos);
+    p.y < b.y + W/2 && p.y > b.y - W/2 && p.x > b.x - W/2 && p.x < b.x + W/2
+}
+
+fn draw_gate_squares(self: *Draw, circuit: *Tc.Circuit) void = {
+    sdtx, state, sgl, W := (self.sdtx, self.state, self.draw&, self.wire_node_width);
+    enumerate circuit.gates { g_gate_index, it |
+        b := self.tc_to_world_pos(it.pos);
+        hover := self.hovering_node(b);
+        sgl.color = pack_rgba(100, 100, 100, 255);
+        if hover {
+            info := Tc'get_builtin_shape(it.kind);
+            sgl.color = pack_rgba(200, 200, 200, 255);
+            sdtx.color = pack_rgba(255, 255, 255, 255);
+            name := info.display_name(it, state.circuit);
+            sdtx.pos = self.world_to_text_pos(b) + vec2(0, self.wire_hover_count);
+            sdtx.put(@tfmt("(%, %) %", it.pos.x, it.pos.y, name));
+            if it.logical_gate_index != -1 {
+                sdtx.put(@tfmt(" [%]", it.logical_gate_index));
+            };
+            self.wire_hover_count += 1;
+            
+            if state.clicked {
+                state.open_gate(.None, (Some = g_gate_index), false);
+            };
+        };
+        sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
+    };
+}
+
+// TODO: dont like that sometimes the connecting lines are under or over the nodes. do two loops to be consistant
+fn draw_wires(self: *Draw, circuit: *Tc.Circuit) void = {
+    sdtx, sgl, W := (self.sdtx, self.draw&, self.wire_node_width);
+    enumerate circuit.wires { wire_i, wire |
+        teleport := wire.path[0].length == 0;
+        enumerate wire.path { i, it |
+            sgl.color = pack_rgba(100, 50, 50 * int(!teleport), 255);
+            b := self.tc_to_world_pos(it.pos);
+            if i != 0 && !teleport {
+                a := self.tc_to_world_pos(wire.path[i - 1].pos);
+                sgl.line(a, b, W/2.5);
+            };
+            hover := self.hovering_node(b);
+            if self.hovered_wire_index.is_some() && self.hovered_wire_index.Some._0.id == wire.logical.id && (i == 0 || i == wire.path.len - 1) {
+                // TODO: these will be kinda useless because it doesn't reset wire_hover_count when for the next wire that's at a different x position. 
+                hover = true;
+            };
+            if hover {
+                sgl.color = pack_rgba(200, 50, 50, 255);
+                sdtx.pos = self.world_to_text_pos(b) + vec2(0, self.wire_hover_count);
+                sdtx.color = pack_rgba(255, 255, 255, 255);
+                sdtx.put(@tfmt("% (%, %) ", wire_i, it.pos.x, it.pos.y));
+                if !circuit.has_bidirectional_pins {
+                    @if(wire.logical.id != 0xFFFFFFFF) self.show_wire_value(wire.logical, true);
+                };
+                self.wire_hover_count += 1;
+            };
+            sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
+        };
+    };
+}
+
+// TODO: seperate out all the hover and do it at the end
+fn draw_pin_lines(self: *Draw, circuit: *Tc.Circuit) void = {
+    sdtx, state, sgl, W := (self.sdtx, self.state, self.draw&, self.wire_node_width);
+    @if(state.loader.progress == .Loading) return();
+    
+    each circuit.gates { it |
+        info := Tc'get_builtin_shape(it.kind);
+        for_pins(info, it, state.circuit) { i, dx, dy |
+            a := self.tc_to_world_pos(it.pos);
+            b := self.tc_to_world_pos(it.pos + vec2(dx.float().cast(), dy.float().cast()));
+            
+            out_arity, in_arity := get_arity(info, it, state.circuit, @static u8.list(panicking_allocator));
+            is_input := i >= out_arity;
+            sgl.color = pack_rgba(0, 100 * int(in_arity + out_arity > 0), 100 * int(!is_input), 255);
+            sgl.line(a, b, W/4);
+            
+            hover := self.hovering_node(b);
+            if hover {
+                sdtx.pos = self.world_to_text_pos(b) + vec2(0, self.wire_hover_count);
+                sdtx.color = pack_rgba(255, 255, 255, 255);
+                name := info.display_name(it, state.circuit);
+                sdtx.put(@tfmt("% %[%]", name, @if(is_input, "in", "out"), @if(is_input, i - out_arity, i)));
+                if it.logical_gate_index != -1 {
+                    sdtx.put(@tfmt(" [%]", it.logical_gate_index));
+                };
+                self.wire_hover_count += 1;
+            };
+        };
+    };
+}
+
+fn console(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Component.Gate) void = {
+    sdtx, world, sgl := (self.sdtx, self.world&, self.draw&);
+    
+    sdtx.pos = vec2(0);
+    a := self.tc_to_world_pos(gate.pos + vec2(-16, -8));
+    sdtx.origin = self.world_to_text_pos(a);
+    b := self.text_to_world_pos(sdtx.origin + vec2(80, 24));
+    s := abs(a - b);
+    sgl.color = pack_rgba(0, 0, 0, 255);
+    sgl.line(vec2(a.x, b.y + s.y/2), vec2(b.x, b.y + s.y/2), s.y);
+    
+    T :: Builtin.Settings.Console;
+    param: T = (repr = it.param.bitcast());
+    @if(param.get(.linked) == 0) return();
+    // TODO: font https://int10h.org/oldschool-pc-fonts/fontlist/font?ibm_bios-2y
+    // TODO: need to bounds check offset against the size of the ram so maybe delay the instance conversion to here
+    offset := world.storage[c.instance_offset_by_gate[i]];
+    
+    bytes_per_char := @if(param.get(.colour) == 0, 1, 8);
+    data := world.storage.interpret_as_bytes();
+    data := data.subslice(param.get(.linked_ram_instance)*8 + offset*bytes_per_char, 80*24*bytes_per_char);
+    
+    if param.get(.colour) == 0 {
+        sdtx.color = pack_rgba(255, 255, 255, 255);
+        range(0, 24) { y |
+            range(0, 80) { x |
+                value := data[y*80 + x];
+                if value == 0 || value == "\n".ascii() || value == "\t".ascii() || value == "\r".ascii() {
+                    sdtx.pos.x += 1;
+                } else {
+                    sdtx.put(value);
+                };
+            };
+            sdtx.pos.x = 0;
+            sdtx.pos.y += 1;
+        };
+    } else {
+        data := i64.reinterpret_bytes(data);
+        range(0, 24) { y |
+            range(0, 80) { x |
+                value := data[y*80 + x];
+                sdtx.color = pack_rgba(value.shift_right_logical(48).bit_and(0xFF), value.shift_right_logical(40).bit_and(0xFF), value.shift_right_logical(32).bit_and(0xFF), 255);
+                my_solid_char := "\x8F".index(0)[];
+                if sdtx.color != 0xff000000 {  // there's already a black background, don't bother
+                    sdtx.put(my_solid_char);
+                    sdtx.pos.x -= 1;
+                }
+                char: u8 = value.trunc();
+                if char == 220 { // HACK bottom half square that tetris uses
+                    char = my_solid_char - 3;
+                };
+                if char == 0xDB {
+                    char = my_solid_char;
+                };
+                if char != 0 && char != "\n".ascii() && char != "\t".ascii() && char != "\r".ascii() && char != 255 {
+                    sdtx.color = pack_rgba(value.shift_right_logical(24).bit_and(0xFF), value.shift_right_logical(16).bit_and(0xFF), value.shift_right_logical(8).bit_and(0xFF), 255);
+                    sdtx.put(char);
+                } else {
+                    sdtx.pos.x += 1;
+                }
+            };
+            sdtx.pos.x = 0;
+            sdtx.pos.y += 1;
+        };
+    };
+};
+
+fn segment_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Component.Gate) void = {
+    world, sgl := (self.world&, self.draw&);
+    base := self.tc_to_world_pos(gate.pos + vec2(-1, -1.5));
+    w: f32 = 0.02;
+    s: f32 = 0.06;
+    colour_index := it.param.clamp(0, 3);
+    mask := world.storage[c.instance_offset_by_gate[i]];
+    empty := pack_rgba(0, 0, 0, 255);
+    // TODO: don't have the lines overlap
+    range(0, 8) { i |  // TODO: make calling for_bits more convenient
+        on := mask.bit_and(1.shift_left(i)) != 0;
+        sgl.color = @if(on, segment_colours[colour_index], empty);
+        da, db := segment_lines[i];
+        a, b := (base + da*s * vec2(1, -1), base + db*s * vec2(1, -1));
+        sgl.line(a, b, w);
+    };
+}
+
+// TODO: should write a texture instead of doing it with 6 vertices per pixel
+fn dot_matrix_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, _: *Component.Gate) void = {
+    world, sgl := (self.world&, self.draw&);
+    buf := world.storage.subslice(c.instance_offset_by_gate[i], 7*8*32/64);
+    buf := u32.reinterpret_bytes(buf.interpret_as_bytes());
+    
+    i := 0;
+    w: f32 = 0.017;
+    p := self.tc_to_world_pos(gate.pos + vec2(-1.5, -1.5));
+    range(0, 8) { y |
+        range(0, 6) { x |
+            r, g, b := (buf[i].shift_right_logical(24).bit_and(0xFF), buf[i].shift_right_logical(16).bit_and(0xFF), buf[i].shift_right_logical(8).bit_and(0xFF));
+            sgl.color = pack_rgba(r.zext(), g.zext(), b.zext(), 255);
+            sgl.line(p + vec2(0, w/2), p + vec2(w, w/2), w);
+            p.x += w;
+            i += 1;
+        };
+        p += vec2(-6 * w, -w);
+    };
+}
+    
+fn sprite_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Component.Gate) void = {
+    state, world, sgl := (self.state, self.world&, self.draw&);
+    data := world.storage.subslice(c.instance_offset_by_gate[i], size_of(Tc.Builtin.SpriteData) * 256);
+    data := Tc.Builtin.SpriteData.reinterpret_bytes(data.interpret_as_bytes());
+    p := self.tc_to_world_pos(gate.pos + vec2(-16.5, 12));
+    uv0, uv1, texture_size := state.atlas.uvs&.get(it.param) || return();
+    uv_size := abs(uv0 - uv1);
+    sgl.color = 0xFFFFFFFF;
+    w: f32 = 1.08;
+    logical_screen_size := vec2(640, 480);
+    
+    aspect := logical_screen_size.y/logical_screen_size.x;
+    p0 := p; p1 := p0 + vec2(w, w*aspect);
+    sgl.v2f(p0.x, p0.y);
+    sgl.v2f(p1.x, p0.y);
+    sgl.v2f(p1.x, p1.y);
+    sgl.v2f(p0.x, p1.y);
+    
+    enumerate data { sprite_i, it |
+        continue :: local_return;
+        @if(it.w * it.h == 0) continue();
+        V :: fn(x: u16, y: u16) Vec2 = vec2(x.int().float().cast(), y.int().float().cast());
+        src, dest, size := (
+            V(it.src_x, it.src_y).min(texture_size), 
+            V(it.dest_x, it.dest_y).min(texture_size), 
+            V(it.w, it.h).min(logical_screen_size),
+        );
+        dest.y = logical_screen_size.y - dest.y - size.y;
+        
+        uv0 := uv0 + src/texture_size * uv_size;
+        uv1 := min(uv1, uv0 + size/texture_size * uv_size);
+        p0 := p + dest/logical_screen_size * w;
+        p1 := p0 + size/logical_screen_size * w * vec2(1, aspect);
+        
+        sgl.v2f_t2f(p0.x, p0.y, uv0.x, uv1.y);
+        sgl.v2f_t2f(p1.x, p0.y, uv1.x, uv1.y);
+        sgl.v2f_t2f(p1.x, p1.y, uv1.x, uv0.y);
+        sgl.v2f_t2f(p0.x, p1.y, uv0.x, uv0.y);
+    };
+};
+
+display_name :: fn(info: *Builtin.Template, it: *Tc.Circuit.Gate, circuit: []Tc.Circuit) Str = {
+    name := info.name;
+    @if(it.kind.group() == .Loaded)
+    if circuit.find(fn(check) => check.id == it.custom_id) { it |
+        name = @tfmt("Custom (%)", it.name);
+    };
+    if it.kind.group() == .Tc2 && it.kind.Tc'gate_name(.Tc2) == .Level_gate {
+        name = @tfmt("% (%)", name, it.label);
+    };
+    name
+}
+
+fn put_text(self: *Draw, world_pos: Vec2, colour: u32, $body: @Fn(out: *List(u8)) void) void = {
+    body(self.out);
+    self.put_text(self.out.items(), world_pos, colour);
+    self.out.clear();
+}
+
+fn put_text(self: *Draw, text: Str, world_pos: Vec2, colour: u32) void = {
+    sdtx := self.sdtx;
+    sdtx.color = colour;
+    sdtx.origin = self.world_to_text_pos(world_pos);
+    sdtx.pos = vec2(0);
+    sdtx.put(text);
+    sdtx.origin = vec2(0); sdtx.pos = vec2(0);
+}
+
+fn show_alert(msg: Str, sdtx: *Sdtx.Context, sapp: *Sapp.Self) void = {
+    sdtx.desc.char_height = 8;
+    sdtx.desc.char_width = sdtx.desc.char_height / 2;
+    sdtx.canvas(sapp, 1);
+    sdtx.color = pack_rgba(255, 255, 255, 255);
+    sdtx.put(msg);
+}
+
+fn tc_to_world_pos(self: *Draw, pos: Vec2) Vec2 = 
+    (pos) / 30 * vec2(1, -1) + vec2(-1, -4) + self.diagram_pos;
+fn world_to_text_pos(self: *Draw, pos: Vec2) Vec2 = 
+    ((pos*self.scale*self.screen_scale + self.pos)*vec2(1, -1) + vec2(1)) / self.sdtx.glyph_size / 2;
+fn text_to_world_pos(self: *Draw, pos: Vec2) Vec2 =
+    (((pos * 2 * self.sdtx.glyph_size) - vec2(1)) * vec2(1, -1) - self.pos) / self.scale / self.screen_scale;
+
+// TODO: doesn't work if you enter by logical text that was exposed by inlining something (so needs to do two+ layers of the diagram)
+// TODO: ugh this needs to not be so verbose
+fn open_gate(state: *State, logical_gate_index: ?i64, diagram_gate_index: ?i64, is_io: bool) void = {
+    new_diagram_circuit: ?i64 = .None;
+    new_component: ?ComponentId = .None;
+    
+    @if(state.tree.len > 0)
+    if logical_gate_index { i |
+        if state.tree[state.tree.len - 1].component { parent |
+            new_component = (Some = state.world&[parent].gates[i].kind);
+        };
+    };
+
+    @if(state.tree.len > 0) if state.tree[state.tree.len - 1].diagram_circuit { i |
+        c := state.circuit[i]&;
         @if(logical_gate_index.is_none()) if diagram_gate_index { i |
             g := c.gates[i];
             if g.logical_gate_index != -1 {
@@ -1164,7 +1124,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             }
         }
         fn MOUSE_SCROLL() => {
-            (lo: f32, hi: f32) := (0.000001, 1000000);
+            (lo: f32, hi: f32) := (0.03, 100);
             delta := event.scroll_y * state.scale * 3 / screen.x;
             delta := clamp(state.scale + delta, lo, hi) - state.scale;
             
@@ -1274,7 +1234,12 @@ worker_get_source :: fn(state: *State, in: *LoaderT.I, a: Alloc) Result(Str, voi
             if state.download_schematic_archive_before_trying_to_load {
                 state.download_schematic_archive_before_trying_to_load = false;
                 root := Foreign'tc_archive();
-                path = @tfmt("%/v6/schematics/architecture/%/circuit.data", root, path);
+                filter := @const_slice("ploter", "3D Engine", "Screenverture", "Dungeon Crawler", "Platformer Game", "ASM computer 64bit", "Game of Life 32x32", "Matrix Animation Studio 3000", "Snake on matrix display with LEG++");
+                template :: "%/v6/schematics/architecture/%/circuit.data";
+                for filter { path |
+                    _ := Syscall'remove(@fmt_cstr(template, root, path));
+                };
+                path = @tfmt(template, root, path);
             };
             load_path_worker(state, in, a, path)
         }
@@ -1416,32 +1381,6 @@ Builtin :: Tc.Builtin;
 //Tc :: Main.tc.load;
 //Builtin :: Main.tc.builtin;
 
-fn read_memory(world: *World, root_component: ComponentId) []u8 = {
-    out := u8.list(world.storage.len / 8, temp());
-    instance := 0;
-    recurse(out&, world, root_component, instance&);
-    return out.items();
-    recurse :: fn(out: *List(u8), world: *World, c: ComponentId, instance: *i64) void = {
-        c := world[c]&;
-        if c.storage_count == 8 {
-            r: u8 = 0;
-            for world.storage.subslice(instance[], 8) { it |
-                r = r.shift_right_logical(1);
-                r = r.bit_or(int(it != 0).shift_left(7).trunc());
-            };
-            out.push(r);
-            instance[] += 8;
-            return();
-        };
-        if c.storage_count == 1 {
-            instance[] += 1;
-        };
-        each c.gates { it |
-            recurse(out, world, it.kind, instance);
-        };
-    };
-}
-
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     drop(state.loader&);
     state.text&.shutdown();
@@ -1487,3 +1426,133 @@ segment_lines :: @const_slice(
     (vec2(0, 1), vec2(1, 1)),
     (vec2(1, 2), vec2(1.2, 2)),
 );
+
+// this is a hack for debugging the overture/leg in ./defs.fr
+fn debug_known_arch(self: *Draw) void = {
+    self.show_maze();
+
+    state := self.state;
+    root_component := state.tree[0].component.unwrap();
+    
+    // hack: colours being useful relies on ordering in defs.fr: (program, ip, registers). 
+    instruction_width := @if(state.arch_is_leg, 4, 1);
+    ip_index := MAX_i64;
+    memory := read_delay_memory(state.world&, root_component);
+    if state.is_new_overture {
+        memory = state.world.storage.interpret_as_bytes();
+    };
+    memory.len = min(memory.len, 512);
+    root_component := state.world&[root_component]&;
+    @if(root_component.name != "overture" && root_component.name != "leg") return();
+    
+    for root_component.labels { label |
+        if label.name == "ip" && label.bit_size == 8 {
+            byte, bit := root_component.instance_offset_by_gate[label.gate_index].udiv_mod(8);
+            if byte < memory.len && bit == 0 {
+                ip_index = byte;
+            };
+        };
+    };
+    ram_start := 0;
+    if state.is_new_overture {
+        ip_index = 0;
+        ram_start = 8;
+    };
+        
+    self.show_known_memory(memory, ram_start, ip_index, instruction_width);
+    self.show_known_disassembly(memory, ram_start, ip_index);
+    
+    fn show_maze(self: *Draw) void = {
+        m := self.state.maze&;
+        c := pack_rgba(@if(m.win, 255, 50), 200, 150, 255);
+        p := vec2(-38 * self.text_spacing.x, (m.map.len().float().cast())*self.text_spacing.x*2 + self.text_spacing.y*5);
+        self.put_text(p, c, fn(out) => m.render(out));
+    }
+    
+    fn show_known_memory(self: *Draw, memory: []u8, ram_start: i64, ip_index: i64, instruction_width: i64) void = {
+        pos := self.text_spacing * vec2(-60, 2);
+        b := 1;
+        current_instruction_colour := pack_rgba(255, 0, 0, 255);
+        range(0, memory.len) { i |
+            y, x := i.udiv_mod(16);
+            if x == 0 && y.umod(16) == 0 {
+                b += 1;
+            };
+            c := pack_rgba(255, 150, b*40, 255);
+            if memory.len > ip_index {
+                drawing := i.align_back(instruction_width);
+                ip_raw: i64 = memory[ip_index].zext() + ram_start;
+                ip := ip_raw.align_back(instruction_width);
+                if drawing == ip {
+                    c = pack_rgba(200, 0, 0, 255);
+                };
+                if i == ip_raw {
+                    c = pack_rgba(255, 0, 0, 255);
+                };
+            };
+            if i == ip_index {
+                c = pack_rgba(255, 200, 200, 255);
+            };
+            self.put_text(pos, c, fn(out) => push_hex_byte(out, memory[i], true));
+            pos += self.text_spacing * vec2(3, 0);
+            
+            if x == 15 {
+                pos -= self.text_spacing * vec2(16*3, 1);
+            };
+        };
+    }
+    
+    fn show_known_disassembly(self: *Draw, memory: []u8, ram_start: i64, ip_index: i64) void = {
+        if self.state.arch_is_leg {
+            dis_iter(u32.reinterpret_bytes(memory), 4, AsmLeg);
+        } else {
+            dis_iter(memory, 1, AsmOverture);
+        };
+        
+        dis_iter :: fn(instructions, alignment, $Arch) void => {
+            end := min(instructions.len.align_back(alignment), 256/alignment);
+            while => end > 0 && instructions[end - 1] == 0 {
+                end -= 1;
+            };
+            pos := self.text_spacing * vec2(-80, 2);
+            range(ram_start/alignment, end) { i |
+                c := pack_rgba(255, 255, 255, 255);
+                if memory.len > ip_index && i*alignment == memory[ip_index].zext().add(ram_start).align_back(alignment) {
+                    ip_raw: i64 = memory[ip_index].zext() + ram_start;
+                    c = pack_rgba(@if(ip_raw.mod(alignment) == 0, 255, 200), 0, 0, 255);
+                };
+                self.put_text(pos, c, fn(out) => Arch'disassemble(out, instructions[i]));
+                pos.y -= self.text_spacing.x*2;
+            };
+        }
+    }
+    
+    // the overture/leg in defs.fr build up registers/memory from `delay` components 
+    // which each hold one bit (but take a whole i64 storage slot). 
+    // this copies the contents into a packed array of real bytes so its easy to display in the debug ui. 
+    fn read_delay_memory(world: *World, root_component: ComponentId) []u8 = {
+        out := u8.list(world.storage.len / 8, temp());
+        instance := 0;
+        recurse(out&, world, root_component, instance&);
+        return out.items();
+        recurse :: fn(out: *List(u8), world: *World, c: ComponentId, instance: *i64) void = {
+            c := world[c]&;
+            if c.storage_count == 8 {
+                r: u8 = 0;
+                for world.storage.subslice(instance[], 8) { it |
+                    r = r.shift_right_logical(1);
+                    r = r.bit_or(int(it != 0).shift_left(7).trunc());
+                };
+                out.push(r);
+                instance[] += 8;
+                return();
+            };
+            if c.storage_count == 1 {
+                instance[] += 1;
+            };
+            each c.gates { it |
+                recurse(out, world, it.kind, instance);
+            };
+        };
+    }
+}
