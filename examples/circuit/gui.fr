@@ -14,6 +14,7 @@ k+shift+cmd: toggle keyboard device capture.
 u: toggle render graphics devices over circuit
 n: select builtin architecture (overture, leg).
 l: fetch schematic archive.
+e: toggle edit mode.
 """;
 
 State :: @rec @struct {
@@ -65,6 +66,7 @@ State :: @rec @struct {
         img: Sg.Image;
         enable: bool;
     };
+    edit: EditState;
 };
 
 CircuitNode :: @struct {
@@ -112,8 +114,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     world := state.world&;
     halted_without_wire_values := false;
     have_logic := state.loader.progress == .Idle && state.tree.len > 0 && state.tree[0].component.is_some() 
-        && world[state.tree[0].component.Some].gates.len > 2;  // HACK for load unimplemented
-    
+        && world[state.tree[0].component.Some].gates.len > 2  // HACK for load unimplemented
+        && !state.edit.enable;
     eval_this_frame := have_logic && (state.want_eval || state.auto_eval);
     eval_last_frame := state.eval_last_frame;
     state.eval_last_frame = eval_this_frame;
@@ -219,12 +221,20 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     
     self.put_text(self.text_spacing * vec2(0, 3), pack_rgba(255, 255, 255, 255)) { out |
+        if state.edit.enable {
+            @fmt(out, "edit mode (press e to exit)");
+        } else {
         frame_time := state.frame_time_history_sum / max(1, state.frame_time_history&.len());
         @fmt(out, "(paused=%, tick_rate=%, tick=%, keyboard=%, frame_time=%ms) ", 
             !state.auto_eval, state.ticks_per_eval, state.tick, state.keyboard_device_focused, frame_time/1000);
         @if(state.load_time != 0) @fmt(out, "load_time=%ms", state.load_time);
+        };
     };
+    if !state.edit.enable {
     self.put_text(HELP, self.text_spacing * vec2(-90, 12), pack_rgba(0, 0, 0, 255));
+    } else {
+        self.gate_selection();
+    };
     
     if self.arch_selection() { i |
         state.clicked = false;
@@ -276,6 +286,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         self.draw_gate_squares(circuit);
         self.draw_wires(circuit);
         self.draw_pin_lines(circuit);
+        self.update_edit(circuit);
     };
     
     if self.hovered_wire_index { wire, position_index |
@@ -569,9 +580,10 @@ fn hovering_node(self: *Draw, b: Vec2) bool = {
 
 fn draw_gate_squares(self: *Draw, circuit: *Tc.Circuit) void = {
     sdtx, state, sgl, W := (self.sdtx, self.state, self.draw&, self.wire_node_width);
+    e := state.edit&;
     enumerate circuit.gates { g_gate_index, it |
         b := self.tc_to_world_pos(it.pos);
-        hover := self.hovering_node(b);
+        hover := self.hovering_node(b) && e.selected_gate.is_none();
         sgl.color = pack_rgba(100, 100, 100, 255);
         if hover {
             info := Tc'get_builtin_shape(it.kind);
@@ -586,7 +598,14 @@ fn draw_gate_squares(self: *Draw, circuit: *Tc.Circuit) void = {
             self.wire_hover_count += 1;
             
             if state.clicked {
-                state.open_gate(.None, (Some = g_gate_index), false);
+                if e.enable {
+                    if e.selected_gate.is_none() && e.placing_wire_start.is_none() {
+                        e.selected_gate = (Some = g_gate_index);
+                        state.clicked = false;
+                    };
+                } else {
+                    state.open_gate(.None, (Some = g_gate_index), false);
+                };
             };
         };
         sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
@@ -595,9 +614,9 @@ fn draw_gate_squares(self: *Draw, circuit: *Tc.Circuit) void = {
 
 // TODO: dont like that sometimes the connecting lines are under or over the nodes. do two loops to be consistant
 fn draw_wires(self: *Draw, circuit: *Tc.Circuit) void = {
-    sdtx, sgl, W := (self.sdtx, self.draw&, self.wire_node_width);
+    sdtx, sgl, W, state := (self.sdtx, self.draw&, self.wire_node_width, self.state);
     enumerate circuit.wires { wire_i, wire |
-        teleport := wire.path[0].length == 0;
+        teleport := wire.teleport;
         enumerate wire.path { i, it |
             sgl.color = pack_rgba(100, 50, 50 * int(!teleport), 255);
             b := self.tc_to_world_pos(it.pos);
@@ -606,6 +625,10 @@ fn draw_wires(self: *Draw, circuit: *Tc.Circuit) void = {
                 sgl.line(a, b, W/2.5);
             };
             hover := self.hovering_node(b);
+            if hover && state.edit.enable && state.clicked && state.edit.placing_wire_start.is_none() && state.edit.selected_gate.is_none() {
+                state.edit.placing_wire_start = (Some = (wire_i, i));
+                state.clicked = false;
+            };
             if self.hovered_wire_index.is_some() && self.hovered_wire_index.Some._0.id == wire.logical.id && (i == 0 || i == wire.path.len - 1) {
                 // TODO: these will be kinda useless because it doesn't reset wire_hover_count when for the next wire that's at a different x position. 
                 hover = true;
@@ -840,10 +863,126 @@ fn show_alert(msg: Str, sdtx: *Sdtx.Context, sapp: *Sapp.Self) void = {
 
 fn tc_to_world_pos(self: *Draw, pos: Vec2) Vec2 = 
     (pos) / 30 * vec2(1, -1) + vec2(-1, -4) + self.diagram_pos;
+fn world_to_tc_pos(self: *Draw, pos: Vec2) Vec2 = {
+    pos := ((pos - self.diagram_pos - vec2(-1, -4)) * vec2(1, -1) * 30);
+    roundf :: fn(a: f32) f32 #libc;
+    vec2(pos.x.roundf(), pos.y.roundf())
+}
 fn world_to_text_pos(self: *Draw, pos: Vec2) Vec2 = 
     ((pos*self.scale*self.screen_scale + self.pos)*vec2(1, -1) + vec2(1)) / self.sdtx.glyph_size / 2;
 fn text_to_world_pos(self: *Draw, pos: Vec2) Vec2 =
     (((pos * 2 * self.sdtx.glyph_size) - vec2(1)) * vec2(1, -1) - self.pos) / self.scale / self.screen_scale;
+
+EditState :: @struct {
+    enable: bool = false;
+    selected_gate: ?i64 = .None;
+    placing_wire_start: ?Ty(i64, i64) = .None;   // (wire index, path index)
+    action: @enum(None, NewGate, Rotate, Delete) = .None;
+    placing_type := zeroed(ComponentId); 
+};
+
+// TODO: recompile when exit edit mode 
+// TODO: allow enter custom component while in edit mode / make new custom components
+// TODO: when placing a wire
+// - if it's not touching anything already, could extend the existing wire
+// - look for path.len==0 to reuse first before reallocating
+// - allow placing wire not conencted to another
+fn update_edit(self: *Draw, c: *Tc.Circuit) void = {
+    state := self.state;
+    e := state.edit&;
+    @if(!e.enable) return();
+    if e.selected_gate { gate_i |
+        gate := c.gates[gate_i]&;
+        new := self.world_to_tc_pos(self.mouse_world_pos);
+        if !(new == gate.pos) {
+            gate.pos = new;
+            state.dirty = true;
+        };
+        if state.clicked&.take() {
+            e.selected_gate = .None;
+        };
+    };
+    if e.placing_wire_start { wire_i, path_i |
+        sgl, W := (self.draw&, self.wire_node_width);
+        wire := c.wires[wire_i]&;
+        start := wire.path[path_i].pos;
+        a := self.tc_to_world_pos(start);
+        sgl.color = pack_rgba(100, 50, 50, 255);
+        rounded := self.world_to_tc_pos(self.mouse_world_pos);
+        b := self.tc_to_world_pos(rounded);
+        sgl.line(a, b, W/2.5);
+        sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
+        
+        if state.clicked&.take() {
+            e.placing_wire_start = .None;
+            a := state.circuit_arena&.borrow();
+            new := @slice(@as(Tc.Circuit.WireNode) (pos = start), (pos = rounded));
+            c.wires&.push((path = c.wires[wire_i].path.items().rest(path_i).shallow_copy(a).as_raw_list()), a);
+            c.wires&.push((path = new.shallow_copy(a).as_raw_list()), a);
+            c.wires[wire_i].path.len = path_i + 1;
+        };
+    };
+    state.dirty = state.dirty || e.action != .None;
+    @match(e.action) {
+        fn NewGate() => {
+            gate_i := c.gates&.index_of(fn(it) => it.kind.is_placeholder()) || {
+                a := state.circuit_arena&.borrow();
+                c.gates&.push(zeroed(Tc.Circuit.Gate), a);
+                c.gates.len - 1
+            };
+            gate := c.gates[gate_i]&;
+            gate.logical_gate_index = -1;
+            gate.kind = e.placing_type;
+            gate.pos = self.world_to_tc_pos(self.mouse_world_pos);
+            e.selected_gate = (Some = gate_i);
+        }
+        fn Rotate() => if e.selected_gate { gate_i |
+            gate := c.gates[gate_i]&;
+            gate.rotation = gate.rotation.add(1).mod(4);
+        };
+        fn Delete() => {
+            if e.selected_gate&.take() { i |
+                gate := c.gates[i]&;
+                gate.kind.id = trunc(component_offset(.Tc1) + GateName(.Tc1)._0.raw().zext());
+                gate.pos = vec2(-10000);
+            };
+            if e.placing_wire_start&.take() { wire_i, path_i |
+                path := c.wires[wire_i].path&;
+                path.ordered_remove(path_i);
+                if path.len == 1 {
+                    path.len = 0;
+                };
+            };
+        }
+        fn None() => ();
+    };
+    e.action = .None;
+}
+
+fn gate_selection(self: *Draw) void = {
+    state, sdtx := (self.state, self.sdtx);
+    new: ?ComponentId = .None;
+    count: f32 = 0;
+    each Tc.Builtin.templates { it |
+        continue :: local_return;
+        @if(@is(it.body, .Unimplemented, .Custom)) continue();
+        
+        sdtx.pos = self.world_to_text_pos(self.text_spacing * vec2(0, -count));
+        p := self.world_to_text_pos(self.mouse_world_pos);
+        hover := p.x > sdtx.pos.x && p.x < sdtx.pos.x + it.name.len.float().cast() && p.y > sdtx.pos.y && p.y < sdtx.pos.y + 1;
+        sdtx.color = pack_rgba(200, 200, 200*int(!hover), 255);
+        sdtx.put(it.name);
+        count += 1;
+        if state.clicked && hover && state.loader.progress == .Idle {
+            new = (Some = it.kind);
+        };
+    };
+    if new { it |
+        state.edit.placing_type = it;
+        state.edit.action = .NewGate;
+    };
+}
+
 
 // TODO: doesn't work if you enter by logical text that was exposed by inlining something (so needs to do two+ layers of the diagram)
 // TODO: ugh this needs to not be so verbose
@@ -932,6 +1071,7 @@ fn push_tree_node(state: *State, it: CircuitNode) void = {
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     init(state.loader&, state);
     state.keyboard_data = .None;
+    state.edit = ();
     sapp.desc.enable_dragndrop = true;
     state.sg = sg; state.sapp = sapp;
     a := general_allocator();
@@ -965,6 +1105,10 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         path := path.str();
         if path.ends_with("circuit.data") {
             state.load_path_async(path);
+        }
+        if path == "-fetch" {
+            state.download_schematic_archive_before_trying_to_load = true;
+            state.load_path_async("Mandelbrot");
         }
     };
     
@@ -1137,10 +1281,17 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         fn KEY_DOWN() => {
             tick_off := @if(event.modifiers.get(.shift) == 1, 50, 1);
             tick_off := @if(event.modifiers.get(.super) == 1, 1000, tick_off);
+            e := state.edit&;
             @match(event.key_code) {
-                fn ESCAPE() => state.pop_tree_node();
+                fn ESCAPE() => @if(!state.edit.enable) state.pop_tree_node();
                 fn ENTER() => { state.want_eval = true; }
-                fn SPACE() => { state.auto_eval = !state.auto_eval; }
+                fn SPACE() => { 
+                    if e.enable {
+                        e.action = .Rotate;
+                    } else {
+                        state.auto_eval = !state.auto_eval; 
+                    }
+                }
                 fn U() => { state.split_graphics_and_wires = !state.split_graphics_and_wires; }
                 fn R() => state.reset();
                 fn C() => state.recenter();
@@ -1150,7 +1301,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 fn RIGHT_BRACKET() => if state.ticks_per_eval + tick_off < 1_000_000 {
                     state.ticks_per_eval += tick_off;
                 }
-                fn N() => {
+                fn N() => if !e.enable {
                     state.load_time = 0;
                     state.is_new_overture = false;
                     state.arch_is_leg = !state.arch_is_leg;
@@ -1160,11 +1311,19 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                     state.reset();
                 }
                 fn LEFT_SHIFT() => { state.show_wire_ref_lines = true; }
-                fn L() => {
+                fn L() => if !e.enable {
                     if state.loader.progress == .Idle {
                         state.download_schematic_archive_before_trying_to_load = true;
                         state.load_path_async("Mandelbrot");
                     };
+                }
+                fn E() => if !e.enable || state.loader.progress == .Idle {
+                    enable := !e.enable;
+                    e[] = ();
+                    e.enable = enable;
+                }
+                fn BACKSPACE() => {
+                    e.action = .Delete;
                 }
                 @default => return();
             };
@@ -1213,7 +1372,7 @@ fn load_path_async(state: *State, path: Str) void = {
     a := state.circuit_arena&.borrow();
     path := path.shallow_copy(a);
     state.warnings = list(a);
-
+    state.edit.enable = false;
     state.loader&.start_async(Path = (path = path));
 }
 
@@ -1271,6 +1430,7 @@ fn load_circuit_index_async(state: *State, root_index: i64, tc_file_loader_devic
     state.load_time = 0;
     state.tree&.clear();
     state.push_tree_node(diagram_circuit = (Some = root_index));
+    state.edit.enable = false;
     state.loader&.start_async(Index = (root_index = root_index, tc_file_loader_device = tc_file_loader_device));
 }
 
@@ -1376,6 +1536,7 @@ fn load_atlas_part2(state: *State, sg: *Sg.Self) void = {
     a.pixels = empty();
 }
 
+Save :: import("@/examples/circuit/save.fr");
 Tc :: import("@/examples/circuit/tc/load.fr");
 Builtin :: Tc.Builtin;
 //Tc :: Main.tc.load;

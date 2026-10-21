@@ -10,8 +10,8 @@ SPAM_LOG :: false;
 // diagram layout loaded from one circuit.data file. 
 Circuit :: @struct {
     id: CustomId;
-    wires: []Wire;
-    gates: []Gate;
+    wires: RawList(Wire);
+    gates: RawList(Gate);
     programs: []Program;
     mnemonics := "";
     min: Vec2;
@@ -35,8 +35,9 @@ Circuit :: @struct {
     Wire :: @struct {
         path: RawList(WireNode);
         logical: WireId = (id = 0xFFFFFFFF);
+        teleport := false;
     };
-    WireNode :: @struct(pos: Vec2, direction: Vec2, length: i64);
+    WireNode :: @struct(pos: Vec2, direction: Vec2 = vec2(0), length: i64 = 0);
     Gate :: @struct {
         pos: Vec2;
         kind: ComponentId;
@@ -1182,6 +1183,9 @@ fn get_builtin_shape(it: ComponentId) *Builtin.Template = {
     }
 }
 
+fn is_placeholder(kind: ComponentId) bool =  // for deleting in editor
+    group(kind) == .Tc1 && Tc'gate_name(kind, .Tc1) == ._0; 
+
 // https://github.com/Stuffe/save_monger/blob/22fa398d95c3d3a0b5e88a80e9daee613cab1823/versions/v6.nim CC0
 // version=6 is non-save_breaker 0.1059 beta, 
 // the lastest version of that repo has the old vN files as though they would still be correct but they're super not because they changed all the component numbers on the commit for v2.1.77 
@@ -1421,7 +1425,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
         };
         
         @if(path.len == 1) return(Err = "bad wire path length?");
-        wires&.push(path = path.as_raw());
+        wires&.push(path = path.as_raw(), teleport = path[0].length == 0);
         
         for path { it |
             min_pos = min(min_pos, it.pos);
@@ -1430,8 +1434,8 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
     };
     @if(i != in.len) fail("extra junk at the end");
     (Ok = (
-        wires = wires.items(), 
-        gates = gates.items(), 
+        wires = wires.as_raw(), 
+        gates = gates.as_raw(), 
         id = circuit_id,
         min = min_pos, max = max_pos,
         dependencies = dependencies.shallow_copy(a),
