@@ -881,6 +881,13 @@ EditState :: @struct {
     placing_type := zeroed(ComponentId); 
 };
 
+// TODO: save format 
+// - paste bytes to load it
+// - files for rom/hdd/image 
+// - autosave
+// - web localstorage
+// TODO: edit params (most importantly constants)
+// TODO: make new circuit
 // TODO: recompile when exit edit mode 
 // TODO: allow enter custom component while in edit mode / make new custom components
 // TODO: when placing a wire
@@ -1103,7 +1110,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.circuit_arena = init(general_allocator(), 1.shift_left(16));
     for cli_args() { path |
         path := path.str();
-        if path.ends_with("circuit.data") {
+        if path.ends_with("circuit.data") || path.ends_with(".txt") {
             state.load_path_async(path);
         }
         if path == "-fetch" {
@@ -1148,6 +1155,7 @@ fn reset(state: *State) void = {
         Tc'set_initial_data(world, state.circuit, root, 0);
     };
     
+    @if(state.tree.len > 0)
     if state.is_new_overture {
         name := "";
         if state.tree[0].diagram_circuit { i |
@@ -1317,6 +1325,15 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                         state.load_path_async("Mandelbrot");
                     };
                 }
+                fn Q() => if !state.keyboard_device_focused && state.loader.progress == .Idle {
+                    if state.tree.len > 0 {
+                        if state.tree[0].diagram_circuit { i |
+                            out := @ref u8.list(temp());
+                            Save'write_save(state.circuit, i, out);
+                            write_entire_file_or_crash("target/circuit.txt", out.items());
+                        };
+                    };
+                };
                 fn E() => if !e.enable || state.loader.progress == .Idle {
                     enable := !e.enable;
                     e[] = ();
@@ -1413,6 +1430,18 @@ load_path_worker :: fn(state: *State, in: *LoaderT.I, out_a: Alloc, path: Str) R
     // if it uses custom components, need to load everything to find them
     circuits, root_index, tc_file_loader_device := Tc'load_all_circuits(path, a, state.warnings&);
    
+    @if(circuits.len == 0)
+    if read_entire_file(a, path) { in |
+        if in.starts_with("CIRCUIT v1 ") {
+            @if_let(Save'read_save(in, a)) fn Ok(c) => {
+                state.warnings&.clear();
+                circuits = c;
+                root_index = c.index_of(fn(it) => it.is_arch) || 0;
+                tc_file_loader_device = empty();
+            };
+        };
+    };
+    
     @eprintln("found % circuit diagrams in %ms; %mb;", circuits.len, timestamp() - start, state.circuit_arena&.current_used_size()/1024/1024);
     state.circuit = circuits;
     if circuits.len == 0 || root_index == -1 {

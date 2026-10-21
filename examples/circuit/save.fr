@@ -1,0 +1,252 @@
+
+write_save :: fn(circuits: []Tc.Circuit, i: i64, out: *List(u8)) void = {
+    out.reserve(1.shift_left(21));
+    #use("@/lib/collections/bit_set.fr");
+    kinds_used: DynamicBitSet = empty(temp());
+    max_size_chars := 10;
+    each circuits { c |
+        @fmt(out, "CIRCUIT v1 ");
+        size_patch_offset := out.len;
+        out.push_repeated(max_size_chars, " ".ascii());
+        @fmt(out, "{\n H ");
+        
+        if c.compiled { it |
+            @fmt(out, "% ", it.id);
+        } else {
+            @fmt(out, "-1 ");
+        };
+        @fmt(out, "% % % % % ", c.id.id, c.gates.len, c.wires.len, c.dependencies.len, c.programs.len);
+        @fmt(out, "%,% %,% % % ", c.min.x, c.min.y, c.max.x, c.max.y, c.default_tick_rate, c.is_arch.int());
+        write_bytes(out, c.name);
+        @fmt(out, "\n");
+        if c.dependencies.len > 0 {
+            @fmt(out, " D ");
+            for c.dependencies { it |
+                @fmt(out, "% ", it.id);
+            };
+            @fmt(out, "\n");
+        }
+        
+        each c.gates { it |
+            // cant filter because programs are stored by index
+            //continue :: local_return;
+            //@if(it.kind.is_placeholder()) continue();
+            kinds_used&.set(it.kind.id.zext());
+            
+            @fmt(out, " G % %,%,% ", it.kind.id, it.pos.x, it.pos.y, it.rotation);
+            shape := get_builtin_shape(it.kind);
+            if group(it.kind) == .Loaded || shape.body == .Custom {
+                p := it.mystery_spice_minus_fifteen_for_custom_pins;
+                @fmt(out, "%,%,% ", it.custom_id.id, p.x, p.y);
+            };
+            
+            if shape.has_param {
+                s := it.settings&;
+                @fmt(out, "%,% ", s[0], s[1]);
+            };
+            if is_link_target(it.kind) {
+                @fmt(out, "% ", it.link_id);
+            };
+            
+            @if(it.data.len > 0) write_bytes(out, it.data);
+            @if(it.label.len > 0) write_bytes(out, it.label);
+            
+            @fmt(out, "\n");
+        };
+        
+        each c.wires { it |
+            continue :: local_return;
+            @if(it.path.len == 0) continue();
+            
+            @fmt(out, " W % ", it.path.len);
+            each it.path { it |
+                @fmt(out, "%,% ", it.pos.x, it.pos.y);
+            };
+            @fmt(out, "\n");
+        };
+        if c.mnemonics != "" {
+            @fmt(out, " M ");
+            write_bytes(out, c.mnemonics);
+            @fmt(out, "\n");
+        };
+        each c.programs { it |
+            @fmt(out, " P % % ", it.gate_index, it.level_id);
+            write_bytes(out, it.name);
+            write_bytes(out, it.assembly || "");
+            @fmt(out, "\n");
+        };
+        
+        @fmt(out, "}\n");
+        
+        dest := out.items().subslice(size_patch_offset, max_size_chars);
+        write_int_to_buffer(dest, out.len - size_patch_offset);
+    };
+    
+    @fmt(out, "BUILTIN v1 ");
+    size_patch_offset := out.len;
+    out.push_repeated(max_size_chars, " ".ascii());
+    @fmt(out, "{\n");
+    it := @slice(Tc.Builtin.templates, Tc.Builtin.templates2);
+    each it { it |
+        each it { it |
+            if kinds_used&.get(it.kind.id.zext()) {
+                @fmt(out, " B % % % ", it.kind.id, it.name, it.out_arity);
+                each it.pins { it |
+                    @fmt(out, "%,% ", it._0, it._1);
+                };
+                @fmt(out, " \n");
+            };
+        };
+    };
+    @fmt(out, "}\n");
+    dest := out.items().subslice(size_patch_offset, max_size_chars);
+    write_int_to_buffer(dest, out.len - size_patch_offset);
+    
+    write_bytes :: fn(out: *List(u8), data: []u8) void = {
+        @fmt(out, "#%\"", data.len);
+        out.push_all(data);
+        @fmt(out, "\" ");
+    };
+}
+
+// returns strings still pointing at `in`
+read_save :: fn(in: Str, a: Alloc) Result([]Tc.Circuit, Str) = {
+    circuits := @ref Tc.Circuit.list(a);
+    while => pop_prefix(in&, "CIRCUIT v1 ") {
+        before := in;
+        length := get_int();
+        @if(length <= 1 || before.len < length || before[length-2] != "}".ascii()) return(Err = "bad length header");
+        in = before.slice(0, length);
+        while => in.len > 0 && in[0] != "H".ascii() {
+            in = in.rest(1);
+        };
+        pop_prefix(in&, "H ") || return(Err = "missing header");
+        compiled_id, circuit_id, gates_len, wires_len, dep_count, program_count := (get_int(), get_int(), get_int(), get_int(), get_int(), get_int());
+        min_x, min_y, max_x, max_y, tick_rate, is_arch := (get_int(), get_int(), get_int(), get_int(), get_int(), get_int() == 1);
+        name := get_str();
+        
+        gates := list(Tc.Circuit.Gate, gates_len, a);
+        wires := list(Tc.Circuit.Wire, wires_len, a);
+        dependencies := list(Tc.CustomId, dep_count, a);
+        programs := list(Tc.Circuit.Program, program_count, a);
+        
+        if pop_prefix(in&, "D ") {
+            range(0, dep_count) { i |
+                dependencies&.push(id = get_int());
+            };
+        };
+        
+        while => pop_prefix(in&, "G ") {
+            kind_id, pos_x, pos_y, rot := (get_int(), get_int(), get_int(), get_int());
+            
+            gates&.push(
+                rotation = rot.trunc(),
+                custom_id = zeroed(Tc.CustomId),
+                kind = (id = kind_id.trunc()),
+                pos = vec2(pos_x.float().cast(), pos_y.float().cast()),
+                settings = (0, 0),
+                data = "",
+                mystery_spice_minus_fifteen_for_custom_pins = vec2(0), 
+                link_id = -1,
+                label = "",
+            );
+            gate := gates[gates.len - 1]&;
+            
+            // TODO: don't crash if its a low number
+            shape := get_builtin_shape(id = kind_id.trunc());
+            
+            if group(shape.kind) == .Loaded || shape.body == .Custom {
+                gate.custom_id = (id = get_int());
+                tc_junk_x, tc_junk_y := (get_int(), get_int());
+                gate.mystery_spice_minus_fifteen_for_custom_pins = vec2(tc_junk_x.float().cast(), tc_junk_y.float().cast());
+            };
+            if shape.has_param {
+                gate.settings = (get_int(), get_int());
+            };
+            if is_link_target(shape.kind) {
+                gate.link_id = get_int();
+            };
+            if in.starts_with("#") {
+                gate.data = get_str();
+            };
+            if in.starts_with("#") {
+                gate.label = get_str();
+            };
+        };
+        
+        while => pop_prefix(in&, "W ") {
+            n := get_int();
+            path := @ref Tc.Circuit.WireNode.list(n, a);
+            range(0, n) { _ |
+                x, y := (get_int(), get_int());
+                path.push(pos = vec2(x.float().cast(), y.float().cast()));
+            };
+            wires&.push(path = path.as_raw());
+        };
+        
+        mnemonics := @if(pop_prefix(in&, "M "), get_str(), "");
+        while => pop_prefix(in&, "P ") {
+            gate, level, name, assembly := (get_int(), get_int(), get_str(), get_str());
+            programs&.push(level_id = level, name = name, gate_index = gate, assembly = @if(assembly.len == 0, .None, (Some = assembly)));
+        };
+        
+        circuits.push(
+            wires = wires.as_raw(), 
+            gates = gates.as_raw(), 
+            id = (id = circuit_id),
+            min = vec2(min_x.float().cast(), min_y.float().cast()), 
+            max = vec2(max_x.float().cast(), max_y.float().cast()),
+            dependencies = dependencies.as_raw(),
+            name = name,
+            programs = programs.items(),
+            default_tick_rate = tick_rate,
+            v2 = false,
+            is_arch = is_arch,
+            mnemonics = mnemonics,
+        );
+        
+        @if(in != "}\n") return(Err = "junk on the end");
+        in = before.rest(length);
+    };
+    return(Ok = circuits.items());
+    
+    get_int :: fn() => {
+        negative := in.starts_with("-");
+        in = in.rest(int(negative));
+        value, remaining := convert_number(in, 10, dec_digit);
+        @if(remaining.len == in.len) return(Err = "expected integer");
+        value *= @if(negative, -1, 1);
+        in = remaining;
+        while => in.len > 0 && (in[0].is_ascii_whitespace() || in[0] == ",".ascii()) {
+            in = in.rest(1);
+        };
+        
+        value
+    };
+    get_str :: fn() => {
+        @if(!in&.pop_prefix("#")) return(Err = "expected string");
+        length := get_int();
+        @if(in.len < length + 2) return(Err = "bad string length");
+        @if(in[0] != "\"".ascii() || in[1+length] != "\"".ascii()) return(Err = "missing string quotes");
+        s := in.subslice(1, length);
+        in = in.rest(length + 2);
+        while => in.len > 0 && in[0].is_ascii_whitespace() {
+            in = in.rest(1);
+        };
+        s
+    };
+    
+    // TODO: use this elsewhere
+    fn pop_prefix(self: *Str, prefix: Str) bool = {
+        @if(!self[].starts_with(prefix)) return(false);
+        self[] = self[].rest(prefix.len);
+        true
+    }
+}
+
+is_link_target :: fn(kind: ComponentId) bool = 
+    group(kind) == .Tc1 && @is(Tc'gate_name(kind, .Tc1), .Rom, .Hdd, .Ram, .RamFast, .RamDualLoad);
+
+Tc :: import("@/examples/circuit/tc/load.fr");
+#use("@/examples/circuit/eval.fr");
+#use("@/examples/circuit/parse.fr");
