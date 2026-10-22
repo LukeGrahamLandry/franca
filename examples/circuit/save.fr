@@ -1,15 +1,32 @@
 
-write_save :: fn(circuits: []Tc.Circuit, i: i64, out: *List(u8)) void = {
+write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *List(u8)) void = {
     out.reserve(1.shift_left(21));
     #use("@/lib/collections/bit_set.fr");
     kinds_used: DynamicBitSet = empty(temp());
+    
+    needed: DynamicBitSet = empty(temp());
+    need_files: DynamicBitSet = empty(temp());
+    if i { i |
+        work := Tc.CustomId.list(temp());
+        work&.push(circuits[i].id);
+        while => work&.pop() { id |
+            i := circuits.index_of(fn(it) => it.id.id == id.id).unwrap();
+            if !needed&.get_set(i) {
+                for circuits[i].dependencies { id |
+                    work&.push(id);
+                };
+            };
+        };
+    };
+    
     max_size_chars := 10;
-    each circuits { c |
-        @fmt(out, "CIRCUIT v1 ");
-        size_patch_offset := out.len;
-        out.push_repeated(max_size_chars, " ".ascii());
-        @fmt(out, "{\n H ");
-        
+    enumerate circuits { circ_i, c |
+        continue :: local_return;
+        if i.is_some() && !needed&.get(circ_i) {
+            continue();
+        };
+        with_patched_size("CIRCUIT") {
+        @fmt(out, " H ");
         if c.compiled { it |
             @fmt(out, "% ", it.id);
         } else {
@@ -43,6 +60,10 @@ write_save :: fn(circuits: []Tc.Circuit, i: i64, out: *List(u8)) void = {
             if shape.has_param {
                 s := it.settings&;
                 @fmt(out, "%,% ", s[0], s[1]);
+                
+                if s[0].ult(files.len) && group(it.kind) == .Tc1 && @is(Tc'gate_name(it.kind, .Tc1), .FileLoader, .SpriteDisplay) {
+                    need_files&.set(s[0]);
+                };
             };
             if is_link_target(it.kind) {
                 @fmt(out, "% ", it.link_id);
@@ -56,7 +77,7 @@ write_save :: fn(circuits: []Tc.Circuit, i: i64, out: *List(u8)) void = {
         
         each c.wires { it |
             continue :: local_return;
-            @if(it.path.len == 0) continue();
+            @if(it.path.len < 2) continue();
             
             @fmt(out, " W % ", it.path.len);
             each it.path { it |
@@ -75,17 +96,27 @@ write_save :: fn(circuits: []Tc.Circuit, i: i64, out: *List(u8)) void = {
             write_bytes(out, it.assembly || "");
             @fmt(out, "\n");
         };
-        
-        @fmt(out, "}\n");
-        
-        dest := out.items().subslice(size_patch_offset, max_size_chars);
-        write_int_to_buffer(dest, out.len - size_patch_offset);
+        };
     };
     
-    @fmt(out, "BUILTIN v1 ");
-    size_patch_offset := out.len;
-    out.push_repeated(max_size_chars, " ".ascii());
-    @fmt(out, "{\n");
+    // TODO: deduplicate when loading, can't do it now becuase they're referenced by index in FileLoader/SpriteDisplay settings
+    // TODO: by index also means can't load if concatenate multiple of these together because need to remap
+    @if(need_files&.count_ones() != 0)
+    with_patched_size("FILES") {
+        enumerate files { i, it |
+            if need_files&.get(i) {
+                @fmt(out, " F ");
+                write_bytes(out, it.name);
+                write_bytes(out, it.data);
+                @fmt(out, "\n");
+            } else {
+                @fmt(out, " F #0\"\" #0\"\" \n");
+            }
+        };
+    };
+    
+    // not needed but i like the idea of the file containing enough info to recreate the graph even if you dont have my code anymore
+    with_patched_size("BUILTIN") {
     it := @slice(Tc.Builtin.templates, Tc.Builtin.templates2);
     each it { it |
         each it { it |
@@ -98,28 +129,67 @@ write_save :: fn(circuits: []Tc.Circuit, i: i64, out: *List(u8)) void = {
             };
         };
     };
-    @fmt(out, "}\n");
-    dest := out.items().subslice(size_patch_offset, max_size_chars);
-    write_int_to_buffer(dest, out.len - size_patch_offset);
+    out.push_all(HELP);
+    };
+    
+    with_patched_size :: fn(tag: Str, $body: @Fn() void) void => {
+        @fmt(out, "% v1 ", tag);
+        size_patch_offset := out.len;
+        out.push_repeated(max_size_chars, " ".ascii());
+        @fmt(out, "{\n");
+        body();
+        @fmt(out, "}\n");
+        dest := out.items().subslice(size_patch_offset, max_size_chars);
+        write_int_to_buffer(dest, out.len - size_patch_offset -1-max_size_chars);
+    };
     
     write_bytes :: fn(out: *List(u8), data: []u8) void = {
         @fmt(out, "#%\"", data.len);
         out.push_all(data);
         @fmt(out, "\" ");
     };
+
+HELP :: """
+ C https://franca.lukegrahamlandry.ca
+ C H kind id ngates nwires ndeps nprograms min max tickrate isarch name
+ C D []depid
+ C G kind pos,rotation (id pinoffset) (s0,s1) (linkid) (data label)
+ C W count []pos
+ C M mnemonics
+ C P gateindex levelid name assembly
+ C F name data
+ C B kind name nout []pin
+""".rest(1);
 }
 
 // returns strings still pointing at `in`
-read_save :: fn(in: Str, a: Alloc) Result([]Tc.Circuit, Str) = {
+read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str) = {
+    while => in.len > 0 && in[0].is_ascii_whitespace() {
+        in = in.rest(1);
+    };
     circuits := @ref Tc.Circuit.list(a);
-    while => pop_prefix(in&, "CIRCUIT v1 ") {
-        before := in;
-        length := get_int();
-        @if(length <= 1 || before.len < length || before[length-2] != "}".ascii()) return(Err = "bad length header");
-        in = before.slice(0, length);
-        while => in.len > 0 && in[0] != "H".ascii() {
-            in = in.rest(1);
+    files := @ref Tc.LoadedFile.list(a);
+    
+    while => in.len > 0 {
+        tag, contents := with_patched_size();
+        left_over := in;
+        in = contents;
+        @switch(tag) {
+            @case("CIRCUIT") => load_circuit();
+            @case("FILES") => {
+                while => pop_prefix(in&, "F ") {
+                    push(files, (name = get_str(), data = get_str()));
+                };
+            };
+            @case("BUILTIN") => { in = ""; };
+            @default => return(Err = "unknown chunk type");
         };
+        @if(in != "") return(Err = "junk on the end");
+        in = left_over;
+    };
+    return(Ok = (circuits.items(), files.items()));
+    
+    load_circuit :: fn() => {
         pop_prefix(in&, "H ") || return(Err = "missing header");
         compiled_id, circuit_id, gates_len, wires_len, dep_count, program_count := (get_int(), get_int(), get_int(), get_int(), get_int(), get_int());
         min_x, min_y, max_x, max_y, tick_rate, is_arch := (get_int(), get_int(), get_int(), get_int(), get_int(), get_int() == 1);
@@ -204,12 +274,26 @@ read_save :: fn(in: Str, a: Alloc) Result([]Tc.Circuit, Str) = {
             is_arch = is_arch,
             mnemonics = mnemonics,
         );
-        
-        @if(in != "}\n") return(Err = "junk on the end");
-        in = before.rest(length);
     };
-    return(Ok = circuits.items());
     
+    with_patched_size :: fn() Ty(Str, Str) => {
+        i := 0;
+        while => i < in.len && in[i].is_ascii_alpha() {
+            i += 1;
+        };
+        tag := in.slice(0, i);
+        in = in.rest(i);
+        pop_prefix(in&, " v1 ") || return(Err = "bad version");
+        length := get_int();
+        @if(length <= 1 || in.len < length || in[length-1] != "}".ascii()) return(Err = "bad length header");
+        new := in.slice(0, length-1);
+        new&.pop_prefix("{\n ");
+        in = in.rest(length);
+        while => in.len > 0 && in[0].is_ascii_whitespace() {
+            in = in.rest(1);
+        };
+        (tag, new)
+    };
     get_int :: fn() => {
         negative := in.starts_with("-");
         in = in.rest(int(negative));

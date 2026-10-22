@@ -10,9 +10,10 @@ DEP :: true;  // i didn't write the compiler
 MEM :: true;  // unsandboxed memory access
 JMP :: !GRAPHICS_TARGET_WEB;  // uses longjmp for errors so won't work in web playground
 JIT :: true;  // not an interpreter
-@const_slice(JMP&&MEM&&JIT, JMP, DEP&&JMP, DEP, JMP&&MEM&&JIT, JIT)
+@const_slice(JIT, JMP&&MEM&&JIT, JMP, DEP&&JMP, DEP, JMP&&MEM&&JIT, JIT)
 };
 Language :: @enum(i32) (
+    Circuit,
     C,    // (../import_c)
     Lox,  // https://craftinginterpreters.com (../lox)
     Lua,  // https://lua.org
@@ -64,6 +65,7 @@ State :: @struct {
     run: bool;
     auto_run: bool;
     animate: @struct(enable: bool, t: i64);
+    cube_size: f32;
     
     view: View;
     prev_view: ?View;
@@ -88,6 +90,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.errors = list(general_allocator());
     state.palette = block_colours.shallow_copy(general_allocator());
     state.prev_view = .None; 
+    state.cube_size = 0.975;
     
     state.draw&.setup(
         allocator = general_allocator(),
@@ -206,13 +209,14 @@ fn render_cubes(state: *State, sg: *Sg.Self, sgl: *Sgl.Self, dpi_scale: f32) voi
     sgl.begin(.QUADS);
     grid := state.grid&;
     colours := state.palette;
+    size := state.cube_size;
     iter_grid(grid) { x, y, z, i |
         c: i64 = grid.cells[i].zext();
         if c < colours.len {
             sgl.color = colours[c].c;
             pos := vec3(x.float().cast(), y.float().cast(), z.float().cast());
             for cube_vertices { v |
-                sgl.v3f(pos + v*0.975);
+                sgl.v3f(pos + v*size);
             };
         };
     };
@@ -384,13 +388,16 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
         range(0, 3) { i |
             it := state.grid.dimensions&[i]&;
             v := it[].cast().int().intcast();
-            prev := v;
             if nk_property_int(ctx, Ui'nk_cstring("X\0Y\0Z\0".rest(i*2)), 1, v&, 64, 1, 0.5) {
-                if v != prev {
                     it[] = v.intcast().float().cast();
                     state.grid_dirty = true;
-                };
             };
+        };
+        
+        v := state.cube_size.cast();
+        if nk_property_double(ctx, Ui'nk_cstring("Packing"), 0.05, v&, 1, 0.01, 0.001) {
+            state.cube_size = v.cast();
+            state.grid_dirty = true;
         };
         
         nk_tree_pop(ctx);
@@ -415,6 +422,22 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
     if state.errors.len > 0 {
         if begin(ctx, "Error", output_pos, flags) {
             wrapping_text_row(ctx, state.errors.items());
+        };
+        nk_end(ctx);
+    };
+    
+    @if(@run file_exists("target/replicube.fr")) {
+        if begin(ctx, "Examples", nk_rect(w/2 - 50, 0, 200, 300), flags) {
+            nk_layout_row_dynamic(ctx, 0, 1);
+            for import("@/target/replicube.fr").solutions { name, code |
+                if button(ctx, name) { 
+                    set_all(state.edit&, code);
+                    state.lang = .Lua;
+                    state.run = true;
+                    state.grid.center_on_zero = true;
+                    state.palette.copy_from(palettes[2]._1);
+                }
+            };
         };
         nk_end(ctx);
     };
@@ -479,7 +502,7 @@ fn evaluate(state: *State) void = {
     };
     vtable :: {  // note that this not being := makes shims so doesn't compile the filtered out ones
         F :: @FnPtr(grid: *Grid, src: Str, errors: *List(u8), t: i64) void;
-        v := @const_slice(@as(F) evaluate_c,evaluate_lox,evaluate_lua,evaluate_lil,evaluate_franca,evaluate_kaleidoscope);
+        v := @const_slice(@as(F) evaluate_circuit,evaluate_c,evaluate_lox,evaluate_lua,evaluate_lil,evaluate_franca,evaluate_kaleidoscope);
         @assert_eq(v.len, enable_languages.len(), "vtable.len");
         range(0, v.len) { i |
             v[i] = @if(!enable_languages[i], zeroed(@type v[0]), v[i]);
@@ -644,14 +667,21 @@ evaluate_lua :: fn(grid, src, errors, t) void = {
     Lua :: import("@/examples/disassemble.fr").Lua;
     L := Lua'luaL_newstate();
     L.open_and_pop("math", Lua'luaopen_math);
+    L.safer_openbase();
     S :: fn(s: CStr) = bit_cast_unchecked(CStr, *i8, s);
     
     enumerate replicube_names { i, name |
         Lua'lua_pushnumber(L, i.float());
         Lua'lua_setglobal(L, S(name[]));
     };
+    prelude :: """
+        for k,v in pairs(math) do _G[k] = v end
+        function inrange(x, lo, hi) return lo <= x and x <= hi end
+        function sign(x) return (x > 0 and 1) or (x < 0 and -1) or 0 end
+        function round(x) return (x >= 0 and floor(x + 0.5)) or ceil(x - 0.5) end
+    """;
     
-    src := @tfmt("return (function(x,y,z,t) % end)", src);
+    src := @tfmt("%return (function(x,y,z,t) % end)", prelude, src);
     r := Lua'luaL_loadbufferx(L, bit_cast_unchecked(*u8, *i8, src.ptr), src.len.bitcast(), zeroed(*i8), S("t"));
     check_error(r);
     check_error :: fn(r) => if r != 0 {
@@ -672,6 +702,10 @@ evaluate_lua :: fn(grid, src, errors, t) void = {
         check_error(r);
         value := Lua'lua_tonumberx(L, -1, @ref @as(i32) 0);
         empty := Lua'lua_isnumber(L, -1) == 0;
+        if empty && Lua'lua_isboolean(L, -1) {
+            empty = Lua'lua_toboolean(L, -1) == 0;
+            value = 1;  // white
+        };
         Lua'lua_pop(L, 1);
         @if(empty, -1, value.int())
     };
@@ -744,6 +778,61 @@ evaluate_kaleidoscope :: fn(grid, src, errors, t) void = {
     end("");
 }
 
+// TODO: should make this setup stuff less verbose 
+evaluate_circuit :: fn(grid, src, errors, t) void = {
+    a := temp();
+    circuits, tc_file_loader_device := @match(Save'read_save(src, a)) {
+        fn Ok(c, files) => (c, files);
+        fn Err(msg) => return(errors.push_all(msg));
+    };
+    root_index := circuits.index_of(fn(it) => it.is_arch)
+        || return(@fmt(errors, "no architecture circuit"));
+    
+    components := @ref Component.list(a);
+    components.push_all(finished_defs.components);
+    warnings := u8.list(temp());
+    Tc'compile_circuit(circuits, root_index, components, a, warnings&);
+    root_component := circuits[root_index].compiled
+        || return(@fmt(errors, "failed to compile\n%", warnings.items()));
+    o, i := components[root_component.id.zext()]&.arity();
+    @if(o != 2 || i != 1) return(@fmt(errors, "bad arity (%<-%) expected (2<-1)\nuse LevelOutputArch and Input64", o, i));
+    
+    fr: CachedCompilerEnv = ();
+    reset_jit(fr&);
+    jit_circuit(fr&, components.items(), a);
+    world := zeroed(World);
+    init(world&, a, true, components.items());
+    world.tc_file_loader_device = tc_file_loader_device;
+
+    clock := realtime_us();
+    eval_loop(grid) { x, y, z |
+        Tc'set_initial_data(world&, circuits, root_component, 0);
+        // TODO: might be less confusing to let you have multiple inputs instead of packing them like this
+        arg := x.bit_and(0xff)
+            .bit_or(y.bit_and(0xff).shift_left(8))
+            .bit_or(z.bit_and(0xff).shift_left(16))
+            .bit_or(t.bit_and(1.shift_left(32)-1).shift_left(32));
+        n := 0;
+        values := @slice(0, 0, arg);
+        limit := 100_000;
+        while => n < limit && world.tc_halt_device == -1 && values[1] == 0 {
+            world.timestamp_us = (Some = clock + n);
+            evaluate(world&, values, root_component, 0, false);
+            n += 1;
+        };
+        
+        @if(values[1] != 0, values[0], 0)
+    };
+    destroy_jit(fr&);
+    
+    Save :: import("@/examples/circuit/save.fr");
+    Tc :: import("@/examples/circuit/tc/load.fr");
+    #use("@/examples/circuit/eval.fr");
+    #use("@/examples/circuit/parse.fr");
+    #use("@/examples/jit_loader.fr");
+    jit_circuit :: import("@/examples/circuit/tc/test.fr").jit_circuit;
+}
+
 fn eval_loop(grid: *Grid, $body: @Fn(x: i64, y: i64, z: i64) i64) void = {
     x0, y0, z0 := @if(grid.center_on_zero, grid.dimensions.neg().div(2).ints(), (0, 0, 0));
     iter_grid(grid) { x, y, z, i |
@@ -787,6 +876,7 @@ main :: fn() void = Easy'start(State);
 Ui :: import("@/graphics/deps/nuklear.fr");
 
 initial_program :: @const_slice(
+    initial_circuit,
     "long i = x*16*16 + y*16 + z;\nreturn 1 + i % 3;",
     "var i = x*16*16 + y*16 + z;\nreturn 1 + mod(i, 3);",
     "local i = x*16*16 + y*16 + z;\nreturn 1 + i % 3;",
@@ -794,6 +884,18 @@ initial_program :: @const_slice(
     "i := x*16*16 + y*16 + z;\n1 + i.mod(3)",
     "var i = x*16*16 + y*16 + z in\n1 + mod(i, 3);",
 );
+initial_circuit :: """
+CIRCUIT v1 179       {
+ H 435 1163493743 4 3 0 0 0,0 100,100 1 1 #11"New Circuit" 
+ G 140 75,11,0 
+ G 127 64,14,0 
+ G 99 69,14,0 
+ G 53 75,14,3 
+ W 2 67,14 68,14 
+ W 2 75,12 75,13 
+ W 2 70,11 74,11 
+}
+""";
 
 /*
 // put size way up

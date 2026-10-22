@@ -1,4 +1,18 @@
 
+
+## (Oct 22)
+
+- put file loader stuff in save. allow saving just from one circuit so it's easy to paste a small thing into cubes. 
+- cubes executor for the circuit, very pleasing to see a rainbow. 
+
+## (Oct 21)
+
+- i've been putting off the circuit editor for a long time relative 
+  to how easy it was to get something that kinda works. 
+- save format for the circuits. better to import to something i control than use the tc one. 
+  wasting time with text instead of binary feels silly but if im going to be pasting it in a text box for cubes it might as well be something i can look at. 
+- a few more replicube things. extra math (inrange,sign,round). coerce boolean. 
+
 ## (Oct 19,20) circuit
 
 - i keep thinking it would be cool if i could have the circuits control my guy 

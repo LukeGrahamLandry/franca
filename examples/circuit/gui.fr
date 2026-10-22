@@ -883,17 +883,15 @@ EditState :: @struct {
 
 // TODO: save format 
 // - paste bytes to load it
-// - files for rom/hdd/image 
 // - autosave
 // - web localstorage
 // TODO: edit params (most importantly constants)
-// TODO: make new circuit
 // TODO: recompile when exit edit mode 
 // TODO: allow enter custom component while in edit mode / make new custom components
 // TODO: when placing a wire
-// - if it's not touching anything already, could extend the existing wire
 // - look for path.len==0 to reuse first before reallocating
-// - allow placing wire not conencted to another
+// - let you place the visual nodes like tc if you want to make it look pretty without connecting 
+// - if want to export to tc, need to do the extra nodes for routing. but rn idc about that. 
 fn update_edit(self: *Draw, c: *Tc.Circuit) void = {
     state := self.state;
     e := state.edit&;
@@ -921,12 +919,17 @@ fn update_edit(self: *Draw, c: *Tc.Circuit) void = {
         sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
         
         if state.clicked&.take() {
-            e.placing_wire_start = .None;
             a := state.circuit_arena&.borrow();
+            e.placing_wire_start = .None;
             new := @slice(@as(Tc.Circuit.WireNode) (pos = start), (pos = rounded));
-            c.wires&.push((path = c.wires[wire_i].path.items().rest(path_i).shallow_copy(a).as_raw_list()), a);
+            old := c.wires[wire_i].path.items().rest(path_i);
+            if old.len >= 2 {
+                c.wires&.push((path = old.shallow_copy(a).as_raw_list()), a);
+            };
             c.wires&.push((path = new.shallow_copy(a).as_raw_list()), a);
-            c.wires[wire_i].path.len = path_i + 1;
+            if path_i + 1 >= 2 {
+                c.wires[wire_i].path.len = path_i + 1;
+            };
         };
     };
     state.dirty = state.dirty || e.action != .None;
@@ -953,10 +956,12 @@ fn update_edit(self: *Draw, c: *Tc.Circuit) void = {
                 gate.kind.id = trunc(component_offset(.Tc1) + GateName(.Tc1)._0.raw().zext());
                 gate.pos = vec2(-10000);
             };
+            // TODO: render the fake nodes that tc uses for routing differently
+            // TODO: delete all the wires that have a real node at that point
             if e.placing_wire_start&.take() { wire_i, path_i |
                 path := c.wires[wire_i].path&;
                 path.ordered_remove(path_i);
-                if path.len == 1 {
+                if path.len < 2 {
                     path.len = 0;
                 };
             };
@@ -964,6 +969,14 @@ fn update_edit(self: *Draw, c: *Tc.Circuit) void = {
         fn None() => ();
     };
     e.action = .None;
+    
+    if state.clicked&.take() && e.placing_wire_start.is_none() && e.selected_gate.is_none() {
+        rounded := self.world_to_tc_pos(self.mouse_world_pos);
+        new := @slice(@as(Tc.Circuit.WireNode) (pos = rounded));   
+        a := state.circuit_arena&.borrow(); 
+        c.wires&.push((path = new.shallow_copy(a).as_raw_list()), a);
+        e.placing_wire_start = (Some = (c.wires.len - 1, 0));
+    };
 }
 
 fn gate_selection(self: *Draw) void = {
@@ -1329,8 +1342,17 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                     if state.tree.len > 0 {
                         if state.tree[0].diagram_circuit { i |
                             out := @ref u8.list(temp());
-                            Save'write_save(state.circuit, i, out);
-                            write_entire_file_or_crash("target/circuit.txt", out.items());
+                            shift := event.modifiers.get(.shift) == 1;
+                            i: ?i64 = @if(shift, (Some = i), .None);
+                            Save'write_save(state.circuit, state.world.tc_file_loader_device, i, out);
+                            path := "target/circuit.txt";
+                            if shift {
+                                // hmm i fear initWithBytes in ns_str isn't going to work if its not valid utf8
+                                // sapp.set_clipboard_string(out.items());
+                                path = "target/circuit2.txt";
+                            };
+                            write_entire_file_or_crash(path, out.items());
+                            println(path);
                         };
                     };
                 };
@@ -1341,6 +1363,26 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 }
                 fn BACKSPACE() => {
                     e.action = .Delete;
+                }
+                fn M() => if e.enable {
+                    c := state.circuit_arena&.borrow().alloc_uninit(Tc.Circuit, state.circuit.len + 1);
+                    c.slice(0, state.circuit.len).copy_from(state.circuit);
+                    c[c.len-1] = (
+                        id = (id = timestamp()),
+                        name = "New Circuit",
+                        gates = empty(),
+                        wires = empty(),
+                        programs = empty(),
+                        min = vec2(0),
+                        max = vec2(100),
+                        dependencies = empty(),
+                        v2 = false,
+                        default_tick_rate = 1,
+                        is_arch = true,
+                    );
+                    state.circuit = c;
+                    state.tree&.clear();
+                    state.tree&.push(diagram_circuit = (Some = c.len-1));
                 }
                 @default => return();
             };
@@ -1433,11 +1475,11 @@ load_path_worker :: fn(state: *State, in: *LoaderT.I, out_a: Alloc, path: Str) R
     @if(circuits.len == 0)
     if read_entire_file(a, path) { in |
         if in.starts_with("CIRCUIT v1 ") {
-            @if_let(Save'read_save(in, a)) fn Ok(c) => {
+            @if_let(Save'read_save(in, a)) fn Ok(c, files) => {
                 state.warnings&.clear();
                 circuits = c;
                 root_index = c.index_of(fn(it) => it.is_arch) || 0;
-                tc_file_loader_device = empty();
+                tc_file_loader_device = files;
             };
         };
     };
