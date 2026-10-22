@@ -17,6 +17,9 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 
+- it technically works now but the circuit editor still feels incredibly bad to use. 
+  deleting wires is the most obviously broken part. undiscoverable keybinds is also bad. 
+  i feel like sometimes my clicks don't go. i actually wonder if my right mouse button is fucked because ive been annoyed by phantom double clicking in programs i didnt write too
 - its implied that `S :: @struct(f :: fn(s: Str) void = ()); S'f"foo"` would work because "foo".S'f() works
 - make types_size_guess growable. need to cope with not reallocating under the cache pointers tho
 - web: include examples for stackie and life

@@ -613,6 +613,7 @@ fn draw_gate_squares(self: *Draw, circuit: *Tc.Circuit) void = {
 }
 
 // TODO: dont like that sometimes the connecting lines are under or over the nodes. do two loops to be consistant
+//       (can see the difference when hover so colour changes)
 fn draw_wires(self: *Draw, circuit: *Tc.Circuit) void = {
     sdtx, sgl, W, state := (self.sdtx, self.draw&, self.wire_node_width, self.state);
     enumerate circuit.wires { wire_i, wire |
@@ -643,7 +644,10 @@ fn draw_wires(self: *Draw, circuit: *Tc.Circuit) void = {
                 };
                 self.wire_hover_count += 1;
             };
-            sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
+            
+            real := i == 0 || i == wire.path.len - 1;  // else: only for routing, can't connect to pins
+            s: f32 = @if(real, 1, 0.6);
+            sgl.line(b - vec2(0, W/2*s), b + vec2(0, W/2*s), W*s);
         };
     };
 }
@@ -888,6 +892,8 @@ EditState :: @struct {
 // TODO: edit params (most importantly constants)
 // TODO: recompile when exit edit mode 
 // TODO: allow enter custom component while in edit mode / make new custom components
+// TODO: dont allow placing outside the field 
+// TODO: dont allow placing gate/wire on top of each other
 // TODO: when placing a wire
 // - look for path.len==0 to reuse first before reallocating
 // - let you place the visual nodes like tc if you want to make it look pretty without connecting 
@@ -956,7 +962,6 @@ fn update_edit(self: *Draw, c: *Tc.Circuit) void = {
                 gate.kind.id = trunc(component_offset(.Tc1) + GateName(.Tc1)._0.raw().zext());
                 gate.pos = vec2(-10000);
             };
-            // TODO: render the fake nodes that tc uses for routing differently
             // TODO: delete all the wires that have a real node at that point
             if e.placing_wire_start&.take() { wire_i, path_i |
                 path := c.wires[wire_i].path&;
@@ -1092,6 +1097,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     init(state.loader&, state);
     state.keyboard_data = .None;
     state.edit = ();
+    sapp.desc.enable_clipboard = true;
     sapp.desc.enable_dragndrop = true;
     state.sg = sg; state.sapp = sapp;
     a := general_allocator();
@@ -1124,11 +1130,11 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     for cli_args() { path |
         path := path.str();
         if path.ends_with("circuit.data") || path.ends_with(".txt") {
-            state.load_path_async(path);
+            state.load_path_async(path, false);
         }
         if path == "-fetch" {
             state.download_schematic_archive_before_trying_to_load = true;
-            state.load_path_async("Mandelbrot");
+            state.load_path_async("Mandelbrot", false);
         }
     };
     
@@ -1335,7 +1341,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 fn L() => if !e.enable {
                     if state.loader.progress == .Idle {
                         state.download_schematic_archive_before_trying_to_load = true;
-                        state.load_path_async("Mandelbrot");
+                        state.load_path_async("Mandelbrot", false);
                     };
                 }
                 fn Q() => if !state.keyboard_device_focused && state.loader.progress == .Idle {
@@ -1344,7 +1350,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                             out := @ref u8.list(temp());
                             shift := event.modifiers.get(.shift) == 1;
                             i: ?i64 = @if(shift, (Some = i), .None);
-                            Save'write_save(state.circuit, state.world.tc_file_loader_device, i, out);
+                            Save'write_save(state.circuit, state.world.tc_file_loader_device, i, out, true);
                             path := "target/circuit.txt";
                             if shift {
                                 // hmm i fear initWithBytes in ns_str isn't going to work if its not valid utf8
@@ -1397,9 +1403,12 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             state.mouse_pos = mouse;
             state.clicked = true;
         }
+        fn CLIPBOARD_PASTED() => if event.pasted.contains("CIRCUIT v1") {
+            state.load_path_async(event.pasted, true);
+        };
         fn FILES_DROPPED() => for event.drop { path |
             if state.loader.progress == .Idle {
-                state.load_path_async(path);
+                state.load_path_async(path, false);
             };
         };
         @default => return();
@@ -1420,7 +1429,7 @@ fn check_movement(state: *State) void = if state.pan_keys_pressed != 0 && !state
     state.pos += dir.normalize() * 0.05;
 };
 
-fn load_path_async(state: *State, path: Str) void = {
+fn load_path_async(state: *State, path: Str, is_bytes: bool) void = {
     @if(!FEAT_TC_CIRCUIT) return(eprintln("FEAT_TC_CIRCUIT is disabled"));
     #use("@/lib/sys/fs.fr");
     
@@ -1431,12 +1440,11 @@ fn load_path_async(state: *State, path: Str) void = {
     a := state.circuit_arena&.borrow();
     path := path.shallow_copy(a);
     state.warnings = list(a);
-    state.edit.enable = false;
-    state.loader&.start_async(Path = (path = path));
+    state.loader&.start_async(Path = (path = path, is_bytes = is_bytes));
 }
 
 LoadSource :: @tagged(
-    Path: @struct(path: Str),
+    Path: @struct(path: Str, is_bytes: bool),
     Index: @struct(root_index: i64, tc_file_loader_device: []Tc.LoadedFile),
 );
 LoaderT :: import("@/examples/jit_loader.fr")'Loader(
@@ -1449,7 +1457,7 @@ worker_get_source :: fn(state: *State, in: *LoaderT.I, a: Alloc) Result(Str, voi
     @match(in[]) {
         fn Path(it) => {
             path := it.path;
-            if state.download_schematic_archive_before_trying_to_load {
+            if state.download_schematic_archive_before_trying_to_load && !it.is_bytes {
                 state.download_schematic_archive_before_trying_to_load = false;
                 root := Foreign'tc_archive();
                 filter := @const_slice("ploter", "3D Engine", "Screenverture", "Dungeon Crawler", "Platformer Game", "ASM computer 64bit", "Game of Life 32x32", "Matrix Animation Studio 3000", "Snake on matrix display with LEG++");
@@ -1459,32 +1467,41 @@ worker_get_source :: fn(state: *State, in: *LoaderT.I, a: Alloc) Result(Str, voi
                 };
                 path = @tfmt(template, root, path);
             };
-            load_path_worker(state, in, a, path)
+            load_path_worker(state, in, a, path, it.is_bytes)
         }
         fn Index(it) => load_circuit_index_worker(state, it.root_index, it.tc_file_loader_device, a);
     }
 }
 
-load_path_worker :: fn(state: *State, in: *LoaderT.I, out_a: Alloc, path: Str) Result(Str, void) = {
+load_path_worker :: fn(state: *State, in: *LoaderT.I, out_a: Alloc, path: Str, is_bytes: bool) Result(Str, void) = {
     start := timestamp();
     a := state.circuit_arena&.borrow();
+    
+    bytes := path;
+    if is_bytes {
+        path = "";
+    };
     
     // if it uses custom components, need to load everything to find them
     circuits, root_index, tc_file_loader_device := Tc'load_all_circuits(path, a, state.warnings&);
    
-    @if(circuits.len == 0)
+    @if(circuits.len == 0 && !is_bytes)
     if read_entire_file(a, path) { in |
         if in.starts_with("CIRCUIT v1 ") {
-            @if_let(Save'read_save(in, a)) fn Ok(c, files) => {
-                state.warnings&.clear();
-                circuits = c;
-                root_index = c.index_of(fn(it) => it.is_arch) || 0;
-                tc_file_loader_device = files;
-            };
+            is_bytes = true;
+            bytes = in;
         };
     };
     
-    @eprintln("found % circuit diagrams in %ms; %mb;", circuits.len, timestamp() - start, state.circuit_arena&.current_used_size()/1024/1024);
+    @if(is_bytes)
+    @if_let(Save'read_save(bytes, a)) fn Ok(c, files) => {
+        state.warnings&.clear();
+        circuits = c;
+        root_index = c.index_of(fn(it) => it.is_arch) || 0;
+        tc_file_loader_device = files;
+    };
+    
+    //@eprintln("found % circuit diagrams in %ms; %mb;", circuits.len, timestamp() - start, state.circuit_arena&.current_used_size()/1024/1024);
     state.circuit = circuits;
     if circuits.len == 0 || root_index == -1 {
         state.circuit = empty();
@@ -1492,6 +1509,7 @@ load_path_worker :: fn(state: *State, in: *LoaderT.I, out_a: Alloc, path: Str) R
         return(.Err);
     };
     state.push_tree_node(diagram_circuit = (Some = root_index));
+    // TODO: dont bother recompiling yet if in edit mode
     in[] = (Index = (root_index = root_index, tc_file_loader_device = tc_file_loader_device));
     worker_get_source(state, in, out_a)
 }
@@ -1501,7 +1519,6 @@ fn load_circuit_index_async(state: *State, root_index: i64, tc_file_loader_devic
     state.load_time = 0;
     state.tree&.clear();
     state.push_tree_node(diagram_circuit = (Some = root_index));
-    state.edit.enable = false;
     state.loader&.start_async(Index = (root_index = root_index, tc_file_loader_device = tc_file_loader_device));
 }
 

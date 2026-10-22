@@ -4,6 +4,8 @@
 
 - put file loader stuff in save. allow saving just from one circuit so it's easy to paste a small thing into cubes. 
 - cubes executor for the circuit, very pleasing to see a rainbow. 
+- editing seperately is too painful, need to show the circuits ui in cubes when that's selected. 
+  already have multiplexer for making an app into a nuklear window. made that more embeddable. 
 
 ## (Oct 21)
 

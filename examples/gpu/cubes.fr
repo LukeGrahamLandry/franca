@@ -10,16 +10,16 @@ DEP :: true;  // i didn't write the compiler
 MEM :: true;  // unsandboxed memory access
 JMP :: !GRAPHICS_TARGET_WEB;  // uses longjmp for errors so won't work in web playground
 JIT :: true;  // not an interpreter
-@const_slice(JIT, JMP&&MEM&&JIT, JMP, DEP&&JMP, DEP, JMP&&MEM&&JIT, JIT)
+@const_slice(JMP&&MEM&&JIT, JMP, DEP&&JMP, DEP, JMP&&MEM&&JIT, JIT, JIT)
 };
 Language :: @enum(i32) (
-    Circuit,
     C,    // (../import_c)
     Lox,  // https://craftinginterpreters.com (../lox)
     Lua,  // https://lua.org
     Lil,  // https://beyondloom.com/decker/lil.html
     Franca,        // (../../compiler) fragile, my thing isn't very embeddable for non-generated programs :(
     Kaleidoscope,  // https://llvm.org/docs/tutorial (../kalidoscope.fr)
+    Circuit,       // (../circuit)
 );
 
 // TODO: depth LESS_EQUAL doesn't work in browser ?? 
@@ -39,6 +39,8 @@ Language :: @enum(i32) (
 // TODO: build a more efficient mesh so i can make bigger shapes
 // TODO: pasting tabs shows as '?' (tab key inserts spaces)
 
+// TODO: no FEAT_CIRC for web aot because cant compile without root_fs
+FEAT_CIRC :: enable_languages[Language.Circuit.ordinal()];
 State :: @struct {
     HIGH_DPI :: true;
     ui: Ui.State;
@@ -71,6 +73,8 @@ State :: @struct {
     prev_view: ?View;
     edit: Ui.Nuklear.nk_text_edit;
     files: FileBrowser;
+    
+    apps: @if(FEAT_CIRC, import("@/examples/gpu/multiplexer.fr").State, void);
 };
 View :: @struct {
     img: Sg.Image;
@@ -123,6 +127,8 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             state.lang = @as(Language) @as(i32) i.intcast();
         };
     };
+
+    @if(FEAT_CIRC) on_init_embedded(state.apps&, sapp, sg);
     state.set_source(initial_program[state.lang.ordinal()]);
     evaluate(state);
     init(state.files&, general_allocator(), get_working_directory(temp()).items());
@@ -132,6 +138,12 @@ fn set_source(state: *State, s: Str) void = {
     set_all(state.edit&, s);
     state.source&.clear();
     state.source&.push_all(s, general_allocator());
+    @if(FEAT_CIRC) if state.lang == .Circuit && state.apps.children.len > 0 /*wait for on_init*/{
+        editor := state.get_circuit();
+        if editor.loader.progress == .Idle {
+            editor.load_path_async(s, true);
+        };
+    };
 }
 
 fn set_all(edit: *Ui.Nuklear.nk_text_edit, s: Str) void = {
@@ -146,11 +158,11 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.dt = (now - state.prev_frame_time).cast();
     state.prev_frame_time = now;
     
+    update_circuit(state);
     if state.animate.enable && state.errors.len == 0 {
         state.animate.t += 1;
         evaluate(state);
     };
-    
     if Easy'should_skip_frame(sapp, state.dirty&) {
         state.ui.idle_last_frame = true;
         return();
@@ -231,6 +243,10 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     on_event(state.ui&, sapp, event);
     state.dirty = true;
     
+    @if(FEAT_CIRC) if state.lang == .Circuit {
+        child_event(state.apps&, sapp, event);
+    };
+    
     @match(event.type) {
         fn MOUSE_SCROLL() => if state.enable_movement {
             state.scale = clamp(state.scale + event.scroll_y / 300, 0.01, 10);
@@ -256,6 +272,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
 
 fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
     ctx := state.ui.ctx&;
+    ctx.style.window.header.padding.y = 2;
     flags := (@as(u32) nk_panel_flags.NK_WINDOW_MOVABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_SCALABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_MINIMIZABLE);
 
     // done first so it starts behind the other windows so it only shows when you click the button to summon it
@@ -400,6 +417,11 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
             state.grid_dirty = true;
         };
         
+        // TODO: would be less annoying if it was NK_WINDOW_BACKGROUND and the other windows were smaller
+        if button(ctx, @if(state.lang == .Circuit, "Focus Editor", "")) && state.lang == .Circuit {
+            @if(FEAT_CIRC) nk_window_set_focus(ctx, state.apps.children[0]&.window_name());
+        };
+        
         nk_tree_pop(ctx);
         };
 
@@ -414,6 +436,7 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
             state.animate.t = 0;
             state.source&.clear();
             state.source&.push_all(source, general_allocator());
+            // TODO: allow editing the text to update the graphical circuit?
             evaluate(state);
         };
     };
@@ -427,11 +450,11 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
     };
     
     @if(@run file_exists("target/replicube.fr")) {
-        if begin(ctx, "Examples", nk_rect(w/2 - 50, 0, 200, 300), flags) {
+        if begin(ctx, "Examples", nk_rect(w/2 - 50, 200, 200, 300), flags) {
             nk_layout_row_dynamic(ctx, 0, 1);
             for import("@/target/replicube.fr").solutions { name, code |
                 if button(ctx, name) { 
-                    set_all(state.edit&, code);
+                    state.set_source(code);
                     state.lang = .Lua;
                     state.run = true;
                     state.grid.center_on_zero = true;
@@ -441,6 +464,8 @@ fn draw_ui(state: *State, w: f32, h: f32) void #use(Ui.Nuklear) = {
         };
         nk_end(ctx);
     };
+    
+    circuit_ui(state);
 }
 
 fn text_box(ctx: *nk_context, edit: *nk_text_edit, box_height: f32, box_width: f32) void #use(Ui.Nuklear) = {
@@ -502,7 +527,7 @@ fn evaluate(state: *State) void = {
     };
     vtable :: {  // note that this not being := makes shims so doesn't compile the filtered out ones
         F :: @FnPtr(grid: *Grid, src: Str, errors: *List(u8), t: i64) void;
-        v := @const_slice(@as(F) evaluate_circuit,evaluate_c,evaluate_lox,evaluate_lua,evaluate_lil,evaluate_franca,evaluate_kaleidoscope);
+        v := @const_slice(@as(F) evaluate_c,evaluate_lox,evaluate_lua,evaluate_lil,evaluate_franca,evaluate_kaleidoscope,evaluate_circuit);
         @assert_eq(v.len, enable_languages.len(), "vtable.len");
         range(0, v.len) { i |
             v[i] = @if(!enable_languages[i], zeroed(@type v[0]), v[i]);
@@ -778,6 +803,7 @@ evaluate_kaleidoscope :: fn(grid, src, errors, t) void = {
     end("");
 }
 
+// TODO: be able to step through it in the editor
 // TODO: should make this setup stuff less verbose 
 evaluate_circuit :: fn(grid, src, errors, t) void = {
     a := temp();
@@ -813,7 +839,9 @@ evaluate_circuit :: fn(grid, src, errors, t) void = {
             .bit_or(z.bit_and(0xff).shift_left(16))
             .bit_or(t.bit_and(1.shift_left(32)-1).shift_left(32));
         n := 0;
-        values := @slice(0, 0, arg);
+        values := @slice(0, 0, arg);  // out, out_enable, in
+        // TODO: if stops by timeout, disable auto run so you're not stuck
+        //       (because its easy to accidently have a wire disconnected) since this is on the main thread for now (todo: should probably change that so its easy to deal with this consistantly for all languages)
         limit := 100_000;
         while => n < limit && world.tc_halt_device == -1 && values[1] == 0 {
             world.timestamp_us = (Some = clock + n);
@@ -870,19 +898,65 @@ fn resize_grid(state: *State, sg: *Sg.Self) void = {
     };
 }
 
+CircuitEditor :: import("@/examples/circuit/gui.fr").State;
+fn get_circuit(state: *State) *CircuitEditor = {
+    CircuitEditor.ptr_from_raw(state.apps.children[0].user)
+}
+
+fn update_circuit(state: *State) void = {
+    @if(!FEAT_CIRC) return();
+    @if(state.lang != .Circuit) return();
+
+    self := state.apps&;
+    first := self.children.len == 0;
+    if first {
+        self.add_app("@/examples/circuit/gui.fr");
+    };
+    update_children(self, self.app, self.sg);
+    if first {  // after on_init
+        editor := state.get_circuit();
+        state.set_source(state.source.items());
+        editor.edit.enable = true;
+    };
+    if self.dirty {
+        state.dirty = true;
+    };
+}
+
+fn circuit_ui(state: *State) void = {
+    @if(!FEAT_CIRC) return();
+    self := state.apps&;
+    @if(!(state.lang == .Circuit && self.children.len > 0 /*wait for on_init*/)) return();
+    
+    editor := state.get_circuit();
+    old_focus := self.focus;
+    new_focus := draw_ui(self, state.ui&, true);
+    update_focus(self, new_focus);
+    @if((old_focus || -1) == 0 && (new_focus || -1) == -1) {
+        Save :: import("@/examples/circuit/save.fr");
+        if editor.tree.len > 0 {
+            if editor.tree[0].diagram_circuit { i |
+                out := @ref u8.list(temp());
+                Save'write_save(editor.circuit, editor.world.tc_file_loader_device, (Some = i), out, false);
+                state.set_source(out.items());  // todo: does a redundant write of the circuit
+            };
+        };
+    };
+};
+
 driver :: fn(vtable: *ImportVTable) void = Easy'build_for_graphics2(vtable, @source_file_name(), true);
 main :: fn() void = Easy'start(State);
 #use("@/graphics/lib.fr");
 Ui :: import("@/graphics/deps/nuklear.fr");
 
 initial_program :: @const_slice(
-    initial_circuit,
     "long i = x*16*16 + y*16 + z;\nreturn 1 + i % 3;",
     "var i = x*16*16 + y*16 + z;\nreturn 1 + mod(i, 3);",
     "local i = x*16*16 + y*16 + z;\nreturn 1 + i % 3;",
     "i: (x*16*16) + (y*16) + z\n1 + 3 % i",
     "i := x*16*16 + y*16 + z;\n1 + i.mod(3)",
     "var i = x*16*16 + y*16 + z in\n1 + mod(i, 3);",
+    initial_circuit,
 );
 initial_circuit :: """
 CIRCUIT v1 179       {
@@ -933,6 +1007,7 @@ fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.source&.drop(a);
     a.dealloc(u8, state.grid.cells);
     a.dealloc(@type state.palette[0], state.palette);
+    @if(FEAT_CIRC) on_cleanup_children(state.apps&);
 }
 
 palettes :: @const_slice(

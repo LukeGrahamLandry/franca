@@ -80,20 +80,25 @@ Window :: @struct {
 
     ready: i64;
     
+    user: rawptr;  // for embed in cubes
     name: Str;  // for hack_decker
 };
 
 fn on_init(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    on_init_embedded(self, sapp, sg);
+    sapp.desc.enable_dragndrop = true;
+    sapp.desc.enable_clipboard = true;
+    on_init(self.ui&, sg);
+}
+
+fn on_init_embedded(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     a := general_allocator();
     self.focus = .None;
     self.hack_decker = .None;
     self.sg = sg;
     self.app = sapp;
     self.children = list(a);
-    sapp.desc.enable_dragndrop = true;
-    sapp.desc.enable_clipboard = true;
     self.dirty = true;
-    on_init(self.ui&, sg);
 };
 
 // TODO: be consistant about who has storage for Sg and Sapp. 
@@ -125,6 +130,7 @@ fn add_app(self: *State, $path: Str) void = {
         };
     };
     
+    it.user = UserData.raw_from_ptr(user);
     it.app = app;
     app.events = list(a);  // annoying to reset after temp()
     app.hack_no_reset_temp_and_no_handle_requests_for_headless = true;
@@ -132,9 +138,7 @@ fn add_app(self: *State, $path: Str) void = {
 }
 
 // TODO: reset temp per child
-fn on_render(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
-    ctx := self.ui.ctx&;
-    
+fn update_children(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     prev_commit_count := sg.disabled_commit_calls;
     prev_commit_disabled := sg.hack_disable_commit_for_headless_app;
     sg.hack_disable_commit_for_headless_app = true;
@@ -197,14 +201,17 @@ fn on_render(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         self.dirty = true;
     };
     sg.hack_disable_commit_for_headless_app = prev_commit_disabled;
-    
+}
+
+fn on_render(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    update_children(self, sapp, sg);
     if Easy'should_skip_frame(sapp, self.dirty&) {
         self.ui.idle_last_frame = true;
         return();
     };
     
     Ui'input_end_with_idle(self.ui&) {
-        new_focus := draw_ui(self);
+        new_focus := draw_ui(self, self.ui&, false);
         update_focus(self, new_focus);
     };
     
@@ -217,7 +224,7 @@ fn on_render(self: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sg.commit();
 }
 
-update_focus :: fn(self: *State, new_focus: ?i64) void = {
+ fn update_focus(self: *State, new_focus: ?i64) void = {
     old_i, new_i := (self.focus || -1, new_focus || -1);
     if old_i != new_i {
         if old_i != -1 {
@@ -232,12 +239,13 @@ update_focus :: fn(self: *State, new_focus: ?i64) void = {
     };
 };
 
-fn draw_ui(self: *State) ?i64 = {
-    ctx := self.ui.ctx&;
+fn draw_ui(self: *State, ui: *Ui.State, $embedded: bool) ?i64 = {
+    ctx := ui.ctx&;
     #use(Ui.Nuklear);
     S :: fn(s: CStr) => bit_cast_unchecked(*u8, *i8, s.ptr);
     flags := (@as(u32) nk_panel_flags.NK_WINDOW_MOVABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_SCALABLE).bit_or(@as(u32) nk_panel_flags.NK_WINDOW_MINIMIZABLE);
     h := self.app.height().float().cast()/self.app.dpi_scale;
+    @if(!embedded) {
     if nk_begin(ctx, S"Applications", nk_rect(0, 0, 300, h), flags) {
         nk_layout_row_dynamic(ctx, 20, 2);
         
@@ -267,7 +275,7 @@ fn draw_ui(self: *State) ?i64 = {
         each self.children { it |
             title := @if(it.title.len != 0, S(ptr = it.title.ptr), S(@fmt_cstr("%", it.name)));
             if nk_tree_push_hashed(ctx, .NK_TREE_NODE, title, .NK_MINIMIZED, S"child", 5, it.id.intcast()) {
-                name := S(@fmt_cstr("%", it.id));
+                name := it.window_name();
 
                 nk_layout_row_dynamic(ctx, 16, 1);
                 nk_label(ctx, S(@fmt_cstr("%", it.name)), 0);
@@ -313,6 +321,7 @@ fn draw_ui(self: *State) ?i64 = {
         self.show_monitor = !nk_window_is_hidden(ctx, S"Monitor");
     };
     nk_end(ctx);
+    };
     
     flags := flags.bit_or(@as(u32) nk_panel_flags.NK_WINDOW_NO_SCROLLBAR); 
     
@@ -324,7 +333,7 @@ fn draw_ui(self: *State) ?i64 = {
     
     new_focus: ?i64 = .None;
     enumerate self.children& { i, it |
-        name := S(@fmt_cstr("%", it.id));
+        name := it.window_name();
         title := @if(it.title.len != 0, S(ptr = it.title.ptr), S(""));
         
         if it.app.quit_ordered {
@@ -363,7 +372,7 @@ fn draw_ui(self: *State) ?i64 = {
             };
             
             if it.ready > 3 {
-                img := nk_image_handle(pack_nk_handle(it.img, self.ui.smp));
+                img := nk_image_handle(pack_nk_handle(it.img, ui.smp));
                 nk_draw_image(canvas, it.bounds, img&, (r=255,g=255,b=255,a=255));
             } else {
                 // don't show flash of purple uninit texture on the first frame
@@ -413,6 +422,8 @@ fn draw_ui(self: *State) ?i64 = {
     new_focus
 }
 
+fn window_name(it: *Window) *i8 = Ui'nk_cstring(@tfmt("%", it.id));
+
 // TODO: don't keep calling on_render when minimised when running as a standalone program either. 
 //       here it happens naturally that events/renders are only sent to the active program. 
 //       which makes sense, no point rendering. tho sokol does keep sending you frames consistantly
@@ -421,17 +432,9 @@ fn draw_ui(self: *State) ?i64 = {
 //       maybe add Desc.tick_while_iconified as a config option. 
 fn on_event(self: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     is_mouse := @is(event.type, .MOUSE_DOWN, .MOUSE_UP, .MOUSE_MOVE, .MOUSE_SCROLL);
-    sent_ui_event := false;
     if self.focus.is_none() || is_mouse {
         on_event(self.ui&, sapp, event);
-        sent_ui_event = true;
     };
-    if event.type == .RESIZED {
-        self.dirty = true;
-        return();
-    };
-    
-    @if(@is(event.type, .MOUSE_ENTER, .MOUSE_LEAVE)) return();  // don't care about the host window
     
     if event.type == .KEY_DOWN && event.key_code == .W && event.modifiers.get(.super) != 0 {
         if self.children.len == 0 {
@@ -445,6 +448,15 @@ fn on_event(self: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             child.app_event(.QUIT_REQUESTED);
         };
     }
+    
+    child_event(self, sapp, event);
+    if self.focus.is_none() {
+        self.dirty = true;
+    };
+}
+
+fn child_event(self: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    @if(@is(event.type, .MOUSE_ENTER, .MOUSE_LEAVE, .RESIZED)) return();  // don't care about the host window
     
     if event.type == .CLIPBOARD_PASTED && event.fake {
         each self.children { it |
@@ -464,6 +476,7 @@ fn on_event(self: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         event.mouse_x -= child.bounds.x * dpi_scale;
         event.mouse_y -= child.bounds.y * dpi_scale;
         
+        is_mouse := @is(event.type, .MOUSE_DOWN, .MOUSE_UP, .MOUSE_MOVE, .MOUSE_SCROLL);
         // TODO: the macos behaviour is you keep getting mouse move events when the 
         //       mouse isn't hovering your window as long as you're still focused. should match that. 
         //       (that's not what happens in web playground tho)
@@ -478,9 +491,6 @@ fn on_event(self: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         
         child.app.events&.push(event[]);
         return();
-    };
-    if sent_ui_event {
-        self.dirty = true;
     };
 };
 
@@ -503,11 +513,15 @@ fn drop(self: *State, it: *Window, final: bool) void = {
 }
 
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    on_cleanup_children(state);
+    on_cleanup(state.ui&, sg);
+}
+
+fn on_cleanup_children(state: *State) void = {
     each state.children { it |
         drop(state, it, true);
     };
     state.children&.drop();
-    on_cleanup(state.ui&, sg);
 }
 
 fn do_resize(sg: *Sg.Self, it: *Window, dpi_scale: f32) void = {
