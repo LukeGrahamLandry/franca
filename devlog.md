@@ -1,6 +1,18 @@
 
+## (Oct 23) circuit
 
-## (Oct 22)
+- delete all wires at that point. dont allow placing outside the field. 
+- trying to improve wire editing. 
+  - if place a gate pin or wide node on the middle of a wire segment, 
+    split the wire so it actually connects (since only end nodes are real)
+    - now that im doing this the restriction to 8 directions and extra routing nodes would make it much more sane to detect when it visually overlaps.
+  - dont allow placing gates with pins overlapping because then it looks like it would work without a wire but won't
+    - afraid of comparing every pin to every other gate being too slow using the radius of the pins area to check fewer. 
+  - look for path.len==0 to reuse first before reallocating
+  - let you place the visual nodes like tc if you want to make it look pretty without connecting 
+- organize the list of gates
+
+## (Oct 22) circuit
 
 - put file loader stuff in save. allow saving just from one circuit so it's easy to paste a small thing into cubes. 
 - cubes executor for the circuit, very pleasing to see a rainbow. 

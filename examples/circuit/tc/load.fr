@@ -37,7 +37,11 @@ Circuit :: @struct {
     bit_width: []u8 = empty();
     switches: []SwitchablePin = empty();
     
+    // this is annoying becuase mystery_spice_minus_fifteen_for_custom_pins is stored on the gate not the circuit so can be different each time but it never is? hopefully i'll understand when i need to edit custom components myself. probably about centering on the field?
+    cached_pin_radius: @struct(r: f32 = -1, p := vec2(0)) = ();
+    
     Wire :: @struct {
+        // only the first and last can connect to things. the others are just visual.
         path: RawList(WireNode);
         logical: WireId = (id = 0xFFFFFFFF);
         teleport := false;
@@ -330,7 +334,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 is_input := it.outputs.len != 0;
                 dest := @if(is_input, custom_pins.len, output_pin_count);
                 
-                is_switchable_output := shape.name.ends_with("z") && shape.name.starts_with("Output") && it.inputs.len == 2 && it.outputs.len == 0;
+                is_switchable_output := shape.name.starts_with("OutputZ") && it.inputs.len == 2 && it.outputs.len == 0;
                 if it.outputs.len + it.inputs.len > 1 {
                     if !is_switchable_output {
                         c.has_arch_pins = true;
@@ -686,7 +690,6 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
 
 templates :: import("@/examples/circuit/tc/builtin.fr").templates;
 
-// return._0[_].kind.id is in just the tc range. 
 // `circuits` is needed for finding the pins when `c` uses a custom component. 
 find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8)) Ty(List(Component.Gate), i64) = {
     #use("@/examples/circuit/parse.fr");
@@ -836,6 +839,7 @@ fn ensure_assembled_and_update_size(circuit: *Circuit, s: *Builtin.Settings.Ram,
 
 CONST_INDEX :: get_component_by_name("Off", @run finished_defs.components);
 
+// TODO: save the index in param now that i call for_pins in the editor
 fn find_custom_impl(g_gate: *Circuit.Gate, circuits: []Circuit) ?*Circuit = {
     if circuits.find(fn(it) => it.id == g_gate.custom_id) { child |
         if child.compiled { child_id |
@@ -1057,6 +1061,23 @@ set_initial_data :: fn(world: *World, circuits: []Tc.Circuit, root: ComponentId,
     };
 }
 
+fn get_pin_radius(gate: *Circuit.Gate, circuits: []Circuit) f32 = {
+    shape := get_builtin_shape(gate.kind);
+    @if(shape.body != .Custom) return(shape.pin_radius);
+    c := find_custom_impl(gate, circuits) || return(1.0/0.0);
+    p := gate.mystery_spice_minus_fifteen_for_custom_pins;
+    if c.cached_pin_radius.r >= 0 && c.cached_pin_radius.p == p {
+        return c.cached_pin_radius.r;
+    };
+    r: f32 = 0;
+    for_pins(shape, gate, circuits) { _, x, y |
+        r = max(r, norm_sq(vec2(x.float().cast(), y.float().cast())));
+    };
+    r := r.sqrt();
+    c.cached_pin_radius = (r = r, p = p);
+    r
+}
+
 // it's used in function name when compiled so important not to let a circuit be named "x :: evil(); y"
 safe_name :: fn(name: Str, a: Alloc) Str = {
     // (first char isn't special because mangle() has a prefix) TODO: could do that here as well and store a sepreate display name and code name. 
@@ -1198,7 +1219,7 @@ fn is_placeholder(kind: ComponentId) bool =  // for deleting in editor
 load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
     a := arena;  // want an arena because leak on error
     version := in[0];
-    @if(version != 6 && version != 15 && version != 14 && version != 13) return(Err = @tfmt("only tc circuit.data version [6,13,14,15] is supported (found %)", version));
+    @if(version != 6 && version != 15 && version != 14 && version != 13 && version != 16) return(Err = @tfmt("only tc circuit.data version [6,13,14,15,16] is supported (found %)", version));
     v2 := version != 6;
     in = in.rest(1);
     
@@ -1429,6 +1450,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
                 path&.push(pos = prev.pos + direction*len.float().cast(), direction = vec2(0), length = 0);
             };
         };
+        // non-version 16 has path reversed but i dont think direction matters?
         
         @if(path.len == 1) return(Err = "bad wire path length?");
         wires&.push(path = path.as_raw(), teleport = path[0].length == 0);

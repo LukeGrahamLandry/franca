@@ -12,6 +12,7 @@ Template :: @struct {
     compute_storage: ?(@FnPtr(it: InstanceInfo) i64) = .None;
     switches: []SwitchablePin = empty();
     kind := zeroed(import("@/examples/circuit/parse.fr")'ComponentId);
+    pin_radius: f32 = 0;  // used for speeding up placing wires in the editor
     
     SwitchablePin :: @struct {
         value_output_index: i64;
@@ -50,6 +51,12 @@ collect_templates :: fn($impl: Type, $g: Tc.GateGroup, $pin_layouts: ~A, $body: 
         
         if pin_layouts.get(k) { pins |
             it.pins = pins;
+            
+            r: f32 = 0;
+            for pins { x, y |
+                r = max(r, norm_sq(vec2(x.float().cast(), y.float().cast())));
+            };
+            it.pin_radius = r.sqrt();
         };
         body(it, k);
         if it.pins.len != 0 && g == .Tc1 {
@@ -561,11 +568,11 @@ Buffer64 :: todo();
 ProbeWireBit :: todo();
 ProbeWireWord :: todo();
 Switch1 :: Switch64;
-Output1z :: Output64z;
-Output8z :: Output64z;
-Output16z :: Output64z;
-Output32z :: Output64z;
-Output64z :: io(0, 2, );
+OutputZ1 :: OutputZ64;
+OutputZ8 :: OutputZ64;
+OutputZ16 :: OutputZ64;
+OutputZ32 :: OutputZ64;
+OutputZ64 :: io(0, 2, );
 Constant16 :: Constant64;
 Not16 :: mask(16, Not64);
 Or16 :: mask(16, Or64);
@@ -1042,11 +1049,11 @@ pin_layouts :: @static @(parse_pin_layouts(.Tc1)) (
     ((-1, 0))),
 ((.Not64, .Neg64, .Not32, .Neg32, .IndexerBit, .IndexerByte, .Not, .Not8, .Not16, .Neg8, .DelayLine1, .Neg16),
     ((1, 0), (-1, 0))),
-((.Output64z),
+((.OutputZ64),
     ((-3, 0), (0, 2))),
-((.LevelOutputArch, .Output1z, .Output8z),
+((.LevelOutputArch, .OutputZ1, .OutputZ8),
     ((-1, 0), (0, 1))),
-((.Output16z, .Output32z),
+((.OutputZ16, .OutputZ32),
     ((-2, 0), (0, 2))),
 ((.Nor, .Xor, .Xnor, .And, .Nand, .Or),
     ((2, 0), (-1, 1), (-1, -1))),
@@ -1122,8 +1129,8 @@ get_width_data :: fn(it: *Template) []u8 = {
             return @slice(0x01, i, i) a;
         }
     };
-    if it.name.starts_with("Output") && it.name.ends_with("z") {
-        i := suffix_int(it.name.slice(0, it.name.len - 1)).unwrap();
+    if it.name.starts_with("OutputZ") {
+        i := suffix_int(it.name).unwrap();
         return @slice(i, 0x01) a;
     }
     
