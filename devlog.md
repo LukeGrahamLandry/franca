@@ -1,4 +1,17 @@
 
+## (Oct 24) circuit
+
+- harmless to do switches even when has_arch_pins
+- recompile when exit edit mode 
+  - wasn't copying dependencies out of input when loading circuit.data
+  - making a change works if i dump save and reload but not if i try to just re-load_circuit_index_async.
+    resetting gate/wire.logical isnt enough. oh its just that find_pins isn't skipping zero length wires made by deleting. 
+  - not re-jit if the source didn't change does help the trivial case where you actually made no edits. 
+    sadly even adding a disconnected wire changes it 
+    because extra logical wires are added at the end (insert_consts_for_dead_wires) so the ids will be shifted. 
+    renumbering when emitting helps that but not worth making it more confusing. 
+- allow placing CCs
+
 ## (Oct 23) circuit
 
 - delete all wires at that point. dont allow placing outside the field. 

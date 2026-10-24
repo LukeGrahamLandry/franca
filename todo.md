@@ -17,6 +17,11 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 
+- circuit
+  - order of outputs is based on order in the file so caller of an arch needs to not just assume. 
+    (which maze in gui&test and cubes both do wrong rn)
+  - tests for the editor. ex. wire routing/splitting
+  - why does circuit fetch the wasm4 dep. it uses that file for atlas but shouldn't be compiling the c? an overload signeture i guess, thats so annoying. 
 - it technically works now but the circuit editor still feels incredibly bad to use. 
   deleting wires is the most obviously broken part. undiscoverable keybinds is also bad. 
   i feel like sometimes my clicks don't go. i actually wonder if my right mouse button is fucked because ive been annoyed by phantom double clicking in programs i didnt write too

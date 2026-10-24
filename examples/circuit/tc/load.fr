@@ -275,6 +275,11 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
             continue();
         }
         
+        if shape.name == "_0" {  // editor: deleted gate
+            kill&.set(i);
+            continue();
+        };
+        
         out_arity, in_arity := get_arity(shape, original_gate, circuits, warn);
         
         if in_arity != it.inputs.len || out_arity != it.outputs.len {
@@ -327,6 +332,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
             fn IO() => {
                 kill&.set(i);
                 @if(shape.name == "LevelScreen") continue();
+                // inputs of the gate become outputs of the circuit and visa versa
                 out&.push_all(it.inputs);
                 in&.push_all(it.outputs);
                 
@@ -334,11 +340,10 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 is_input := it.outputs.len != 0;
                 dest := @if(is_input, custom_pins.len, output_pin_count);
                 
-                is_switchable_output := shape.name.starts_with("OutputZ") && it.inputs.len == 2 && it.outputs.len == 0;
-                if it.outputs.len + it.inputs.len > 1 {
-                    if !is_switchable_output {
+                is_switchable_output := it.inputs.len == 2 && it.outputs.len == 0;
+                if is_switchable_output {
+                    if shape.name.ends_with("Arch") {
                         c.has_arch_pins = true;
-                        continue();
                     };
                     // :OutputNz ughhhhh this seems convoluted but i don't have a better idea rn. 
                     // it has two input pins on the inside but only exposes one output pin. 
@@ -441,7 +446,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         @fmtln(warn, "something was unimplemented in (%)", c.name);
     };
     
-    bit_width := @if(!c.has_arch_pins, bit_width.items(), empty());
+    bit_width := bit_width.items();
     
     c.pins = custom_pins.items();
     c.switches = switches.items();
@@ -449,7 +454,8 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     logical_to_circuit&.insert(0, -1);  // in
     logical_to_circuit&.push(-1);       // out
     insert_consts_for_dead_wires(components.items(), gates&);
-    @if(!c.has_arch_pins) @debug_assert_eq(bit_width.len, custom_pins.len);
+    @debug_assert_eq(bit_width.len, custom_pins.len);
+    
     @if(!c.v2)  // TODO
     insert_bit_width_casts(components.items(), gates&, wire_count&, bit_width, warn);
     logical_to_circuit&.push_repeated(gates.len - logical_to_circuit.len, -1);
@@ -698,7 +704,9 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8)) Ty(
     // all the places wires connect (to a component or to other wires). 
     wire_positions: HashMap(i64, *WireId) = init(temp());
     enumerate c.wires& { wire_i, new |
+        continue :: local_return;
         new.logical = (id = wire_i.trunc());
+        @if(new.path.len <= 1) continue();  // editor: deleted wire
         // the other nodes on the path are just for the visuals. 
         ends := @slice(new.path[0].pos, new.path[new.path.len - 1].pos);
         for ends { end_pos |
@@ -742,6 +750,7 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8)) Ty(
             || shape.name.starts_with("Probe")   // not yet implemented
             || shape.name.starts_with("Buffer")  // does nothing?
             || shape.name == "Custom"            // might just be for a visual block
+            || shape.name == "_0"                // placeholder for editor deleted gate
         ;
         if no_pins && !allow_no_pins {
             @fmtln(warn, "TODO: % has no pins", shape.name);
@@ -868,6 +877,7 @@ fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, 
         
         // TODO: i don't understand why this is part of the gate not the component or why 15 is the magic number but it makes the ones i've tested look right so here we are. 
         p := gate.mystery_spice_minus_fifteen_for_custom_pins;
+        child.cached_pin_radius.p = p;  // editor uses this when placing custom component. TODO: calculate something sane myself for when i let you make new CCs
         dx = p.x.cast().int() + 15;
         dy = p.y.cast().int() + 15;
     };
@@ -1466,7 +1476,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
         gates = gates.as_raw(), 
         id = circuit_id,
         min = min_pos, max = max_pos,
-        dependencies = dependencies.as_raw_list(),
+        dependencies = dependencies.shallow_copy(a).as_raw_list(),
         name = name,
         programs = programs.items(),
         default_tick_rate = tick_rate,

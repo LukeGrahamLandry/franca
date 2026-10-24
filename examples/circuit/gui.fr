@@ -50,6 +50,7 @@ State :: @rec @struct {
     circuit: []Tc.Circuit;
     circuit_index: i64;
     circuit_arena: Arena.Allocator;
+    current_jitted_source: Str;
     is_new_overture: bool;  // TODO: remove
     load_time: i64;
     warnings: List(u8);
@@ -85,6 +86,13 @@ main_use_output :: fn(state: *State, in: LoaderT.I, out: Result(void, void)) voi
     };
     state.reset();
     state.find_keyboard();
+    
+    if out&.is(.Err) {
+        // recompiled for exiting edit mode but current_jitted_source didn't change so didnt call worker_get_output
+        // barely helps because wire ids change if you did anything at all but doesn't hurt
+        return();
+    };
+    
     state.load_atlas_part2(state.sg);
     state.load_time = timestamp() - state.loader.start_time;
 }
@@ -637,6 +645,7 @@ fn draw_wires(self: *Draw, circuit: *Tc.Circuit) void = {
                 // TODO: these will be kinda useless because it doesn't reset wire_hover_count when for the next wire that's at a different x position. 
                 hover = true;
             };
+            // TODO: be able to hover the pin of a disconnected gate where there's no graphical wire to see value
             if hover {
                 sgl.color = pack_rgba(200, 50, 50, 255);
                 sdtx.pos = self.world_to_text_pos(b) + vec2(0, self.wire_hover_count);
@@ -797,6 +806,7 @@ fn sprite_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it
     data := world.storage.subslice(c.instance_offset_by_gate[i], size_of(Tc.Builtin.SpriteData) * 256);
     data := Tc.Builtin.SpriteData.reinterpret_bytes(data.interpret_as_bytes());
     p := self.tc_to_world_pos(gate.pos + vec2(-16.5, 12));
+    @debug_assert(state.atlas.enable, "SpriteDisplay but no atlas");
     uv0, uv1, texture_size := state.atlas.uvs&.get(it.param) || return();
     uv_size := abs(uv0 - uv1);
     sgl.color = 0xFFFFFFFF;
@@ -888,10 +898,10 @@ EditState :: @struct {
     placing_type := zeroed(ComponentId); 
 };
 
+// TODO: bundle the source files the jit needs so binary is self contained
 // TODO: autosave & web localstorage
 // TODO: be able to paste to add one circuit without stomping everything. choose (replace all, replace one, add new). same for dragndrop and cli. 
 // TODO: edit params (most importantly constants)
-// TODO: recompile when exit edit mode 
 // TODO: allow enter custom component while in edit mode / make new custom components
 // TODO: copy paste a gate (or area)
 // TODO: route better 
@@ -991,6 +1001,18 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
             gate.logical_gate_index = -1;
             gate.kind = e.placing_type;
             gate.pos = self.world_to_tc_pos(self.mouse_world_pos);
+            
+            if gate.kind.group() == .Loaded {
+                each circuits { check |
+                    if check.compiled { kind |
+                        if kind.id == gate.kind.id {
+                            gate.custom_id = check.id;
+                            gate.mystery_spice_minus_fifteen_for_custom_pins = check.cached_pin_radius.p;
+                        };
+                    };
+                };
+            };
+            
             e.selected_gate = (Some = gate_i);
         }
         fn Rotate() => if e.selected_gate { gate_i |
@@ -1105,18 +1127,32 @@ fn gate_selection(self: *Draw) void = {
     new: ?ComponentId = .None;
     enumerate gate_selection_columns { column_i, column |
         enumerate column { row_i, i |
-        it := t[i[]];
+            do_button(column_i, row_i, t[i[]].name, t[i[]].kind);
+        };
+    };
+    
+    // TODO: allow placing CCs that weren't already used so don't have a kind assigned yet
+    n := 0;
+    each state.circuit { c |
+        @if(!c.is_arch) if c.compiled { kind |
+            do_button(gate_selection_columns.len(), n, c.name, kind);
+            n += 1;
+        };
+    };
+    n += 1;
+    
+    do_button :: fn(column_i: i64, row_i: i64, name: Str, kind: ComponentId) => {
         pos := vec2(column_i.float().cast() * 18, -row_i.float().cast());
         sdtx.pos = self.world_to_text_pos(self.text_spacing * pos);
         p := self.world_to_text_pos(self.mouse_world_pos);
-        hover := p.x > sdtx.pos.x && p.x < sdtx.pos.x + it.name.len.float().cast() && p.y > sdtx.pos.y && p.y < sdtx.pos.y + 1;
+        hover := p.x > sdtx.pos.x && p.x < sdtx.pos.x + name.len.float().cast() && p.y > sdtx.pos.y && p.y < sdtx.pos.y + 1;
         sdtx.color = pack_rgba(200, 200, 200*int(!hover), 255);
-        sdtx.put(it.name);
+        sdtx.put(name);
         if state.clicked && hover && state.loader.progress == .Idle {
-            new = (Some = it.kind);
-        };
+            new = (Some = kind);
         };
     };
+    
     @if(state.edit&.no_selection())
     if new { it |
         state.edit.placing_type = it;
@@ -1477,10 +1513,30 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                         };
                     };
                 };
-                fn E() => if !e.enable || state.loader.progress == .Idle {
+                fn E() => if state.loader.progress == .Idle {
                     enable := !e.enable;
                     e[] = ();
                     e.enable = enable;
+                    
+                    // recompile when exiting edit mode. 
+                    // TODO: this leaks arena space forever so eventually need to dump save and reload to reset it
+                    if !enable && state.tree.len > 0 {
+                        if state.tree[0].diagram_circuit { i |
+                            // forget that loaded it before
+                            each state.circuit { c |
+                                if c.compiled.is_some() {
+                                    each c.gates { it |
+                                        it.logical_gate_index = -1;
+                                    };
+                                    each c.wires { it |
+                                        it.logical.id = 0xFFFFFFFF;
+                                    };
+                                }
+                            };
+                            
+                            load_circuit_index_async(state, i, state.world.tc_file_loader_device);
+                        };
+                    };
                 }
                 fn BACKSPACE() => {
                     e.action = .Delete;
@@ -1552,6 +1608,8 @@ fn load_path_async(state: *State, path: Str, is_bytes: bool) void = {
     state.world = zeroed(World);
     state.tree&.clear();
     state.circuit_arena&.reset_retaining_capacity();
+    state.current_jitted_source = "";
+    state.atlas.enable = false;
     a := state.circuit_arena&.borrow();
     path := path.shallow_copy(a);
     state.warnings = list(a);
@@ -1568,7 +1626,7 @@ LoaderT :: import("@/examples/jit_loader.fr")'Loader(
     "dispatch",
 );
 
-worker_get_source :: fn(state: *State, in: *LoaderT.I, a: Alloc) Result(Str, void) = {
+worker_get_source :: fn(state: *State, in: *LoaderT.I) Result(Str, void) = {
     @match(in[]) {
         fn Path(it) => {
             path := it.path;
@@ -1582,13 +1640,13 @@ worker_get_source :: fn(state: *State, in: *LoaderT.I, a: Alloc) Result(Str, voi
                 };
                 path = @tfmt(template, root, path);
             };
-            load_path_worker(state, in, a, path, it.is_bytes)
+            load_path_worker(state, in, path, it.is_bytes)
         }
-        fn Index(it) => load_circuit_index_worker(state, it.root_index, it.tc_file_loader_device, a);
+        fn Index(it) => load_circuit_index_worker(state, it.root_index, it.tc_file_loader_device);
     }
 }
 
-load_path_worker :: fn(state: *State, in: *LoaderT.I, out_a: Alloc, path: Str, is_bytes: bool) Result(Str, void) = {
+load_path_worker :: fn(state: *State, in: *LoaderT.I, path: Str, is_bytes: bool) Result(Str, void) = {
     start := timestamp();
     a := state.circuit_arena&.borrow();
     
@@ -1626,7 +1684,7 @@ load_path_worker :: fn(state: *State, in: *LoaderT.I, out_a: Alloc, path: Str, i
     state.push_tree_node(diagram_circuit = (Some = root_index));
     // TODO: dont bother recompiling yet if in edit mode
     in[] = (Index = (root_index = root_index, tc_file_loader_device = tc_file_loader_device));
-    worker_get_source(state, in, out_a)
+    worker_get_source(state, in)
 }
 
 fn load_circuit_index_async(state: *State, root_index: i64, tc_file_loader_device: []Tc.LoadedFile) void = {
@@ -1639,7 +1697,7 @@ fn load_circuit_index_async(state: *State, root_index: i64, tc_file_loader_devic
 
 // should fine for the ui to show the diagram on the other thread while this compiles. 
 // there needs to not use the logical part while progress==.Loading and here needs to not push to state.tree. 
-fn load_circuit_index_worker(state: *State, root_index: i64, tc_file_loader_device: []Tc.LoadedFile, a: Alloc) Result(Str, void) = {
+fn load_circuit_index_worker(state: *State, root_index: i64, tc_file_loader_device: []Tc.LoadedFile) Result(Str, void) = {
     @if(!FEAT_TC_CIRCUIT) panic("!FEAT_TC_CIRCUIT");
     circuits := state.circuit;
     each circuits { c | 
@@ -1648,13 +1706,18 @@ fn load_circuit_index_worker(state: *State, root_index: i64, tc_file_loader_devi
     
     // TODO: bring back FEAT_RT_COMPILE which doesn't compile the franca compiler. 
     
+    a := state.circuit_arena&.borrow();
     components := @ref Component.list(a);
     components.push_all(finished_defs.components);
     Tc'compile_circuit(circuits, root_index, components, a, state.warnings&);
     
     first_index_that_needs_fast_eval := finished_defs.components.len();
     src := compile_gates_source(components.items(), a, first_index_that_needs_fast_eval);
+    if state.current_jitted_source != "" && state.current_jitted_source == src {
+        return(.Err);
+    };
     state.world.components = components.items();
+    state.current_jitted_source = src;
     (Ok = src)
 }
     
@@ -1941,7 +2004,7 @@ gate_selection_columns :: {
         };
     };
     
-    no := @const_slice("NoteSound", "SyntheticCast_FR", "LevelScreen");
+    no := @const_slice("NoteSound", "SyntheticCast_FR", "LevelScreen", "LevelOutput1Sum", "LevelOutput1Car", "LevelInput1", "LevelOutput1");
     enumerate t { j, it |
         if !seen&.get(j) && !no.contains(it.name) && !@is(it.body, .Unimplemented, .Custom) {
             columns[5]&.push(j, a);

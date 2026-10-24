@@ -7,7 +7,7 @@ fn Loader(
     $Input: Type,
     $Output: Type,
     $Error: Type,
-    $worker_get_source: @Fn(self: UserData, in: *Input, a: Alloc) Result(Str, Error),
+    $worker_get_source: @Fn(self: UserData, in: *Input) Result(Str, Error),
     $worker_get_output: @Fn(self: UserData, in: *Input, callee: rawptr) Result(Output, Error),
     $main_use_output: @Fn(self: UserData, in: Input, out: Result(Output, Error)) void,
     $value_name: Str,
@@ -82,12 +82,13 @@ fn Loader(
     }
     
     worker_body :: fn(self: *Loader) void = {
-        reset_jit(self.fr&);
-        fr, _ := self.fr.it.unwrap();
         in := self.in&.unwrap();
-        @match(worker_get_source(self.userdata, in, fr.get_alloc())) {
+        @match(worker_get_source(self.userdata, in)) {
             fn Err(it) => { self.output = (Some = (Err = it)); }
             fn Ok(source) => {
+                reset_jit(self.fr&);
+                fr, _ := self.fr.it.unwrap();
+                source = source.shallow_copy(fr.get_alloc());
                 self.compile_start_time = timestamp();
                 self.progress = .Compiling;
                 callee := jit_value(self.fr&, source, value_name);
