@@ -35,7 +35,7 @@ State :: @rec @struct {
     auto_eval: bool;
     ticks_per_eval: i64;
     maze: Scenario.Maze;
-    arch_is_leg: bool;
+    shape: IoShape;
     tick: i64;
     halt_message: List(u8);
     show_wire_ref_lines: bool;
@@ -51,7 +51,6 @@ State :: @rec @struct {
     circuit_index: i64;
     circuit_arena: Arena.Allocator;
     current_jitted_source: Str;
-    is_new_overture: bool;  // TODO: remove
     load_time: i64;
     warnings: List(u8);
     loader: LoaderT;
@@ -77,7 +76,10 @@ CircuitNode :: @struct {
     saved := zeroed(@struct(pos: Vec2, scale: f32));
 };
 
-has_dis :: @const_slice("overture", "leg", "OVERTURE", "LEG", "NANDverture");
+IoShape :: @struct {
+    is_maze: bool; arch_pins: bool; debug_known: bool; defs_reprogram: bool; is_leg: bool;
+    out: i64; out_used: i64; in: i64; in_used: i64;
+};
 
 main_use_output :: fn(state: *State, in: LoaderT.I, out: Result(void, void)) void = {
     if state.tree.len > 0 && state.tree[0].diagram_circuit.is_some() {
@@ -96,6 +98,71 @@ main_use_output :: fn(state: *State, in: LoaderT.I, out: Result(void, void)) voi
     state.load_atlas_part2(state.sg);
     state.load_time = timestamp() - state.loader.start_time;
 }
+
+do_eval :: fn(state: *State) void = {
+    world := state.world&;
+    state.halt_message&.clear();
+    state.want_eval = false;
+    prev_timestamp := state.prev_timestamp_us;
+    this_timestamp := realtime_us();
+    state.prev_timestamp_us = this_timestamp;
+    delta_time := this_timestamp - prev_timestamp;
+    if state.eval_last_frame {
+        if state.frame_time_history&.len() == state.frame_time_history&.capacity() {
+            old_delta_time := state.frame_time_history&.pop_front().unwrap();
+            state.frame_time_history_sum -= old_delta_time;
+        };
+        state.frame_time_history_sum += delta_time;
+        state.frame_time_history&.push_back(delta_time, panicking_allocator);
+        // TODO: could also use this to throttle the tick rate down so don't drop frames if the circuit is too big. 
+    } else {
+        delta_time = 16 * US_PER_MS;
+        prev_timestamp = this_timestamp - delta_time;
+    };
+    
+    count := @if(state.auto_eval, state.ticks_per_eval, 1);
+    root_component := state.tree[0].component.unwrap();
+    shape := state.shape;
+    values := @slice(0, 0, 0, 0, 0);
+    values = values.slice(0, @if(shape.arch_pins, @if(shape.defs_reprogram, 5, 4), 0));
+    range(0, count) { i |
+        // the idea here is to spread the times evenly instead of all the ticks being grouped together each frame with 16ms gaps.
+        clock := prev_timestamp + delta_time*i/count;
+        world.timestamp_us = (Some = clock);
+        
+        state.service_keyboard_device();
+        state.tick += 1;
+        if shape.is_maze {
+            values[shape.in] = state.maze&.input().zext();
+        };
+        
+        save_wire_values := i == count - 1;
+        state.halted_without_wire_values = !save_wire_values;
+        evaluate(world, values, root_component, 0, save_wire_values);
+        
+        if world.tc_halt_device != -1 {
+            return do_halt(state);
+        };
+        
+        if shape.is_maze && values[shape.out_used] != 0 {
+            state.maze&.output(values[shape.out].trunc());
+            if state.maze.win {
+                @fmt(state.halt_message&, "solved in % ticks", state.tick);
+                state.auto_eval = false;
+                return();
+            }
+        };
+    };
+};
+
+do_halt :: fn(state: *State) void = {
+    world := state.world&;
+    param: Tc.Builtin.Settings.Halt = (repr = world.tc_halt_device.bitcast());
+    msg := state.circuit[param.get(.circ_i)].gates[param.get(.gate_i)].data;
+    @fmt(state.halt_message&, "halted after % ticks: %", state.tick, msg);
+    world.tc_halt_device = -1;
+    state.auto_eval = false;
+};
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.check_movement();
@@ -123,84 +190,15 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     
     world := state.world&;
-    halted_without_wire_values := false;
     have_logic := state.loader.progress == .Idle && state.tree.len > 0 && state.tree[0].component.is_some() 
         && world[state.tree[0].component.Some].gates.len > 2  // HACK for load unimplemented
         && !state.edit.enable;
     eval_this_frame := have_logic && (state.want_eval || state.auto_eval);
-    eval_last_frame := state.eval_last_frame;
-    state.eval_last_frame = eval_this_frame;
     
     if eval_this_frame {
-        state.halt_message&.clear();
-        break :: local_return;
-        prev_timestamp := state.prev_timestamp_us;
-        this_timestamp := realtime_us();
-        state.prev_timestamp_us = this_timestamp;
-        delta_time := this_timestamp - prev_timestamp;
-        if eval_last_frame {
-            if state.frame_time_history&.len() == state.frame_time_history&.capacity() {
-                old_delta_time := state.frame_time_history&.pop_front().unwrap();
-                state.frame_time_history_sum -= old_delta_time;
-            };
-            state.frame_time_history_sum += delta_time;
-            state.frame_time_history&.push_back(delta_time, panicking_allocator);
-            // TODO: could also use this to throttle the tick rate down so don't drop frames if the circuit is too big. 
-        } else {
-            delta_time = 0;
-            prev_timestamp = this_timestamp;
-        };
-        
-    count := @if(state.auto_eval, state.ticks_per_eval, 1);
-    root_component := state.tree[0].component.unwrap();
-    range(0, count) { i |
-        // the idea here is to spread the times evenly instead of all the ticks being grouped together each frame with 16ms gaps.
-        clock := prev_timestamp + delta_time*i/count;
-        state.world.timestamp_us = (Some = clock);
-        
-        state.service_keyboard_device();
-        state.tick += 1;
-        // TODO: don't do this every tick if not doing one of the few hacked maze ones
-        input := state.maze&.input();
-        OUT: ?u8 = .None;
-        save_wire_values := i == count - 1;
-        if state.is_new_overture {
-            has_arch_pins := state.tree[0].diagram_circuit.is_some() && state.circuit[state.tree[0].diagram_circuit.Some].has_arch_pins;
-            values := @slice(0, 0, 0, @as(i64) input.zext());
-            if !has_arch_pins {
-                values.len = 0;
-            };
-            evaluate(world, values, root_component, 0, save_wire_values);
-            OUT = @if(has_arch_pins && values[1 + int(state.arch_is_leg)] != 0, (Some = values[0 + int(state.arch_is_leg)].trunc()), .None);
-        } else {
-            values := @slice(0, 0, 0, input.zext(), 0);
-            evaluate(world, values, root_component, 0, save_wire_values);
-            OUT = @if(values[1] != 0, (Some = values[0].trunc()), .None);
-        };
-        out := OUT;
-        if out { byte |
-            state.maze&.output(byte);
-            if state.maze.win && state.halt_message.len == 0 {
-                @fmt(state.halt_message&, "solved in % ticks", state.tick);
-                state.auto_eval = false;
-            }
-        };
-        
-        state.halted_without_wire_values = !save_wire_values;
-        if world.tc_halt_device != -1 {
-            param: Tc.Builtin.Settings.Halt = (repr = world.tc_halt_device.bitcast());
-            msg := state.circuit[param.get(.circ_i)].gates[param.get(.gate_i)].data;
-            @fmt(state.halt_message&, "halted after % ticks: %", state.tick, msg);
-            
-            world.tc_halt_device = -1;
-            state.want_eval = false;
-            state.auto_eval = false;
-            state.halted_without_wire_values = !save_wire_values; 
-            break();
-        };
+        do_eval(state);
     };
-    state.want_eval = false;
-    };
+    state.eval_last_frame = eval_this_frame;
     
     app_w, app_h := (sapp.width().float().cast(), sapp.height().float().cast());
     screen_scale := vec2(500 * sapp.dpi_scale) / vec2(app_w, app_h);
@@ -268,7 +266,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         };
         
         self.draw_component_code(c, instance, parent_wire_offset);
-        if has_dis.contains(world[root_component].name) {
+        if state.shape.is_maze {
             self.debug_known_arch();
         };
     };
@@ -528,13 +526,9 @@ fn show_wire_value(self: *Draw, id: WireId, force_hover: bool) = {
     // TODO: need to keep track of data size of each wire
     //       i have Component.bit_width now
     @if(ok) 
-    if state.is_new_overture {
         for_rev i64.cast_to_bytes(value&) { c |
             push_hex_byte(out, c, false);
         };
-    } else {
-        push_hex_byte(out, value.trunc(), true);
-    };
     sdtx.put(out.items());
     out.clear();
     sdtx.put(" ");
@@ -1294,9 +1288,11 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         }
     };
     
+    if state.loader.progress == .Idle {
     out := @ref u8.list(temp());
     layout_components(defs.components.items(), defs.tc_components_offset, out);
     state.load_path_async(out.items(), true);
+    };
     
     state.reset();
 }
@@ -1311,32 +1307,46 @@ fn reset(state: *State) void = {
     state.frame_time_history_sum = 0;
     state.frame_time_history&.clear();
 
-    state.maze = Scenario'Maze'new(Scenario.Maze.tc0);
     state.tick = 0;
     state.halt_message&.clear();
     
     world := state.world&;
     world.storage.set_zeroed();  // importantly resets ip,registers=0
     
-    @if(state.tree.len > 0) if state.tree[0].component { root |
-        name := state.world&[root].name;
-        if state.tree[0].diagram_circuit { i |
-            Tc'set_initial_data(world, state.circuit, root, 0);
-            name = state.circuit[i].name;
-        };
-        
-        is_defs := name == "overture" || name == "leg";
-        program := @if(name == "leg" || name == "LEG", Defs.the_maze_leg, Defs.the_maze);
+    @if(state.tree.len == 0) return();
+    root := state.tree[0].component || return();
     
-        if is_defs {
+    name := state.world&[root].name;
+    shape := state.shape&;
+    is_defs := name == "overture" || name == "leg";
+    non_defs := name == "LEG" || name == "OVERTURE" || name == "NANDverture";
+    leg := name == "leg" || name == "LEG";
+    shape[] = (
+        is_maze = is_defs || non_defs,
+        arch_pins = is_defs || non_defs,
+        debug_known = is_defs,
+        is_leg = leg,
+        defs_reprogram = is_defs,
+        out = 0 + int(non_defs && leg),
+        out_used = 1 + int(non_defs && leg),
+        in = 3,
+        in_used = 2,
+    );
+    
+    if state.tree[0].diagram_circuit { i |
+        Tc'set_initial_data(world, state.circuit, root, 0);
+        shape.arch_pins = shape.arch_pins || state.circuit[i].has_arch_pins;
+    };
+    
+    program := @if(shape.is_leg, Defs.the_maze_leg, Defs.the_maze);
+    if shape.is_maze {
+        state.maze = Scenario'Maze'new(Scenario.Maze.tc0);
+        if shape.defs_reprogram {
             range(0, 256) { i |
                 values := @slice(0, 0, 0, program[i].zext(), /*write program*/1);
                 evaluate(world, values, root, 0, false);
             };
-        };
-        
-        // TODO: have a button for loading my own maze programs instead
-        if name == "LEG" || name == "OVERTURE" || name == "NANDverture" {
+        } else {
             off := @if(name == "NANDverture", 56, 1);  // HACK 
             world.storage.subslice(off, 256/8).interpret_as_bytes().copy_from(program);
         };
@@ -1484,15 +1494,6 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 }
                 fn RIGHT_BRACKET() => if state.ticks_per_eval + tick_off < 1_000_000 {
                     state.ticks_per_eval += tick_off;
-                }
-                fn N() => if !e.enable {
-                    state.load_time = 0;
-                    state.is_new_overture = false;
-                    state.arch_is_leg = !state.arch_is_leg;
-                    root := get_component_by_name(@if(state.arch_is_leg, "leg", "overture"), finished_defs.components);
-                    state.tree&.clear();
-                    state.push_tree_node(component = (Some = root));
-                    state.reset();
                 }
                 fn LEFT_SHIFT() => { state.show_wire_ref_lines = true; }
                 fn L() => if !e.enable {
@@ -1739,8 +1740,6 @@ worker_get_output :: fn(state: *State, in: *LoaderT.I, callee: rawptr) Result(vo
    
     c := circuits[in.Index.root_index]&; 
     state.load_atlas_part1(c);
-    state.arch_is_leg = c.name == "LEG" || c.name == "leg";
-    state.is_new_overture = !(c.name == "leg" || c.name == "overture");
     // the game ui lets you ask for as slow as 0.1hz (10 seconds per tick), so the number in the save file is scaled by 10
     state.ticks_per_eval = max(c.default_tick_rate / 10 / 60, 1);
     .Ok
@@ -1862,17 +1861,16 @@ segment_lines :: @const_slice(
 // this is a hack for debugging the overture/leg in ./defs.fr
 fn debug_known_arch(self: *Draw) void = {
     self.show_maze();
-
     state := self.state;
+    @if(!state.shape.debug_known) return();
     root_component := state.tree[0].component.unwrap();
     
     // hack: colours being useful relies on ordering in defs.fr: (program, ip, registers). 
-    instruction_width := @if(state.arch_is_leg, 4, 1);
+    instruction_width := @if(state.shape.is_leg, 4, 1);
     ip_index := MAX_i64;
     memory := read_delay_memory(state.world&, root_component);
     memory.len = min(memory.len, 512);
     root_component := state.world&[root_component]&;
-    @if(root_component.name != "overture" && root_component.name != "leg") return();
     
     ram_start := 0;
     enumerate root_component.gates { i, it |
@@ -1900,7 +1898,7 @@ fn debug_known_arch(self: *Draw) void = {
         pos := self.text_spacing * vec2(-left_distance, 2);
         range(0, memory.len) { i |
             y, x := i.udiv_mod(16);
-            c := pack_rgba(255, 150, 40, 255);
+            c := pack_rgba(255, 150, 80, 255);
             if memory.len > ip_index && i >= ram_start {
                 drawing := i.sub(ram_start).align_back(instruction_width) + ram_start;
                 ip_raw: i64 = memory[ip_index].zext() + ram_start;
@@ -1925,7 +1923,7 @@ fn debug_known_arch(self: *Draw) void = {
     }
     
     fn show_known_disassembly(self: *Draw, memory: []u8, ram_start: i64, ip_index: i64) void = {
-        if self.state.arch_is_leg {
+        if self.state.shape.is_leg {
             dis_iter(AsmLeg, u32);
         } else {
             dis_iter(AsmOverture, u8);
