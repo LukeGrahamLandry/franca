@@ -1,4 +1,19 @@
 
+## (Oct 25) circuit
+
+- making a graphical circuit for defs.fr so it doesn't have to be special 
+  (want to get rid of DefsBuiltin/DefsLoaded and gui not keep checking the optional in CircuitNode). 
+  - track bit width (i was already documenting with case of variable name) so it knows not to insert casts. 
+  - its going to mess up labels for debug_known_arch and places that check is_new_overture but first just want to see if it works. 
+  - somehow made maze 52x slower (per samply). exactly same tick count so its correct just somehow the perturbed the shape. 
+    preread of memory8 now has 2 prereads of each memory1. 
+    because schedule_gates pulls all memory down so the byte_make for the output is first, 
+    so does a local preread to get the inputs and then does the normal preread when it sees the gates
+    fix in compile_gate which also makes (cached) test.fr go 9591 -> 8557. 
+    i love so much when random cleanup side quests accidently make the main thing way faster. 
+  - maze after graphics is still slower tho. 54 -> 122 samples. 
+    memory8 non-preread prereads the memory1s to make the output and then calls them normally to write. 
+
 ## (Oct 24) circuit
 
 - harmless to do switches even when has_arch_pins

@@ -114,8 +114,11 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             fn Path(it) => it.path;
             fn Index(it) => state.circuit[it.root_index].name;
         };
-        msg := @tfmt("compiling %\nit's been % ms\nif you can read all this it's too slow!", name, timestamp() - state.loader.start_time);
-        show_alert(msg, sdtx, sapp);
+        t := timestamp() - state.loader.start_time;
+        msg := @tfmt("compiling %\nit's been % ms\nif you can read all this it's too slow!", name, t);
+        if t > 50 {  // dont flicker for a frame when exiting exit mode without changes
+            show_alert(msg, sdtx, sapp);
+        };
         state.dirty = true;
     };
     
@@ -257,6 +260,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         instance, parent_wire_offset, wire_offset := self.walk_component_tree(c&);
         
         if !state.halted_without_wire_values {
+            @debug_assert(world.scratch.len >= wire_offset + c.wire_count, "misconfigured scratch");
             self.wires = world.scratch.items().subslice(wire_offset, c.wire_count);
         };
         if state.show_wire_ref_lines {
@@ -522,6 +526,7 @@ fn show_wire_value(self: *Draw, id: WireId, force_hover: bool) = {
     sdtx.color = pack_rgba(150, 150, 150, 255);
     sdtx.put("=");
     // TODO: need to keep track of data size of each wire
+    //       i have Component.bit_width now
     @if(ok) 
     if state.is_new_overture {
         for_rev i64.cast_to_bytes(value&) { c |
@@ -1289,6 +1294,10 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         }
     };
     
+    out := @ref u8.list(temp());
+    layout_components(defs.components.items(), defs.tc_components_offset, out);
+    state.load_path_async(out.items(), true);
+    
     state.reset();
 }
 
@@ -1309,27 +1318,21 @@ fn reset(state: *State) void = {
     world := state.world&;
     world.storage.set_zeroed();  // importantly resets ip,registers=0
     
-    program := @if(state.arch_is_leg, Defs.the_maze_leg, Defs.the_maze);
-    if !state.is_new_overture && state.tree.len > 0 && state.tree[0].component.is_some() {
-        root_component := state.tree[0].component.unwrap();
-    range(0, 256) { i |
-        values := @slice(0, 0, 0, program[i].zext(), /*write program*/1);
-        evaluate(world, values, root_component, 0, false);
-    };
-    };
-    world.scratch.len = world.scratch.cap;
-    world.scratch.items().set_zeroed();
-    
-    @if(state.tree.len > 0)
-    if state.tree[0].component { root |
-        Tc'set_initial_data(world, state.circuit, root, 0);
-    };
-    
-    @if(state.tree.len > 0)
-    if state.is_new_overture {
-        name := "";
+    @if(state.tree.len > 0) if state.tree[0].component { root |
+        name := state.world&[root].name;
         if state.tree[0].diagram_circuit { i |
+            Tc'set_initial_data(world, state.circuit, root, 0);
             name = state.circuit[i].name;
+        };
+        
+        is_defs := name == "overture" || name == "leg";
+        program := @if(name == "leg" || name == "LEG", Defs.the_maze_leg, Defs.the_maze);
+    
+        if is_defs {
+            range(0, 256) { i |
+                values := @slice(0, 0, 0, program[i].zext(), /*write program*/1);
+                evaluate(world, values, root, 0, false);
+            };
         };
         
         // TODO: have a button for loading my own maze programs instead
@@ -1337,7 +1340,10 @@ fn reset(state: *State) void = {
             off := @if(name == "NANDverture", 56, 1);  // HACK 
             world.storage.subslice(off, 256/8).interpret_as_bytes().copy_from(program);
         };
-    }
+    };
+    
+    world.scratch.len = world.scratch.cap;
+    world.scratch.items().set_zeroed();
 }
 
 fn service_keyboard_device(state: *State) void = {
@@ -1733,8 +1739,8 @@ worker_get_output :: fn(state: *State, in: *LoaderT.I, callee: rawptr) Result(vo
    
     c := circuits[in.Index.root_index]&; 
     state.load_atlas_part1(c);
-    state.arch_is_leg = c.name == "LEG";
-    state.is_new_overture = true;
+    state.arch_is_leg = c.name == "LEG" || c.name == "leg";
+    state.is_new_overture = !(c.name == "leg" || c.name == "overture");
     // the game ui lets you ask for as slow as 0.1hz (10 seconds per tick), so the number in the save file is scaled by 10
     state.ticks_per_eval = max(c.default_tick_rate / 10 / 60, 1);
     .Ok
@@ -1811,7 +1817,6 @@ Builtin :: Tc.Builtin;
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     drop(state.loader&);
     state.text&.shutdown();
-    drop(state.world&, general_allocator());
     sg.destroy_pipeline(state.pipe&);;
     state.draw&.destroy(sg, general_allocator());
     state.circuit_arena&.deinit();
@@ -1865,25 +1870,19 @@ fn debug_known_arch(self: *Draw) void = {
     instruction_width := @if(state.arch_is_leg, 4, 1);
     ip_index := MAX_i64;
     memory := read_delay_memory(state.world&, root_component);
-    if state.is_new_overture {
-        memory = state.world.storage.interpret_as_bytes();
-    };
     memory.len = min(memory.len, 512);
     root_component := state.world&[root_component]&;
     @if(root_component.name != "overture" && root_component.name != "leg") return();
     
-    for root_component.labels { label |
-        if label.name == "ip" && label.bit_size == 8 {
-            byte, bit := root_component.instance_offset_by_gate[label.gate_index].udiv_mod(8);
-            if byte < memory.len && bit == 0 {
-                ip_index = byte;
-            };
-        };
-    };
     ram_start := 0;
-    if state.is_new_overture {
-        ip_index = 0;
-        ram_start = 8;
+    enumerate root_component.gates { i, it |
+        name := state.world&[it.kind].name;
+        if name == "counter" {
+            ip_index = root_component.instance_offset_by_gate[i].udiv(8);
+        };
+        if name.starts_with("ram256") {
+            ram_start = root_component.instance_offset_by_gate[i].udiv(8);
+        };
     };
         
     self.show_known_memory(memory, ram_start, ip_index, instruction_width);
@@ -1896,20 +1895,16 @@ fn debug_known_arch(self: *Draw) void = {
         self.put_text(p, c, fn(out) => m.render(out));
     }
     
+    left_distance :: 140.0;
     fn show_known_memory(self: *Draw, memory: []u8, ram_start: i64, ip_index: i64, instruction_width: i64) void = {
-        pos := self.text_spacing * vec2(-60, 2);
-        b := 1;
-        current_instruction_colour := pack_rgba(255, 0, 0, 255);
+        pos := self.text_spacing * vec2(-left_distance, 2);
         range(0, memory.len) { i |
             y, x := i.udiv_mod(16);
-            if x == 0 && y.umod(16) == 0 {
-                b += 1;
-            };
-            c := pack_rgba(255, 150, b*40, 255);
-            if memory.len > ip_index {
-                drawing := i.align_back(instruction_width);
+            c := pack_rgba(255, 150, 40, 255);
+            if memory.len > ip_index && i >= ram_start {
+                drawing := i.sub(ram_start).align_back(instruction_width) + ram_start;
                 ip_raw: i64 = memory[ip_index].zext() + ram_start;
-                ip := ip_raw.align_back(instruction_width);
+                ip := ip_raw.sub(ram_start).align_back(instruction_width) + ram_start;
                 if drawing == ip {
                     c = pack_rgba(200, 0, 0, 255);
                 };
@@ -1931,25 +1926,23 @@ fn debug_known_arch(self: *Draw) void = {
     
     fn show_known_disassembly(self: *Draw, memory: []u8, ram_start: i64, ip_index: i64) void = {
         if self.state.arch_is_leg {
-            dis_iter(u32.reinterpret_bytes(memory), 4, AsmLeg);
+            dis_iter(AsmLeg, u32);
         } else {
-            dis_iter(memory, 1, AsmOverture);
+            dis_iter(AsmOverture, u8);
         };
         
-        dis_iter :: fn(instructions, alignment, $Arch) void => {
-            end := min(instructions.len.align_back(alignment), 256/alignment);
-            while => end > 0 && instructions[end - 1] == 0 {
-                end -= 1;
-            };
-            pos := self.text_spacing * vec2(-80, 2);
-            range(ram_start/alignment, end) { i |
+        dis_iter :: fn($Arch, $T) void => {
+            alignment := size_of(T);
+            pos := self.text_spacing * vec2(-left_distance - 20, 2);
+            i := 0;
+            while => i + ram_start + alignment <= min(memory.len, ram_start + 256) {
                 c := pack_rgba(255, 255, 255, 255);
-                if memory.len > ip_index && i*alignment == memory[ip_index].zext().add(ram_start).align_back(alignment) {
-                    ip_raw: i64 = memory[ip_index].zext() + ram_start;
-                    c = pack_rgba(@if(ip_raw.mod(alignment) == 0, 255, 200), 0, 0, 255);
+                if memory.len > ip_index && i == memory[ip_index].zext().div(alignment)*alignment {
+                    c = pack_rgba(@if(memory[ip_index].zext().mod(alignment) == 0, 255, 200), 0, 0, 255);
                 };
-                self.put_text(pos, c, fn(out) => Arch'disassemble(out, instructions[i]));
+                self.put_text(pos, c, fn(out) => Arch'disassemble(out, memory.rest(ram_start+i).peek_type(T)[]));
                 pos.y -= self.text_spacing.x*2;
+                i += alignment;
             };
         }
     }

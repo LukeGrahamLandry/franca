@@ -97,7 +97,6 @@ defs :: @static {
         continue :: local_return;
         it := FatExpr.get_constant(S, name) || continue();
         gates := @ref Component.Gate.list(ast_alloc());
-        labels := @ref GateLabel.list(ast_alloc());
         @ct_assert(it.expr&.is(.Block), it.loc, "expected block body");
         block := it.expr.Block&;
         defs: HashMap(WireId, ComponentId) = init(temp());
@@ -108,6 +107,7 @@ defs :: @static {
             @ct_assert(ok, it.loc, "invalid identifier");  // possible because of @"raw identifiers"
         };
         
+        bit_width := @ref u8.list(ast_alloc());
         for block.body { it |
             continue :: local_return;
             in, out, kind := (@ref WireId.list(ast_alloc()), @ref WireId.list(ast_alloc()), @symbol none);
@@ -123,38 +123,39 @@ defs :: @static {
                     param = i64.const_eval(call.arg[]);
                 };
                 
-                if kind == sym("label") {
-                    name, size := Ty(Str, i64).const_eval(call.arg[]);
-                    labels.push(name = name, bit_size = size, gate_index = gates.len);
-                    @ct_assert(out.len == 0, expr.loc, "label() must have no outputs");
-                    continue();
-                };
-                
                 @if(!call.arg.expr&.is(.Value))
                 each call.arg.items() { it |
                     name := it.ident()
                         || compile_error("expected identifier (wire id)", it.loc);
-                    in.push(to_wire_id(name, it.loc));
+                    in.push(to_wire_id(name, it.loc, bit_width));
                 };
             };
             
-            to_wire_id :: fn(name: Symbol, loc: Span) WireId = {
+            to_wire_id :: fn(name: Symbol, loc: Span, bit_width: *List(u8)) WireId = {
                 name := name.str();
                 @if(name == "_") return(NONE);
                 @ct_assert(name.starts_with("w") || name.starts_with("W"), loc, "expected wire name start with 'w'");
                 i, extra := convert_number(name.rest(1), 10, dec_digit);
                 @ct_assert(extra.len == 0, loc, "expected number after 'w' in wire name");
+                width: u8 = @if(name.starts_with("w"), 1, 8);
+                while => bit_width.len <= i {
+                    bit_width.push(0);
+                };
+                if bit_width[i] != 0 && bit_width[i] != width {
+                    compile_error(@tfmt("bit width conflict %", name), loc);
+                };
+                bit_width[i] = width;
                 (id = i.trunc())
             };
             
             @match(it.stmt&) {
                 fn Decl(it) => {
-                    out.push(to_wire_id(it[].ident().unwrap(), it.default.loc));
+                    out.push(to_wire_id(it[].ident().unwrap(), it.default.loc, bit_width));
                     do_value(it.default&);
                 }
                 fn DeclVarPattern(it) => {
                     each it.binding.bindings { it |
-                        out.push(to_wire_id(it.ident().unwrap(), it.default.loc));
+                        out.push(to_wire_id(it.ident().unwrap(), it.default.loc, bit_width));
                     };
                     do_value(it.value&);
                 }
@@ -212,7 +213,7 @@ defs :: @static {
             name = name.str(),
             gates = gates.items(),
             wire_count = wire_count,
-            labels = labels.items(),
+            bit_width = bit_width.items(),
         );
         map&.insert(name, (id = components.len.trunc() - 1));
     };
@@ -238,6 +239,121 @@ finished_defs :: @static {
     fr := current_compiler_context();
     compile_gates(fr, components.items());
     @anon_literal(components = components.items())
+};
+
+layout_components :: fn(components: []Component, end: i64, out: *List(u8)) void = {
+    out_components := @ref components.clone(temp());
+    components := components.slice(0, end);
+    n := 0;
+    while => n < components.len && components[n].gates.len == 0 {
+        n += 1;
+    };
+    
+    #use("@/graphics/vec.fr");
+    circuits := temp().alloc_zeroed(Tc.Circuit, components.len - n);
+    enumerate components.rest(n) { i, it |
+        c := circuits[i]&;
+        gates := @ref Tc.Circuit.Gate.list(temp());
+        wires := @ref Tc.Circuit.Wire.list(temp());
+        dependencies := @ref Tc.CustomId.list(temp());
+        
+        wire_pos := temp().alloc_init(?Vec2, it.wire_count, fn(_) => .None);
+        
+        enumerate it.gates[0].outputs { x, w |
+            do_io(@if(it.bit_width[w.id.zext()] == 1, .Input1, .Input8), w, x, 0);
+        };
+        enumerate it.gates[it.gates.len - 1].inputs { x, w |
+            do_io(@if(it.bit_width[w.id.zext()] == 1, .Output1, .Output8), w, x, 16);
+        };
+        do_io :: fn(kind: GateName(.Tc1), w: *WireId, x: i64, y: f32) => {
+            kind: ComponentId = (id = trunc(component_offset(.Tc1) + kind.raw().zext()));
+            gates.push(pos = (v=(x.float().cast()*8, y)), kind = kind, rotation = 0);
+            g2 := gates[gates.len - 1]&;
+            info := Tc'get_builtin_shape(kind);
+            for_pins(info, g2, circuits) { i, dx, dy |
+                pos := g2.pos + vec2(dx.float().cast(), dy.float().cast());
+                link_wire(pos, w[]);
+            };
+        };
+        
+        enumerate it.gates.slice(1, it.gates.len - 1) { y, g |
+            kind: ?ComponentId = .None;
+            is_custom := g.kind.id >= n.trunc();
+            if !is_custom {
+                k: GateName(.Tc1) = @switch(components[g.kind.id.zext()].name) {
+                    @case("nand") => .Nand;
+                    @case("byte_split") => .Splitter8;
+                    @case("byte_make") => .Maker8;
+                    @case("delay") => .DelayLine1;
+                    @case("switch1") => .Switch1;
+                    @case("switch8") => .Switch8;
+                    @case("const") => @switch(g.param) {
+                        @case(0) => .Off;
+                        @case(1) => .On;
+                        @default => .Constant8;
+                    };
+                    @default => unreachable();
+                };
+                kind = (Some = (id = trunc(component_offset(.Tc1) + k.raw().zext())));
+            };
+            
+            new: Tc.CustomId = (id = g.kind.id.zext() - n);
+            if is_custom {
+                if !dependencies.contains(fn(it) => it.id == new.id) {
+                    dependencies.push(new);
+                };
+            };
+            kind := kind || (id = g.kind.id + finished_defs.components.len.trunc() - n.trunc());
+            
+            gates.push(pos = (v=(0,y.float().cast()*8+24)), kind = kind, rotation = 0, custom_id = new);
+            g2 := gates[gates.len - 1]&;
+            if is_custom {
+                g2.mystery_spice_minus_fifteen_for_custom_pins = circuits[new.id].cached_pin_radius.p;
+            };
+            if components[g.kind.id.zext()].name == "const" {
+                g2.settings&[0] = g.param;
+            };
+            
+            info := Tc'get_builtin_shape(kind);
+            for_pins(info, g2, circuits) { i, dx, dy |
+                pos := g2.pos + vec2(dx.float().cast(), dy.float().cast());
+                w := @if(i < g.outputs.len, g.outputs[i], g.inputs[i - g.outputs.len]);
+                link_wire(pos, w);
+            };
+        };
+        
+        link_wire :: fn(pos, w) => {
+            slot := wire_pos[w.id.zext()]&;
+            if slot[] { prev |
+                new := @slice(@as(Tc.Circuit.WireNode) (pos = prev), (pos = pos));
+                wires.push(path = new.shallow_copy(temp()).as_raw_list(), teleport = true);
+            };
+            slot[] = (Some = pos);
+        };
+        
+        oa, ia := it.arity();
+        w := max(oa, ia).float().cast();
+        circuits[i] = (
+            id = (id = i),
+            wires = wires.as_raw(),
+            gates = gates.as_raw(),
+            programs = empty(),
+            min = (v=(-4,-4)),
+            max = (v=(w*8-4,it.gates.len.float().cast()*8+4)),
+            dependencies = dependencies.as_raw(),
+            name = it.name,
+            v2 = false,
+            default_tick_rate = 1,
+            is_arch = it.name == "overture" || it.name == "leg",  // hack
+            cached_pin_radius = (r=-1, p = vec2(-15, -16)),
+            compiled = .None,
+        );
+        
+        Tc'compile_circuit(circuits, i, out_components, temp(), @ref u8.list(temp()));
+    };
+    
+    #use("@/examples/circuit/save.fr");
+    write_save(circuits, empty(), .None, out, false);
 };
 
 Tc :: import("@/examples/circuit/tc/load.fr");
@@ -409,6 +525,12 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
     // TODO: for things with storage that were already pre_read, also compile a version that only does the writes and propagates not needing outputs
     discard_outputs := !self.doing_pre_read && it.outputs.len > 0 && self.wires_evaluated&.get(it.outputs[0].id.zext());
     if discard_outputs && child_storage_count == 0 && !child.is_switch {
+        return();
+    };
+
+    // if needed local pre_read because the output was caluclated before the memory gate, dont do an extra preread for the parent.
+    if self.doing_pre_read && child_storage_count != 0 && it.outputs.len > 0 
+    && self.wires_evaluated&.get(it.outputs[0].id.zext()) {
         return();
     };
     
@@ -620,6 +742,7 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
                 self.compile_component(doing_pre_read);
                 @fmt(out, "return();\n};\n");
                 
+                @debug_assert_gt(self.compile_order.len, 0);
                 // eval() skips one so input always needs to be first even if all inputs unused.
                 if self.compile_order[0].gate_i != 0 {
                     self.compile_order&.insert(0, (gate_i = 0, pre_read = false));
@@ -649,6 +772,8 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
         #use("@/lib/sys/fs.fr");
         write_entire_file_or_crash("target/a.fr", out.items());
     };
+    write_entire_file_or_crash("target/a.fr", out.items());
+    
     out.items()
 };
 
@@ -692,7 +817,7 @@ DefsBuiltins :: @struct {
     byte_split :: TcBuiltins.Splitter8;
     byte_make :: TcBuiltins.Maker8;
     delay :: TcBuiltins.DelayLine1;
-    const :: TcBuiltins.Constant64;
+    const :: TcBuiltins.Constant8;
     switch1 :: TcBuiltins.Switch1;
     switch8 :: TcBuiltins.Switch8;
 };

@@ -17,6 +17,7 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 
+- `if (1*2).ult(3) {` parses wrong
 - circuit
   - order of outputs is based on order in the file so caller of an arch needs to not just assume. 
     (which maze in gui&test and cubes both do wrong rn)
