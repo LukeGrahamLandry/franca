@@ -1,4 +1,8 @@
 
+## (Oct 26) circuit
+
+- place diagonal wires. edit constants. remember wire widths for ui. 
+
 ## (Oct 25) circuit
 
 - making a graphical circuit for defs.fr so it doesn't have to be special 

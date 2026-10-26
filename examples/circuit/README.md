@@ -75,15 +75,10 @@ it works well enough to run my overture/leg in the maze and a few things from th
   - speed mode that cheats and implements components with native instructions (like tc) instead of nand gates
 - tc: at top level sort by type of IO maybe so don't have to add random offsets in the evaluator depending on the arch. ie in my overture and leg input and output are swapped because the order in save file is arbitrary. 
 - compile a version with save_wire_values so can get rid of the interpreter? 
-  (when running the defs.fr one. tc import will probably always do that)
 - fast mode that doesn't even save_wire_values once per frame
 - ui: allow copying the code to clipboard
 - `Main :: import().examples.circuit;` doesn't work in the web demo
 - nice ui for web gallery from my archive of the old schematic hub
-- i don't really care about ui for visually editing the wires
-  but i have a bunch of code for converting positions into graph 
-  and rn the only way to test it involves opening Steam which is a pain, 
-  so maybe i have to give up and have my own shitty version too. 
 - option to do scenario test on circuit.data
 - less trash code. builtin.fr and gpu.fr are particularly bad.. 
 - deduplicate error checking between parse and load
@@ -92,12 +87,10 @@ it works well enough to run my overture/leg in the maze and a few things from th
 - show wire comments/colours in the ui
 - auto throttle tick rate to keep a sane frame rate even if you ask for something too high. (also report number in Hz instead of per frame so it's easy to compare to the game)
 - :NotReorderingTheseBreaksOvertureLegNandverture
-- don't be checking names of components all the time (at least also check the ids are in the builtin range)
 - it's annoying that you can't see the wire values if it halts on a tick that was evaled in fast mode. 
   delay all writes to the end somehow so can rerun the tick in slow mode after knowing it will halt?
 - use 32 bit instructions instead of bit_and(0xFFFFFFFF)
 - arm has nice merged (and,or)+shift in one instruction
-- something that dumps raw circuit.data as readable-ish text
 - option to see generated source or -d logging in the ui
   - ^ would be nicer if i factor out examples/gpu/terminal.fr into a reusable textbox widgit and use that (also for showing ram contents). 
     the other option would just be rendering the whole sapp thingy into a texture which might be less annoying than infecting everything in the terminal with positioning code. 

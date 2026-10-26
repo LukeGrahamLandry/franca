@@ -77,7 +77,7 @@ CircuitNode :: @struct {
 };
 
 IoShape :: @struct {
-    is_maze: bool; arch_pins: bool; debug_known: bool; defs_reprogram: bool; is_leg: bool;
+    is_maze: bool; debug_known: bool; defs_reprogram: bool; is_leg: bool;
     out: i64; out_used: i64; in: i64; in_used: i64;
 };
 
@@ -122,9 +122,9 @@ do_eval :: fn(state: *State) void = {
     
     count := @if(state.auto_eval, state.ticks_per_eval, 1);
     root_component := state.tree[0].component.unwrap();
-    shape := state.shape;
-    values := @slice(0, 0, 0, 0, 0);
-    values = values.slice(0, @if(shape.arch_pins, @if(shape.defs_reprogram, 5, 4), 0));
+    shape := state.shape&;
+    o_n, i_n := world[root_component]&.arity();
+    values := temp().alloc_zeroed(i64, o_n + i_n);
     range(0, count) { i |
         // the idea here is to spread the times evenly instead of all the ticks being grouped together each frame with 16ms gaps.
         clock := prev_timestamp + delta_time*i/count;
@@ -166,7 +166,10 @@ do_halt :: fn(state: *State) void = {
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.check_movement();
-    if !state.auto_eval && Easy'should_skip_frame(sapp, state.dirty&) {
+    if state.auto_eval && !state.edit.enable {
+        state.dirty = true;
+    };
+    if Easy'should_skip_frame(sapp, state.dirty&) {
         state.eval_last_frame = false;
         return();
     };
@@ -260,6 +263,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         if !state.halted_without_wire_values {
             @debug_assert(world.scratch.len >= wire_offset + c.wire_count, "misconfigured scratch");
             self.wires = world.scratch.items().subslice(wire_offset, c.wire_count);
+            self.logical = (Some = c);
         };
         if state.show_wire_ref_lines {
             self.all_wire_positions = temp().alloc_zeroed(RawList(Vec2), c.wire_count);
@@ -371,6 +375,7 @@ Draw :: @struct {
     text_spacing := vec2(0);
     wire_node_width: f32 = 0.025;
     wire_hover_count: f32 = 1;
+    logical: ?*Component = .None;
 };
 
 fn arch_selection(self: *Draw) ?i64 = {
@@ -480,8 +485,10 @@ fn draw_primitive_code(self: *Draw, instance: i64, parent_wire_offset: i64, hove
     if !state.halted_without_wire_values {
         // show callsite in the parent
         self.wires = world.scratch.items().subslice(parent_wire_offset, parent.wire_count);
+        self.logical = (Some = parent);
         self.draw_gate_code(it, false);
         self.wires = empty();
+        self.logical = .None;
     };
     
     @if(n == 0 && !world[it.kind].has_param) return();
@@ -504,12 +511,13 @@ fn draw_primitive_code(self: *Draw, instance: i64, parent_wire_offset: i64, hove
 fn show_wire_value(self: *Draw, id: WireId, force_hover: bool) = {
     sdtx, state, wires, out := (self.sdtx, self.state, self.wires, self.out);
     @if(!self.have_logic) return();
+    i := id.id.zext();
     if state.show_wire_ref_lines && self.all_wire_positions.len != 0 {
         start := sdtx.pos;
         end := start + vec2(6, 1);
         p := self.world_to_text_pos(self.mouse_world_pos);
         hover := p.x > start.x && p.x < end.x && p.y > start.y && p.y < end.y;
-        positions := self.all_wire_positions[id.id.zext()]&;
+        positions := self.all_wire_positions[i]&;
         // collecting all these is a bit unreasonably :SLOW but here we are. it's only when holding shift so maybe it's fine 
         positions.push(sdtx.pos, temp());
         if self.hovered_wire_index.is_none() && (hover || force_hover) {
@@ -517,18 +525,24 @@ fn show_wire_value(self: *Draw, id: WireId, force_hover: bool) = {
         };
     };
 
-    ok := id.id.zext().ult(self.wires.len);
-    value := @if(!ok, 0, self.wires[id.id.zext()]);
+    ok := i.ult(self.wires.len);
+    value := @if(!ok, 0, self.wires[i]);
     sdtx.color = self.wire_value_colour&[int(value != 0)];
     sdtx.put(@tfmt("w%", id.id));
     sdtx.color = pack_rgba(150, 150, 150, 255);
     sdtx.put("=");
-    // TODO: need to keep track of data size of each wire
-    //       i have Component.bit_width now
-    @if(ok) 
-        for_rev i64.cast_to_bytes(value&) { c |
-            push_hex_byte(out, c, false);
+    if ok {
+        c := self.logical.unwrap();
+        bit_width: i64 = @if(i.ult(c.wire_bit_width.len), c.wire_bit_width[i].zext(), 64);
+        if bit_width == 1 {
+            @fmt(out, "%", value);
+        } else {
+            w := @if(bit_width == 0, 8, bit_width.ualign_to(8).udiv(8).min(8));
+            for_rev i64.cast_to_bytes(value&).slice(0, w) { c |
+                push_hex_byte(out, c, false);
+            };
         };
+    };
     sdtx.put(out.items());
     out.clear();
     sdtx.put(" ");
@@ -590,6 +604,7 @@ fn hovering_node(self: *Draw, b: Vec2) bool = {
 fn draw_gate_squares(self: *Draw, circuit: *Tc.Circuit) void = {
     sdtx, state, sgl, W := (self.sdtx, self.state, self.draw&, self.wire_node_width);
     e := state.edit&;
+    had_hover := false;
     enumerate circuit.gates { g_gate_index, it |
         b := self.tc_to_world_pos(it.pos);
         hover := self.hovering_node(b) && e.no_selection();
@@ -605,20 +620,24 @@ fn draw_gate_squares(self: *Draw, circuit: *Tc.Circuit) void = {
                 sdtx.put(@tfmt(" [%]", it.logical_gate_index));
             };
             self.wire_hover_count += 1;
+            had_hover = true;
+            hover_gate(e, (Some = g_gate_index), circuit);
             
             if state.clicked {
                 if e.enable {
                     if e.no_selection() {
-                        e.selected_gate = (Some = g_gate_index);
+                        e.select_gate((Some = g_gate_index), circuit);
                         state.clicked = false;
                     };
                 } else {
+                    state.clicked = false;
                     state.open_gate(.None, (Some = g_gate_index), false);
                 };
             };
         };
         sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
     };
+    @if(!had_hover && e.selected_gate.is_none()) hover_gate(e, .None, circuit);
 }
 
 // TODO: dont like that sometimes the connecting lines are under or over the nodes. do two loops to be consistant
@@ -636,9 +655,8 @@ fn draw_wires(self: *Draw, circuit: *Tc.Circuit) void = {
             };
             hover := self.hovering_node(b);
             @if(state.show_wire_ref_lines && wire.is_end(it.pos))
-            if hover && state.edit.enable && state.clicked && state.edit&.no_selection() {
+            if hover && state.edit.enable && state.edit&.no_selection() && state.clicked&.take() {
                 state.edit.placing_wire_start = (Some = (wire_i, i));
-                state.clicked = false;
             };
             if self.hovered_wire_index.is_some() && self.hovered_wire_index.Some._0.id == wire.logical.id && (i == 0 || i == wire.path.len - 1) {
                 // TODO: these will be kinda useless because it doesn't reset wire_hover_count when for the next wire that's at a different x position. 
@@ -895,27 +913,36 @@ EditState :: @struct {
     placing_wire_start: ?Ty(i64, i64) = .None;   // (wire index, path index)
     action: @enum(None, NewGate, Rotate, Delete) = .None;
     placing_type := zeroed(ComponentId); 
+    
+    hovered_gate: ?i64 = .None;
+    has_text_field := false;
+    text: List(u8);
 };
 
 // TODO: bundle the source files the jit needs so binary is self contained
 // TODO: autosave & web localstorage
 // TODO: be able to paste to add one circuit without stomping everything. choose (replace all, replace one, add new). same for dragndrop and cli. 
-// TODO: edit params (most importantly constants)
+// TODO: edit more params
 // TODO: allow enter custom component while in edit mode / make new custom components
 // TODO: copy paste a gate (or area)
 // TODO: route better 
-// - show how it will look before you place it 
-// - do the same for holding shift to place visual
-// - allow direct diagonals 
 // - keep track of length/direction (dont forget to reconstruct in read_save) and use that to simplify split_for_node
 // - route around gates/pins/nodes so you have to click explicitly if you want it to connect
 // TODO: be able to delete just one wire by clicking on the segment instead of the node
 // TODO: be able to delete a redundant node and have the wires reconnect into a bigger one
 // TODO: key to summon the add gate menu to your current place?
+// TODO: be able to delete longer wires
 fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
     state := self.state;
     e := state.edit&;
     @if(!e.enable) return();
+    
+    @if(e.has_text_field) if e.hovered_gate { gate_i |
+        gate := c.gates[gate_i]&;
+        p := self.tc_to_world_pos(gate.pos + vec2(0, -2));
+        self.put_text(p, pack_rgba(255, 255, 255, 255), fn(out) => out.push_all(e.text.items()));
+    };
+    
     in_bounds :: fn(p) => p.x >= c.min.x && p.y >= c.min.y && p.x <= c.max.x && p.y <= c.max.y;
     if e.selected_gate { gate_i |
         gate := c.gates[gate_i]&;
@@ -924,6 +951,7 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
             gate.pos = new;
             state.dirty = true;
         };
+        
         if state.clicked&.take() && in_bounds(new) {
             break :: local_return;
             info := Tc'get_builtin_shape(gate.kind);
@@ -937,7 +965,7 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
                 split_for_node(c.wires&, pos, a);
             };
             
-            e.selected_gate = .None;
+            e.select_gate(.None, c);
             state.dirty = true;
         };
     };
@@ -950,11 +978,16 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
         rounded := self.world_to_tc_pos(self.mouse_world_pos);
         inside := in_bounds(rounded);
         sgl.color = pack_rgba(100 + 150*int(!inside), 50, 50, 255);
-        b := self.tc_to_world_pos(rounded);
-        sgl.line(a, b, W/2.5);
-        sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
         
-        if state.clicked&.take() && inside {
+        route := plan_route(start, rounded);
+        for route { pos |
+            b := self.tc_to_world_pos(pos);
+            sgl.line(a, b, W/2.5);
+            sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
+            a = b;
+        };
+        
+        if inside && state.clicked&.take() {
             break :: local_return;
             enumerate c.gates { i, it |
                 @if(it.pos == rounded) break();
@@ -969,25 +1002,27 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
             };
             if state.show_wire_ref_lines && w.is_end(start) {
                 // holding shift, allow placing routing nodes
-                // TODO: maybe disallow doing this through a real node because that will be confusing
-                i := @if(path_i == 0, 0, path_i + 1);
-                w.path&.insert(i, (pos = rounded), a);
-                e.placing_wire_start.Some._1 = i;
+                if path_i != 0 {
+                    for route { pos |
+                        w.path&.push((pos = pos), a);
+                        e.placing_wire_start.Some._1 += 1;
+                    };
+                } else {
+                    for route { pos |
+                        w.path&.insert(0, (pos = pos), a);
+                    };
+                };
             } else {
                 e.placing_wire_start = .None;
                 
-                dir := start - rounded;
-                if dir.x != 0 && dir.y != 0 {
-                    extra := vec2(start.x, rounded.y);
-                    split_for_node(c.wires&, extra, a);
-                    w.path&.push((pos = extra), a);
+                for route { pos |
+                    split_for_node(c.wires&, pos, a);
+                    w.path&.push((pos = pos), a);
                 };
-                
-                split_for_node(c.wires&, rounded, a);
-                w.path&.push((pos = rounded), a);
             };
         };
     };
+    
     state.dirty = state.dirty || e.action != .None;
     @match(e.action) {
         fn NewGate() => {
@@ -1011,8 +1046,7 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
                     };
                 };
             };
-            
-            e.selected_gate = (Some = gate_i);
+            e.select_gate((Some = gate_i), c);
         }
         fn Rotate() => if e.selected_gate { gate_i |
             gate := c.gates[gate_i]&;
@@ -1041,7 +1075,7 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
     };
     e.action = .None;
     
-    if state.clicked&.take() && e.no_selection() {
+    if e.no_selection() && state.clicked&.take() {
         break :: local_return;
         rounded := self.world_to_tc_pos(self.mouse_world_pos);
         @if(!in_bounds(rounded)) break();
@@ -1084,6 +1118,26 @@ fn has_pin_overlap(gate_i: i64, c: *Tc.Circuit, circuits: []Tc.Circuit) bool = {
     false
 }
 
+// TODO: either split if visual part of the new wire hits a node/pin
+//       or route around nodes/pins (tc does the latter)
+// TODO: track length/direction so split_for_node can work on diagonals
+// TODO: dont recalculate this every render if it gets more expensive
+// only allow 8 directions to simplify split_for_node
+plan_route :: fn(start: Vec2, rounded: Vec2) []Vec2 = {
+    dir := start - rounded;
+    if dir.x != 0 && dir.y != 0 {
+        extra := start;
+        n := int(dir.x.abs() < dir.y.abs());
+        while => dir.x.abs() != dir.y.abs() {
+            extra&[n] -= @if(dir&[n] < 0, -1, 1);
+            dir = extra - rounded;
+        };
+        it := @slice(extra, rounded);
+        return it.shallow_copy(temp());
+    };
+    (@slice(rounded)).shallow_copy(temp())
+};
+
 fn split_for_node(wires: *RawList(Tc.Circuit.Wire), pos: Vec2, a: Alloc) void = {
     range(0, wires.len) { wire_i |
         break :: local_return;
@@ -1120,6 +1174,33 @@ fn is_end(it: *Tc.Circuit.Wire, pos: Vec2) bool =
 
 fn no_selection(e: *EditState) bool = e.placing_wire_start.is_none() && e.selected_gate.is_none();
 
+fn select_gate(e: *EditState, i: ?i64, c: *Tc.Circuit) void = {
+    e.selected_gate = i;
+}
+
+fn hover_gate(e: *EditState, i: ?i64, c: *Tc.Circuit) void = {
+    @if((e.hovered_gate || -1) == (i || -1)) return();
+    
+    @if(e.has_text_field) if e.hovered_gate { old_i |
+        value, extra := convert_number_prefixed(e.text.items());
+        if extra.len == 0 {
+            c.gates[old_i].settings&[0] = value;
+        };
+    };
+    
+    e.hovered_gate = i;
+    e.has_text_field = false;
+    e.text&.clear();
+    i := i || return();
+    g := c.gates[i]&;
+    e.has_text_field = g.kind.has_edit_number();
+    @if(!e.has_text_field) return();
+    @fmt(e.text&, "%", g.settings&[0]);
+}
+
+fn has_edit_number(k: ComponentId) bool =
+    k.group() == .Tc1 && @is(k.name(.Tc1), .Constant8, .Constant16, .Constant32, .Constant64, .Counter8, .Counter16, .Counter32, .Counter64, .IndexerBit, .IndexerByte);
+
 fn gate_selection(self: *Draw) void = {
     t :: Tc.Builtin.templates;
     state, sdtx := (self.state, self.sdtx);
@@ -1147,7 +1228,7 @@ fn gate_selection(self: *Draw) void = {
         hover := p.x > sdtx.pos.x && p.x < sdtx.pos.x + name.len.float().cast() && p.y > sdtx.pos.y && p.y < sdtx.pos.y + 1;
         sdtx.color = pack_rgba(200, 200, 200*int(!hover), 255);
         sdtx.put(name);
-        if state.clicked && hover && state.loader.progress == .Idle {
+        if hover && state.loader.progress == .Idle && state.clicked&.take() {
             new = (Some = kind);
         };
     };
@@ -1246,7 +1327,7 @@ fn push_tree_node(state: *State, it: CircuitNode) void = {
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     init(state.loader&, state);
     state.keyboard_data = .None;
-    state.edit = ();
+    state.edit = (text = list(general_allocator()));
     sapp.desc.enable_clipboard = true;
     sapp.desc.enable_dragndrop = true;
     state.sg = sg; state.sapp = sapp;
@@ -1323,7 +1404,6 @@ fn reset(state: *State) void = {
     leg := name == "leg" || name == "LEG";
     shape[] = (
         is_maze = is_defs || non_defs,
-        arch_pins = is_defs || non_defs,
         debug_known = is_defs,
         is_leg = leg,
         defs_reprogram = is_defs,
@@ -1335,7 +1415,6 @@ fn reset(state: *State) void = {
     
     if state.tree[0].diagram_circuit { i |
         Tc'set_initial_data(world, state.circuit, root, 0);
-        shape.arch_pins = shape.arch_pins || state.circuit[i].has_arch_pins;
     };
     
     program := @if(shape.is_leg, Defs.the_maze_leg, Defs.the_maze);
@@ -1453,6 +1532,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         return();
     };
     
+    e := state.edit&;
     @match(event.type) {
         fn RESIZED() => ();
         fn MOUSE_MOVE() => {
@@ -1475,7 +1555,6 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         fn KEY_DOWN() => {
             tick_off := @if(event.modifiers.get(.shift) == 1, 50, 1);
             tick_off := @if(event.modifiers.get(.super) == 1, 1000, tick_off);
-            e := state.edit&;
             @match(event.key_code) {
                 fn ESCAPE() => @if(!state.edit.enable) state.pop_tree_node();
                 fn ENTER() => { state.want_eval = true; }
@@ -1521,14 +1600,18 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                     };
                 };
                 fn E() => if state.loader.progress == .Idle {
-                    enable := !e.enable;
-                    e[] = ();
-                    e.enable = enable;
+                    @if(state.tree.len == 0) return();
+                    i := state.tree[0].diagram_circuit || return();
+                    c := state.circuit[i]&;
+                    
+                    if e.enable {
+                        hover_gate(e, .None, c);
+                    };
+                    e[] = (text = e.text, enable = !e.enable);
                     
                     // recompile when exiting edit mode. 
                     // TODO: this leaks arena space forever so eventually need to dump save and reload to reset it
-                    if !enable && state.tree.len > 0 {
-                        if state.tree[0].diagram_circuit { i |
+                    if !e.enable {
                             // forget that loaded it before
                             each state.circuit { c |
                                 if c.compiled.is_some() {
@@ -1542,10 +1625,14 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                             };
                             
                             load_circuit_index_async(state, i, state.world.tc_file_loader_device);
-                        };
                     };
                 }
                 fn BACKSPACE() => {
+                    if e.selected_gate.is_none() || event.modifiers.get(.shift) == 1 {
+                        _ := e.text&.pop();
+                        return();
+                    };
+                    
                     e.action = .Delete;
                 }
                 fn M() => if e.enable {
@@ -1589,6 +1676,10 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 state.load_path_async(path, false);
             };
         };
+        // for now only numbers so not bothering with utf8
+        fn CHAR() => if e.has_text_field && event.char_code < 127 && event.char_code >= 32 {
+            e.text&.push(event.char_code.trunc());
+        }
         @default => return();
     };
     state.dirty = true;
@@ -2003,4 +2094,16 @@ gate_selection_columns :: {
     };
     
     columns
+};
+
+convert_number_prefixed :: fn(s: Str) Ty(i64, Str) = {
+    negative := s&.pop_prefix("-");
+    value, extra := @if_else {
+        @if(s&.pop_prefix("0x")) => convert_number_dyn(s, 16);
+        @if(s&.pop_prefix("0o")) => convert_number_dyn(s, 8);
+        @if(s&.pop_prefix("0b")) => convert_number_dyn(s, 2);
+        @else => convert_number_dyn(s, 10);
+    };
+    value *= @if(negative, -1, 1);
+    (value, extra)
 };

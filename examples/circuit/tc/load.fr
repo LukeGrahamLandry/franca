@@ -34,7 +34,7 @@ Circuit :: @struct {
     // used when referenced as a Custom Gate in another Circuit. 
     // these are based on layout of the implementation. 
     pins: []Ty(i64, i64) = empty();
-    bit_width: []u8 = empty();
+    bit_width: []u8 = empty();  // io only
     switches: []SwitchablePin = empty();
     
     // this is annoying becuase mystery_spice_minus_fifteen_for_custom_pins is stored on the gate not the circuit so can be different each time but it never is? hopefully i'll understand when i need to edit custom components myself. probably about centering on the field?
@@ -456,8 +456,10 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     insert_consts_for_dead_wires(components.items(), gates&);
     @debug_assert_eq(bit_width.len, custom_pins.len);
     
-    @if(!c.v2)  // TODO
-    insert_bit_width_casts(components.items(), gates&, wire_count&, bit_width, warn);
+    wire_bit_width: []u8 = empty();
+    if !c.v2 { // TODO
+        wire_bit_width = insert_bit_width_casts(components.items(), gates&, wire_count&, bit_width, warn);
+    };
     logical_to_circuit&.push_repeated(gates.len - logical_to_circuit.len, -1);
     new_gates, order := schedule_gates(c, gates, wire_count, a, out.items(), in.items(), components.items(), warn);
     gates := new_gates;
@@ -477,6 +479,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         name = name,
         wire_count = wire_count,
         bit_width = bit_width,
+        wire_bit_width = wire_bit_width,
     );
     c.bit_width = bit_width;
     calculate_usage(components.items(), components.len - 1, a, warn);
@@ -898,11 +901,12 @@ fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, 
 }
 
 // TODO: what if a bidirectional pin is given too big a value?
-fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate), wire_count: *i64, bit_width: []u8, warn: *List(u8)) void = {
+fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate), wire_count: *i64, bit_width: []u8, warn: *List(u8)) []u8 = {
     a := gates.gpa;
     cast_id: ComponentId = (id = trunc(component_offset(.Tc2) - 1));
     @debug_assert_eq(components[cast_id.id.zext()].name, "SyntheticCast_FR");
-    width := temp().alloc_zeroed(u8, wire_count[]);
+    width := @ref u8.list(a);
+    width.push_repeated(wire_count[], 0);
     outputs, inputs := (gates[gates.len - 1].inputs, gates[0].outputs);
     known := outputs.len + inputs.len == bit_width.len;
     @if(!known) @fmtln(warn, "TODO: missing some io sizes?");
@@ -944,6 +948,7 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
             
             new: WireId = (id = wire_count[].trunc());
             wire_count[] += 1;
+            width.push(want);
             id[] = new;
             // @fmtln(warn, "cast % => % (want=%, found=%)", old.id, new.id, want, found);
             casts&.insert((old, want), new);
@@ -977,7 +982,7 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
     n := gates.len - original_output_index - 1;
     //@if(n != 0) @fmtln(warn, "- inserted % casts", n);
     
-    // TODO: save `widths` and use it when rendering wire values in the ui
+    width.items()
 }
 
 // this can't be in find_pins because it has to be after bidirectional components are inlined
