@@ -1,0 +1,302 @@
+
+Maze :: @struct {
+    pos: i64;
+    direction: i64;
+    map: []i64;
+    win := false;
+    
+    new :: fn(map: []i64) Maze = {
+        self: Maze = (pos = 0, direction = 0, map = map);
+        self.pos = self&.width() * (self.map.len() - 1) - 2;
+        self
+    }
+    
+    fn facing(self: *Maze) Ty(i64, i64, i64, bool) = {
+        width := self.width();
+        deltas :: @const_slice((0, -1), (1, 0), (0, 1), (-1, 0));  // (up, right, down, left)
+        y, x := self.pos.div_mod(width);
+        dx, dy := deltas[self.direction];
+        x += dx; y += dy;
+        look_pos := y*width + x;
+        looking_at_wall := self.map[y].bit_and(1.shift_left(width - x - 1)) != 0;
+        (look_pos, x, y, looking_at_wall)
+    }
+    
+    fn input(self: *Maze) u8 = {
+        look_pos, x, y, looking_at_wall := self.facing();
+        width := self.width();
+        @debug_assert(look_pos >= 0 && look_pos < width*self.map.len(), "looking out of maze");
+        input: u8 = @if_else {
+            @if(look_pos == 1) => 3;
+            @if(looking_at_wall) => 1;
+            @else => 0;
+        };
+        input
+    }
+    
+    fn output(self: *Maze, byte: u8) void = {
+        width := self.width();
+        look_pos, x, y, looking_at_wall := self.facing();
+        // there should be a wall around but just to make sure:
+        not_looking_at_edge := x != 0 && x != width - 1 && y != 0 && y != self.map.len() - 1;
+        
+        @switch(byte) {
+            @case(0) => {  // left
+                self.direction = self.direction.add(4).sub(1).umod(4);
+            };
+            @case(1) => if !looking_at_wall && not_looking_at_edge {  // move
+                self.pos = look_pos;
+            };
+            @case(2) => { // right
+                self.direction = self.direction.add(1).umod(4);
+            };
+            @case(3) => (); // wait
+            @case(4) => if look_pos == 1 {  // action
+                self.win = true;
+            };
+            @default => ();
+        };
+    }
+    
+    fn render(self: *Maze, maze_text: *List(u8)) void = {
+        width := self.width();
+        maze_text.reserve((width + 1)*self.map.len());
+        range(0, width*self.map.len()) { i |
+            y, x := i.div_mod(width);
+            @if(x == 0) maze_text.push_all("\n");
+            x = width - x - 1;  // little endian bit literal
+            wall := self.map[y].bit_and(1.shift_left(x)) != 0;
+            maze_text.push(@if_else {
+                @if(i == 1) => "+".ascii();
+                // cpc font has arrows
+                @if(i == self.pos) => "\xF0\xF3\xF1\xF2".index(self.direction)[];
+                // could use \x8F which is solid
+                @else => @if(wall, "@".ascii(), " ".ascii());
+            });
+        };
+    }
+    
+    fn width(self: *Maze) i64 = count_ones(self.map[0]).zext();
+    
+    // a map stolen from TuringComplete.Game's The Maze level
+    tc0 :: @const_slice(@as(i64)
+        0b1111111111111111111111111,
+        0b1000100000001010001000001,
+        0b1110111110111010111011101,
+        0b1000100010000010000010101,
+        0b1011101111101110111010101,
+        0b1010101010000000101010001,
+        0b1010101011111011101110111,
+        0b1000000000000010000010101,
+        0b1011101111111010111011101,
+        0b1010000000001000001000101,
+        0b1111101111111110111011101,
+        0b1000001000000010100000001,
+        0b1011111010111011111011111,
+        0b1000000010100000001000001,
+        0b1111111111111111111111111,
+    );
+};
+
+#use("@/examples/circuit/level_api.fr");
+Self :: @struct {
+    sim: *Simulation;
+    maze: Maze;
+    
+    debug_known := false;
+    debug_is_leg := false;
+};
+
+level_spec :: @static @as(Exports) (
+// TODO: dont leak
+start = fn(sim) = {
+    self := general_allocator().boxed(Self, (
+        sim = sim,
+        maze = Maze'new(Maze.tc0),
+    ));
+    self.init_program();
+    Self.raw_from_ptr(self)
+},
+before = fn(self, values) = {
+    self := Self.ptr_from_raw(self);
+    values[self.sim.shape.in] = self.maze&.input().zext();
+},
+after = fn(self, values) = {
+    self := Self.ptr_from_raw(self);
+    out, out_on := (values[self.sim.shape.out], values[self.sim.shape.out_used] != 0);
+    @if(out_on) self.maze&.output(out.trunc());
+    self.maze.win
+},
+render = fn(self) = {
+    self := Self.ptr_from_raw(self);
+    out := @ref u8.list(temp());
+    self.maze&.render(out);
+    c := pack_rgba(@if(self.maze.win, 255, 50), 200, 150, 255);
+    self.sim.put_text(vec2(-38, 40), c, out.items());
+    if self.debug_known {
+        self.debug_known_arch();
+    };
+},
+title = "Maze",
+description = """
+The circuit controls a robot moving through a maze (2d grid). 
+The robot faces in a cardinal direction (up, right, down, left). 
+To win, find the door and open it.
+INPUT: contents of the cell in front of the robot. 
+       [0 = empty, 1 = wall, 3 = door]
+OUTPUT: action for the robot to take. 
+       [0 = turn left, 1 = move forward, 2 = turn right, 4 = open door]
+""",
+solutions = {
+    out := @ref u8.list(ast_alloc());
+    #use("@/examples/circuit/parse.fr");
+    layout_components(defs.components.items(), defs.tc_components_offset, out);
+    out.items()
+},
+);
+
+init_program :: fn(self: *Self) void = {
+    name := self.sim.circuit.name;
+    is_defs := name == "overture" || name == "leg";
+    non_defs := name == "LEG" || name == "OVERTURE" || name == "NANDverture";
+    is_leg := name == "leg" || name == "LEG";
+    known := is_defs || non_defs;
+    
+    // TODO
+    self.sim.shape = (
+        out = 0 + int(non_defs && is_leg),
+        out_used = 1 + int(non_defs && is_leg),
+        in = 3,
+        in_used = 2,
+    );
+    @if(!known) return();
+    self.debug_known = is_defs;
+    self.debug_is_leg = is_leg;
+    Defs :: import("@/examples/circuit/defs.fr");
+    program := @if(is_leg, Defs.the_maze_leg, Defs.the_maze);
+    if is_defs {
+        root := self.sim.circuit.compiled.unwrap();
+        range(0, 256) { i |
+            values := @slice(0, 0, 0, program[i].zext(), /*write program*/1);
+            evaluate(self.sim.world, values, root, 0, false);
+        };
+    } else {
+        off := @if(name == "NANDverture", 56, 1);  // HACK 
+        self.sim.world.storage.subslice(off, 256/8).interpret_as_bytes().copy_from(program);
+    };
+}
+
+// this is a hack for debugging the overture/leg in ./defs.fr
+fn debug_known_arch(self: *Self) void = {
+    root_component := self.sim.circuit.compiled.unwrap();
+    world := self.sim.world;
+    
+    // hack: colours being useful relies on ordering in defs.fr: (program, ip, registers). 
+    instruction_width := @if(self.debug_is_leg, 4, 1);
+    ip_index := MAX_i64;
+    memory := read_delay_memory(world, root_component);
+    memory.len = min(memory.len, 512);
+    root_component := world[root_component]&;
+    
+    ram_start := 0;
+    enumerate root_component.gates { i, it |
+        name := world[it.kind].name;
+        if name == "counter" {
+            ip_index = root_component.instance_offset_by_gate[i].udiv(8);
+        };
+        if name.starts_with("ram256") {
+            ram_start = root_component.instance_offset_by_gate[i].udiv(8);
+        };
+    };
+        
+    self.show_known_memory(memory, ram_start, ip_index, instruction_width);
+    self.show_known_disassembly(memory, ram_start, ip_index);
+    
+    left_distance :: 140.0;
+    show_known_memory :: fn(self: *Self, memory: []u8, ram_start: i64, ip_index: i64, instruction_width: i64) void = {
+        pos := vec2(-left_distance, 2);
+        range(0, memory.len) { i |
+            y, x := i.udiv_mod(16);
+            c := pack_rgba(255, 150, 80, 255);
+            if memory.len > ip_index && i >= ram_start {
+                drawing := i.sub(ram_start).align_back(instruction_width) + ram_start;
+                ip_raw: i64 = memory[ip_index].zext() + ram_start;
+                ip := ip_raw.sub(ram_start).align_back(instruction_width) + ram_start;
+                if drawing == ip {
+                    c = pack_rgba(200, 0, 0, 255);
+                };
+                if i == ip_raw {
+                    c = pack_rgba(255, 0, 0, 255);
+                };
+            };
+            if i == ip_index {
+                c = pack_rgba(255, 200, 200, 255);
+            };
+            out := @ref u8.list(2, temp());
+            push_hex_byte(out, memory[i], true);
+            self.sim.put_text(pos, c, out.items());
+            pos += vec2(3, 0);
+            
+            if x == 15 {
+                pos -= vec2(16*3, 1.5);
+            };
+        };
+    }
+    
+    show_known_disassembly :: fn(self: *Self, memory: []u8, ram_start: i64, ip_index: i64) void = {
+        if self.debug_is_leg {
+            dis_iter(AsmLeg, u32);
+        } else {
+            dis_iter(AsmOverture, u8);
+        };
+        
+        dis_iter :: fn($Arch, $T) void => {
+            alignment := size_of(T);
+            pos := vec2(-left_distance - 20, 2);
+            i := 0;
+            while => i + ram_start + alignment <= min(memory.len, ram_start + 256) {
+                c := pack_rgba(255, 255, 255, 255);
+                if memory.len > ip_index && i == memory[ip_index].zext().div(alignment)*alignment {
+                    c = pack_rgba(@if(memory[ip_index].zext().mod(alignment) == 0, 255, 200), 0, 0, 255);
+                };
+                out := @ref u8.list(temp());
+                Arch'disassemble(out, memory.rest(ram_start+i).peek_type(T)[]);
+                self.sim.put_text(pos, c, out.items());
+                pos.y -= 1;
+                i += alignment;
+            };
+        }
+    }
+    
+    #use("@/examples/circuit/eval.fr");
+    #use("@/examples/circuit/parse.fr");
+    
+    // the overture/leg in defs.fr build up registers/memory from `delay` components 
+    // which each hold one bit (but take a whole i64 storage slot). 
+    // this copies the contents into a packed array of real bytes so its easy to display in the debug ui. 
+    read_delay_memory :: fn(world: *World, root_component: ComponentId) []u8 = {
+        out := u8.list(world.storage.len / 8, temp());
+        instance := 0;
+        recurse(out&, world, root_component, instance&);
+        return out.items();
+        recurse :: fn(out: *List(u8), world: *World, c: ComponentId, instance: *i64) void = {
+            c := world[c]&;
+            if c.storage_count == 8 {
+                r: u8 = 0;
+                for world.storage.subslice(instance[], 8) { it |
+                    r = r.shift_right_logical(1);
+                    r = r.bit_or(int(it != 0).shift_left(7).trunc());
+                };
+                out.push(r);
+                instance[] += 8;
+                return();
+            };
+            if c.storage_count == 1 {
+                instance[] += 1;
+            };
+            each c.gates { it |
+                recurse(out, world, it.kind, instance);
+            };
+        };
+    }
+}

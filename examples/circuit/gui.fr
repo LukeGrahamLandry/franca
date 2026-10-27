@@ -34,8 +34,9 @@ State :: @rec @struct {
     want_eval: bool;
     auto_eval: bool;
     ticks_per_eval: i64;
-    maze: Scenario.Maze;
-    shape: IoShape;
+    sim: LevelApi.Simulation;
+    level: *LevelApi.Exports;
+    levels: List(*LevelApi.Exports);
     tick: i64;
     halt_message: List(u8);
     show_wire_ref_lines: bool;
@@ -76,10 +77,7 @@ CircuitNode :: @struct {
     saved := zeroed(@struct(pos: Vec2, scale: f32));
 };
 
-IoShape :: @struct {
-    is_maze: bool; debug_known: bool; defs_reprogram: bool; is_leg: bool;
-    out: i64; out_used: i64; in: i64; in_used: i64;
-};
+LevelApi :: import("@/examples/circuit/level_api.fr");
 
 main_use_output :: fn(state: *State, in: LoaderT.I, out: Result(void, void)) void = {
     if state.tree.len > 0 && state.tree[0].diagram_circuit.is_some() {
@@ -122,7 +120,6 @@ do_eval :: fn(state: *State) void = {
     
     count := @if(state.auto_eval, state.ticks_per_eval, 1);
     root_component := state.tree[0].component.unwrap();
-    shape := state.shape&;
     o_n, i_n := world[root_component]&.arity();
     values := temp().alloc_zeroed(i64, o_n + i_n);
     range(0, count) { i |
@@ -132,8 +129,9 @@ do_eval :: fn(state: *State) void = {
         
         state.service_keyboard_device();
         state.tick += 1;
-        if shape.is_maze {
-            values[shape.in] = state.maze&.input().zext();
+        
+        if values.len != 0 {
+            state'level'before(state.level.userdata, values);
         };
         
         save_wire_values := i == count - 1;
@@ -144,9 +142,9 @@ do_eval :: fn(state: *State) void = {
             return do_halt(state);
         };
         
-        if shape.is_maze && values[shape.out_used] != 0 {
-            state.maze&.output(values[shape.out].trunc());
-            if state.maze.win {
+        if values.len != 0 {
+            win := state'level'after(state.level.userdata, values);
+            if win {
                 @fmt(state.halt_message&, "solved in % ticks", state.tick);
                 state.auto_eval = false;
                 return();
@@ -270,13 +268,29 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         };
         
         self.draw_component_code(c, instance, parent_wire_offset);
-        if state.shape.is_maze {
-            self.debug_known_arch();
+        
+        // TODO: more sane way of doing positioning
+        state'level'render(state.level.userdata);
+        s := vec2(self.text_spacing.x, self.text_spacing.x*2);
+        each state.sim.text& { it |
+            self.put_text(it.msg, it.pos * s, it.c);
         };
+        state.sim.text&.clear();
     };
     
     if state.halt_message.len != 0 {
         self.put_text(state.halt_message.items(), self.text_spacing * vec2(0, 4), pack_rgba(50, 200, 150, 255));
+    };
+    
+    if self.level_selection() { it |
+        state.dirty = true;
+        state.level = it;
+        if it.solutions.len != 0 {
+            // TODO: dont just delete your circuits. etc.
+            state.load_path_async(it.solutions, true);
+        } else {
+            state.reset();
+        };
     };
     
     sgl.defaults();
@@ -378,8 +392,20 @@ Draw :: @struct {
     logical: ?*Component = .None;
 };
 
+fn do_option(self: *Draw, pos: Vec2, name: Str, selected: bool, value: ~T, new: *?T) void #where = {
+    sdtx, state := (self.sdtx, self.state);
+    sdtx.pos = self.world_to_text_pos(self.text_spacing * pos);
+    p := self.world_to_text_pos(self.mouse_world_pos);
+    hover := p.x > sdtx.pos.x && p.x < sdtx.pos.x + name.len.float().cast() && p.y > sdtx.pos.y && p.y < sdtx.pos.y + 1;
+    sdtx.color = pack_rgba(200, 200*int(!selected), 200*int(!hover), 255);
+    sdtx.put(name);
+    if hover && state.loader.progress == .Idle && state.clicked&.take() {
+        new[] = (Some = value);
+    };
+}
+
 fn arch_selection(self: *Draw) ?i64 = {
-    state, sdtx := (self.state, self.sdtx);
+    state := self.state;
     new: ?i64 = .None;
     arch_list_count: f32 = 0;
     selected_circuit := @if(state.tree.len == 0, -1, state.tree[0].diagram_circuit || -1);
@@ -387,16 +413,23 @@ fn arch_selection(self: *Draw) ?i64 = {
     enumerate state.circuit { i, c |
         continue :: local_return;
         @if(!c.is_arch) continue();
-        
-        sdtx.pos = self.world_to_text_pos(self.text_spacing * vec2(0, (7 + arch_list_count)));
-        p := self.world_to_text_pos(self.mouse_world_pos);
-        hover := p.x > sdtx.pos.x && p.x < sdtx.pos.x + c.name.len.float().cast() && p.y > sdtx.pos.y && p.y < sdtx.pos.y + 1;
-        sdtx.color = pack_rgba(200, 200*int(i != selected_circuit), 200*int(!hover), 255);
-        sdtx.put(c.name);
+        pos := vec2(0, (7 + arch_list_count));
+        self.do_option(pos, c.name, i == selected_circuit, i, new&);
         arch_list_count += 1;
-        if state.clicked && hover && state.loader.progress == .Idle {
-            new = (Some = i);
-        };
+    };
+    new
+}
+
+fn level_selection(self: *Draw) ?*LevelApi.Exports = {
+    state := self.state;
+    arch_list_count: f32 = 0;
+    new: ?*LevelApi.Exports = .None;
+    for state.levels { it |
+        ::ptr_utils(@type it[]);
+        selected := identical(it, state.level);
+        pos := vec2(50, (7 + arch_list_count));
+        self.do_option(pos, it.title, selected, it, new&);
+        arch_list_count += 1;
     };
     new
 }
@@ -1223,14 +1256,7 @@ fn gate_selection(self: *Draw) void = {
     
     do_button :: fn(column_i: i64, row_i: i64, name: Str, kind: ComponentId) => {
         pos := vec2(column_i.float().cast() * 18, -row_i.float().cast());
-        sdtx.pos = self.world_to_text_pos(self.text_spacing * pos);
-        p := self.world_to_text_pos(self.mouse_world_pos);
-        hover := p.x > sdtx.pos.x && p.x < sdtx.pos.x + name.len.float().cast() && p.y > sdtx.pos.y && p.y < sdtx.pos.y + 1;
-        sdtx.color = pack_rgba(200, 200, 200*int(!hover), 255);
-        sdtx.put(name);
-        if hover && state.loader.progress == .Idle && state.clicked&.take() {
-            new = (Some = kind);
-        };
+        self.do_option(pos, name, false, kind, new&);
     };
     
     @if(state.edit&.no_selection())
@@ -1343,10 +1369,16 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         ..,
     )));
     
+    state.sim.text = list(general_allocator());
+    state.levels = list(a);
+    state.levels&.push(@static { x: LevelApi.Exports = (title = "Sandbox"); x });
+    state.levels&.push(import("@/examples/circuit/levels/maze.fr").level_spec);
+    state.level = state.levels[0];
+    
     state.halt_message = list(a);
     state.key_buffer = init(a, 64);
     state.frame_time_history = init(a, 128);
-    init(state.world&, a, true);  // TODO: leaked when loading new circuit
+    init(state.world&, a, true, finished_defs.components);  // TODO: leaked when loading new circuit
     state.tree = list(a);
     state.push_tree_node(
         component = (Some = get_component_by_name("overture", finished_defs.components)),
@@ -1369,12 +1401,6 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         }
     };
     
-    if state.loader.progress == .Idle {
-    out := @ref u8.list(temp());
-    layout_components(defs.components.items(), defs.tc_components_offset, out);
-    state.load_path_async(out.items(), true);
-    };
-    
     state.reset();
 }
 
@@ -1383,7 +1409,6 @@ fn recenter(state: *State) void = {
     state.pos = vec2(0, 0.5);
 }
 
-Defs :: import("@/examples/circuit/defs.fr");
 fn reset(state: *State) void = {
     state.frame_time_history_sum = 0;
     state.frame_time_history&.clear();
@@ -1394,42 +1419,28 @@ fn reset(state: *State) void = {
     world := state.world&;
     world.storage.set_zeroed();  // importantly resets ip,registers=0
     
+    world.scratch.len = world.scratch.cap;
+    world.scratch.items().set_zeroed();
     @if(state.tree.len == 0) return();
     root := state.tree[0].component || return();
     
     name := state.world&[root].name;
-    shape := state.shape&;
-    is_defs := name == "overture" || name == "leg";
-    non_defs := name == "LEG" || name == "OVERTURE" || name == "NANDverture";
-    leg := name == "leg" || name == "LEG";
-    shape[] = (
-        is_maze = is_defs || non_defs,
-        debug_known = is_defs,
-        is_leg = leg,
-        defs_reprogram = is_defs,
-        out = 0 + int(non_defs && leg),
-        out_used = 1 + int(non_defs && leg),
-        in = 3,
-        in_used = 2,
+
+    i := state.tree[0].diagram_circuit || return();
+    c := state.circuit[i]&;
+    Tc'set_initial_data(world, state.circuit, root, 0);
+    
+    v := @static @as(LevelApi.Imports) (
+        put_text = LevelApi.impl.put_text,
     );
-    
-    if state.tree[0].diagram_circuit { i |
-        Tc'set_initial_data(world, state.circuit, root, 0);
-    };
-    
-    program := @if(shape.is_leg, Defs.the_maze_leg, Defs.the_maze);
-    if shape.is_maze {
-        state.maze = Scenario'Maze'new(Scenario.Maze.tc0);
-        if shape.defs_reprogram {
-            range(0, 256) { i |
-                values := @slice(0, 0, 0, program[i].zext(), /*write program*/1);
-                evaluate(world, values, root, 0, false);
-            };
-        } else {
-            off := @if(name == "NANDverture", 56, 1);  // HACK 
-            world.storage.subslice(off, 256/8).interpret_as_bytes().copy_from(program);
-        };
-    };
+    @debug_assert(!state.edit.enable, "c& wont be stable");
+    state.sim = (
+        fns = v,
+        world = world,
+        circuit = c,
+        text = state.sim.text,
+    );
+    state.level.userdata = state'level'start(state.sim&);
     
     world.scratch.len = world.scratch.cap;
     world.scratch.items().set_zeroed();
@@ -1920,8 +1931,6 @@ main :: fn() void = Easy'start(State);
 
 #use("@/examples/circuit/eval.fr");
 #use("@/examples/circuit/parse.fr");
-//Scenario :: Main.scenario;
-Scenario :: import("@/examples/circuit/scenario.fr");
 ENABLE_TRACY :: Foreign.ENV.FRANCA_TRACY.get_environment_variable().is_some();  // ugh
 #use("@/lib/sys/threads.fr");
 Futex :: import("@/lib/sys/sync/futex.fr");
@@ -1948,123 +1957,6 @@ segment_lines :: @const_slice(
     (vec2(0, 1), vec2(1, 1)),
     (vec2(1, 2), vec2(1.2, 2)),
 );
-
-// this is a hack for debugging the overture/leg in ./defs.fr
-fn debug_known_arch(self: *Draw) void = {
-    self.show_maze();
-    state := self.state;
-    @if(!state.shape.debug_known) return();
-    root_component := state.tree[0].component.unwrap();
-    
-    // hack: colours being useful relies on ordering in defs.fr: (program, ip, registers). 
-    instruction_width := @if(state.shape.is_leg, 4, 1);
-    ip_index := MAX_i64;
-    memory := read_delay_memory(state.world&, root_component);
-    memory.len = min(memory.len, 512);
-    root_component := state.world&[root_component]&;
-    
-    ram_start := 0;
-    enumerate root_component.gates { i, it |
-        name := state.world&[it.kind].name;
-        if name == "counter" {
-            ip_index = root_component.instance_offset_by_gate[i].udiv(8);
-        };
-        if name.starts_with("ram256") {
-            ram_start = root_component.instance_offset_by_gate[i].udiv(8);
-        };
-    };
-        
-    self.show_known_memory(memory, ram_start, ip_index, instruction_width);
-    self.show_known_disassembly(memory, ram_start, ip_index);
-    
-    fn show_maze(self: *Draw) void = {
-        m := self.state.maze&;
-        c := pack_rgba(@if(m.win, 255, 50), 200, 150, 255);
-        p := vec2(-38 * self.text_spacing.x, (m.map.len().float().cast())*self.text_spacing.x*2 + self.text_spacing.y*5);
-        self.put_text(p, c, fn(out) => m.render(out));
-    }
-    
-    left_distance :: 140.0;
-    fn show_known_memory(self: *Draw, memory: []u8, ram_start: i64, ip_index: i64, instruction_width: i64) void = {
-        pos := self.text_spacing * vec2(-left_distance, 2);
-        range(0, memory.len) { i |
-            y, x := i.udiv_mod(16);
-            c := pack_rgba(255, 150, 80, 255);
-            if memory.len > ip_index && i >= ram_start {
-                drawing := i.sub(ram_start).align_back(instruction_width) + ram_start;
-                ip_raw: i64 = memory[ip_index].zext() + ram_start;
-                ip := ip_raw.sub(ram_start).align_back(instruction_width) + ram_start;
-                if drawing == ip {
-                    c = pack_rgba(200, 0, 0, 255);
-                };
-                if i == ip_raw {
-                    c = pack_rgba(255, 0, 0, 255);
-                };
-            };
-            if i == ip_index {
-                c = pack_rgba(255, 200, 200, 255);
-            };
-            self.put_text(pos, c, fn(out) => push_hex_byte(out, memory[i], true));
-            pos += self.text_spacing * vec2(3, 0);
-            
-            if x == 15 {
-                pos -= self.text_spacing * vec2(16*3, 1);
-            };
-        };
-    }
-    
-    fn show_known_disassembly(self: *Draw, memory: []u8, ram_start: i64, ip_index: i64) void = {
-        if self.state.shape.is_leg {
-            dis_iter(AsmLeg, u32);
-        } else {
-            dis_iter(AsmOverture, u8);
-        };
-        
-        dis_iter :: fn($Arch, $T) void => {
-            alignment := size_of(T);
-            pos := self.text_spacing * vec2(-left_distance - 20, 2);
-            i := 0;
-            while => i + ram_start + alignment <= min(memory.len, ram_start + 256) {
-                c := pack_rgba(255, 255, 255, 255);
-                if memory.len > ip_index && i == memory[ip_index].zext().div(alignment)*alignment {
-                    c = pack_rgba(@if(memory[ip_index].zext().mod(alignment) == 0, 255, 200), 0, 0, 255);
-                };
-                self.put_text(pos, c, fn(out) => Arch'disassemble(out, memory.rest(ram_start+i).peek_type(T)[]));
-                pos.y -= self.text_spacing.x*2;
-                i += alignment;
-            };
-        }
-    }
-    
-    // the overture/leg in defs.fr build up registers/memory from `delay` components 
-    // which each hold one bit (but take a whole i64 storage slot). 
-    // this copies the contents into a packed array of real bytes so its easy to display in the debug ui. 
-    fn read_delay_memory(world: *World, root_component: ComponentId) []u8 = {
-        out := u8.list(world.storage.len / 8, temp());
-        instance := 0;
-        recurse(out&, world, root_component, instance&);
-        return out.items();
-        recurse :: fn(out: *List(u8), world: *World, c: ComponentId, instance: *i64) void = {
-            c := world[c]&;
-            if c.storage_count == 8 {
-                r: u8 = 0;
-                for world.storage.subslice(instance[], 8) { it |
-                    r = r.shift_right_logical(1);
-                    r = r.bit_or(int(it != 0).shift_left(7).trunc());
-                };
-                out.push(r);
-                instance[] += 8;
-                return();
-            };
-            if c.storage_count == 1 {
-                instance[] += 1;
-            };
-            each c.gates { it |
-                recurse(out, world, it.kind, instance);
-            };
-        };
-    }
-}
 
 gate_selection_columns :: {
     t :: Tc.Builtin.templates;

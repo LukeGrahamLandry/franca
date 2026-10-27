@@ -2,6 +2,7 @@
 ## (Oct 26) circuit
 
 - place diagonal wires. edit constants. remember wire widths for ui. 
+- started thinking about an api for levels. need the gui to not bless the maze specially. 
 
 ## (Oct 25) circuit
 

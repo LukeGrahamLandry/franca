@@ -55,6 +55,7 @@ fn run_tests(harness: *Harness) void = {
 }
 
 init_harness :: fn(image_callback: ?ImageFn) Harness = {
+    test_defs();
     root := Foreign'tc_archive();
 
     name := "Tetris";
@@ -233,8 +234,8 @@ fn keyboard_input(self: *Harness, text: Str) *Harness = {
     self
 }
 
+Maze :: import("@/examples/circuit/levels/maze.fr").Maze;
 fn maze(self: *Harness, limit: i64) *Harness = {
-    #use("@/examples/circuit/scenario.fr");
     kind := self.root || return(self);
     if self.world&[kind].name == "NANDverture" {
         program := import("@/examples/circuit/defs.fr").the_maze;
@@ -242,8 +243,8 @@ fn maze(self: *Harness, limit: i64) *Harness = {
     };
     maze := @ref Maze'new(Maze.tc0);
     range(0, limit) { _ |
-        input := maze.input();
-        values := @slice(0, 0, 0, @as(i64) input.zext());
+        in := maze.input();
+        values := @slice(0, 0, 0, @as(i64) in.zext());
         evaluate(self.world&, values, kind, 0, false);
         if values[1] != 0 {
             maze.output(values[0].trunc());
@@ -270,3 +271,87 @@ jit_circuit :: fn(slot: *CachedCompilerEnv, components: []Component, a: Alloc) v
     callee := jit_value(slot, src, "dispatch");
     fill_fast_eval(components, callee);
 }
+
+// TODO: #use(Main.eval); doesn't work at top level (works if #use the string): "Compile Error: Poison expression Unknown." :compiler
+Main :: import().examples.circuit;
+test_defs :: fn() void = {
+    world := @ref zeroed(World);
+    a := general_allocator();
+    init(world, a, false, finished_defs.components);
+    
+    Defs :: Main.defs;
+    cpus := @slice(
+        ("overture", Defs.the_maze),
+        ("leg", Defs.the_maze_leg),
+    );
+    for cpus { name, program |
+        world.storage.set_zeroed();
+        maze := @ref Maze'new(Maze.tc0);
+        root_component := get_component_by_name(name, finished_defs.components);
+        start := timestamp();
+        range(0, 256) { i |
+            tick_defs_arch(world, root_component, program[i], true);
+        };
+        
+        n := 0;
+        dowhile {
+            in := maze.input();
+            if tick_defs_arch(world, root_component, in, false) { byte |
+                maze.output(byte);
+            };
+            n += 1;
+            @assert_lt(n, 20000, "this is taking too long. broken?");
+            !maze.win
+        };
+        end := timestamp();
+        @println("[%] solved maze in % ticks (%ms)", name, n, end - start);
+    };
+    
+    C :: fn($a: Str, b: []i64) => world.check(a, b);
+    range(0, 256) { a0 |
+        C("eq0", @slice(a0, int(a0 == 0)));
+        C("neg8", @slice(a0, bit_and(-a0, 255)));
+        range(0, 256) { a1 |
+            C("add8", @slice(0, a0, a1, bit_and(a0+a1, 255), int(a0 + a1 > 255)));
+            C("sub8", @slice(a0, a1, bit_and(a0-a1, 255)));
+            C("and8", @slice(a0, a1, bit_and(a0, a1)));
+            C("or8", @slice(a0, a1, bit_or(a0, a1)));
+            C("xor8", @slice(a0, a1, bit_xor(a0, a1)));
+            C("equal8", @slice(a0, a1, int(a0 == a1)));
+            C("ult8", @slice(a0, a1, int(a0 < a1)));
+            
+            range(0, 6) { c |
+                F :: @FnPtr(i64, i64) bool;
+                x := @const_slice(@as(F) eq, ne, lt, le, gt, ge);
+                cond := x[c];
+                C("leg_cond", @slice(c, a0, a1, 1, int(cond(a0, a1))));
+            };
+        };
+    };
+    
+    check :: fn(world: *World, $name: Str, args: []i64) void = {
+        kind := get_component_by_name(name, finished_defs.components);
+        o_n, i_n := world[kind]&.arity();
+        a := Arena'stack_alloc(size_of(WireValue) * max_in_out_wires);
+        wires := a.alloc_zeroed(WireValue, args.len);
+        wires.rest(o_n).copy_from(args.slice(0, i_n));
+        evaluate(world, wires, kind, 0, false);
+        range(0, o_n) { i |
+            @assert_eq(wires[i], args[i_n + i], "check(%, %) o[%]", name, args, i);
+        };
+    };
+    
+    tick_defs_arch :: fn(world: *World, root_component: ComponentId, input: u8, write_program: bool) ?u8 = {
+        values := @slice(0, 0, 0, input.zext(), int(write_program));
+        evaluate(world, values, root_component, 0, false);
+        @if(values[1] != 0, (Some = values[0].trunc()), .None)
+    };
+    
+    drop(world, a);
+    
+    if query_current_arch() != .wasm32 {
+        umulh :: import("@/examples/circuit/tc/builtin.fr").multiply_high_u64;
+        @assert_eq(umulh(-1, -2), -3);
+        @assert_eq(umulh(12345678987654321, 987654321), 660998);
+    };
+};
