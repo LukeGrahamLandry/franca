@@ -52,6 +52,17 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
             
             @fmt(out, " G % %,%,% ", it.kind.id, it.pos.x, it.pos.y, it.rotation);
             shape := get_builtin_shape(it.kind);
+            
+            if group(it.kind) != .Tc2 && !shape.has_param {
+                @fmt(out, "0 ");
+            } else {
+                @fmt(out, "%", it.settings.len);
+                for it.settings { value |
+                    @fmt(out, ",%", value);
+                };
+                @fmt(out, " ");
+            };
+            
             if group(it.kind) == .Loaded || shape.body == .Custom {
                 p := it.mystery_spice_minus_fifteen_for_custom_pins;
                 @fmt(out, "%,%,% ", it.custom_id.id, p.x, p.y);
@@ -59,8 +70,6 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
             
             if shape.has_param {
                 s := it.settings&;
-                @fmt(out, "%,% ", s[0], s[1]);
-                
                 if s[0].ult(files.len) && group(it.kind) == .Tc1 && @is(Tc'gate_name(it.kind, .Tc1), .FileLoader, .SpriteDisplay) {
                     need_files&.set(s[0]);
                 };
@@ -215,7 +224,6 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
                 custom_id = zeroed(Tc.CustomId),
                 kind = (id = kind_id.trunc()),
                 pos = vec2(pos_x.float().cast(), pos_y.float().cast()),
-                settings = (0, 0),
                 data = "",
                 mystery_spice_minus_fifteen_for_custom_pins = vec2(0), 
                 link_id = -1,
@@ -226,14 +234,19 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
             // TODO: don't crash if its a low number
             shape := get_builtin_shape(id = kind_id.trunc());
             
+            n := get_int();
+            @if(!n.ult(100)) return(Err = "bad settings len");
+            gate.settings = a.alloc_zeroed(i64, n);
+            range(0, n) { i |
+                gate.settings[i] = get_int();
+            };
+            
             if group(shape.kind) == .Loaded || shape.body == .Custom {
                 gate.custom_id = (id = get_int());
                 tc_junk_x, tc_junk_y := (get_int(), get_int());
                 gate.mystery_spice_minus_fifteen_for_custom_pins = vec2(tc_junk_x.float().cast(), tc_junk_y.float().cast());
             };
-            if shape.has_param {
-                gate.settings = (get_int(), get_int());
-            };
+            
             if is_link_target(shape.kind) {
                 gate.link_id = get_int();
             };

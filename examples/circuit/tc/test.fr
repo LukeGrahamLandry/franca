@@ -21,6 +21,8 @@ fn run_tests(harness: *Harness) void = {
         .run(10_000_000, true)  // TODO: time depends on clock randomness for what pieces get chosen
         .halted("End of program execution.");
     harness.load("NANDverture").maze(3775);
+    harness.load("OVERTURE").maze(3775);
+    harness.load("LEG").maze(4140);
     
     /*
     harness.load("TCMIPS")
@@ -28,11 +30,6 @@ fn run_tests(harness: *Harness) void = {
         .keyboard_input("hash hello\n")
         .run(_)
         .console_contains(@tfmt("sha256: %", Sha256'hex("hello")));
-    
-    // TODO: add my overture and leg with maze programs to the archive just because the more the merrier
-    harness.load("OVERTURE").maze();
-    harness.load("LEG").maze();
-    
     */
     
     // these idk a convient test to do but can still run a few ticks to make sure it compiles ok
@@ -46,6 +43,7 @@ fn run_tests(harness: *Harness) void = {
         "Conways Game Of Life 16x16 Soup", 
         "Matrix Display Playground",
         "line drawer",
+        "Timestamp",
     );
     for visual { it |
         harness.load(it).run(100);
@@ -59,7 +57,7 @@ init_harness :: fn(image_callback: ?ImageFn) Harness = {
     root := Foreign'tc_archive();
 
     name := "Tetris";
-    path := @tfmt("%/v6/schematics/architecture/%/circuit.data", root, name);
+    path := @tfmt("%/v1/schematics/architecture/%/circuit.data", root, name);
     circuits, _, tc_file_loader_device := Tc'load_all_circuits(path, temp(), @ref u8.list(temp()));
     harness := @ref @as(Harness) (
         temp = temp().mark(),
@@ -237,17 +235,23 @@ fn keyboard_input(self: *Harness, text: Str) *Harness = {
 Maze :: import("@/examples/circuit/levels/maze.fr").Maze;
 fn maze(self: *Harness, limit: i64) *Harness = {
     kind := self.root || return(self);
-    if self.world&[kind].name == "NANDverture" {
-        program := import("@/examples/circuit/defs.fr").the_maze;
+    name := self.world&[kind].name;
+    Defs :: import("@/examples/circuit/defs.fr");
+    program := @if(name == "LEG", Defs.the_maze_leg, Defs.the_maze);
+    if name == "NANDverture" {
         self.world.storage.subslice(56, 256/8).interpret_as_bytes().copy_from(program);
     };
+    if name == "OVERTURE" || name == "LEG" {
+        self.world.storage.subslice(1, 256/8).interpret_as_bytes().copy_from(program);
+    };
+    hack := int(name == "LEG");
     maze := @ref Maze'new(Maze.tc0);
     range(0, limit) { _ |
         in := maze.input();
         values := @slice(0, 0, 0, @as(i64) in.zext());
         evaluate(self.world&, values, kind, 0, false);
-        if values[1] != 0 {
-            maze.output(values[0].trunc());
+        if values[1+hack] != 0 {
+            maze.output(values[0+hack].trunc());
         };
     };
     if !maze.win {
@@ -265,7 +269,7 @@ jit_circuit :: fn(slot: *CachedCompilerEnv, components: []Component, a: Alloc) v
     first_index_that_needs_fast_eval := builtin_components.len();
     
     // either way need to set Component.compile_order for interp
-    src := compile_gates_source(components, a, first_index_that_needs_fast_eval);
+    src := compile_gates_source(components, a, first_index_that_needs_fast_eval, @ref u8.list(temp()));
     @if(!FEAT_COMPILE) return();
     
     callee := jit_value(slot, src, "dispatch");

@@ -326,11 +326,13 @@ layout_components :: fn(components: []Component, out: *List(u8)) void = {
 Tc :: import("@/examples/circuit/tc/load.fr");
 TcBuiltins :: Tc.Builtin.impl;
 
-calculate_usage :: fn(components: []Component, off: i64, a: Alloc, warn: *List(u8)) void = {
+calculate_usage :: fn(components: []Component, off: i64, a: Alloc, warn: *List(u8)) bool = {
     @assert_lt(components.len, MAX_u32, "too many components");
+    error := false;
     range(off, components.len) { i |
         continue :: local_return;
         id := @as(ComponentId) (id = i.trunc());
+        component_i := i;
         c := components.index(i);
         c.usage = a.box_zeroed(Component.Usage);
         if c.gates.len == 0 {
@@ -348,9 +350,13 @@ calculate_usage :: fn(components: []Component, off: i64, a: Alloc, warn: *List(u
             gate_sum += child.gate_sum;
             storage_count += get_storage_count(components, it);
             if i != 0 && i != c.gates.len - 1 {
+                gate_i := i;
                 // give a better error message than array length mismatch when typechecking the generated code.
                 o, i := child.arity();
-                @assert(o == it.outputs.len && i == it.inputs.len, "arity error calling gate[%] (%) in (%)", i, child.name, c.name);
+                if !(o == it.outputs.len && i == it.inputs.len) {
+                    @fmtln(warn, "arity error calling gate[%] (%){%} in (%){%} (%:% vs %:%)", gate_i, child.name, it.kind.id, c.name, component_i, o, i, it.outputs.len, it.inputs.len);
+                    error = true;
+                };
             };
         };
         c.wire_depth = wire_depth + c.wire_count;
@@ -435,6 +441,7 @@ calculate_usage :: fn(components: []Component, off: i64, a: Alloc, warn: *List(u
         wires_used.bits.gpa = panicking_allocator;
         c.wires_used = wires_used;
     };
+    error
 }
 
 fn get_storage_count(components: []Component, it: *Component.Gate) i64 = 
@@ -466,6 +473,7 @@ CompileGates :: @struct {
     // for now this is just so maybe if the pins are messed up you can still draw. should get rid of it once more confident. 
     // tho maybe for runtime loading circuits should keep something like this and turn it into error to show in ui instead of just crashing. 
     failed := false;
+    warn: *List(u8);
 };
 
 // TODO: arrange for builtins to have const known param/doing_pre_read
@@ -509,13 +517,16 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
         while => self.need_pre_read.len > 0 {
             wire := self.need_pre_read[self.need_pre_read.len - 1];
             // :SLOW should compute wireid -> defining gate once and reuse
-            gate_i := self.c.gates.index_of(fn(it) => it.outputs.contains(fn(it) => it.id == wire.id))
-                || @panic("missing def for w%", wire.id);
+            gate_i := self.c.gates.index_of(fn(it) => it.outputs.contains(fn(it) => it.id == wire.id)) || {
+                @fmtln(self.warn, "missing def for w%", wire.id);
+                self.failed = true;
+                return();
+            };
             it := self.c.gates[gate_i]&;
             child := self.components[it.kind.id.zext()]&;
             child_storage_count := get_storage_count(self.components, it);
             if child_storage_count == 0 {
-                @println("TODO: use-before-def without memory w% in (%)", wire.id, self.c.name);
+                @fmtln(self.warn, "TODO: use-before-def without memory w% in (%)", wire.id, self.c.name);
                 self.failed = true;
                 return();
             };
@@ -603,7 +614,7 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
     
     @if(!self.doing_pre_read) for it.inputs { it |
         if !self.wires_evaluated&.get(it.id.zext()) {
-            @println("TODO: use-before-def without memory w% in (%).", it.id, self.c.name);
+            @fmtln(self.warn, "TODO: use-before-def without memory w% in (%).", it.id, self.c.name);
             self.failed = true;
         };
     };
@@ -633,7 +644,7 @@ fn compile_component(self: *CompileGates, doing_pre_read: bool) void = {
 // so indexing with the Gate.(i,o) happens at compile time instead of run time. 
 // compiled fns call each other directly without going through the interpreter's calling convention. 
 compile_gates :: fn(fr: CompCtx, components: []Component) void = {
-    src := compile_gates_source(components, fr.get_alloc(), 0);
+    src := compile_gates_source(components, fr.get_alloc(), 0, @ref u8.list(temp()));
     fast_eval := const_eval([]rawptr, @{ import(@[@literal src]).dispatch });
     enumerate components { i, it |
         it.fast_eval = fast_eval[i];
@@ -641,7 +652,7 @@ compile_gates :: fn(fr: CompCtx, components: []Component) void = {
 };
 
 // side effect: sets Component.compile_order which the interpreter needs
-compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_needs_fast_eval: i64) Str = {
+compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_needs_fast_eval: i64, warn: *List(u8)) Str = {
     out := @ref u8.list(components.len * 2000, a);
     @fmt(out, "{\n#use(\"@/examples/circuit/eval.fr\");\n#use(\"@/examples/circuit/parse.fr\");\n");
     @fmt(out, "operator_index :: index_unchecked;\n");  // the backend fixes it because they're always constant and in bounds of the arrays but might as well save the useless work. 
@@ -680,6 +691,7 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
             wires_evaluated = empty(temp()),
             need_pre_read = WireId.list(temp()),
             compile_order = list(temp()),
+            warn = warn,
         ); self := self&;
         
         @debug_assert(!c.has_param, "only builtins have param");
@@ -748,7 +760,7 @@ fn declare_wire_vars(self: *CompileGates) void = {
     for c.wires_used& { i |
         if !seen&.get(i) {
             self.failed = true;
-            @eprintln("TODO: malformed wire in % %", c.name, i);
+            @fmtln(self.warn, "TODO: malformed wire in % %", c.name, i);
             // for now turn it into a runtime error instead of a compile error
             @fmt(out, "@panic(\"malformed wire \%\", %);\n", i);
         }

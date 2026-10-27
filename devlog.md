@@ -4,6 +4,9 @@
 - continued moving debug_known_arch out of the main gui
 - dont always put the defs components first.
   especially because dont want ids of builtins in save.fr files to change if add something to defs. 
+- be better at displaying diagrams that didnt load because unimplemented.
+  - dont crash in for_pins,calculate_usage
+  - dont clear pins so can still look in the cc
 
 ## (Oct 26) circuit
 

@@ -250,6 +250,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         state.clicked = false;
         state.dirty = true;
         have_logic = false;
+        state.warnings&.clear();
         load_circuit_index_async(state, i, state.world.tc_file_loader_device);
     };
     
@@ -347,14 +348,19 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             i := gate.logical_gate_index;
             @if(i == -1) continue();
             it := c.gates[i]&;
-            @if(it.kind.group() != .Tc1) continue();
             
             // TODO: all these need to know the thing's rotation
+            @if(it.kind.group() == .Tc1)
             @match(it.kind.name(.Tc1)) {
                 fn Console() => self.console(gate, c, i, it);
                 fn SegmentDisplay() => self.segment_display(gate, c, i, it);
                 fn DotMatrixDisplay() => self.dot_matrix_display(gate, c, i, it);
                 fn SpriteDisplay() => self.sprite_display(gate, c, i, it);
+                @default => ();
+            };
+            @if(it.kind.group() == .Tc2)
+            @match(it.kind.name(.Tc2)) {
+                fn Segment_display() => self.segment_display(gate, c, i, it);
                 @default => ();
             };
         };
@@ -648,6 +654,7 @@ fn draw_gate_squares(self: *Draw, circuit: *Tc.Circuit) void = {
             sdtx.color = pack_rgba(255, 255, 255, 255);
             name := info.display_name(it, state.circuit);
             sdtx.pos = self.world_to_text_pos(b) + vec2(0, self.wire_hover_count);
+            base := sdtx.pos.x;
             sdtx.put(@tfmt("(%, %) %", it.pos.x, it.pos.y, name));
             if it.logical_gate_index != -1 {
                 sdtx.put(@tfmt(" [%]", it.logical_gate_index));
@@ -655,6 +662,14 @@ fn draw_gate_squares(self: *Draw, circuit: *Tc.Circuit) void = {
             self.wire_hover_count += 1;
             had_hover = true;
             hover_gate(e, (Some = g_gate_index), circuit);
+            
+            if it.settings.len != 0 {
+                sdtx.put(" [");
+                each it.settings { s |
+                    sdtx.put(@tfmt("%,", s));
+                };
+                sdtx.put("]");
+            };
             
             if state.clicked {
                 if e.enable {
@@ -1062,6 +1077,7 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
             gate_i := c.gates&.index_of(fn(it) => it.kind.is_placeholder()) || {
                 a := state.circuit_arena&.borrow();
                 c.gates&.push(zeroed(Tc.Circuit.Gate), a);
+                c.gates[c.gates.len-1].settings = a.alloc_zeroed(i64, 2);
                 c.gates.len - 1
             };
             gate := c.gates[gate_i]&;
@@ -1645,7 +1661,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                     c := state.circuit_arena&.borrow().alloc_uninit(Tc.Circuit, state.circuit.len + 1);
                     c.slice(0, state.circuit.len).copy_from(state.circuit);
                     c[c.len-1] = (
-                        id = (id = timestamp()),
+                        id = (id = realtime_us()),
                         name = "New Circuit",
                         gates = empty(),
                         wires = empty(),
@@ -1737,7 +1753,7 @@ worker_get_source :: fn(state: *State, in: *LoaderT.I) Result(Str, void) = {
                 state.download_schematic_archive_before_trying_to_load = false;
                 root := Foreign'tc_archive();
                 filter := @const_slice("ploter", "3D Engine", "Screenverture", "Dungeon Crawler", "Platformer Game", "ASM computer 64bit", "Game of Life 32x32", "Matrix Animation Studio 3000", "Snake on matrix display with LEG++");
-                template :: "%/v6/schematics/architecture/%/circuit.data";
+                template :: "%/v1/schematics/architecture/%/circuit.data";
                 for filter { path |
                     _ := Syscall'remove(@fmt_cstr(template, root, path));
                 };
@@ -1814,7 +1830,7 @@ fn load_circuit_index_worker(state: *State, root_index: i64, tc_file_loader_devi
     Tc'compile_circuit(circuits, root_index, components, a, state.warnings&);
     
     first_index_that_needs_fast_eval := builtin_components.len();
-    src := compile_gates_source(components.items(), a, first_index_that_needs_fast_eval);
+    src := compile_gates_source(components.items(), a, first_index_that_needs_fast_eval, state.warnings&);
     if state.current_jitted_source != "" && state.current_jitted_source == src {
         return(.Err);
     };

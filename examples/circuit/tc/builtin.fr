@@ -101,7 +101,8 @@ templates :: collect_templates(impl, .Tc1, pin_layouts) { it, k |
 };
 
 templates2 :: collect_templates(impl2, .Tc2, pin_layouts2) { it, k |
-    it.has_param = it.has_param || @is(k, .Level_gate);
+    it.bit_width = get_width_data2(it);
+    it.has_param = it.has_param || @is(k, .Static_indexer, .Segment_display);
 };
 
 #use("@/examples/circuit/eval.fr");
@@ -124,6 +125,7 @@ Settings :: @struct {
         gate_i := 32,
     );
     Mul64 :: @bit_fields(need_high := 1, _ := 63);
+    StaticIndex :: @bit_fields(width := 8, shift := 6, left := 1, _ := 49);
 };
 
 fn word_size(param: Settings.Ram) i64 = 1.shift_left(param.get(.word_size_index)); // [1, 2, 4, 8, 16, 32]
@@ -854,7 +856,7 @@ Register_bit :: impl.BitMemory;
 Full_adder :: impl.FullAdder;
 Maker_bit_8 :: impl.Maker8;
 Splitter_bit_8 :: impl.Splitter8;
-Not_word :: todo();
+Not_word :: impl.Not64;
 Or_word :: todo();
 And_word :: todo();
 Nand_word :: todo();
@@ -879,9 +881,15 @@ Register_word :: todo();
 Level_output_8_pin :: todo();
 Level_delay_gate :: todo();
 Mux :: todo();
-Decoder_1 :: todo();
-Decoder_2 :: todo();
-Decoder_3 :: todo();
+Decoder_1 :: impl.Decoder1;
+Decoder_2 :: math(4, 1) { o, i |
+    o[] = (0, 0, 0, 0);
+    o[i[1]] = 1;
+};
+Decoder_3 :: math(8, 2) { o, i |
+    o[] = (0, 0, 0, 0, 0, 0, 0, 0);
+    o[i[1]] = i[2].bit_xor(1);
+};
 Constant :: todo();
 Splitter_word_2 :: todo();
 Maker_word_2 :: todo();
@@ -895,15 +903,7 @@ Delay_line_word :: todo();
 Store_port :: todo();
 Ctz :: todo();
 Cc_level_output :: todo();
-Level_gate :: device(1, 1,
-    fn(it) => 64,
-    fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 1), param: i64, instance: i64, _1: bool) void = {
-        // TODO: clickable if i=1, o=1 if solved
-        // TODO: click in ui to open level
-        // TODO: load solvedness with init_data
-        o[0] = 0;
-    },
-);
+Level_gate :: todo();
 Level_input_1_pin :: todo();
 Level_input_word :: todo();
 Level_input_switched :: todo();
@@ -933,10 +933,22 @@ Probe_wire_word :: todo();
 _20_v2 :: todo();
 Halt_v2 :: todo();
 _1 :: todo();
-Segment_display :: todo();
+Segment_display :: device(0, 1, 
+    fn(_) => 64,
+    fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 1), _0: i64, instance: i64, _2: bool) void = {
+        world.storage[instance] = i[0];
+    },
+);
 Static_value :: todo();
 Screen :: todo();
-Time :: todo();
+Time :: device(1, 0, 
+    fn(_) => 0,
+    fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 0)) void = {
+        i := bit_cast_unchecked(i64, Array(i64, 1), 1);
+        (@run impl'Timing.fid.unwrap())(world, o, i&);
+        o[0] *= 1000;  // ns
+    },
+);
 Keyboard_v2 :: todo();
 Static_eval :: todo();
 Verilog_input :: todo();
@@ -945,7 +957,16 @@ Maker_word_4 :: todo();
 Maker_word_8 :: todo();
 Splitter_word_4 :: todo();
 Splitter_word_8 :: todo();
-Static_indexer :: todo();
+// `p` is a constant when compiled so this isn't as bad as it looks
+Static_indexer :: math_param(1, 1) { o, i, p |
+    p: Settings.StaticIndex = (repr = p.bitcast());
+    if p.get(.left) == 1 {
+        o[0] = i[0].shift_left(p.get(.shift));
+    } else {
+        o[0] = i[0].shift_right_logical(p.get(.shift));
+    };
+    o[0] = o[0].bit_and(1.shift_left(p.get(.width)) - 1);
+};
 _7 :: todo();
 _8 :: todo();
 Inc :: todo();
@@ -953,8 +974,18 @@ _19_v2 :: todo();
 Cc_level_input :: todo();
 _9 :: todo();
 Mod :: todo();
-Splitter_bit_2 :: todo();
-Splitter_bit_4 :: todo();
+Splitter_bit_2 :: math(2, 1) { o, i | 
+    r := i[0];
+    inline_range(0, 2) { i |
+        o[i] = r.shift_right_logical(i).bit_and(1);
+    };
+};
+Splitter_bit_4 :: math(4, 1) { o, i | 
+    r := i[0];
+    inline_range(0, 4) { i |
+        o[i] = r.shift_right_logical(i).bit_and(1);
+    };
+};
 Maker_bit_2 :: todo();
 Maker_bit_4 :: todo();
 _10 :: todo();
@@ -1155,6 +1186,8 @@ pin_layouts2 :: @static @(parse_pin_layouts(.Tc2)) (
     ((1, -1), (1, 0), (1, 1), (1, 2), (-1, -1))),
 ((.Decoder_3),
     ((1, -3), (1, -2), (1, -1), (1, 0), (1, 1), (1, 2), (1, 3), (1, 4), (-1, -2), (0, -4))),
+((.Segment_display),
+    ((-1, -3))),
 );
 
 get_width_data :: fn(it: *Template) []u8 = {
@@ -1243,6 +1276,22 @@ get_width_data :: fn(it: *Template) []u8 = {
     @if(k == .RamDualLoad) return(@slice(i, i, 0x01, 0x01, 0x40, i, 0x01, 0x40) a);
     
     empty()
+}
+
+get_width_data2 :: fn(it: *Template) []u8 = {
+    a := ast_alloc();
+    pin_count := it.in_arity + it.out_arity;
+    k := import("@/examples/circuit/tc/load.fr")'gate_name(it.kind, .Tc2);
+    if it.name.ends_with("_bit") || @is(k, .Off_v2, .On_v2, .Full_adder, .Halt_v2) {
+        return a.alloc_init(u8, pin_count, fn(_) => 1);
+    };
+    x: []u8 = @match(k) {
+        fn Decoder_1() => @slice(0x01, 1, 1);
+        fn Decoder_2() => @slice(0x01, 1, 1, 1, 2, 1);
+        fn Decoder_3() => @slice(0x01, 1, 1, 1, 1, 1, 1, 1, 3, 1);
+        @default => empty();
+    };
+    x.shallow_copy(a)
 }
 
 parse_pin_layouts :: fn($g: Tc.GateGroup) FuncId = (fn(e: FatExpr) FatExpr #macro = {
