@@ -307,7 +307,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sgl.scale(state.scale * screen_scale.x, state.scale * screen_scale.y, 1.0);
     
     @if(state.tree.len > 0)
-    @if(FEAT_TC_CIRCUIT) if state.tree[state.tree.len - 1].diagram_circuit { circuit_i |
+    if state.tree[state.tree.len - 1].diagram_circuit { circuit_i |
         need_draw = true;
         circuit := state.circuit[circuit_i]&;
         self.draw_circuit_background(circuit);
@@ -329,7 +329,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
 
     @if(state.tree.len == 1 || state.split_graphics_and_wires)
-    if have_logic && FEAT_TC_CIRCUIT && state.tree[0].diagram_circuit.is_some() {
+    if have_logic && state.tree[0].diagram_circuit.is_some() {
         need_draw = true;
         circuit := state.circuit[state.tree[0].diagram_circuit.unwrap()]&;
         // TODO: allow console in custom component too (use last element in the tree and offset by its base instance)
@@ -1297,7 +1297,6 @@ fn open_gate(state: *State, logical_gate_index: ?i64, diagram_gate_index: ?i64, 
             };
         };
         
-        @if(FEAT_TC_CIRCUIT) 
         if diagram_gate_index { i |
             it := c.gates[i]&;
             new_component = (Some = it.kind);
@@ -1314,7 +1313,7 @@ fn open_gate(state: *State, logical_gate_index: ?i64, diagram_gate_index: ?i64, 
     
     if new_component { i |
         // TODO: do this with shape.kind == .io ?
-        if @is(group(i), .DefsBuiltin, .Tc1, .Tc2) {
+        if @is(group(i), .LogicalIO, .Tc1, .Tc2) {
             name := state.world&[i].name;
             is_io = is_io || name == "input" || name == "output" || name.contains("Input") || name.contains("Output")|| name.contains("Level_input") || name.contains("Level_output");
         };
@@ -1378,11 +1377,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.halt_message = list(a);
     state.key_buffer = init(a, 64);
     state.frame_time_history = init(a, 128);
-    init(state.world&, a, true, finished_defs.components);  // TODO: leaked when loading new circuit
     state.tree = list(a);
-    state.push_tree_node(
-        component = (Some = get_component_by_name("overture", finished_defs.components)),
-    );
     state.dirty = true;
     state.ticks_per_eval = 1;
     state.recenter();
@@ -1710,7 +1705,6 @@ fn check_movement(state: *State) void = if state.pan_keys_pressed != 0 && !state
 };
 
 fn load_path_async(state: *State, path: Str, is_bytes: bool) void = {
-    @if(!FEAT_TC_CIRCUIT) return(eprintln("FEAT_TC_CIRCUIT is disabled"));
     #use("@/lib/sys/fs.fr");
     
     state.circuit = empty();
@@ -1807,7 +1801,6 @@ fn load_circuit_index_async(state: *State, root_index: i64, tc_file_loader_devic
 // should fine for the ui to show the diagram on the other thread while this compiles. 
 // there needs to not use the logical part while progress==.Loading and here needs to not push to state.tree. 
 fn load_circuit_index_worker(state: *State, root_index: i64, tc_file_loader_device: []Tc.LoadedFile) Result(Str, void) = {
-    @if(!FEAT_TC_CIRCUIT) panic("!FEAT_TC_CIRCUIT");
     circuits := state.circuit;
     each circuits { c | 
         c.compiled = .None;
@@ -1817,10 +1810,10 @@ fn load_circuit_index_worker(state: *State, root_index: i64, tc_file_loader_devi
     
     a := state.circuit_arena&.borrow();
     components := @ref Component.list(a);
-    components.push_all(finished_defs.components);
+    components.push_all(builtin_components);
     Tc'compile_circuit(circuits, root_index, components, a, state.warnings&);
     
-    first_index_that_needs_fast_eval := finished_defs.components.len();
+    first_index_that_needs_fast_eval := builtin_components.len();
     src := compile_gates_source(components.items(), a, first_index_that_needs_fast_eval);
     if state.current_jitted_source != "" && state.current_jitted_source == src {
         return(.Err);

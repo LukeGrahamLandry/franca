@@ -1,4 +1,10 @@
 
+## (Oct 27) circuit
+
+- continued moving debug_known_arch out of the main gui
+- dont always put the defs components first.
+  especially because dont want ids of builtins in save.fr files to change if add something to defs. 
+
 ## (Oct 26) circuit
 
 - place diagonal wires. edit constants. remember wire widths for ui. 

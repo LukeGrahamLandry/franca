@@ -133,7 +133,7 @@ fn load(self: *Harness, name: Str) *Harness = {
     
     a := temp();
     components := @ref Component.list(a);
-    components.push_all(finished_defs.components);
+    components.push_all(builtin_components);
     discard := u8.list(temp());
     Tc'compile_circuit(self.circuits, root_index, components, a, discard&);
     jit_circuit(self.fr&, components.items(), a);
@@ -262,7 +262,7 @@ fn maze(self: *Harness, limit: i64) *Harness = {
 
 jit_circuit :: fn(slot: *CachedCompilerEnv, components: []Component, a: Alloc) void = {
     // finished_defs don't need to be re-compiled every time because they'll already have it.fast_eval set from comptime. 
-    first_index_that_needs_fast_eval := finished_defs.components.len();
+    first_index_that_needs_fast_eval := builtin_components.len();
     
     // either way need to set Component.compile_order for interp
     src := compile_gates_source(components, a, first_index_that_needs_fast_eval);
@@ -277,7 +277,14 @@ Main :: import().examples.circuit;
 test_defs :: fn() void = {
     world := @ref zeroed(World);
     a := general_allocator();
-    init(world, a, false, finished_defs.components);
+    finished_components :: @run {
+        components := @ref Component.list(ast_alloc());
+        components.push_all(builtin_components);
+        compile_defs(components);
+        compile_gates(current_compiler_context(), components.items());
+        components.items()
+    };
+    init(world, a, false, finished_components);
     
     Defs :: Main.defs;
     cpus := @slice(
@@ -287,7 +294,7 @@ test_defs :: fn() void = {
     for cpus { name, program |
         world.storage.set_zeroed();
         maze := @ref Maze'new(Maze.tc0);
-        root_component := get_component_by_name(name, finished_defs.components);
+        root_component := get_component_by_name(name, finished_components);
         start := timestamp();
         range(0, 256) { i |
             tick_defs_arch(world, root_component, program[i], true);
@@ -330,7 +337,7 @@ test_defs :: fn() void = {
     };
     
     check :: fn(world: *World, $name: Str, args: []i64) void = {
-        kind := get_component_by_name(name, finished_defs.components);
+        kind := get_component_by_name(name, finished_components);
         o_n, i_n := world[kind]&.arity();
         a := Arena'stack_alloc(size_of(WireValue) * max_in_out_wires);
         wires := a.alloc_zeroed(WireValue, args.len);

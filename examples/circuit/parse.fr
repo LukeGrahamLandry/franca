@@ -10,7 +10,6 @@
 
 // even when disabled still need to call compile_gates to fill `compile_order` for the interpreter and set fast_eval callback for tc builtins. 
 FEAT_COMPILE :: true;  // disable to test the interpreter. enabled is ~110x speedup on defs (nand only) maze solve. 
-FEAT_TC_CIRCUIT :: true;  // be able to load TuringComplete.Game's circuit.data save files?
 max_in_out_wires :: 256;
 
 Component :: @struct {
@@ -62,8 +61,8 @@ WireId :: @struct(id: u32);
 GateId :: @struct(id: u32);
 
 #use("@/lib/collections/map.fr");
-defs :: @static {
-    components := @ref Component.list(ast_alloc());
+compile_defs :: fn(components: *List(Component)) void = {
+    start_count := components.len;
     map: HashMap(Symbol, ComponentId) = init(temp());
 
     //User := Main.defs;
@@ -72,25 +71,13 @@ defs :: @static {
     for get_constants(S) { name |
         shape := (*TcBuiltins.Template).get_constant(S, name)
             || @panic("missing %", str(name));
-        arity := (shape.out_arity, shape.in_arity);
-        
         @ct_assert(get_constant(User, name).is_none(), @source_location(), "defs has conflict with builtin name: %", name.str());
-        
-        components.push(
-            name = name.str(), gates = empty(), 
-            wire_count = 0,
-            storage_count = int(name == sym("delay")),
-            primitive_arity = arity,
-            has_param = name == sym("const"),
-            is_switch = name.str().starts_with("switch"),
-        );
-        map&.insert(name, (id = components.len.trunc() - 1));
+        map&.insert(name, shape.kind);
     };
     
     s := @slice("input", "output");
-    for s { name |
-        map&.insert(sym(name), (id = components.len.trunc()));
-        components.push(name = name, gates = empty(), wire_count = 0);
+    enumerate s { i, name |
+        map&.insert(sym(name[]), (id = i.trunc()));
     };
     
     S := User;
@@ -101,7 +88,6 @@ defs :: @static {
         @ct_assert(it.expr&.is(.Block), it.loc, "expected block body");
         block := it.expr.Block&;
         defs: HashMap(WireId, ComponentId) = init(temp());
-        ::AutoHash(WireId, TrivialHasher); ::AutoEq(WireId);
         
         for str(name) { c |
             ok := c.is_ascii_alpha() || c.is_ascii_digit() || c == "_".ascii();
@@ -220,39 +206,33 @@ defs :: @static {
     };
     NONE :WireId: (id = 0xFFFFFFFF);
     
-    components.gpa = panicking_allocator;
-    @anon_literal(
-        components = components[],
-        tc_components_offset = components.len(),
-    )
+    warn := @ref u8.list(temp());
+    calculate_usage(components.items(), start_count, ast_alloc(), warn);
+    print(warn.items());
 }
 
-finished_defs :: @static {
-    components := defs.components&;
+builtin_components :: {
+    ::AutoHash(WireId, TrivialHasher); ::AutoEq(WireId);
     a := ast_alloc();
+    components := @ref Component.list(a);
     warn := @ref u8.list(temp());
-    calculate_usage(components.items(), 0, a, warn);
     @if(warn.len != 0) compile_error(warn.items(), @source_location());
-    components.gpa = a;
-    @if(FEAT_TC_CIRCUIT) Tc'load_builtins(components, a);
-    components.gpa = panicking_allocator;
-    @if(false) print_components(components.items());
+    s := @slice("input", "output");
+    for s { name |
+        components.push(name = name, gates = empty(), wire_count = 0, usage = a.box_zeroed(Component.Usage));
+    };
+    Tc'load_builtins(components, a);
     fr := current_compiler_context();
     compile_gates(fr, components.items());
-    @anon_literal(components = components.items())
+    components.items()
 };
 
-layout_components :: fn(components: []Component, end: i64, out: *List(u8)) void = {
-    out_components := @ref components.clone(temp());
-    components := components.slice(0, end);
-    n := 0;
-    while => n < components.len && components[n].gates.len == 0 {
-        n += 1;
-    };
-    
+layout_components :: fn(components: []Component, out: *List(u8)) void = {
+    out_components := @ref builtin_components.clone(temp());
+   
     #use("@/graphics/vec.fr");
-    circuits := temp().alloc_zeroed(Tc.Circuit, components.len - n);
-    enumerate components.rest(n) { i, it |
+    circuits := temp().alloc_zeroed(Tc.Circuit, components.len);
+    enumerate components { i, it |
         c := circuits[i]&;
         gates := @ref Tc.Circuit.Gate.list(temp());
         wires := @ref Tc.Circuit.Wire.list(temp());
@@ -278,41 +258,26 @@ layout_components :: fn(components: []Component, end: i64, out: *List(u8)) void 
         };
         
         enumerate it.gates.slice(1, it.gates.len - 1) { y, g |
-            kind: ?ComponentId = .None;
-            is_custom := g.kind.id >= n.trunc();
-            if !is_custom {
-                k: GateName(.Tc1) = @switch(components[g.kind.id.zext()].name) {
-                    @case("nand") => .Nand;
-                    @case("byte_split") => .Splitter8;
-                    @case("byte_make") => .Maker8;
-                    @case("delay") => .DelayLine1;
-                    @case("switch1") => .Switch1;
-                    @case("switch8") => .Switch8;
-                    @case("const") => @switch(g.param) {
-                        @case(0) => .Off;
-                        @case(1) => .On;
-                        @default => .Constant8;
-                    };
-                    @default => unreachable();
-                };
-                kind = (Some = (id = trunc(component_offset(.Tc1) + k.raw().zext())));
-            };
-            
-            new: Tc.CustomId = (id = g.kind.id.zext() - n);
+            is_custom := g.kind.id.zext() >= builtin_components.len();
+            new: Tc.CustomId = (id = g.kind.id.zext() - builtin_components.len());
             if is_custom {
                 if !dependencies.contains(fn(it) => it.id == new.id) {
                     dependencies.push(new);
                 };
             };
-            kind := kind || (id = g.kind.id + finished_defs.components.len.trunc() - n.trunc());
+            kind := g.kind;
             
             gates.push(pos = (v=(0,y.float().cast()*8+24)), kind = kind, rotation = 0, custom_id = new);
             g2 := gates[gates.len - 1]&;
             if is_custom {
                 g2.mystery_spice_minus_fifteen_for_custom_pins = circuits[new.id].cached_pin_radius.p;
             };
-            if components[g.kind.id.zext()].name == "const" {
-                g2.settings&[0] = g.param;
+            if out_components[g.kind.id.zext()].name == "Constant8" {
+                @switch(g.param) {
+                    @case(0) => { g2.kind = get_component_by_name("Off", builtin_components); };
+                    @case(1) => { g2.kind = get_component_by_name("On", builtin_components); };
+                    @default => { g2.settings&[0] = g.param; };
+                };
             };
             
             info := Tc'get_builtin_shape(kind);
@@ -369,15 +334,6 @@ calculate_usage :: fn(components: []Component, off: i64, a: Alloc, warn: *List(u
         c.usage = a.box_zeroed(Component.Usage);
         if c.gates.len == 0 {
             c.gate_sum = 1;
-        
-            @if(group(id) == .DefsBuiltin)
-            if c.name == "delay" || c.name == "input" || c.name == "output" {
-                c.inputs_for_pure_eval = empty();
-            } else {
-                _, in_arity := c.arity();
-                @assert_ne(in_arity, -1, "TODO: % arity?", c.name);
-                c.inputs_for_pure_eval = a.alloc_init(i64, in_arity, fn(i) => i);
-            };
             continue();
         };
         
@@ -694,10 +650,6 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
         id := @as(ComponentId) (id = i.trunc());
         if c.gates.len == 0 {
             g := group(id);
-            if g == .DefsBuiltin {
-                @fmt(out, "% :: TcBuiltins'get_native(DefsBuiltins.%);\n", mangle(components, i), c.name);
-                continue();
-            };
             // TODO: quarantine this in ./tc/*.fr
             if g == .Tc1 {
                 shape := get_builtin_shape(id);
@@ -800,8 +752,6 @@ fn declare_wire_vars(self: *CompileGates) void = {
 
 fn mangle(c: []Component, i: i64) Str = 
     @tfmt("g%_%", i, c[i].name);
-
-defs_builtin_names :: @static collect_scope_names(Type.scope_of(DefsBuiltins));
 
 collect_scope_names :: fn(S: ScopeId) RawHashMap(Str, void) #fold = {
     names: HashMap(Str, void) = init(ast_alloc());
@@ -951,41 +901,6 @@ AsmLeg :: @rec @struct {
     };
 };
 
-// TODO: ?? :Compiler?
-main :: fn() void = 
-    print_components(@run defs.components.items());
-
-print_components :: fn(components: []Component) void = {
-    out := @ref u8.list(temp());
-    for components { it |
-        @fmt(out, "% :: @{\n", it.name);
-        if it.gates.len > 0 && it.inputs_for_pure_eval.len != it.gates[0].outputs.len {
-            @fmt(out, "    // inputs_for_pure_eval: %\n", it.inputs_for_pure_eval);
-        };
-        
-        for it.gates { it |
-            @fmt(out, "    ");
-            for it.outputs { it |
-                @fmt(out, "w%, ", it.id);
-            };
-            out.len -= 2 * int(out.items().ends_with(", "));
-            @if(it.outputs.len > 0) @fmt(out, " := ");
-            @fmt(out, "%(", components[it.kind.id.zext()].name);
-            for it.inputs { it |
-                @fmt(out, "w%, ", it.id);
-            };
-            out.len -= 2 * int(out.items().ends_with(", "));
-            @if(components[it.kind.id.zext()].has_param) @fmt(out, "%", it.param);
-            @fmt(out, ");\n");
-        };
-        if it.gates.len == 0 {
-            @fmt(out, "    // intrinsic % <- %\n", it.primitive_arity._0 , it.primitive_arity._1);
-        };
-        @fmt(out, "};\n");
-    };
-    print(out.items());
-}
-
 fn arity(c: *Component) Ty(i64, i64) = {
     @if(c.gates.len == 0) return(c.primitive_arity);
     out_n, in_n := (c.gates[c.gates.len - 1].inputs.len, c.gates[0].outputs.len);
@@ -1004,7 +919,7 @@ Main :: import().examples.circuit;
 fill_fast_eval :: fn(components: []Component, callee: rawptr) void = {
     callee := bit_cast_unchecked(rawptr, @FnPtr() []rawptr, callee);
     fast_eval := callee();
-    first_index_that_needs_fast_eval := finished_defs.components.len();
+    first_index_that_needs_fast_eval := builtin_components.len();
     range(first_index_that_needs_fast_eval, components.len) { i |
         components[i].fast_eval = fast_eval[i];
     };
