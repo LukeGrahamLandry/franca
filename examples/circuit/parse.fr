@@ -24,6 +24,7 @@ Component :: @struct {
     compile_order := zeroed(Array([]Op, 2));
     has_param := false;
     is_switch := false;
+    has_bidirectional_pins := false;  // always inlined so doesn't need to be compiled
     bit_width: []u8 = empty();  // io only
     wire_bit_width: []u8 = empty();
     
@@ -565,7 +566,7 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
             };
         } else {
             // TODO: coerce '()' literal to zero length array :compiler
-            @fmt(out, "i := zeroed(Array(WireValue, 0));\n");
+            @fmt(out, "i := WV0;\n");
         };
     };
     
@@ -644,7 +645,8 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
     out := @ref u8.list(components.len * 2000, a);
     @fmt(out, "{\n#use(\"@/examples/circuit/eval.fr\");\n#use(\"@/examples/circuit/parse.fr\");\n");
     @fmt(out, "operator_index :: index_unchecked;\n");  // the backend fixes it because they're always constant and in bounds of the arrays but might as well save the useless work. 
-    
+    @fmt(out, "ZR :: zeroed(rawptr);\n");
+    @fmt(out, "WV0 :: zeroed(Array(WireValue, 0));\n");
     enumerate components { i, c |
         continue :: local_return;
         id := @as(ComponentId) (id = i.trunc());
@@ -665,7 +667,11 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
                     continue();
                 };
             };
-            @fmt(out, "% :: zeroed(rawptr);\n", mangle(components, i));
+            @fmt(out, "% :: ZR;\n", mangle(components, i));
+            continue();
+        };
+        if c.has_bidirectional_pins {
+            @fmt(out, "% :: ZR;  // has_bidirectional_pins\n", mangle(components, i));
             continue();
         };
         
@@ -710,12 +716,11 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
     };
     
     @fmt(out, "dispatch :: @const_slice(@as(rawptr) ");
-    // TODO: only reference the ones actually needed from the top level thing? ie. not always defs if just using a tc circuit.
     range(0, components.len) { i |
-        if i >= first_index_that_needs_fast_eval && (FEAT_COMPILE || components[i].gates.len == 0) {
+        if !components[i].has_bidirectional_pins && i >= first_index_that_needs_fast_eval && (FEAT_COMPILE || components[i].gates.len == 0) {
             @fmt(out, "%, ", mangle(components, i));
         } else {
-            @fmt(out, "zeroed(rawptr), ");
+            @fmt(out, "ZR, ");
         };
     };
     @fmt(out, ");\n");  // dispatch

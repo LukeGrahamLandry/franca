@@ -232,7 +232,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     
     @if(SPAM_LOG) @fmtln(warn, "loading (%):", c.name);
     a := arena;
-    gates, wire_count := find_pins(c, a, circuits, warn);
+    gates, wire_count := find_pins(c, a, circuits, warn, unimplemented&);
     custom_pins := Ty(i64, i64).list(a);
     switches := Circuit.SwitchablePin.list(a);
     
@@ -286,10 +286,6 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
             unimplemented = true;
             @fmtln(warn, "TODO: arity error (%) I: % vs %; O: % vs %; gate %/%", shape.name, shape.in_arity, it.inputs.len, shape.out_arity, it.outputs.len, i, gates.len);
         }
-        if shape.pins.len == 0 && shape.name != "LevelScreen" && !shape.name.starts_with("Probe") && shape.name != "Custom" {
-            @fmtln(warn, "TODO: no pins for %", shape.name);
-            unimplemented = true;
-        };
         
         apply_switchable_pin :: fn(value, condition, bit_width) => {  // :OutputNz
             S := @const_slice(
@@ -480,6 +476,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         wire_count = wire_count,
         bit_width = bit_width,
         wire_bit_width = wire_bit_width,
+        has_bidirectional_pins = c.has_bidirectional_pins,
     );
     c.bit_width = bit_width;
     calculate_usage(components.items(), components.len - 1, a, warn);
@@ -700,7 +697,7 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
 templates :: import("@/examples/circuit/tc/builtin.fr").templates;
 
 // `circuits` is needed for finding the pins when `c` uses a custom component. 
-find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8)) Ty(List(Component.Gate), i64) = {
+find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8), unimplemented: *bool) Ty(List(Component.Gate), i64) = {
     #use("@/examples/circuit/parse.fr");
     pos_key :: fn(a: Vec2) i64 = bit_cast_unchecked(Vec2, i64, a);
     
@@ -753,10 +750,13 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8)) Ty(
             || shape.name.starts_with("Probe")   // not yet implemented
             || shape.name.starts_with("Buffer")  // does nothing?
             || shape.name == "Custom"            // might just be for a visual block
+            || shape.name == "Custom_v2"         // "
             || shape.name == "_0"                // placeholder for editor deleted gate
+            || shape.name == "Ram_v2"            // pins are on the ports
         ;
         if no_pins && !allow_no_pins {
             @fmtln(warn, "TODO: % has no pins", shape.name);
+            unimplemented[] = true;
         };
         
         out, in := (w.slice(0, out_arity), w.rest(out_arity));
@@ -862,7 +862,7 @@ fn find_custom_impl(g_gate: *Circuit.Gate, circuits: []Circuit) ?*Circuit = {
 }
 
 fn get_arity(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, warn: *List(u8)) Ty(i64, i64) = {
-    @if(group(shape.kind) != .Tc1 || name(shape.kind, .Tc1) != .Custom) return(shape.out_arity, shape.in_arity);
+    @if(shape.body != .Custom) return(shape.out_arity, shape.in_arity);
     child := find_custom_impl(gate, circuits) || {
         @fmtln(warn, "TODO: custom component missing from dependencies?? %", gate.custom_id.id);
         return(0, 0);
@@ -873,9 +873,11 @@ fn get_arity(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit,
 fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, $body: @Fn(pin_index: i64, dx: i64, dy: i64) void) void = {
     pins := shape.pins;
     dx, dy := (0, 0);
-    if group(shape.kind) == .Tc1 && name(shape.kind, .Tc1) == .Custom {
+    if shape.body == .Custom {
         child := find_custom_impl(gate, circuits)
-            || @panic("TODO: custom component missing from dependencies?? %", gate.custom_id.id);
+            || return();
+            // dont crash because find_pins is called even if unimplemented=true for missing dependency
+            //|| @panic("TODO: custom component missing from dependencies?? %", gate.custom_id.id);
         pins = child.pins;
         
         // TODO: i don't understand why this is part of the gate not the component or why 15 is the magic number but it makes the ones i've tested look right so here we are. 
@@ -1131,8 +1133,8 @@ collect_schematics :: fn(tc_save_root: Str, a: Alloc) List(Str) = {
     dirs := Str.list(temp());
     tc_save_root.len -= int(tc_save_root.ends_with("/"));
     dirs&.push(@tfmt("%/architecture", tc_save_root));
-    // TODO: it's called foundery now
     dirs&.push(@tfmt("%/component_factory", tc_save_root));
+    dirs&.push(@tfmt("%/foundry", tc_save_root));
     while => dirs&.pop() { s |
         _ := (walk_directory_unordered(as_cstr s) { e |
             continue :: local_return;
@@ -1400,7 +1402,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
                     pos = pos,
                     settings = (word_size, buffer_size),  // TODO: need more
                     data = custom_string.shallow_copy(a),
-                    mystery_spice_minus_fifteen_for_custom_pins = vec2(0), 
+                    mystery_spice_minus_fifteen_for_custom_pins = vec2(-15), 
                     link_id = id,
                     label = user_label.shallow_copy(a),
                 );
