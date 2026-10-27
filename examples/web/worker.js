@@ -118,6 +118,7 @@ export const imports = {
         atan: (a) => Math.atan(a),
         atan2: (a, b) => Math.atan2(a, b),
         round: (a) => Math.round(a),
+        roundf: (a) => Math.round(a),
         trunc: (a) => Math.trunc(a),
 
         js_worker_stop: (status, known_wasm_jit_event_) => {

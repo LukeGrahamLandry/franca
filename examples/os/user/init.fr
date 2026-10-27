@@ -3,6 +3,11 @@ enable_memory_tracking :: @static_mut false;
 // TODO: remove libc things that aren't used
 // TODO: don't use workers
 LIGHT_WEB :: cli_args().contains(fn(it) => it[] == "-lightweb");
+LIGHT_WEB_FILE :: @if(LIGHT_WEB, {
+    i := cli_args().index_of(fn(it) => it[] == "-lightweb").unwrap();
+    @afmt(ast_alloc(), "@/%", cli_args()[i+1])
+}, "");
+LIGHT_WEB_JIT :: LIGHT_WEB_FILE == "@/examples/circuit/gui.fr" || LIGHT_WEB_FILE == "@/examples/gpu/cubes.fr";
 
 // called by kernel/start.fr/user_exec via examples/elf_loader.fr
 main :: fn() void = {
@@ -391,8 +396,8 @@ libc_exports :: @static_mut {
         };
         
         @if(LIGHT_WEB) out&.retain(fn(key, _) => true
-            && !key[].starts_with("pthread") 
-            && !key[].starts_with("dl")
+            && (!key[].starts_with("pthread") || LIGHT_WEB_JIT)
+            && (!key[].starts_with("dl") || LIGHT_WEB_JIT)
             && !key[].starts_with("posix_spawn")
         ); 
         
@@ -580,6 +585,10 @@ fn get_current_tls() *ThreadData =
 fn get_tls(thread: *Thread) *ThreadData = {
     @run @assert_eq(size_of(@type thread.runtime_data), size_of(ThreadData));
     ::ptr_utils(Thread);
+    if thread.is_null() && identical(thread, Thread.ptr_from_raw(tls(.thread)[])) {
+        host_platform'debug_write("missing env.thread");
+        host_platform'shutdown(false);
+    };
     @assert(!thread.is_null(), "missing env.thread");
     thread := bit_cast_unchecked(@type thread.runtime_data&, *ThreadData, thread.runtime_data&);
     thread

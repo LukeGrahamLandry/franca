@@ -8,6 +8,8 @@
   - dont crash in for_pins,calculate_usage
   - dont clear pins so can still look in the cc
 
+- spent a very long time on web-aot-cubes dying super early because startup_table_assign wasnt big enough. 
+  thats before get_tls works so you loop on "missing env.thread" trying to panic
 ## (Oct 26) circuit
 
 - place diagonal wires. edit constants. remember wire widths for ui. 

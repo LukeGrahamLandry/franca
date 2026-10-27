@@ -22,7 +22,7 @@ fn main(argc: i64, argv: *CStr, envp: *CStr, sp: i64) void = {
     host_platform[] = web_platform;
     
     // must be done early so mmap works in allocate_stack
-    globals.startup_table_assign = from_capacity(@run ast_alloc().alloc_uninit(Ty(i32, i32), 64));
+    globals.startup_table_assign = from_capacity(@run ast_alloc().alloc_uninit(Ty(i32, i32), 128));
     for_wasm_imports { i, name |
         if libc_exports.get(name) { addr |
             dest, src := (i.intcast(), addr.int_from_rawptr().intcast());
@@ -30,7 +30,10 @@ fn main(argc: i64, argv: *CStr, envp: *CStr, sp: i64) void = {
             push_assume_capacity(globals.startup_table_assign&, (dest, src));
         };
     };
-    @assert(globals.startup_table_assign.len <= globals.startup_table_assign.cap);
+    if globals.startup_table_assign.len > globals.startup_table_assign.cap {
+        host_platform'debug_write("startup_table_assign");
+        host_platform'shutdown(false);
+    };
     globals.startup_table_assign.cap = globals.startup_table_assign.len;  // assert no push after startup. 
     
     // TODO: don't waste the memory of the original stack
@@ -87,8 +90,7 @@ main2 :: fn() void = {
     tls(.prefer_syscalls)[] = false;
     @if(!LIGHT_WEB) import("@/examples/web/demo.fr")'main();
     @if(LIGHT_WEB) {
-        i :: cli_args().index_of(fn(it) => it[] == "-lightweb").unwrap();
-        import(@run @afmt(ast_alloc(), "@/%", cli_args()[i+1]))'main();
+        import(LIGHT_WEB_FILE)'main();
     };
     host_platform'shutdown(true);
 }
@@ -347,7 +349,7 @@ table_assign :: AsmFunctionWasmOnly(fn(dest: i32, src: i32) void = (), fn(out) =
 });
 
 fetch_root_fs :: fn(args: []CStr) []u8 = {
-    @if(LIGHT_WEB) return(@run ast_alloc().alloc_init(u8, 8, fn(i) => @if(i == 0, 8, 0)));
+    @if(@run(LIGHT_WEB && !LIGHT_WEB_JIT)) return(@run ast_alloc().alloc_init(u8, 8, fn(i) => @if(i == 0, 8, 0)));
     
     i := args.index_of(fn(it) => it[] == "-rootfs_hash").expect("rootfs_hash");
     rootfs_hash := args[i + 1].str();

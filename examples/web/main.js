@@ -95,7 +95,7 @@ function get_worker() {
         };
         w.onmessage = (e) => console.error(e);
         if (wasm_module === undefined) throw "get_worker before load_wasm";
-        w.postMessage({ tag: "setmodule", module: wasm_module });
+        w.postMessage({ tag: "setmodule", module: prev_was_aot ? aot_wasm_module : wasm_module });
         thread_pool.push(w);
     };
     return thread_pool.pop();
@@ -181,13 +181,13 @@ const toggle_worker = async (resolve) => {
             ...(document.getElementById("arg_unsafe").checked ? ["-unsafe"] : []),
             ...(dbg.length == 0 ? [] : (dbg.includes("-") ? dbg.split(" ") : ["-d", dbg])),
         ];
+        if (aot) {
+            const source_path = document.getElementById("example").value;
+            aot_wasm_module = await load_wasm(precompiled_wasm_path(source_path));
+        }
         worker = get_worker();
         worker.onmessage = handle(resolve, handle_app_request__);
         
-        if (aot) {
-            const source_path = document.getElementById("example").value;
-            worker.postMessage({ tag: "setmodule", module: await load_wasm(precompiled_wasm_path(source_path)) });
-        }
         
         // need to do this extra dance because you can't un-transferControlToOffscreen, 
         // and when you run a new program i give you a new worker. 
@@ -258,6 +258,7 @@ const worker_url = `./${manifest_version}/worker.js`;
 // _: my hope is that i can ask it to prefetch everything i want and then it will be faster on the workers via magic.   
 const _worker_script = fetch(worker_url);
 let [wasm_module, rootfs] = [null, null];
+let aot_wasm_module = null;
 if (lang !== "aot") await prefetch();
 async function prefetch() {
     const [a, b] = await Promise.all([

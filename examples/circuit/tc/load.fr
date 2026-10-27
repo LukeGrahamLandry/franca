@@ -117,7 +117,7 @@ load_all_circuits :: fn(original_root: Str, a: Alloc, warn: *List(u8)) Ty([]Circ
         files&.push(original_root);
     };
     if root.ends_with("/v1/schematics/") {  // HACK
-        it := @tfmt("%/v2/schematics/", root.pop_path_segment().pop_path_segment());
+        it := @tfmt("%v2/schematics/", root.pop_path_segment().pop_path_segment());
         it := collect_schematics(it, temp()).items();
         files&.push_all(it);
     };
@@ -459,10 +459,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     insert_consts_for_dead_wires(components.items(), gates&);
     @debug_assert_eq(bit_width.len, custom_pins.len);
     
-    wire_bit_width: []u8 = empty();
-    if !c.v2 { // TODO
-        wire_bit_width = insert_bit_width_casts(components.items(), gates&, wire_count&, bit_width, warn);
-    };
+    wire_bit_width := insert_bit_width_casts(components.items(), gates&, wire_count&, bit_width, warn);
     logical_to_circuit&.push_repeated(gates.len - logical_to_circuit.len, -1);
     new_gates, order := schedule_gates(c, gates, wire_count, a, out.items(), in.items(), components.items(), warn);
     gates := new_gates;
@@ -833,11 +830,19 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8), uni
             }
             
             k := @if(group(it.kind) != .Tc2, GateName(.Tc2).None, name(it.kind, .Tc2));
+            // TODO: check length and error
+            s := it.settings;
             @match(k) {
                 fn Static_indexer() => {
-                    width, shift := (it.settings[0], it.settings[2]);
+                    width, shift := (s[0], s[2]);
                     s: Builtin.Settings.StaticIndex = construct(width = width, shift = shift.abs(), left = int(shift < 0));
                     param = s.repr.bitcast();
+                }
+                fn Segment_display() => {
+                    param = 0;  // v2 no colour
+                }
+                fn Constant() => {
+                    param = s[2];
                 }
                 @default => ();
             };
@@ -1042,7 +1047,7 @@ insert_consts_for_dead_wires :: fn(components: []Component, gates: *List(Compone
 }
 
 fn get_bit_width(components: []Component, it: *Component.Gate) []u8 = {
-    if it.kind.group() == .Tc1 {
+    if @is(it.kind.group(), .Tc1, .Tc2) {
         shape := get_builtin_shape(it.kind);
         return get_bit_width(shape, it.param);
     };
@@ -1053,15 +1058,22 @@ fn get_bit_width(components: []Component, it: *Component.Gate) []u8 = {
 fn get_bit_width(shape: *Tc.Builtin.Template, param: i64) []u8 = {
     if group(shape.kind) == .Tc2 {
         k := name(shape.kind, .Tc2);
-        //if @is(k, .Neg, .Mul, .Div) {  // all same
+        //if @is(k, .Not_word, .Neg) {  // all same
             //return temp().alloc_init(u8, shape.pins.len, fn(_) => 
         //};
         
+        // and outputs will need truncations
+        // , .Mul, .Div
         //if @is(k, .Lsl, .Lsr, .Rol, .Ror, .Asr) {  // one input is smaller
         //};
         
         //if @is(k, .Equal, .Less_u, .Less_s) {  // bool out
         //};
+        
+        if k == .Static_indexer {
+            p: Builtin.Settings.StaticIndex = (repr = param.bitcast());
+            return shallow_copy(@slice(@as(u8) p.get(.width).trunc(), 0x80), temp());
+        };
     };
 
     if !shape.has_param || group(shape.kind) != .Tc1 {

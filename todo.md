@@ -17,6 +17,7 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 
+- the extra math added to libc_exports in host/web is too late for LIGHT_WEB because there the imports are real. need to do startup_table_assign
 - examples/web/build.fr: if theres a compile error in an aot one, it still thinks it doesnt need to rerun if you dont change a file
 - annoying that you cant run_tests build_graphics alone because "failed to record cross_repro"
 - `if (1*2).ult(3) {` parses wrong
