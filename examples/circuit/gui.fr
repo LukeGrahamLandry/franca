@@ -670,7 +670,12 @@ fn draw_gate_squares(self: *Draw, circuit: *Tc.Circuit) void = {
                 };
                 sdtx.put("]");
             };
-            for (@slice(it.data, it.label)) { s |
+            
+            if state.show_wire_ref_lines {
+                sdtx.put(@tfmt(" %", it.link_id));
+            };
+            
+            for (@slice(it.label)) { s |
                 if s.len != 0 {
                     sdtx.pos.x = base;
                     sdtx.pos.y += 1;
@@ -713,6 +718,7 @@ fn draw_wires(self: *Draw, circuit: *Tc.Circuit) void = {
             if hover && state.edit.enable && state.edit&.no_selection() && state.clicked&.take() {
                 state.edit.placing_wire_start = (Some = (wire_i, i));
             };
+            this_hover := hover;
             if self.hovered_wire_index.is_some() && self.hovered_wire_index.Some._0.id == wire.logical.id && (i == 0 || i == wire.path.len - 1) {
                 // TODO: these will be kinda useless because it doesn't reset wire_hover_count when for the next wire that's at a different x position. 
                 hover = true;
@@ -721,12 +727,20 @@ fn draw_wires(self: *Draw, circuit: *Tc.Circuit) void = {
             if hover {
                 sgl.color = pack_rgba(200, 50, 50, 255);
                 sdtx.pos = self.world_to_text_pos(b) + vec2(0, self.wire_hover_count);
+                base := sdtx.pos.x;
                 sdtx.color = pack_rgba(255, 255, 255, 255);
                 sdtx.put(@tfmt("% (%, %) ", wire_i, it.pos.x, it.pos.y));
                 if !circuit.has_bidirectional_pins {
                     @if(wire.logical.id != 0xFFFFFFFF) self.show_wire_value(wire.logical, true);
                 };
                 self.wire_hover_count += 1;
+                
+                if this_hover && wire.comment.len != 0 {
+                    sdtx.color = pack_rgba(200, 200, 200, 255);
+                    sdtx.pos = self.world_to_text_pos(b) + vec2(0, self.wire_hover_count);
+                    self.wire_hover_count += 1;
+                    sdtx.put(wire.comment);
+                };
             };
             
             real := i == 0 || i == wire.path.len - 1;  // else: only for routing, can't connect to pins
@@ -742,9 +756,15 @@ fn draw_pin_lines(self: *Draw, circuit: *Tc.Circuit) void = {
     @if(state.loader.progress == .Loading) return();
     
     each circuit.gates { it |
+        a := self.tc_to_world_pos(it.pos);
+        if it.port_linked_list.ult(circuit.gates.len) {
+            b := self.tc_to_world_pos(circuit.gates[it.port_linked_list].pos);
+            sgl.color = pack_rgba(143, 186, 255, 50);
+            sgl.line(a, b, W/4);
+        };
+        
         info := Tc'get_builtin_shape(it.kind);
         for_pins(info, it, state.circuit) { i, dx, dy |
-            a := self.tc_to_world_pos(it.pos);
             b := self.tc_to_world_pos(it.pos + vec2(dx.float().cast(), dy.float().cast()));
             
             out_arity, in_arity := get_arity(info, it, state.circuit, @static u8.list(panicking_allocator));

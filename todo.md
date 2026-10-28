@@ -27,6 +27,7 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
   - tests for the editor. ex. wire routing/splitting
   - why does circuit fetch the wasm4 dep. it uses that file for atlas but shouldn't be compiling the c? an overload signeture i guess, thats so annoying. 
   - allocate World contigously with .storage
+  - wtf, it looks suspisously like transparency doesnt work on the first frame in draw_pin_lines.port_linked_list
 - it technically works now but the circuit editor still feels incredibly bad to use. 
   deleting wires is the most obviously broken part. undiscoverable keybinds is also bad. 
   i feel like sometimes my clicks don't go. i actually wonder if my right mouse button is fucked because ive been annoyed by phantom double clicking in programs i didnt write too

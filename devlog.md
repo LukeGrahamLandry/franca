@@ -1,6 +1,16 @@
 
+## (Oct 28) circuit
 
 - so strange that static value is the one magic component that i cant use in the sandbox until i do symphony_decoder level
+- multiple port share a ram. this is way better than the v1 combinatoric explosion of ram types. 
+  port impl needs to know the ram's instance. 
+  putting it in param wont work if its inside aa cc because base instance isnt 0. (which im doing wrong for console rn.). 
+  port connecting is just based on position, not wires/link_id. 
+  ports run in order so schedule_gates needs to know about them.
+- sadly the assembled programs aren't in there cause im really not interested in writing an assembler generator thing rn
+  but i had success with running their assembler as a seperate program
+  - https://github.com/Stuffe/isa_spec https://nim-lang.org/install_unix.html
+  - `./nim-2.4.0/bin/nim compile main && ./main spec.isa new_program.asm` makes new_program.bin
 
 ## (Oct 27) circuit
 

@@ -45,6 +45,7 @@ Circuit :: @struct {
         path: RawList(WireNode);
         logical: WireId = (id = 0xFFFFFFFF);
         teleport := false;
+        comment := "";
     };
     WireNode :: @struct(pos: Vec2, direction: Vec2 = vec2(0), length: i64 = 0);
     Gate :: @struct {
@@ -59,7 +60,11 @@ Circuit :: @struct {
         logical_gate_index := -1;
         link_id: i64 = 0;  // ram.link_id is referenced by console.data. `{rom.link_id}.rom` file has init data. 
         label: Str = "";
+        // ram -> ports (reverse of execution order :()
+        port_linked_list := -1;  // index in Circuit.gates
+        watched: []Watched = empty();
     };
+    Watched :: @struct(id: i64, inner_id: i64, name: Str, offset: i64, word_size: i64);
     Program :: @struct {
         SANDBOX_LEVEL_ID :: 86;
         level_id: i64;
@@ -163,14 +168,21 @@ load_all_circuits :: fn(original_root: Str, a: Alloc, warn: *List(u8)) Ty([]Circ
         each info.gates { it |
             continue :: local_return;
             
-            check_file(.Rom, "rom");
-            check_file(.Hdd, "hdd");
-            check_file :: fn(kind: GateName(.Tc1), ext) => if group(it.kind) == .Tc1 && gate_name(it.kind, .Tc1) == kind {
+            check_file("Rom", "rom");
+            check_file("Hdd", "hdd");
+            check_file("Ram_v2", "bin");
+            check_file :: fn($name: Str, ext) => {
+                kind := get_component_by_name(name, builtin_components);
+            if it.kind.id == kind.id {
                 it.data = "";
                 if read_entire_file(a, @tfmt("%%.%", dir, it.link_id, ext)) { data |
                     it.data = data;
                 };
+                if read_entire_file(a, @tfmt("%sandbox/%.%", dir, it.link_id, ext)) { data |
+                    it.data = data;
+                };
                 continue();
+            };
             };
             
             if group(it.kind) != .Tc1 || !@is(gate_name(it.kind, .Tc1), .FileLoader, .SpriteDisplay) {
@@ -266,6 +278,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         };
         
         original_gate := c.gates[i]&;
+        original_gate.port_linked_list = -1;  // dont warn about multiple being connected when recompiling
         shape := get_builtin_shape(it.kind);
         
         if shape.name.starts_with("Bidirectional") {
@@ -324,7 +337,8 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         if shape.switches.len != 0 {
             widths := get_bit_width(shape, it.param);
             for shape.switches { pin |
-                apply_switchable_pin(it.outputs[pin.value_output_index]&, it.inputs[pin.condition_input_index]&, widths[pin.value_output_index]);
+                width := @if(widths.len > pin.value_output_index, widths[pin.value_output_index], original_gate.settings[0].trunc());
+                apply_switchable_pin(it.outputs[pin.value_output_index]&, it.inputs[pin.condition_input_index]&, width);
             };
         }
         
@@ -366,7 +380,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 x = (x.align_to(8) - OFF)/8;
                 y = (y.align_to(8) - OFF)/8;
                 insert(custom_pins&, dest, (x, y));
-                width: u8 = @if(shape.name.starts_with("Cc"),
+                width: u8 = @if(shape.name.starts_with("Cc") || shape.name == "Level_input_switched",
                     original_gate.settings[0].trunc(),
                     @if(shape.bit_width.len == 0, 0, shape.bit_width[0]));
                 insert(bit_width&, dest, width);
@@ -375,6 +389,14 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                     insert(custom_pins&, dest + 1, (HACK_NONE_PIN_POSITION, HACK_NONE_PIN_POSITION));
                     insert(bit_width&, dest + 1, 1);
                     output_pin_count += 1;
+                };
+                
+                // TODO: be consistant about treating these the same as cc ones. rn dest is wrong 
+                //       but also this wouldnt work at all if you tried to put them in a cc anyway. 
+                //       cause would need to chain them from the top which is convoluted. 
+                if /* shape.name == "LevelInputArch" ||*/ shape.name == "Level_input_switched" {
+                    insert(custom_pins&, dest + 1, (HACK_NONE_PIN_POSITION, HACK_NONE_PIN_POSITION));
+                    insert(bit_width&, dest + 1, 1);
                 };
                 
                 output_pin_count += int(!is_input); 
@@ -445,6 +467,9 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     };  
     logical_to_circuit&.push_repeated(extra_gates, -1);
     
+    // after `kill` so no more reordering the graphical ones
+    assign_port_links(c.gates.items(), warn);    
+    
     c.arity = (out.len, in.len);
     if unimplemented { 
         gates.len = 0;
@@ -474,6 +499,11 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
             c.gates[gate_i].logical_gate_index = i;
         };
     };
+    assign_port_param(c.gates.items(), gates.items());
+    
+    each gates { it |
+        @if(it.kind.is_port() && it.get_param(.Port)[].get(.connected) == 0) @fmtln(warn, "port without ram");
+    };
     
     name := safe_name(c.name, a);
     c.compiled = (Some = (id = components.len.trunc()));
@@ -497,11 +527,25 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     find_links_for_lastest_component(c, components.items(), warn);
 }
 
-// TODO: report errors better
 find_links_for_lastest_component :: fn(c: *Circuit, components: []Component, warn: *List(u8)) void = {
     component := components[components.len - 1]&;
     each c.gates { it |
         continue :: local_return;
+        
+        if group(it.kind) == .Tc2 && name(it.kind, .Tc2) == .Screen {
+            each it.watched { watched |
+                if c.gates.index_of(fn(it) => it.link_id == watched.id) { i |
+                    ram := c.gates[i]&;
+                    if group(ram.kind) == .Tc2 && name(ram.kind, .Tc2) == .Ram_v2 {
+                        @if(it.port_linked_list != -1) @fmtln(warn, "screen had multiple linked rams");
+                        it.port_linked_list = i;
+                    };
+                };
+            };
+            @if(it.port_linked_list == -1) @fmtln(warn, "didn't find screens's linked ram");
+            continue();
+        };
+
         if group(it.kind) != .Tc1 || name(it.kind, .Tc1) != .Console {
             continue();
         };
@@ -521,10 +565,11 @@ find_links_for_lastest_component :: fn(c: *Circuit, components: []Component, war
                 continue();
             };
             
-            ram := c.gates.find(fn(it) => it.link_id == linked0) || {
+            ram_index := c.gates.index_of(fn(it) => it.link_id == linked0) || {
                 @fmtln(warn, "didn't find console's linked id %", linked0);
                 continue();
             };
+            ram := c.gates[ram_index]&;
             if ram.logical_gate_index == -1 {
                 @fmtln(warn, "TODO: console's linked ram doesn't have logical_gate_index");
                 continue();
@@ -535,12 +580,65 @@ find_links_for_lastest_component :: fn(c: *Circuit, components: []Component, war
             };
             instance := component.instance_offset_by_gate[ram.logical_gate_index];
             
+            it.port_linked_list = ram_index;
+            // TODO: do this like how ports do so can allow console in custom component where base instance wont be 0
             logical_gate := component.gates[it.logical_gate_index]&;
             T :: Builtin.Settings.Console;
             param: T = (repr = logical_gate.param.bitcast());
             param&.set(.linked_ram_instance, instance);
             param&.set(.linked, 1);
             logical_gate.param = param.repr.bitcast();  // :PatchConsoleLink
+    };
+};
+
+assign_port_links :: fn(gates: []Circuit.Gate, warn: *List(u8)) void = {
+    enumerate gates { gate_i, gate |
+        continue :: local_return;
+        @if(group(gate.kind) != .Tc2 || name(gate.kind, .Tc2) != .Ram_v2) continue();
+        
+        prev := gate;
+        port_pos := gate.pos + vec2(0, -7);
+        dowhile {
+            found := false;
+            enumerate gates { i, it |
+                if is_port(it.kind) {
+                    height: f32 = @if(name(it.kind, .Tc2) == .Store_port, 3, 2);
+                    if it.pos == port_pos - vec2(0, height) {
+                        if prev.port_linked_list != -1 {
+                            @fmtln(warn, "multiple ports in the same position");
+                        };
+                        prev.port_linked_list = i;
+                        port_pos = it.pos;
+                        prev = it;
+                        found = true;
+                    };
+                };
+            };
+            found
+        };
+    };
+};
+
+assign_port_param :: fn(gates: []Circuit.Gate, logical: []Component.Gate) void = {
+    each gates { gate |
+        continue :: local_return;
+        @if(group(gate.kind) != .Tc2 || name(gate.kind, .Tc2) != .Ram_v2) continue();
+        @if(gate.logical_gate_index == -1) continue();
+        
+        p := logical[gate.logical_gate_index]&.get_param(.Ram_v2)[];
+        ram_size_bytes, little_endian := (p.get(.ram_size_bytes), p.get(.little_endian));
+        
+        i := gate.port_linked_list;
+        while => i != -1 {
+            it := gates[i]&;
+            g := logical[it.logical_gate_index]&;
+            @debug_assert(it.kind.is_port() && g.kind.id == it.kind.id, "expected port");
+            p := g.get_param(.Port);
+            p.set(.little_endian, little_endian);
+            p.set(.ram_size_bytes, ram_size_bytes);
+            p.set(.connected, 1);
+            i = it.port_linked_list;
+        };
     };
 };
 
@@ -608,6 +706,8 @@ fn push_inputs_outputs(gates: *List(Component.Gate), out: []WireId, in: []WireId
     gates.push(kind = O, inputs = out, outputs = empty());
 }
 
+// TODO: ports depend on the ones above them
+//       and cant pre_read a load port until the store above it is done. 
 schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, a: Alloc, out: []WireId, in: []WireId, components: []Component, warn: *List(u8)) Ty(List(Component.Gate), []i64) = {
     order := i64.list(temp());
     ready: DynamicBitSet = empty(temp()); // [WireId]
@@ -707,6 +807,9 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
     
     (gates, order.items())
 };
+
+fn is_port(kind: ComponentId) bool = 
+    group(kind) == .Tc2 && @is(name(kind, .Tc2), .Load_port, .Store_port, .Pipelined_load_port);
 
 templates :: import("@/examples/circuit/tc/builtin.fr").templates;
 
@@ -859,9 +962,26 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8), uni
                 fn Maker_word_2() => maker(s[0], 2);
                 fn Maker_word_4() => maker(s[0], 4);
                 fn Maker_word_8() => maker(s[0], 8);
+                fn Ram_v2() => {
+                    s: Builtin.Settings.Ram_v2 = construct(
+                        init = s[s.len - 1], // InitDataKind
+                        little_endian = s[s.len - 2],
+                        ram_size_bytes = @if(s[1] == 0, 256, s[1].clamp(0, 1.shift_left(40))),
+                    );
+                    param = s.repr.bitcast();
+                }
                 @default => {
                     if @is(k, .Splitter_word_8, .Splitter_word_4, .Splitter_word_2) {
                         param = s[0];
+                    };
+                    if is_port(it.kind) {
+                        p: Builtin.Settings.Port = (repr = 0);
+                        if s[0] != 8 && s[0] != 16 && s[0] != 32 && s[0] != 64 {
+                            @fmtln(warn, "% bad memory width: %", k, s[0]);
+                            unimplemented[] = true;
+                        };
+                        p&.set(.width, s[0]);
+                        param = p.repr.bitcast();
                     };
                 };
             };
@@ -1088,11 +1208,21 @@ fn get_bit_width(shape: *Tc.Builtin.Template, param: i64) []u8 = {
         break :: local_return;
         k := name(shape.kind, .Tc2);
         r := temp().alloc_init(u8, shape.pins.len, fn(_) => param.trunc());
-        if @is(k, .Or_word, .Nand_word, .Xor_word, .Delay_line_word, .Constant) {  // all same
+        
+        if k == .Constant {
+            // TODO: this is wrong if i try to use it for the static eval width math
+            r[0] = @if(param == 0, 1, 64 - param.leading_zeros().trunc());
             return r;
         };
-        // .Not_word, .Xnor_word, .Nor_word, .Neg, sub, .Mul, .Div
-        // are all same but outputs need truncations because bits can spill out if less than 64 bit
+        
+        if @is(k, .Or_word, .Nand_word, .Xor_word, .Delay_line_word) {  // all same
+            return r;
+        };
+        
+        // TODO: but outputs need truncations because bits can spill out if less than 64 bit
+        if @is(k, .Not_word, .Xnor_word, .Nor_word, .Neg, .Mul, .Div, .Mod) {
+            return r;
+        };
         
         // and outputs will need truncations
         //if @is(k, .Lsl, .Lsr, .Rol, .Ror, .Asr) {  // one input is smaller
@@ -1100,6 +1230,17 @@ fn get_bit_width(shape: *Tc.Builtin.Template, param: i64) []u8 = {
         
         if @is(k, .Equal, .Less_u, .Less_s) {  // bool out
             r[0] = 1;
+            return r;
+        };
+        
+        if is_port(shape.kind) {
+            param: Builtin.Settings.Port = (repr = param.bitcast());
+            w: u8 = param.get(.width).trunc();
+            if @is(k, .Store_port) {
+                r.copy_from(@slice(0x01, 64, w));
+            } else {
+                r.copy_from(@slice(w, 1, 64));
+            };
             return r;
         };
         
@@ -1117,6 +1258,7 @@ fn get_bit_width(shape: *Tc.Builtin.Template, param: i64) []u8 = {
         @match(k) {
             fn Mux() => { r[1] = 1; };
             fn Switch_word() => { r[2] = 1; };
+            fn Level_input_switched() => { r[1] = 1; };
             fn Register_word() => { r[1] = 1; };
             fn Splitter_word_2() => { r[2] *= 2; }
             fn Splitter_word_4() => { r[4] *= 4; }
@@ -1151,6 +1293,7 @@ fn get_bit_width(shape: *Tc.Builtin.Template, param: i64) []u8 = {
     shape.bit_width
 }
 
+// #alias(tc'init)
 // this only does the ones with explicit starting values. caller must world.storage.set_zeroed() first for the rest. 
 set_initial_data :: fn(world: *World, circuits: []Tc.Circuit, root: ComponentId, instance: i64) void = {
     c := world[root]&;
@@ -1158,13 +1301,39 @@ set_initial_data :: fn(world: *World, circuits: []Tc.Circuit, root: ComponentId,
     @if(c.storage_count == 0 || c.gates.len == 0) return();
     circuit := circuits.find(fn(it) => it.compiled.is_some() && it.compiled.Some.id == root.id) || return();
     
+    instance_base := instance;
     enumerate circuit.gates { c_gate_i, c_gate |
         continue :: local_return;
         gate_i := c_gate.logical_gate_index;
         @if(gate_i == -1) continue();
         gate := c.gates[gate_i]&;
         instance := instance + c.instance_offset_by_gate[gate_i];
+        
+        @if(group(gate.kind) == .Loaded)
         set_initial_data(world, circuits, gate.kind, instance);  // might be a rom inside a custom component
+        
+        if group(gate.kind) == .Tc2 && name(gate.kind, .Tc2) == .Ram_v2 {
+            p := gate.get_param(.Ram_v2)[];
+            init_kind := @as(InitDataKind) @as(i64) p.get(.init);
+            if init_kind != .Zeroes {
+                dest := world.storage.rest(instance).interpret_as_bytes().slice(0, p.get(.ram_size_bytes));
+                n := min(dest.len, c_gate.data.len);
+                dest.slice(0, n).copy_from(c_gate.data.slice(0, n));
+            };
+            
+            i := c_gate.port_linked_list;
+            while => i != -1 {
+                port := circuit.gates[i]&;
+                @debug_assert(port.kind.is_port(), "expected port");
+                @debug_assert_eq(get_storage_count(world.components, c.gates[port.logical_gate_index]&), 1);
+                port_instance := instance_base + c.instance_offset_by_gate[port.logical_gate_index];
+                world.storage[port_instance] = instance;
+                i = port.port_linked_list;
+            };
+            
+            continue();
+        };
+        
         @if(group(gate.kind) != .Tc1) continue();
         n := get_storage_count(world.components, gate);
         dest := world.storage.subslice(instance, n);
@@ -1328,8 +1497,19 @@ fn get_builtin_shape(it: ComponentId) *Builtin.Template = {
     }
 }
 
+SettingName :: enum_from_scope_names(Builtin.Settings);
+SettingType :: fn(N: SettingName) Type #fold = {
+    ::enum_derive(@type N);
+    get_constant(Type, Type.scope_of(Builtin.Settings), N.name_str().sym()).unwrap()
+}
+fn get_param(gate: *Component.Gate, $N: SettingName) *SettingType(N) #generic = {
+    bit_cast_unchecked(*i64, *SettingType(N), gate.param&)
+}
+
 fn is_placeholder(kind: ComponentId) bool =  // for deleting in editor
     group(kind) == .Tc1 && Tc'gate_name(kind, .Tc1) == ._0; 
+
+InitDataKind :: @enum(Zeroes, Assembler, PunchCard, File, HexEditor, Persistent);  // order matters
 
 // https://github.com/Stuffe/save_monger/blob/22fa398d95c3d3a0b5e88a80e9daee613cab1823/versions/v6.nim CC0
 // version=6 is non-save_breaker 0.1059 beta, 
@@ -1462,22 +1642,25 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
         } else {
                 settings := eatN(u16, i64);
                 buffer_size := eat(i64);
-                eat(i16);
+                eat(i16);  // ui order
                 word_size := eat(i64);
                 is_immutable := eat(bool);
                 if version >= 14 {
+                    // gate/delay variant
                     eat(i64); eat(i64);
                 };
                 is_little_endian := eat(bool);
                 init_data_kind := eat(u8);
           
-                watched := eat(u16);
-                range(0, watched.zext()) { _ |
+                n_watched := eat(u16);
+                watched := @ref Circuit.Watched.list(a);
+                range(0, n_watched.zext()) { _ |
                     id := eat(i64);
                     inner_id := eat(i64);
-                    name := eatN(u16, u8);
+                    name := eatN(u16, u8).shallow_copy(a);
                     offset := eat(i64);
                     word_size := eat(i64);
+                    watched.push(id=id,inner_id=inner_id,name=name,offset=offset,word_size=word_size);
                 };
                 program_count := eat(u16);
                 range(0, program_count.zext()) { _ |
@@ -1485,10 +1668,15 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
                     value := eatN(u16, u8);
                 };
                 
-                s := @ref i64.list(settings.len, a);
+                s := @ref i64.list(settings.len+2+int(kind == 118)*2, a);
                 s.push(word_size);
                 s.push(buffer_size);
                 s.push_all(settings);
+                
+                if kind == 118 { // com_ram
+                    s.push(int(is_little_endian));
+                    s.push(int(init_data_kind));
+                };
                 
                 if kind == 78 { // com_custom
                     custom_id = eat(CustomId);
@@ -1516,6 +1704,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
                     mystery_spice_minus_fifteen_for_custom_pins = vec2(-15), 
                     link_id = id,
                     label = user_label.shallow_copy(a),
+                    watched = watched.items(),
                 );
         };
         
@@ -1579,7 +1768,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
         // non-version 16 has path reversed but i dont think direction matters?
         
         @if(path.len == 1) return(Err = "bad wire path length?");
-        wires&.push(path = path.as_raw(), teleport = path[0].length == 0);
+        wires&.push(path = path.as_raw(), teleport = path[0].length == 0, comment = comment.shallow_copy(a));
         
         for path { it |
             min_pos = min(min_pos, it.pos);

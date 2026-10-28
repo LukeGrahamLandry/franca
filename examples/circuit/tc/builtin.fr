@@ -1,3 +1,5 @@
+// TODO: conver the old rams into something made out of load/store ports
+
 Template :: @struct {
     in_arity: i64;
     out_arity: i64;
@@ -102,9 +104,12 @@ templates :: collect_templates(impl, .Tc1, pin_layouts) { it, k |
 
 templates2 :: collect_templates(impl2, .Tc2, pin_layouts2) { it, k |
     it.bit_width = get_width_data2(it);
-    it.has_param = it.has_param || @is(k, .Static_indexer, .Segment_display);
-    if @is(k, .Register_word) {
+    it.has_param = it.has_param || @is(k, .Static_indexer, .Segment_display, .Load_port, .Store_port, .Ram_v2);
+    if @is(k, .Register_word, .Delay_line_word, .Delay_line_bit) {
         it.inputs_for_pure_eval = empty();
+    };
+    if k == .Load_port {
+        it.switches = ast_alloc().alloc_init(Template.SwitchablePin, 1, fn(i) => (value_output_index = 0, condition_input_index = 0));
     };
 };
 
@@ -117,6 +122,7 @@ Settings :: @struct {
         word_size_index := 3,
         is_program := 1,
     );
+    // TODO: for it to work in custom component `linked_ram_instance` needs to be in storage instead
     Console :: @bit_fields(
         colour := 1, 
         font := 2, 
@@ -129,6 +135,8 @@ Settings :: @struct {
     );
     Mul64 :: @bit_fields(need_high := 1, _ := 63);
     StaticIndex :: @bit_fields(width := 8, shift := 6, left := 1, _ := 49);
+    Port :: @bit_fields(width := 8, little_endian := 1, connected := 1, ram_size_bytes := 54);
+    Ram_v2 :: @bit_fields(little_endian := 1, init := 8, ram_size_bytes := 55);
 };
 
 fn word_size(param: Settings.Ram) i64 = 1.shift_left(param.get(.word_size_index)); // [1, 2, 4, 8, 16, 32]
@@ -869,7 +877,9 @@ Less_u :: impl.LessU64;
 Less_s :: impl.LessI64;
 Neg :: impl.Neg64;
 Add :: impl.Add64;
-Mul :: todo();
+Mul :: math(1, 2) { o, i | 
+    o[0] = i[0] * i[1];
+};
 Div :: math(1, 2) { o, i | 
     o[0] = @if(i[1] == 0, 0, i[0].udiv(i[1]));
 };
@@ -910,9 +920,57 @@ Register_word_config :: todo();
 Delay_line_word_asm :: todo();
 Push_button :: todo();
 Pipelined_load_port :: todo();
-Load_port :: todo();
+Load_port :: device(1, 2,
+    fn(it) => 64,
+    fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 2), param: i64, instance: i64, doing_pre_read: bool) void = {
+        enable, address := (i[0] != 0, i[1]);
+        @if(!enable) return();
+        param: Settings.Port = (repr = param.bitcast());
+        @if(param.get(.connected) == 0) return();
+        instance := world.storage[instance];  // the linked ram
+        data := world.storage.rest(instance).interpret_as_bytes().slice(0, param.get(.ram_size_bytes));
+        if ((address + param.get(.width)/8).ugt(data.len)) {
+            o[0] = 0;
+            return();
+        };
+        data := data.rest(address);
+        value := @switch(param.get(.width)) {
+            @case(8) => data[0].int();
+            @case(16) => u16.reinterpret_bytes(data)[0].int();
+            @case(32) => u32.reinterpret_bytes(data)[0].int();
+            @case(64) => i64.reinterpret_bytes(data)[0];
+            @default => unreachable();
+        };
+        if param.get(.little_endian) == 0 {
+            value = value.byte_swap().shift_left(64 - param.get(.width));
+        };
+        o[0] = value;
+    },
+);
 Delay_line_word :: impl.DelayLine64;
-Store_port :: todo();
+Store_port :: device(0, 3,
+    fn(it) => 64,
+    fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 3), param: i64, instance: i64, _0: bool) void = {
+        enable, address, value := (i[0] != 0, i[1], i[2]);
+        @if(!enable) return();
+        param: Settings.Port = (repr = param.bitcast());
+        @if(param.get(.connected) == 0) return();
+        if param.get(.little_endian) == 0 {
+            value = value.byte_swap().shift_left(64 - param.get(.width));
+        };
+        instance := world.storage[instance];  // the linked ram
+        data := world.storage.rest(instance).interpret_as_bytes().slice(0, param.get(.ram_size_bytes));
+        @if((address + param.get(.width)/8).ugt(data.len)) return();
+        data := data.rest(address);
+        @switch(param.get(.width)) {
+            @case(8) => { data[0] = value.trunc(); };
+            @case(16) => { u16.reinterpret_bytes(data)[0] = value.trunc(); };
+            @case(32) => { u32.reinterpret_bytes(data)[0] = value.trunc(); };
+            @case(64) => { i64.reinterpret_bytes(data)[0] = value; };
+            @default => unreachable();
+        };
+    },
+);
 Ctz :: todo();
 Cc_level_output :: todo();
 Level_gate :: todo();
@@ -952,7 +1010,12 @@ Segment_display :: device(0, 1,
     },
 );
 Static_value :: todo();
-Screen :: todo();
+Screen :: device(0, 3, 
+    fn(_) => 64,
+    fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 3), instance: i64, _1: bool) void = {
+        // TODO
+    },
+);
 Time :: device(1, 0, 
     fn(_) => 0,
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 0)) void = {
@@ -961,7 +1024,13 @@ Time :: device(1, 0,
         o[0] *= 1000;  // ns
     },
 );
-Keyboard_v2 :: todo();
+Keyboard_v2 :: device(3, 1, 
+    fn(_) => 64,
+    fn(world: *World, o: *Array(i64, 3), i: *Array(i64, 1), instance: i64, doing_pre_read: bool) void = {
+        // TODO
+        o[] = (0, 0, 0);
+    },
+);
 Static_eval :: todo();
 Verilog_input :: todo();
 Verilog_output :: todo();
@@ -997,7 +1066,14 @@ Concatenator_2 :: make_maker(2);
 Concatenator_4 :: make_maker(4);
 Concatenator_8 :: make_maker(8);
 Static_indexer_config :: todo();
-Ram_v2 :: todo();
+Ram_v2 :: device(0, 0,
+    fn(it) => {
+        param: Settings.Ram_v2 = (repr = it.param.bitcast());
+        param.get(.ram_size_bytes) * 8
+    },
+    // connected load/store ports do the actual work
+    fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 0), param: i64, instance: i64, doing_pre_read: bool) void = (),
+);
 Delay_line_word_config :: todo();
 _11 :: todo();
 _12 :: todo();
@@ -1165,7 +1241,7 @@ pin_layouts2 :: @static @(parse_pin_layouts(.Tc2)) (
 ((.Halt_v2), 
     ((-1, 0))),
 ((.Delay_line_word, .Delay_line_bit), 
-    ((-3, 0), (3, 0))),
+    ((3, 0), (-3, 0))),
 ((.Probe_wire_word), 
     ((-3, 0))),
 ((.Constant), 
@@ -1326,6 +1402,8 @@ get_width_data2 :: fn(it: *Template) []u8 = {
         fn Decoder_2() => @slice(0x01, 1, 1, 1, 2, 1);
         fn Decoder_3() => @slice(0x01, 1, 1, 1, 1, 1, 1, 1, 3, 1);
         fn Splitter_bit_4() => @slice(0x01, 1, 1, 1, 4);
+        fn Keyboard_v2() => @slice(0x01, 0x10, 0x01, 0x01);
+        fn Screen() => @slice(0x01, 64, 64);
         @default => it.bit_width;
     };
     x.shallow_copy(a)
