@@ -103,6 +103,9 @@ templates :: collect_templates(impl, .Tc1, pin_layouts) { it, k |
 templates2 :: collect_templates(impl2, .Tc2, pin_layouts2) { it, k |
     it.bit_width = get_width_data2(it);
     it.has_param = it.has_param || @is(k, .Static_indexer, .Segment_display);
+    if @is(k, .Register_word) {
+        it.inputs_for_pure_eval = empty();
+    };
 };
 
 #use("@/examples/circuit/eval.fr");
@@ -214,10 +217,7 @@ make_from_bytes :: fn($n: i64) *Template = math(1, n) { o, in |
     o[0] = r;
 };
 make_split_bytes :: fn($n: i64) *Template = math(n, 1) { o, i | 
-    r := i[0];
-    inline_range(0, n) { i |
-        o[i] = r.shift_right_logical(i*8).bit_and(0xFF);
-    };
+    do_split(n, 8, o, i[0]);
 };
 
 todo :: fn() *Template = ast_alloc().boxed(Template, {
@@ -879,7 +879,17 @@ Rol :: impl.Rol64;
 Ror :: impl.Ror64;
 Asr :: impl.Ashr64;
 Counter :: todo();
-Register_word :: todo();
+Register_word :: device(1, 2, 
+    fn(_) => 8*8,
+    fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 2), instance: i64, doing_pre_read: bool) void = {
+        save, value := (i[0] != 0, i[1]);
+        slot := world.storage[instance]&;
+        o[0] = slot[];
+        if !doing_pre_read && save {
+            slot[] = value;
+        };
+    },
+);
 Level_output_8_pin :: todo();
 Level_delay_gate :: todo();
 Mux :: impl.Mux64;
@@ -893,8 +903,8 @@ Decoder_3 :: math(8, 2) { o, i |
     o[i[1]] = i[2].bit_xor(1);
 };
 Constant :: impl.Constant64;
-Splitter_word_2 :: todo();
-Maker_word_2 :: todo();
+Splitter_word_2 :: make_splitter(2);
+Maker_word_2 :: make_maker(2);
 Clz :: todo();
 Register_word_config :: todo();
 Delay_line_word_asm :: todo();
@@ -908,7 +918,7 @@ Cc_level_output :: todo();
 Level_gate :: todo();
 Level_input_1_pin :: todo();
 Level_input_word :: todo();
-Level_input_switched :: todo();
+Level_input_switched :: impl.LevelInputArch;
 Level_input_2_pin :: todo();
 Level_input_3_pin :: todo();
 Level_input_4_pin :: todo();
@@ -916,7 +926,7 @@ _16 :: todo();
 _17 :: todo();
 Level_output_1_pin :: todo();
 Level_output_word :: todo();
-Level_output_switched :: todo();
+Level_output_switched :: impl.LevelOutputArch;
 _2 :: todo();
 _3 :: todo();
 Level_output_2_pin :: todo();
@@ -955,10 +965,10 @@ Keyboard_v2 :: todo();
 Static_eval :: todo();
 Verilog_input :: todo();
 Verilog_output :: todo();
-Maker_word_4 :: todo();
-Maker_word_8 :: todo();
-Splitter_word_4 :: todo();
-Splitter_word_8 :: todo();
+Maker_word_4 :: make_maker(4);
+Maker_word_8 :: make_maker(8);
+Splitter_word_4 :: make_splitter(4);
+Splitter_word_8 :: make_splitter(8);
 // `p` is a constant when compiled so this isn't as bad as it looks
 Static_indexer :: math_param(1, 1) { o, i, p |
     p: Settings.StaticIndex = (repr = p.bitcast());
@@ -975,27 +985,17 @@ Inc :: todo();
 _19_v2 :: todo();
 Cc_level_input :: todo();
 _9 :: todo();
-Mod :: :: math(1, 2) { o, i | 
+Mod :: math(1, 2) { o, i | 
     o[0] = @if(i[1] == 0, 0, i[0].umod(i[1]));
 };
-Splitter_bit_2 :: math(2, 1) { o, i | 
-    r := i[0];
-    inline_range(0, 2) { i |
-        o[i] = r.shift_right_logical(i).bit_and(1);
-    };
-};
-Splitter_bit_4 :: math(4, 1) { o, i | 
-    r := i[0];
-    inline_range(0, 4) { i |
-        o[i] = r.shift_right_logical(i).bit_and(1);
-    };
-};
-Maker_bit_2 :: todo();
-Maker_bit_4 :: todo();
+Splitter_bit_2 :: make_splitter(2);
+Splitter_bit_4 :: make_splitter(4);
+Maker_bit_2 :: make_maker(2);
+Maker_bit_4 :: make_maker(4);
 _10 :: todo();
-Concatenator_2 :: todo();
-Concatenator_4 :: todo();
-Concatenator_8 :: todo();
+Concatenator_2 :: make_maker(2);
+Concatenator_4 :: make_maker(4);
+Concatenator_8 :: make_maker(8);
 Static_indexer_config :: todo();
 Ram_v2 :: todo();
 Delay_line_word_config :: todo();
@@ -1004,6 +1004,32 @@ _12 :: todo();
 _13 :: todo();
 _14 :: todo();
 _15 :: todo();
+};
+
+// p is an array of N u8 widths
+// other than concatenator, it could just be one since they're all the same but it shouldn't matter because p is constant
+// TODO: make sure it folds away correctly
+make_maker :: fn($n: i64) *Template = math_param(1, n) { o, i, p |
+    o[0] = do_make(n, p, i);
+};
+make_splitter :: fn($n: i64) *Template = math_param(n, 1) { o, i, p |
+    do_split(n, p, o, i[0]);
+};
+do_split :: fn($N: i64, p: i64, o: *Array(i64, N), r: i64) void #generic #inline = {
+    mask := 1.shift_left(p) - 1;
+    inline_range(0, N) { I |
+        o[I] = r.shift_right_logical(p*I).bit_and(mask);
+    };
+};
+do_make :: fn($N: i64, p: i64, i: *Array(i64, N)) i64 #generic #inline = {
+    r := 0;
+    W := 0;
+    inline_range(0, N) { I |
+        w := p.shift_right_logical(I*8).bit_and(0xff);
+        r = r.bit_or(i[I].bit_and(1.shift_left(w)-1).shift_left(W));
+        W += w;
+    };
+    r
 };
 
 pin_layouts :: @static @(parse_pin_layouts(.Tc1)) (
@@ -1147,7 +1173,7 @@ pin_layouts2 :: @static @(parse_pin_layouts(.Tc2)) (
 ((.Static_value), 
     ((3, 0), (3, 1))),
 ((.Static_eval), 
-    ((2, 0), (2, 1), (-2, 0), (-2, 1))),
+    ((2, 0), (2, 1), (-1, 0), (-1, 1))),
 ((.Static_indexer_config), 
     ((2, 0), (-2, 0), (1, -1), (-1, -1))),
 ((.Time), 
@@ -1177,7 +1203,7 @@ pin_layouts2 :: @static @(parse_pin_layouts(.Tc2)) (
 ((.Maker_word_2, .Concatenator_2),
     ((1, 0), (-1, -1), (-1, 0))),
 ((.Register_word),
-    ((3, 0), (-3, 0), (-3, -1))),
+    ((3, 0), (-3, -1), (-3, 0))),
 ((.Keyboard_v2),
     ((4, -3), (5, 1), (5, 0), (-6, -2))),
 ((.Cc_input),
@@ -1192,6 +1218,10 @@ pin_layouts2 :: @static @(parse_pin_layouts(.Tc2)) (
     ((1, -3), (1, -2), (1, -1), (1, 0), (1, 1), (1, 2), (1, 3), (1, 4), (-1, -2), (0, -4))),
 ((.Segment_display),
     ((-1, -3))),
+((.Level_output_switched), 
+    ((-3, 0), (-1, -2))),
+((.Level_input_switched), 
+    ((3, 0), (1, -2))),
 );
 
 get_width_data :: fn(it: *Template) []u8 = {
@@ -1286,11 +1316,12 @@ get_width_data2 :: fn(it: *Template) []u8 = {
     a := ast_alloc();
     pin_count := it.in_arity + it.out_arity;
     k := import("@/examples/circuit/tc/load.fr")'gate_name(it.kind, .Tc2);
-    if it.name.ends_with("_bit") || @is(k, .Off_v2, .On_v2, .Full_adder, .Halt_v2, .Segment_display) {
+    if it.name.ends_with("_bit") || @is(k, .Off_v2, .On_v2, .Full_adder, .Halt_v2) {
         return a.alloc_init(u8, pin_count, fn(_) => 1);
     };
     x: []u8 = @match(k) {
         fn Time() => @slice(0x80);
+        fn Segment_display() => @slice(0x08);
         fn Decoder_1() => @slice(0x01, 1, 1);
         fn Decoder_2() => @slice(0x01, 1, 1, 1, 2, 1);
         fn Decoder_3() => @slice(0x01, 1, 1, 1, 1, 1, 1, 1, 3, 1);

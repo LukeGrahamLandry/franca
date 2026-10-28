@@ -1,15 +1,21 @@
 
+
+- so strange that static value is the one magic component that i cant use in the sandbox until i do symphony_decoder level
+
 ## (Oct 27) circuit
 
 - continued moving debug_known_arch out of the main gui
 - dont always put the defs components first.
   especially because dont want ids of builtins in save.fr files to change if add something to defs. 
+- the v2 schematic hub has some pretty cool stuff so giving that more serious attempt. 
+  trying to find one that doesnt use memory to start with cause that changed more. 
 - be better at displaying diagrams that didnt load because unimplemented.
   - dont crash in for_pins,calculate_usage
   - dont clear pins so can still look in the cc
-
+- on "Timestamp" i compile much faster but run much slower. 
 - spent a very long time on web-aot-cubes dying super early because startup_table_assign wasnt big enough. 
   thats before get_tls works so you loop on "missing env.thread" trying to panic
+
 ## (Oct 26) circuit
 
 - place diagonal wires. edit constants. remember wire widths for ui. 

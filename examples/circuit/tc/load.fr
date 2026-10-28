@@ -366,7 +366,10 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 x = (x.align_to(8) - OFF)/8;
                 y = (y.align_to(8) - OFF)/8;
                 insert(custom_pins&, dest, (x, y));
-                insert(bit_width&, dest, @if(shape.bit_width.len == 0, 0, shape.bit_width[0]));
+                width: u8 = @if(shape.name.starts_with("Cc"),
+                    original_gate.settings[0].trunc(),
+                    @if(shape.bit_width.len == 0, 0, shape.bit_width[0]));
+                insert(bit_width&, dest, width);
                 
                 if is_switchable_output {
                     insert(custom_pins&, dest + 1, (HACK_NONE_PIN_POSITION, HACK_NONE_PIN_POSITION));
@@ -782,6 +785,10 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8), uni
         };
         
         param := 0;
+        if !shape.has_param && group(it.kind) == .Tc2 {
+            param = it.settings[0];
+        };
+        
         if shape.has_param {
             k := @if(group(it.kind) != .Tc1, GateName(.Tc1)._0, name(it.kind, .Tc1));
             s0, s1 := (it.settings&[0], it.settings&[1]);
@@ -832,6 +839,8 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8), uni
             k := @if(group(it.kind) != .Tc2, GateName(.Tc2).None, name(it.kind, .Tc2));
             // TODO: check length and error
             s := it.settings;
+            // TODO: s[0]==MIN_i64 means auto width
+            // TODO: the number in concatenator means nothing, its just determined by inputs always
             @match(k) {
                 fn Static_indexer() => {
                     width, shift := (s[0], s[2]);
@@ -844,7 +853,25 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8), uni
                 fn Constant() => {
                     param = s[2];
                 }
-                @default => ();
+                fn Maker_bit_2() => maker(2, 2);
+                fn Maker_bit_4() => maker(4, 4);
+                // fn Maker_bit_8() => maker(8, 8);
+                fn Maker_word_2() => maker(s[0], 2);
+                fn Maker_word_4() => maker(s[0], 4);
+                fn Maker_word_8() => maker(s[0], 8);
+                @default => {
+                    if @is(k, .Splitter_word_8, .Splitter_word_4, .Splitter_word_2) {
+                        param = s[0];
+                    };
+                };
+            };
+            // TODO: wrong. you're allowed to set it to ex. 3
+            maker :: fn(output_bit_width, n) => {
+                x := output_bit_width.udiv(n);
+                param = 0;
+                range(0, n) { i |
+                    param = param.bit_or(x.shift_left(8*i));
+                };
             };
         };
         
@@ -940,7 +967,8 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
     width.push_repeated(wire_count[], 0);
     outputs, inputs := (gates[gates.len - 1].inputs, gates[0].outputs);
     known := outputs.len + inputs.len == bit_width.len;
-    @if(!known) @fmtln(warn, "TODO: missing some io sizes?");
+    error_wires: DynamicBitSet = empty(temp());
+    @if(!known) @fmtln(warn, "TODO: missing some io sizes? %+%!=%", outputs.len, inputs.len, bit_width.len);
     original_output_index := gates.len - 1;
     @if(known)
     enumerate inputs { i, id |
@@ -969,7 +997,7 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
     maybe_cast :: fn(want: u8, id: *WireId) => {
         break :: local_return;
         found := width[id.id.zext()];
-        @if(found == 0) @fmtln(warn, "TODO: unknown wire size w%", id.id);
+        @if(found == 0 && !error_wires&.get_set(id.id.zext())) @fmtln(warn, "TODO: unknown wire size w%", id.id);
         if want < found && want != 0 {
             old := id[];
             if get(casts&, (old, want)) { new |
@@ -1057,23 +1085,49 @@ fn get_bit_width(components: []Component, it: *Component.Gate) []u8 = {
 
 fn get_bit_width(shape: *Tc.Builtin.Template, param: i64) []u8 = {
     if group(shape.kind) == .Tc2 {
+        break :: local_return;
         k := name(shape.kind, .Tc2);
-        //if @is(k, .Not_word, .Neg) {  // all same
-            //return temp().alloc_init(u8, shape.pins.len, fn(_) => 
-        //};
+        r := temp().alloc_init(u8, shape.pins.len, fn(_) => param.trunc());
+        if @is(k, .Or_word, .Nand_word, .Xor_word, .Delay_line_word, .Constant) {  // all same
+            return r;
+        };
+        // .Not_word, .Xnor_word, .Nor_word, .Neg, sub, .Mul, .Div
+        // are all same but outputs need truncations because bits can spill out if less than 64 bit
         
         // and outputs will need truncations
-        // , .Mul, .Div
         //if @is(k, .Lsl, .Lsr, .Rol, .Ror, .Asr) {  // one input is smaller
         //};
         
-        //if @is(k, .Equal, .Less_u, .Less_s) {  // bool out
-        //};
-        
-        if k == .Static_indexer {
-            p: Builtin.Settings.StaticIndex = (repr = param.bitcast());
-            return shallow_copy(@slice(@as(u8) p.get(.width).trunc(), 0x80), temp());
+        if @is(k, .Equal, .Less_u, .Less_s) {  // bool out
+            r[0] = 1;
+            return r;
         };
+        
+        if @is(k, .Maker_bit_2, .Maker_bit_4, .Maker_word_2, .Maker_word_4, .Maker_word_8, .Concatenator_2, .Concatenator_4, .Concatenator_8) {
+            total := 0;
+            range(0, r.len-1) { i |
+                w := param.shift_right_logical(i*8).bit_and(0xff);
+                r[i+1] = w.trunc();
+                total += w;
+            };
+            r[0] = total.min(64).trunc();
+            return r;
+        };
+        
+        @match(k) {
+            fn Mux() => { r[1] = 1; };
+            fn Switch_word() => { r[2] = 1; };
+            fn Register_word() => { r[1] = 1; };
+            fn Splitter_word_2() => { r[2] *= 2; }
+            fn Splitter_word_4() => { r[4] *= 4; }
+            fn Splitter_word_8() => { r[8] *= 8; }
+            fn Static_indexer() => {
+                p: Builtin.Settings.StaticIndex = (repr = param.bitcast());
+                r.copy_from(@slice(@as(u8) p.get(.width).trunc(), 0x80));
+            }
+            @default => break();
+        };
+        return r;
     };
 
     if !shape.has_param || group(shape.kind) != .Tc1 {
@@ -1431,12 +1485,20 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
                     value := eatN(u16, u8);
                 };
                 
+                s := @ref i64.list(settings.len, a);
+                s.push(word_size);
+                s.push(buffer_size);
+                s.push_all(settings);
+                
                 if kind == 78 { // com_custom
                     custom_id = eat(CustomId);
+                    // static values
                     n := eat(u16);
                     range(0, n.zext()) { _ |
-                        a := eat(CustomId);
+                        id := eat(CustomId);
                         bits := eat(i64);
+                        s.push(id.id);
+                        s.push(bits);
                     };
                 };
                 
@@ -1444,10 +1506,6 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
                     return(Err = "gate oob");
                 }
                 
-                s := @ref i64.list(settings.len, a);
-                s.push(word_size);
-                s.push(buffer_size);
-                s.push_all(settings);
                 gates&.push(
                     rotation = rotation,
                     custom_id = custom_id,
