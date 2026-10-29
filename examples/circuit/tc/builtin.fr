@@ -241,6 +241,16 @@ fn get_native(a: *Template) FuncId = {
 
 KeyboardData :: @struct(up: bool, prev_up: bool, value: u16, prev_value: u16, have_next: u8, valid: bool);
 SpriteData :: @struct(src_x: u16, src_y: u16, w: u16, h: u16, dest_x: u16, dest_y: u16);
+ScreenData :: @struct {
+    offset: i64;
+    resolution: u32;  // pixel only. this * 4:3
+    mode: @enum(u8) (Ascii8, Ascii32, Pixel8, Pixel32);
+    background_colour: u8;  // ascii8 only
+    foreground_colour: u8;  // ascii8 only
+    font: u8;
+    ram_instance: i64;
+    ram_size_bytes: i64;
+};
 
 // these are in order by their ComponentKind value in the circuit.data format. 
 impl :: @struct {
@@ -929,6 +939,8 @@ Load_port :: device(1, 2,
         @if(param.get(.connected) == 0) return();
         instance := world.storage[instance];  // the linked ram
         data := world.storage.rest(instance).interpret_as_bytes().slice(0, param.get(.ram_size_bytes));
+        address := address.umod(data.len);  // TODO: i think its always a power of 2
+        
         if ((address + param.get(.width)/8).ugt(data.len)) {
             o[0] = 0;
             return();
@@ -942,7 +954,7 @@ Load_port :: device(1, 2,
             @default => unreachable();
         };
         if param.get(.little_endian) == 0 {
-            value = value.byte_swap().shift_left(64 - param.get(.width));
+            value = value.byte_swap().shift_right_logical(64 - param.get(.width));
         };
         o[0] = value;
     },
@@ -956,10 +968,11 @@ Store_port :: device(0, 3,
         param: Settings.Port = (repr = param.bitcast());
         @if(param.get(.connected) == 0) return();
         if param.get(.little_endian) == 0 {
-            value = value.byte_swap().shift_left(64 - param.get(.width));
+            value = value.byte_swap().shift_right_logical(64 - param.get(.width));
         };
         instance := world.storage[instance];  // the linked ram
         data := world.storage.rest(instance).interpret_as_bytes().slice(0, param.get(.ram_size_bytes));
+        address := address.umod(data.len);  // TODO: i think its always a power of 2
         @if((address + param.get(.width)/8).ugt(data.len)) return();
         data := data.rest(address);
         @switch(param.get(.width)) {
@@ -1011,8 +1024,32 @@ Segment_display :: device(0, 1,
 );
 Static_value :: todo();
 Screen :: device(0, 3, 
-    fn(_) => 64,
+    fn(_) => size_of(ScreenData) * 8,
     fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 3), instance: i64, _1: bool) void = {
+        // note: enable is of the settings write, not the screen itself (which is always enabled)
+        enable, setting_index, value := (i[0] != 0, i[1], i[2]);
+        @if(!enable) return();
+        data := world.storage.rest(instance).interpret_as_bytes().peek_type(ScreenData);
+        @switch(setting_index) {
+            @case(0) => {
+                data.mode = @as(@type data.mode) @as(u8) value.umod(4).trunc();
+            };
+            @case(1) => {
+                data.offset = value;
+            };
+            @case(2) => if @is(data.mode, .Pixel8, .Pixel32) {
+                data.resolution = value.bit_and(0xff).add(1).trunc();
+            } else {
+                data.foreground_colour = value.trunc();
+            };
+            @case(3) => {
+                data.background_colour = value.trunc();
+            };
+            @case(4) => {
+                data.font = value.trunc();
+            };
+            @default => ();
+        }
         // TODO
     },
 );
@@ -1255,9 +1292,9 @@ pin_layouts2 :: @static @(parse_pin_layouts(.Tc2)) (
 ((.Time), 
     ((2, 0))),
 ((.Equal, .Less_u, .Less_s, .Or_word, .And_word, .Nand_word, .Nor_word, .Xor_word, .Mul, .Div, .Mod, .Lsl, .Lsr, .Rol, .Ror, .Asr), 
-    ((2, 0), (-1, 1), (-1, -1))),
+    ((2, 0), (-1, -1), (-1, 1))),
 ((.Add), 
-    ((2, 0), (1, 1), (-1, 1), (-1, -1), (0, -2))),
+    ((2, 0), (1, 1), (0, -2), (-1, 1), (-1, -1))),
 ((.Mux), 
     ((2, 0), (-1, -1), (-1, 0), (-1, 1))),
 ((.Load_port), 
@@ -1396,7 +1433,7 @@ get_width_data2 :: fn(it: *Template) []u8 = {
         return a.alloc_init(u8, pin_count, fn(_) => 1);
     };
     x: []u8 = @match(k) {
-        fn Time() => @slice(0x80);
+        fn Time() => @slice(0x40);
         fn Segment_display() => @slice(0x08);
         fn Decoder_1() => @slice(0x01, 1, 1);
         fn Decoder_2() => @slice(0x01, 1, 1, 1, 2, 1);

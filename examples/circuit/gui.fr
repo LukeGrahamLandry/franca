@@ -361,6 +361,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             @if(it.kind.group() == .Tc2)
             @match(it.kind.name(.Tc2)) {
                 fn Segment_display() => self.segment_display(gate, c, i, it);
+                fn Screen() => self.screen(gate, c, i, it);
                 @default => ();
             };
         };
@@ -526,6 +527,24 @@ fn draw_primitive_code(self: *Draw, instance: i64, parent_wire_offset: i64, hove
         self.wires = world.scratch.items().subslice(parent_wire_offset, parent.wire_count);
         self.logical = (Some = parent);
         self.draw_gate_code(it, false);
+        
+        if is_linkable(it.kind) {
+            if state.tree[state.tree.len - 2].diagram_circuit { c |
+                c := state.circuit[c]&;
+                // TODO: store graphical_gate: ?i64 in CircuitNode :SLOW
+                if c.gates.index_of(fn(it) => it.logical_gate_index == gate_i) { i |
+                    it := c.gates[i]&;
+                    while => it.port_linked_list != -1 {
+                        sdtx.put("\n> ");
+                        it = c.gates[it.port_linked_list]&;
+                        if it.logical_gate_index != -1 {
+                            self.draw_gate_code(parent.gates[it.logical_gate_index]&, false);
+                        };
+                    };
+                };
+            };
+        };
+        
         self.wires = empty();
         self.logical = .None;
     };
@@ -535,6 +554,18 @@ fn draw_primitive_code(self: *Draw, instance: i64, parent_wire_offset: i64, hove
     // TODO: unpack `param` in a readable way
     sdtx.color = pack_rgba(255, 255, 255, 255);
     sdtx.put(@tfmt("\n(storage_count=%, instance=%, param=%)\n", n, instance, fmt_hex(it.param)));
+    
+    if state.tree[state.tree.len - 2].diagram_circuit { c |
+        c := state.circuit[c]&;
+        // TODO: store graphical_gate: ?i64 in CircuitNode :SLOW
+        if c.gates.index_of(fn(it) => it.logical_gate_index == gate_i) { i |
+            it := c.gates[i]&;
+            if it.label.len != 0 {
+                sdtx.put(it.label);
+                sdtx.put("\n");
+            };
+        };
+    };
     
     // show contents of the memory this gate owns
     data := world.storage.subslice(instance, n.min(4096)).interpret_as_bytes();
@@ -934,6 +965,44 @@ fn sprite_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it
         sgl.v2f_t2f(p0.x, p1.y, uv0.x, uv0.y);
     };
 };
+
+
+fn screen(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Component.Gate) void = {
+    sdtx, world, sgl := (self.sdtx, self.world&, self.draw&);
+    
+    a_tc := gate.pos + vec2(-25, -19);
+    a := self.tc_to_world_pos(a_tc);
+    b := self.tc_to_world_pos(a_tc + vec2(4, 3)*13);
+    s := abs(a - b);
+    sgl.color = pack_rgba(0, 0, 0, 255);
+    sgl.line(vec2(a.x, b.y + s.y/2), vec2(b.x, b.y + s.y/2), s.y);
+   
+    data := world.storage.rest(c.instance_offset_by_gate[i]).interpret_as_bytes().peek_type(Tc.Builtin.ScreenData);
+    @if(data.ram_size_bytes == 0) return();
+    memory := world.storage.rest(data.ram_instance).interpret_as_bytes().slice(0, data.ram_size_bytes);
+    // TODO: bounds check or wrap?
+    memory := memory.rest(data.offset);
+    width, height := @if(@is(data.mode, .Ascii8, .Ascii32),
+        (96, 40),
+        (data.resolution.zext() * 4, data.resolution.zext() * 3));
+    bpp := @if(@is(data.mode, .Ascii8, .Pixel8), 1, 4);
+    memory := memory.slice(0, width * height * 4);
+    
+    //@println("% % %", data.resolution, width, height);
+    // TODO: do this correctly
+    w: f32 = s.x / width.float().cast();
+    range(0, height) { y |
+        range(0, width) { x |
+            value := memory[y*width+x];
+            if value != 0 {
+                sgl.color = pack_rgba(value, value, value, 255);
+                p := a + vec2(x.float().cast()/width.float().cast(), -y.float().cast()/height.float().cast())*s;
+                sgl.line(p + vec2(0, w/2), p + vec2(w, w/2), w);
+            };
+        };
+    };
+    
+}
 
 display_name :: fn(info: *Builtin.Template, it: *Tc.Circuit.Gate, circuit: []Tc.Circuit) Str = {
     name := info.name;
@@ -1878,8 +1947,7 @@ worker_get_output :: fn(state: *State, in: *LoaderT.I, callee: rawptr) Result(vo
    
     c := circuits[in.Index.root_index]&; 
     state.load_atlas_part1(c);
-    // the game ui lets you ask for as slow as 0.1hz (10 seconds per tick), so the number in the save file is scaled by 10
-    state.ticks_per_eval = max(c.default_tick_rate / 10 / 60, 1);
+    state.ticks_per_eval = max(c.default_tick_rate / 60, 1);
     .Ok
 }
 

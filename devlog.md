@@ -1,4 +1,20 @@
 
+## (Oct 29) circuit
+
+- schedualing ports
+- now have something that maybe works but i need to do screen to test it. 
+  doesnt bode well that mine never sets the screen settings write pin. ("Conway's Game of Life Symphony") should be on tick 9.
+  - the bytes of assembly i got out of isa_spec look the same as what the game shows
+  - wrong shift direction to fix byteswap in ports so was always 0
+  - wrong pin order for Add
+  - now tick 10 wrong register value. address needs to wrap when too big for memory. 
+  - div (and others) inputs flipped so resolution was wrong. 
+  - im cheating with just supporting pixel8 in a silly way but it works!
+  - oh thank god, mine animates way faster than the one in tc even tho it says its not keeping up with the tick rate. 
+    which means im reading the tick rate from the save file wrong. they dont scale by 10 anymore, now its 1000. 
+    so when i thought the rate i could keep up with was like 80x less than them its cause i was missreading it by a factor of 100.
+    i still might be slower but its not insane. will be easier to tell when i adapt the sim speed to keep up with frames like they do. 
+
 ## (Oct 28) circuit
 
 - so strange that static value is the one magic component that i cant use in the sandbox until i do symphony_decoder level
