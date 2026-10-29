@@ -34,9 +34,7 @@ in this mode there are many more builtin gates (ex. a 64 bit xor compiles to one
 
 it works well enough to run my overture/leg in the maze and a few things from the schematic hub (mandelbrot and tetris). 
 
-> Eventually I want to support the 2.x rewrite of the game 
-> (and I started to do so) but I want to wait until it stabilizes more.
-> rn it's hard to tell what's supposed to work and what's perpetually broken. 
+> i've started to support circuits the 2.x rewrite of the game 
 
 ## TODO
 
@@ -67,7 +65,6 @@ it works well enough to run my overture/leg in the maze and a few things from th
 - the game has a setting ("Allow circular recipies") to idiom-regognise a few shapes of circular dependencies and convert to (AndOrLatch,NandNandLatch,NorNorLatch)
 - i don't think im doing the keyboard right. ex. mandelbrot is behind a key sometimes?
 - use f64 for pos/zoom in ui because it gets jerky scrolled down far in the trace for big circuits
-- finish leg: memory, stack, call, shifts
 - make the defs language less painful
   - number literal instead of const()
   - nested expressions
@@ -99,12 +96,9 @@ it works well enough to run my overture/leg in the maze and a few things from th
     ;actually it's more convoluted than that, output pins are bidirectional pins now (ie they can be used as inputs or both depending on switches). 
     so maybe should figure out a nicer way to compile bidirectional pins first. 
     but the common case will be that the wire connecting to an output pin doesn't connect to any input pins of any components inside the CC so then it can be compiled the easy way. 
-  - memory is extended with load/store ports that are applied in order so need to represent a new type of dependency
-  - new pin positions, more sizes of wires
   - components have configurable (sometimes auto?) wire size
     - some of the logic ones can go up to 2048 bit but the concatenators don't seem to work so i don't really understand
   - isa: assembly parser generator thingy https://github.com/Stuffe/isa_spec
-  - have to decide if i care about keeping support for the old version
 ```
 // TODO: don't always recompile everything when loading a new circuit. it might reuse some custom components. 
 //       and don't reset the state.fr every time because bootstrapping the comptime stuff takes ~50ms. just reset when arena is getting too full. 

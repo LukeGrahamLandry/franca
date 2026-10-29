@@ -61,11 +61,21 @@ State :: @rec @struct {
     frame_time_history_sum: i64;
     eval_last_frame: bool;
     split_graphics_and_wires: bool;
+    // v1 SpriteDisplay
     atlas: @struct {
         data: @struct(pixels: []u32  /*general_allocator, free after loading on ui thread*/, w: i64, h: i64);
         uvs: RawHashMap(i64, Ty(Vec2, Vec2, Vec2));  // SpriteDisplay.param -> (uv1, uv2, size_pixels)
         img: Sg.Image;
         enable: bool;
+    };
+    // v2 Screen
+    screen: @struct {
+        atlas: Atlas;
+        img: Sg.Image;
+        enable: bool;
+        need_resize: bool;
+        did_warning: bool;
+        to_drop: ?Sg.Image;
     };
     edit: EditState;
 };
@@ -294,11 +304,16 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         };
     };
     
+    if state.screen.to_drop&.take() { img |
+        sg.destroy(img);
+    };
+    
     sgl.defaults();
     sgl.viewport(0, 0, app_w, app_h, true);
-    if state.atlas.enable {
+    if state.atlas.enable || state.screen.img.id != 0 {
         sgl.load_pipeline(state.pipe);
-        sgl.texture(state.atlas.img, (id = 0));
+        img := @if(state.atlas.enable, state.atlas.img, state.screen.img);
+        sgl.texture(img, (id = 0));
         sgl.texturing_enabled = true;
         sgl.u = 0; sgl.v = 0;  // :WhitePixelForDrawingSolidColours
     };
@@ -365,6 +380,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                 @default => ();
             };
         };
+        
+        state.finish_screens();
     };
     
     sgl.end();
@@ -923,7 +940,7 @@ fn dot_matrix_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64
         p += vec2(-6 * w, -w);
     };
 }
-    
+
 fn sprite_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Component.Gate) void = {
     state, world, sgl := (self.state, self.world&, self.draw&);
     data := world.storage.subslice(c.instance_offset_by_gate[i], size_of(Tc.Builtin.SpriteData) * 256);
@@ -976,6 +993,7 @@ fn screen(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Compo
     s := abs(a - b);
     sgl.color = pack_rgba(0, 0, 0, 255);
     sgl.line(vec2(a.x, b.y + s.y/2), vec2(b.x, b.y + s.y/2), s.y);
+    @if(self.state.tick == 0) return();  // dont show whatever junk is at the start of memory before you run
    
     data := world.storage.rest(c.instance_offset_by_gate[i]).interpret_as_bytes().peek_type(Tc.Builtin.ScreenData);
     @if(data.ram_size_bytes == 0) return();
@@ -986,22 +1004,89 @@ fn screen(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Compo
         (96, 40),
         (data.resolution.zext() * 4, data.resolution.zext() * 3));
     bpp := @if(@is(data.mode, .Ascii8, .Pixel8), 1, 4);
-    memory := memory.slice(0, width * height * 4);
+    memory := memory.slice(0, width * height * bpp);
     
-    //@println("% % %", data.resolution, width, height);
-    // TODO: do this correctly
-    w: f32 = s.x / width.float().cast();
-    range(0, height) { y |
-        range(0, width) { x |
-            value := memory[y*width+x];
-            if value != 0 {
-                sgl.color = pack_rgba(value, value, value, 255);
-                p := a + vec2(x.float().cast()/width.float().cast(), -y.float().cast()/height.float().cast())*s;
-                sgl.line(p + vec2(0, w/2), p + vec2(w, w/2), w);
-            };
+    if @is(data.mode, .Pixel8, .Pixel32) {
+        // TODO: atlas.try_reserve and do it in place
+        texture := temp().alloc_uninit(u32, width * height);
+        i := 0;
+        range(0, height) { y |
+            range(0, width) { x |
+                c := @match(data.mode) {
+                    fn Pixel8() => {
+                        v := memory[i];
+                        X :: fn(a: u8, b: u8, c: f64) => (@as(i64) v.shift_right_logical(a).bit_and(b).zext()).float() / c;
+                        r, g, b := (X(5, 0b111, 7), X(2, 0b111, 7), X(0, 0b11, 3));
+                        pack_rgba(r, g, b, 1.0)
+                    }
+                    fn Pixel32() => {
+                        v: i64 = u32.reinterpret_bytes(memory)[i].zext();
+                        r, g, b := (v.shift_right_logical(24).bit_and(0xFF), v.shift_right_logical(16).bit_and(0xFF), v.shift_right_logical(8).bit_and(0xFF));
+                        pack_rgba(r, g, b, 255)
+                    }
+                    @default => unreachable();
+                };
+                texture[i] = c;
+                i += 1;
+            }
         };
+        
+        s := self.state.screen&;
+        uv0, uv1 := s.atlas&.try_push(texture, width, height) || {
+            put_text(self, "RESIZING", a + vec2(0, self.text_spacing.x), pack_rgba(255, 255, 255, 255));
+            s.need_resize = true;
+            return();
+        };
+        s.enable = true;
+        
+        // TODO: i think i have y flipped, but its hard to tell with life
+        sgl.color = pack_rgba(255, 255, 255, 255);
+        sgl.v2f_t2f(a.x, a.y, uv0.x, uv1.y);
+        sgl.v2f_t2f(b.x, a.y, uv1.x, uv1.y);
+        sgl.v2f_t2f(b.x, b.y, uv1.x, uv0.y);
+        sgl.v2f_t2f(a.x, b.y, uv0.x, uv0.y);
+    } else {
+        // TODO
     };
-    
+}
+
+// TODO: use this for DotMatrixDisplay too 
+//       but then need to deal with switching textures between this and the sprite screen one. 
+//       if did that then could easily allow mixed v1/v2 components in one circuit which would be nice. 
+fn finish_screens(state: *State) void = {
+    s, sg := (state.screen&, state.sg);
+    if s.need_resize&.take() {
+        state.resize_screen_atlas();
+    };
+    if s.enable&.take() {
+        sg.update_image(s.img, @ref SubImage(s.atlas.buf.interpret_as_bytes()));
+        s.atlas.x = 1; s.atlas.y = 1; s.atlas.current_row_height = 1;  // :WhitePixelForDrawingSolidColours
+    };
+}
+
+// TODO: dont hard code this. my metal is double this but webgpu makes you ask for it in the limits. 
+texture_size_limit :: 8192;
+fn resize_screen_atlas(state: *State) void = {
+    s, sg, a := (state.screen&, state.sg, general_allocator());
+    size := 128;
+    if s.img.id != 0 {
+        if s.atlas.width == texture_size_limit {
+            if !s.did_warning && state.loader.progress == .Idle {
+                s.did_warning = true;
+                @fmtln(state.warnings&, "TODO: too many screens to fit in one texture");
+            };
+            return();  // shit outta luck
+        };
+        size = min(s.atlas.width * 2, texture_size_limit);
+        a.dealloc(u32, s.atlas.buf);
+        @debug_assert(s.to_drop.is_none());
+        s.to_drop = (Some = s.img);
+        // TODO: make it work on the frame that it resizes but its only one frame so not a huge deal
+    };
+    s.atlas = Atlas'new_sized(a, size, size);
+    _ := s.atlas&.push(@slice(0xFFFFFFFF), 1, 1);  // :WhitePixelForDrawingSolidColours
+    size := size.intcast();
+    s.img = sg.make(width = size, height = size, pixel_format = .BGRA8, data = zeroed(Sg.ImageData), usage = .DYNAMIC);
 }
 
 display_name :: fn(info: *Builtin.Template, it: *Tc.Circuit.Gate, circuit: []Tc.Circuit) Str = {
@@ -1463,6 +1548,7 @@ fn push_tree_node(state: *State, it: CircuitNode) void = {
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     init(state.loader&, state);
+    state.screen.to_drop = .None;
     state.keyboard_data = .None;
     state.edit = (text = list(general_allocator()));
     sapp.desc.enable_clipboard = true;
@@ -1952,9 +2038,9 @@ worker_get_output :: fn(state: *State, in: *LoaderT.I, callee: rawptr) Result(vo
 }
 
 // TODO: if there were to be a sandbox escape in this program it would probably be by passing untrusted bytes to stb_image.
+Atlas :: import("@/tests/external/wasm4.fr").Atlas;
 fn load_atlas_part1(state: *State, c: *Tc.Circuit) void = {
     @if(!FEAT_PNG) return();
-    Atlas :: import("@/tests/external/wasm4.fr").Atlas;
     Viewer :: import("@/examples/gpu/viewer.fr");
     world := state.world&;
     files := world.tc_file_loader_device;
@@ -1981,6 +2067,11 @@ fn load_atlas_part1(state: *State, c: *Tc.Circuit) void = {
         
         atlas_w += img.w;
         atlas_h = max(atlas_h, img.h);
+    };
+    
+    if images.len == 0 {
+        state.atlas.data = zeroed(@type state.atlas.data);
+        return();
     };
     
     atlas := Atlas'new_sized(general_allocator(), atlas_w, atlas_h);
@@ -2022,9 +2113,13 @@ Builtin :: Tc.Builtin;
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     drop(state.loader&);
     state.text&.shutdown();
-    sg.destroy_pipeline(state.pipe&);;
-    state.draw&.destroy(sg, general_allocator());
+    sg.destroy_pipeline(state.pipe&);
+    sg.destroy(state.screen.img);
+    sg.destroy(state.atlas.img);
+    a := general_allocator();
+    state.draw&.destroy(sg, a);
     state.circuit_arena&.deinit();
+    a.dealloc(u32, state.screen.atlas.buf);
 }
 
 // TODO: this doesn't work in the web demo ?? :compiler

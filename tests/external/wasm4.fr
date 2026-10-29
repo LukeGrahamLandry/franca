@@ -1113,15 +1113,25 @@ new_sized :: fn(a: Alloc, w: i64, h: i64) Atlas = {
 };
 
 fn push(self: *Atlas, img: []u32, width: i64, height: i64) Ty(Vec2, Vec2) = {
+    it := self.try_push(img, width, height);
+    it || @panic("Atlas.push image too large for capacity")
+};
+
+fn try_push(self: *Atlas, img: []u32, width: i64, height: i64) ?Ty(Vec2, Vec2) = {
+    @if(self.width == 0) return(.None);
     @debug_assert_eq(img.len, width * height, "Atlas.push bad dimensions");
     self_height := self.buf.len / self.width;
-    if self.x + width > self.width {
-        self.x = 0;
-        self.y += self.current_row_height;
-        self.current_row_height = 0;
+    x, y, current_row_height := (self.x, self.y, self.current_row_height);
+    if x + width > self.width {
+        x = 0;
+        y += current_row_height;
+        current_row_height = 0;
     };
-    self.current_row_height = max(self.current_row_height, height);
-    @assert(self.y + height <= self_height && self.x + width <= self.width, "Atlas.push image too large for capacity");
+    current_row_height = max(current_row_height, height);
+    if !(y + height <= self_height && x + width <= self.width) {
+        return(.None);
+    };
+    self.x = x; self.y = y; self.current_row_height = current_row_height;
     
     F :: fn(x) => x.float().cast();
     scale := vec2(self.width.F(), self_height.F());
@@ -1133,7 +1143,7 @@ fn push(self: *Atlas, img: []u32, width: i64, height: i64) Ty(Vec2, Vec2) = {
         dest.copy_from(src);
     };
     self.x += width;
-    (uv1, uv2)
+    (Some = (uv1, uv2))
 }
 
 fn build(self: *Atlas, sg: *Sg.Self) Sg.Image = {

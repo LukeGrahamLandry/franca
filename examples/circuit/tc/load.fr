@@ -394,9 +394,10 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 x = (x.align_to(8) - OFF)/8;
                 y = (y.align_to(8) - OFF)/8;
                 insert(custom_pins&, dest, (x, y));
-                width: u8 = @if(shape.name.starts_with("Cc") || shape.name == "Level_input_switched",
+                width: u8 = @if(shape.name == "Cc_input" || shape.name == "Level_input_switched",
                     original_gate.settings[0].trunc(),
-                    @if(shape.bit_width.len == 0, 0, shape.bit_width[0]));
+                    @if(shape.name == "Cc_output", 64,   // :InferCc_output
+                        @if(shape.bit_width.len == 0, 0, shape.bit_width[0])));
                 insert(bit_width&, dest, width);
                 
                 if is_switchable_output {
@@ -787,9 +788,16 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
                     @debug_assert_ne(g_i, -1, "port?");
                     g := c.gates[g_i]&;
                     if g.port_linked_list != -1 {
-                        i := logical_to_circuit.index_of(fn(it) => it[] == g.port_linked_list).unwrap();  // :SLOW
-                        if !done&.get(i) {
-                            ok = false;
+                        // adjacent load order doesnt matter, go up until a store
+                        while => g.port_linked_list != -1 && @is(name(c.gates[g.port_linked_list].kind, .Tc2), .Load_port, .Pipelined_load_port) {
+                            g = c.gates[g.port_linked_list]&;
+                        };
+                        
+                        if g.port_linked_list != -1 {
+                            i := logical_to_circuit.index_of(fn(it) => it[] == g.port_linked_list).unwrap();  // :SLOW
+                            if !done&.get(i) {
+                                ok = false;
+                            };
                         };
                     };
                 };
@@ -1226,6 +1234,12 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
     n := gates.len - original_output_index - 1;
     //@if(n != 0) @fmtln(warn, "- inserted % casts", n);
     
+    
+    // :InferCc_output
+    @if(known) enumerate outputs { i, id |
+        bit_width[i] = width[id.id.zext()];
+    };
+    
     width.items()
 }
 
@@ -1273,6 +1287,12 @@ fn get_bit_width(shape: *Tc.Builtin.Template, param: i64) []u8 = {
         break :: local_return;
         k := name(shape.kind, .Tc2);
         r := temp().alloc_init(u8, shape.pins.len, fn(_) => param.trunc());
+        
+        if k == .Cc_output {
+            // TODO
+            r[0] = 64;
+            return r;
+        };
         
         if k == .Constant {
             // TODO: this is wrong if i try to use it for the static eval width math

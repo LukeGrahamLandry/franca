@@ -14,6 +14,12 @@
     which means im reading the tick rate from the save file wrong. they dont scale by 10 anymore, now its 1000. 
     so when i thought the rate i could keep up with was like 80x less than them its cause i was missreading it by a factor of 100.
     i still might be slower but its not insane. will be easier to tell when i adapt the sim speed to keep up with frames like they do. 
+- for SYM3E_BADAPPLE_OPTIMIZAED, load port needs to only depend on stores. order of other loads doesnt matter.
+- problematic that i dont insert casts if dont know a width because the impls assume they'll be in bounds so like decoder_3 indexes oob. 
+  the width of output in file seems to always be 8 so need to infer that. 
+- proper texture for screen instead of drawing a line per pixel. 
+  - wasnt rescaling the sub byte colour components
+  - old atlas.enable was never false because of the 1 white pixel for lines. 
 
 ## (Oct 28) circuit
 
