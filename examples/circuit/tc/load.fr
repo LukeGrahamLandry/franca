@@ -782,7 +782,6 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
                     };
                 };
                 
-                // TODO: adjacent load order doesnt matter, go up until a store
                 if ok && it.kind.is_port() {
                     g_i := logical_to_circuit[i];
                     @debug_assert_ne(g_i, -1, "port?");
@@ -854,8 +853,8 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
     n := 0;
     range_rev(0, order.len) { i |
         it := gates[order[i]]&;
-        all_inputs_needed := components[it.kind.id.zext()].inputs_for_pure_eval.len != it.inputs.len;
-        if !it.kind.is_port() && get_storage_count(components, it) != 0 { // TODO: :NotReorderingTheseBreaksOvertureLegNandverture && it.outputs.len != 0 && all_inputs_needed {
+        if !it.kind.is_port() && get_storage_count(components, it) != 0 && it.outputs.len != 0 {
+            // TODO: :NotReorderingTheseBreaksOvertureLegNandverture && inputs.len!=pure_eval.len
             x := order&.ordered_remove(i).unwrap();
             order&.push(x);
             n += 1;
@@ -1305,7 +1304,7 @@ fn get_bit_width(shape: *Tc.Builtin.Template, param: i64) []u8 = {
         };
         
         // TODO: but outputs need truncations because bits can spill out if less than 64 bit
-        if @is(k, .Not_word, .Xnor_word, .Nor_word, .Neg, .Mul, .Div, .Mod) {
+        if @is(k, .Not_word, .Xnor_word, .Nor_word, .Neg, .Mul, .Div, .Mod, .Inc) {
             return r;
         };
         
@@ -1342,6 +1341,7 @@ fn get_bit_width(shape: *Tc.Builtin.Template, param: i64) []u8 = {
         
         @match(k) {
             fn Mux() => { r[1] = 1; };
+            fn Counter() => { r[2] = 1; };
             fn Switch_word() => { r[2] = 1; };
             fn Level_input_switched() => { r[1] = 1; };
             fn Register_word() => { r[1] = 1; };
@@ -1817,6 +1817,10 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
                     label = user_label.shallow_copy(a),
                     watched = watched.items(),
                 );
+                
+                if kind == 91 {  // screen
+                    max_pos = max(max_pos, pos + vec2(4, 3)*6.5);
+                };
         };
         
         min_pos = min(min_pos, pos);

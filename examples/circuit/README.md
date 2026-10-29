@@ -91,14 +91,24 @@ it works well enough to run my overture/leg in the maze and a few things from th
 - option to see generated source or -d logging in the ui
   - ^ would be nicer if i factor out examples/gpu/terminal.fr into a reusable textbox widgit and use that (also for showing ram contents). 
     the other option would just be rendering the whole sapp thingy into a texture which might be less annoying than infecting everything in the terminal with positioning code. 
-- tc2
+
+## todo tc2
+
+
   - outputs don't coerce z so need to check if that wire is a switch and compile to two outputs like the old OutputNz did
     ;actually it's more convoluted than that, output pins are bidirectional pins now (ie they can be used as inputs or both depending on switches). 
     so maybe should figure out a nicer way to compile bidirectional pins first. 
     but the common case will be that the wire connecting to an output pin doesn't connect to any input pins of any components inside the CC so then it can be compiled the easy way. 
   - components have configurable (sometimes auto?) wire size
     - some of the logic ones can go up to 2048 bit but the concatenators don't seem to work so i don't really understand
+  - insert casts better
+  - Concatenator, Static_indexer_config, Delay_line_word_config, Static_eval, Keyboard, Static_value, Push_button, Pipelined_load_port, Register_word_config, Delay_line_word_asm, Clz, Ctz
   - isa: assembly parser generator thingy https://github.com/Stuffe/isa_spec
+  - do screen in tests/images.fr
+  - let the editor place the new components
+
+---
+
 ```
 // TODO: don't always recompile everything when loading a new circuit. it might reuse some custom components. 
 //       and don't reset the state.fr every time because bootstrapping the comptime stuff takes ~50ms. just reset when arena is getting too full. 

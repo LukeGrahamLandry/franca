@@ -56,7 +56,7 @@ State :: @rec @struct {
     warnings: List(u8);
     loader: LoaderT;
     download_schematic_archive_before_trying_to_load: bool;
-    prev_timestamp_us: i64;
+    prev_timestamp_ns: i64;
     frame_time_history: RawDeque(i64);
     frame_time_history_sum: i64;
     eval_last_frame: bool;
@@ -111,20 +111,21 @@ do_eval :: fn(state: *State) void = {
     world := state.world&;
     state.halt_message&.clear();
     state.want_eval = false;
-    prev_timestamp := state.prev_timestamp_us;
-    this_timestamp := realtime_us();
-    state.prev_timestamp_us = this_timestamp;
+    prev_timestamp := state.prev_timestamp_ns;
+    this_timestamp := realtime_ns();
+    state.prev_timestamp_ns = this_timestamp;
     delta_time := this_timestamp - prev_timestamp;
     if state.eval_last_frame {
         if state.frame_time_history&.len() == state.frame_time_history&.capacity() {
             old_delta_time := state.frame_time_history&.pop_front().unwrap();
             state.frame_time_history_sum -= old_delta_time;
         };
-        state.frame_time_history_sum += delta_time;
-        state.frame_time_history&.push_back(delta_time, panicking_allocator);
+        dt_us := delta_time / 1000;
+        state.frame_time_history_sum += dt_us;
+        state.frame_time_history&.push_back(dt_us, panicking_allocator);
         // TODO: could also use this to throttle the tick rate down so don't drop frames if the circuit is too big. 
     } else {
-        delta_time = 16 * US_PER_MS;
+        delta_time = min(delta_time, 16 * NS_PER_MS);
         prev_timestamp = this_timestamp - delta_time;
     };
     
@@ -132,10 +133,13 @@ do_eval :: fn(state: *State) void = {
     root_component := state.tree[0].component.unwrap();
     o_n, i_n := world[root_component]&.arity();
     values := temp().alloc_zeroed(i64, o_n + i_n);
+    // lifting the division out of the loop instead of `clock := prev_timestamp + delta_time*i/count;` 
+    // is fine if running slower than 1GHz which would mean simulating a tick in ~3 real cycles which is not a risk. 
+    clock_step := delta_time / count;  
+    world.timestamp_ns = (Some = prev_timestamp);
     range(0, count) { i |
         // the idea here is to spread the times evenly instead of all the ticks being grouped together each frame with 16ms gaps.
-        clock := prev_timestamp + delta_time*i/count;
-        world.timestamp_us = (Some = clock);
+        world.timestamp_ns.Some += clock_step;
         
         state.service_keyboard_device();
         state.tick += 1;
@@ -992,11 +996,15 @@ fn screen(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Compo
     b := self.tc_to_world_pos(a_tc + vec2(4, 3)*13);
     s := abs(a - b);
     sgl.color = pack_rgba(0, 0, 0, 255);
-    sgl.line(vec2(a.x, b.y + s.y/2), vec2(b.x, b.y + s.y/2), s.y);
-    @if(self.state.tick == 0) return();  // dont show whatever junk is at the start of memory before you run
-   
     data := world.storage.rest(c.instance_offset_by_gate[i]).interpret_as_bytes().peek_type(Tc.Builtin.ScreenData);
+    if data.mode == .Ascii8 {
+        sgl.color = data.background_colour.decode_8bit_colour();
+    };
+    sgl.line(vec2(a.x, b.y + s.y/2), vec2(b.x, b.y + s.y/2), s.y);
+
+    @if(self.state.tick == 0) return();  // dont show whatever junk is at the start of memory before you run
     @if(data.ram_size_bytes == 0) return();
+    
     memory := world.storage.rest(data.ram_instance).interpret_as_bytes().slice(0, data.ram_size_bytes);
     // TODO: bounds check or wrap?
     memory := memory.rest(data.offset);
@@ -1006,22 +1014,23 @@ fn screen(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Compo
     bpp := @if(@is(data.mode, .Ascii8, .Pixel8), 1, 4);
     memory := memory.slice(0, width * height * bpp);
     
+    decode_8bit_colour :: fn(v: u8) u32 = {
+        X :: fn(a: u8, b: u8, c: f64) => (@as(i64) v.shift_right_logical(a).bit_and(b).zext()).float() / c;
+        r, g, b := (X(5, 0b111, 7), X(2, 0b111, 7), X(0, 0b11, 3));
+        pack_rgba(r, g, b, 1.0)
+    };
+    
+    i := 0;
     if @is(data.mode, .Pixel8, .Pixel32) {
         // TODO: atlas.try_reserve and do it in place
         texture := temp().alloc_uninit(u32, width * height);
-        i := 0;
         range(0, height) { y |
             range(0, width) { x |
                 c := @match(data.mode) {
-                    fn Pixel8() => {
-                        v := memory[i];
-                        X :: fn(a: u8, b: u8, c: f64) => (@as(i64) v.shift_right_logical(a).bit_and(b).zext()).float() / c;
-                        r, g, b := (X(5, 0b111, 7), X(2, 0b111, 7), X(0, 0b11, 3));
-                        pack_rgba(r, g, b, 1.0)
-                    }
+                    fn Pixel8() => decode_8bit_colour(memory[i]);
                     fn Pixel32() => {
                         v: i64 = u32.reinterpret_bytes(memory)[i].zext();
-                        r, g, b := (v.shift_right_logical(24).bit_and(0xFF), v.shift_right_logical(16).bit_and(0xFF), v.shift_right_logical(8).bit_and(0xFF));
+                        r, g, b := (v.shift_right_logical(16).bit_and(0xFF), v.shift_right_logical(8).bit_and(0xFF), v.bit_and(0xFF));
                         pack_rgba(r, g, b, 255)
                     }
                     @default => unreachable();
@@ -1039,14 +1048,41 @@ fn screen(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Compo
         };
         s.enable = true;
         
-        // TODO: i think i have y flipped, but its hard to tell with life
         sgl.color = pack_rgba(255, 255, 255, 255);
-        sgl.v2f_t2f(a.x, a.y, uv0.x, uv1.y);
-        sgl.v2f_t2f(b.x, a.y, uv1.x, uv1.y);
-        sgl.v2f_t2f(b.x, b.y, uv1.x, uv0.y);
-        sgl.v2f_t2f(a.x, b.y, uv0.x, uv0.y);
+        sgl.v2f_t2f(a.x, a.y, uv0.x, uv0.y);
+        sgl.v2f_t2f(b.x, a.y, uv1.x, uv0.y);
+        sgl.v2f_t2f(b.x, b.y, uv1.x, uv1.y);
+        sgl.v2f_t2f(a.x, b.y, uv0.x, uv1.y);
     } else {
-        // TODO
+        sdtx.pos = vec2(0);
+        sdtx.origin = self.world_to_text_pos(a);
+        foreground := data.foreground_colour.decode_8bit_colour();
+        // TODO: fonts
+        range(0, height) { y |
+            range(0, width) { x |
+                char, fore := @match(data.mode) {
+                    fn Ascii8() => (memory[i], foreground);
+                    fn Ascii32() => {
+                        v := u32.reinterpret_bytes(memory)[i];
+                        //back := decode_8bit_colour();
+                        //if back != pack_rgba(0, 0, 0, 255) {
+                        //    sdtx.color = back;
+                        //    sdtx.put("\x8F");
+                        //    sdtx.pos.x -= 1;
+                        //};
+                        panic("TODO: ascii32");
+                        //(v.trunc(), decode_8bit_colour())
+                    }
+                    @default => unreachable();
+                };
+                sdtx.color = fore;
+                sdtx.put(char.max(32));
+                
+                i += 1;
+            };
+            sdtx.pos.x = 0;
+            sdtx.pos.y += 1;
+        };
     };
 }
 
@@ -1263,6 +1299,7 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
             };
             gate := c.gates[gate_i]&;
             gate.logical_gate_index = -1;
+            gate.port_linked_list = -1;
             gate.kind = e.placing_type;
             gate.pos = self.world_to_tc_pos(self.mouse_world_pos);
             
@@ -1580,7 +1617,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.ticks_per_eval = 1;
     state.recenter();
     state.reset();
-    state.prev_timestamp_us = realtime_us();
+    state.prev_timestamp_ns = realtime_ns();
     
     state.circuit_arena = init(general_allocator(), 1.shift_left(16));
     for cli_args() { path |
@@ -1608,6 +1645,7 @@ fn reset(state: *State) void = {
 
     state.tick = 0;
     state.halt_message&.clear();
+    state.halted_without_wire_values = true;  // dont show zeroes before first tick
     
     world := state.world&;
     world.storage.set_zeroed();  // importantly resets ip,registers=0
@@ -1639,8 +1677,11 @@ fn reset(state: *State) void = {
     world.scratch.items().set_zeroed();
 }
 
-fn service_keyboard_device(state: *State) void = {
-    data := state.keyboard_data || return();
+fn service_keyboard_device(state: *State) void #inline = {
+    service_keyboard_device(state, state.keyboard_data || return());
+}
+
+fn service_keyboard_device(state: *State, data: *Tc.Builtin.KeyboardData) void = {
     buf := state.key_buffer&;
     if buf.len == 0 && !data.valid {
         data.value = 0;
@@ -1843,7 +1884,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                     c := state.circuit_arena&.borrow().alloc_uninit(Tc.Circuit, state.circuit.len + 1);
                     c.slice(0, state.circuit.len).copy_from(state.circuit);
                     c[c.len-1] = (
-                        id = (id = realtime_us()),
+                        id = (id = realtime_ns()),
                         name = "New Circuit",
                         gates = empty(),
                         wires = empty(),
@@ -2053,10 +2094,9 @@ fn load_atlas_part1(state: *State, c: *Tc.Circuit) void = {
     atlas_w, atlas_h := (1, 1);
     each c.gates { it |
         continue :: local_return;
-        @if(world[it.kind].name != "SpriteDisplay") continue();
+        @if(group(it.kind) != .Tc1 || name(it.kind, .Tc1) != .SpriteDisplay) continue();
         @if(!it.param.ult(files.len)) continue();
         file := files[it.param]&;
-        println(file.name);
         
         pixels, w, h := Viewer'stbi_load(file.data).or(fn(err) => {
             @eprintln("failed to load image (%): %", file.name, err);

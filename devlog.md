@@ -5,6 +5,7 @@
 - now have something that maybe works but i need to do screen to test it. 
   doesnt bode well that mine never sets the screen settings write pin. ("Conway's Game of Life Symphony") should be on tick 9.
   - the bytes of assembly i got out of isa_spec look the same as what the game shows
+  - this is the part thats fun where i get to step through them side by side until the registers are different. 
   - wrong shift direction to fix byteswap in ports so was always 0
   - wrong pin order for Add
   - now tick 10 wrong register value. address needs to wrap when too big for memory. 
@@ -20,6 +21,12 @@
 - proper texture for screen instead of drawing a line per pixel. 
   - wasnt rescaling the sub byte colour components
   - old atlas.enable was never false because of the 1 white pixel for lines. 
+  - i think i have y flipped, but its hard to tell with life. ah bad apple is a shape. fixed. 
+- brainfuck
+  - tick 12 address is wrong. fix register_bit,full_adder pins. 
+  - was doing wrong counter width=1 for a bit
+- platformergame draws but i fall through the floor
+- did more timer precision for good luck
 
 ## (Oct 28) circuit
 

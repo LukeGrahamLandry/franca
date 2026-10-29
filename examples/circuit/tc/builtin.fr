@@ -105,7 +105,7 @@ templates :: collect_templates(impl, .Tc1, pin_layouts) { it, k |
 templates2 :: collect_templates(impl2, .Tc2, pin_layouts2) { it, k |
     it.bit_width = get_width_data2(it);
     it.has_param = it.has_param || @is(k, .Static_indexer, .Segment_display, .Load_port, .Store_port, .Ram_v2);
-    if @is(k, .Register_word, .Delay_line_word, .Delay_line_bit) {
+    if @is(k, .Register_word, .Register_bit, .Delay_line_word, .Delay_line_bit, .Counter) {
         it.inputs_for_pure_eval = empty();
     };
     if k == .Load_port {
@@ -376,16 +376,10 @@ Decoder2 :: math(4, 2) { o, i |
 Timing :: device(1, 1, 
     fn(_) => 0,
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 1)) void = {
-        enable := i[0] != 0;
-        o[0] = if enable {
-            world.timestamp_us || {
-                x := realtime_us();
-                world.timestamp_us = (Some = x);
-                x
-            }
-        } else {
-            0
-        };
+        if i[0] != 0 {
+            @inline ((@run impl2'Time.fid.unwrap())(world, o, @ref zeroed(Array(i64, 0))));
+            o[0] /= 1000;  // us
+        };  // else: switch
     },
 );
 NoteSound :: device(0, 3, 
@@ -898,7 +892,12 @@ Lsr :: impl.Shr64;
 Rol :: impl.Rol64;
 Ror :: impl.Ror64;
 Asr :: impl.Ashr64;
-Counter :: impl.Counter64;
+Counter :: device(1, 2, 
+    impl.Counter64.compute_storage.unwrap(),
+    fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 2), instance: i64, doing_pre_read: bool) void = {
+        @inline ((@run impl.Counter64.fid.unwrap())(world, o, i, 1, instance, doing_pre_read));
+    },
+);
 Register_word :: device(1, 2, 
     fn(_) => 8*8,
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 2), instance: i64, doing_pre_read: bool) void = {
@@ -1056,9 +1055,11 @@ Screen :: device(0, 3,
 Time :: device(1, 0, 
     fn(_) => 0,
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 0)) void = {
-        i := bit_cast_unchecked(i64, Array(i64, 1), 1);
-        (@run impl'Timing.fid.unwrap())(world, o, i&);
-        o[0] *= 1000;  // ns
+        o[0] = world.timestamp_ns || {
+            x := realtime_ns();
+            world.timestamp_ns = (Some = x);
+            x
+        };
     },
 );
 Keyboard_v2 :: device(3, 1, 
@@ -1087,7 +1088,9 @@ Static_indexer :: math_param(1, 1) { o, i, p |
 };
 _7 :: todo();
 _8 :: todo();
-Inc :: todo();
+Inc :: math(1, 1) { o, i | 
+    o[0] = i[0] + 1;
+};
 _19_v2 :: todo();
 Cc_level_input :: todo();
 _9 :: todo();
@@ -1263,7 +1266,7 @@ pin_layouts2 :: @static @(parse_pin_layouts(.Tc2)) (
     ((-1, 0))),
 ((.Level_input_2_pin),
     ((0, 1), (0, -1))),
-((.Not_bit, .Not_word, .Neg),
+((.Not_bit, .Not_word, .Neg, .Inc),
     ((2, 0), (-1, 0))),
 ((.Or_bit, .And_bit, .Nand_bit, .Xor_bit, .Nor_bit, .Xnor_bit),
     ((2, 0), (-1, -1), (-1, 1))),
@@ -1313,10 +1316,12 @@ pin_layouts2 :: @static @(parse_pin_layouts(.Tc2)) (
     ((1, 0), (-1, -1), (-1, 0), (-1, 1), (-1, 2))),
 ((.Splitter_word_2),
     ((1, -1), (1, 0), (-1, 0))),
-((.Maker_word_2, .Concatenator_2),
+((.Maker_word_2, .Maker_bit_2, .Concatenator_2),
     ((1, 0), (-1, -1), (-1, 0))),
 ((.Register_word),
     ((3, 0), (-3, -1), (-3, 0))),
+((.Register_bit),
+    ((3, 0), (-3, 0), (-3, -1))),
 ((.Counter),
     ((3, 0), (-3, 0), (-3, -1))),
 ((.Keyboard_v2),
@@ -1337,6 +1342,8 @@ pin_layouts2 :: @static @(parse_pin_layouts(.Tc2)) (
     ((-3, 0), (-1, -2))),
 ((.Level_input_switched), 
     ((3, 0), (1, -2))),
+((.Full_adder),
+    ((2, 0), (1, 2), (-1, -1), (-1, 1), (0, -2))),
 );
 
 get_width_data :: fn(it: *Template) []u8 = {
