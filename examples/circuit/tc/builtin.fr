@@ -208,12 +208,17 @@ fn io(o: i64, i: i64) = {
 
 InstanceInfo :: @struct(param: i64);
 fn device(o: i64, i: i64, compute_storage: @FnPtr(it: InstanceInfo) i64, fid: FuncId) = {
+    t := device_no_storage(o, i, fid);
+    t.compute_storage = (Some = compute_storage);
+    t
+}
+
+fn device_no_storage(o: i64, i: i64, fid: FuncId) = {
     ast_alloc().boxed(Template, (
         in_arity = i, 
         out_arity = o, 
         body = .Native,
         fid = (Some = fid),
-        compute_storage = (Some = compute_storage),
     ))
 }
 
@@ -373,8 +378,7 @@ Decoder2 :: math(4, 2) { o, i |
         o[i] = int(n == i);
     };
 };
-Timing :: device(1, 1, 
-    fn(_) => 0,
+Timing :: device_no_storage(1, 1, 
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 1)) void = {
         if i[0] != 0 {
             @inline ((@run impl2'Time.fid.unwrap())(world, o, @ref zeroed(Array(i64, 0))));
@@ -382,8 +386,7 @@ Timing :: device(1, 1,
         };  // else: switch
     },
 );
-NoteSound :: device(0, 3, 
-    fn(_) => 0,
+NoteSound :: device_no_storage(0, 3, 
     fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 3)) void = {
         // TODO
     },
@@ -409,8 +412,7 @@ Keyboard :: device(3, 1,
     },
 );
 
-FileLoader :: device(1, 2, 
-    fn(_) => 0,
+FileLoader :: device_no_storage(1, 2, 
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 2), param: i64) void = {
         enable, offset := (i[0] != 0, i[1]);
         want_length := offset == -1;
@@ -431,8 +433,7 @@ FileLoader :: device(1, 2,
         };
     },
 );
-Halt :: device(0, 1, 
-    fn(_) => 0,
+Halt :: device_no_storage(0, 1, 
     fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 1), param: i64) void = {
         halt := i[0] != 0;
         if halt {
@@ -533,7 +534,7 @@ LessI8 :: math(1, 2) { o, i | o[0] = int(lt(i[0].sign_extend(7), i[1].sign_exten
 DotMatrixDisplay :: device(0, 4, 
     fn(_) => 48*32*2,
     fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 4), param: i64, instance: i64, _: bool) void = {
-        coloumn_major_pixels := param == 1;  // TODO
+        coloumn_major_pixels := param == 1;
         n := 48*32*2/64;
         buf := world.storage.subslice(instance, n);
         enable, pixel_mask, colour := (i[1] != 0 && i[3] != 0, i[0], i[2]);
@@ -927,7 +928,12 @@ Maker_word_2 :: make_maker(2);
 Clz :: todo();
 Register_word_config :: todo();
 Delay_line_word_asm :: todo();
-Push_button :: todo();
+Push_button :: device(1, 0,
+    fn(it) => 64,
+    fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 0), instance: i64, doing_pre_read: bool) void = {
+        o[0] = world.storage[instance];
+    },
+);
 Pipelined_load_port :: todo();
 Load_port :: device(1, 2,
     fn(it) => 64,
@@ -1052,8 +1058,7 @@ Screen :: device(0, 3,
         // TODO
     },
 );
-Time :: device(1, 0, 
-    fn(_) => 0,
+Time :: device_no_storage(1, 0, 
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 0)) void = {
         o[0] = world.timestamp_ns || {
             x := realtime_ns();
@@ -1314,7 +1319,7 @@ pin_layouts2 :: @static @(parse_pin_layouts(.Tc2)) (
     ((1, -1), (1, 0), (1, 1), (1, 2), (-1, 0))),
 ((.Maker_word_4, .Maker_bit_4, .Concatenator_4),
     ((1, 0), (-1, -1), (-1, 0), (-1, 1), (-1, 2))),
-((.Splitter_word_2),
+((.Splitter_word_2, .Splitter_bit_2),
     ((1, -1), (1, 0), (-1, 0))),
 ((.Maker_word_2, .Maker_bit_2, .Concatenator_2),
     ((1, 0), (-1, -1), (-1, 0))),
@@ -1344,6 +1349,8 @@ pin_layouts2 :: @static @(parse_pin_layouts(.Tc2)) (
     ((3, 0), (1, -2))),
 ((.Full_adder),
     ((2, 0), (1, 2), (-1, -1), (-1, 1), (0, -2))),
+((.Push_button),
+    ((2, 0))),
 );
 
 get_width_data :: fn(it: *Template) []u8 = {
@@ -1438,7 +1445,7 @@ get_width_data2 :: fn(it: *Template) []u8 = {
     a := ast_alloc();
     pin_count := it.in_arity + it.out_arity;
     k := import("@/examples/circuit/tc/load.fr")'gate_name(it.kind, .Tc2);
-    if it.name.ends_with("_bit") || @is(k, .Off_v2, .On_v2, .Full_adder, .Halt_v2) {
+    if it.name.ends_with("_bit") || @is(k, .Off_v2, .On_v2, .Full_adder, .Halt_v2, .Push_button) {
         return a.alloc_init(u8, pin_count, fn(_) => 1);
     };
     x: []u8 = @match(k) {
@@ -1447,7 +1454,9 @@ get_width_data2 :: fn(it: *Template) []u8 = {
         fn Decoder_1() => @slice(0x01, 1, 1);
         fn Decoder_2() => @slice(0x01, 1, 1, 1, 2);
         fn Decoder_3() => @slice(0x01, 1, 1, 1, 1, 1, 1, 1, 3, 1);
+        fn Splitter_bit_8() => @slice(0x01, 1, 1, 1, 1, 1, 1, 1, 8);
         fn Splitter_bit_4() => @slice(0x01, 1, 1, 1, 4);
+        fn Splitter_bit_2() => @slice(0x01, 1, 2);
         fn Keyboard_v2() => @slice(0x01, 0x10, 0x01, 0x01);
         fn Screen() => @slice(0x01, 64, 64);
         @default => it.bit_width;

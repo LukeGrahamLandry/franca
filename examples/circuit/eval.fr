@@ -144,10 +144,10 @@ fn evaluate(world: *World, values: []WireValue, kind: ComponentId, param: i64, s
     prev := world.save_wire_values;
     @debug_assert(prev || !save_wire_values, "if init(save_wire_values=false), won't have preallocated enough");
     world.save_wire_values = save_wire_values;
-    if !save_wire_values && get_compiled(world, kind).is_some() {
+    if !save_wire_values && world[kind].signeture < 4 {
         eval_compiled(world, values, kind, param);
     } else {
-        eval(world, values, kind, param);
+        eval_top(world, values, kind, param);
     };
     world.save_wire_values = prev;
     world.timestamp_ns = .None;
@@ -155,13 +155,10 @@ fn evaluate(world: *World, values: []WireValue, kind: ComponentId, param: i64, s
 
 // expose the compiled version with the intepreter's calling convention. 
 fn eval_compiled(world: *World, parent: []WireValue, it: *Component.Gate) void = {
-    o_n, i_n := world[it.kind]&.arity();
-    // redundant if the gate is from a Component but be safe for base_gate in the top level call. 
-    @assert(it.inputs.len == i_n && it.outputs.len == o_n, "arity error calling compiled gate");  
     a := Arena'stack_alloc(size_of(WireValue) * max_in_out_wires);
     values := a.alloc_zeroed(WireValue, it.outputs.len + it.inputs.len);
     range(0, it.inputs.len) { i |
-        values[i + o_n] = parent[it.inputs[i].id.zext()];
+        values[i + it.outputs.len] = parent[it.inputs[i].id.zext()];
     };
     eval_compiled(world, values, it.kind, it.param);
     range(0, it.outputs.len) { i |
@@ -170,36 +167,38 @@ fn eval_compiled(world: *World, parent: []WireValue, it: *Component.Gate) void =
 }
 
 // values is (uninit outputs, inputs)
-fn eval_compiled(world: *World, values: []WireValue, kind: ComponentId, param: i64) []i64 = {
+fn eval_compiled(world: *World, values: []WireValue, kind: ComponentId, param: i64) void = {
     child := world[kind]&;
-    storage_count := get_storage_count(world.components, kind, param);
-    compiled := get_compiled(world, kind)
-        || @panic("expected eval_compiled gate to have fast_eval for (%)", child.name);
-    o_n, i_n := child.arity();
-    @assert_eq(o_n + i_n, values.len, "arity error calling compiled gate %", child.name);  
+    o_n, i_n := child.primitive_arity;
+    @debug_assert_eq(o_n + i_n, values.len, "arity error calling compiled gate %", child.name);  
+    
     // SAFETY: *Array(T, N) has same repr as *T. compile_gates chooses N based on Gate arity. 
-    if child.has_param {  // TODO: this is stupid. only matters on wasm. should probably just always add a junk param:i64 in the compiler instead. 
+                          // TODO: this is stupid. only matters on wasm. should probably just always add a junk param:i64 in the compiler instead. 
                           //       the junk would also fix needing to know for storage without param to shift the arg. 
-        if storage_count != 0 {
+    compiled := child.fast_eval;
+    p := values.ptr.offset(o_n);
+    @switch(child.signeture) {
+        @case(0) => {
             compiled := bit_cast_unchecked(rawptr, @FnPtr(*World, *WireValue, *WireValue, i64, i64, bool) void, compiled);
-            compiled(world, values.ptr, values.ptr.offset(o_n), param, world.instance, world.doing_pre_read);
-        } else {    
+            compiled(world, values.ptr, p, param, world.instance, world.doing_pre_read);
+        };
+        @case(1) => {
             compiled := bit_cast_unchecked(rawptr, @FnPtr(*World, *WireValue, *WireValue, i64) void, compiled);
-            compiled(world, values.ptr, values.ptr.offset(o_n), param);
-        }
-    } else {
-        if storage_count != 0 {
+            compiled(world, values.ptr, p, param);
+        };
+        @case(2) => {
             compiled := bit_cast_unchecked(rawptr, @FnPtr(*World, *WireValue, *WireValue, i64, bool) void, compiled);
-            compiled(world, values.ptr, values.ptr.offset(o_n), world.instance, world.doing_pre_read);
-        } else {
+            compiled(world, values.ptr, p, world.instance, world.doing_pre_read);
+        };
+        @case(3) => {
             compiled := bit_cast_unchecked(rawptr, @FnPtr(*World, *WireValue, *WireValue) void, compiled);
-            compiled(world, values.ptr, values.ptr.offset(o_n));
-        }
+            compiled(world, values.ptr, p);
+        };
+        @default => unreachable();
     };
-    values.slice(0, o_n)
 }
 
-fn eval(world: *World, values: []WireValue, kind: ComponentId, param: i64) []i64 = {
+fn eval_top(world: *World, values: []WireValue, kind: ComponentId, param: i64) []i64 = {
     a := Arena'stack_alloc(size_of(WireId) * max_in_out_wires);
     o_n, i_n := world[kind]&.arity();
     @assert_eq(values.len, o_n + i_n, "arity error calling gate");  

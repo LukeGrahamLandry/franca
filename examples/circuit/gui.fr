@@ -10,6 +10,7 @@ space: toggle auto eval.
 r: restart program. 
 c: reset scale/pos.
 [/]: slower/faster eval (shift:50, cmd:1000). 
+p: toggle adaptive tick rate
 k+shift+cmd: toggle keyboard device capture.
 u: toggle render graphics devices over circuit
 n: select builtin architecture (overture, leg).
@@ -31,9 +32,11 @@ State :: @rec @struct {
     world: World;
     tree: List(CircuitNode);
     clicked: bool;
+    left_mouse_down: bool;
     want_eval: bool;
     auto_eval: bool;
     ticks_per_eval: i64;
+    adapt_tick_rate: bool;
     sim: LevelApi.Simulation;
     level: *LevelApi.Exports;
     levels: List(*LevelApi.Exports);
@@ -57,8 +60,8 @@ State :: @rec @struct {
     loader: LoaderT;
     download_schematic_archive_before_trying_to_load: bool;
     prev_timestamp_ns: i64;
-    frame_time_history: RawDeque(i64);
-    frame_time_history_sum: i64;
+    frame_time_history: RollingAverage;  // us
+    tick_count_history: RollingAverage;
     eval_last_frame: bool;
     split_graphics_and_wires: bool;
     // v1 SpriteDisplay
@@ -97,6 +100,10 @@ main_use_output :: fn(state: *State, in: LoaderT.I, out: Result(void, void)) voi
     state.reset();
     state.find_keyboard();
     
+    if state.warnings.len != 0 {
+        state.auto_eval = false;
+    };
+    
     if out&.is(.Err) {
         // recompiled for exiting edit mode but current_jitted_source didn't change so didnt call worker_get_output
         // barely helps because wire ids change if you did anything at all but doesn't hurt
@@ -115,48 +122,67 @@ do_eval :: fn(state: *State) void = {
     this_timestamp := realtime_ns();
     state.prev_timestamp_ns = this_timestamp;
     delta_time := this_timestamp - prev_timestamp;
+    recalibrate := 1;
     if state.eval_last_frame {
-        if state.frame_time_history&.len() == state.frame_time_history&.capacity() {
-            old_delta_time := state.frame_time_history&.pop_front().unwrap();
-            state.frame_time_history_sum -= old_delta_time;
+        state.frame_time_history&.push(delta_time / 1000);
+        
+        if state.adapt_tick_rate && state.frame_time_history.history&.len() > 16 {
+            ave_frame_time := state.frame_time_history&.get();
+            if ave_frame_time < 17_000 {
+                prev_frame_time := state.frame_time_history.history&[state.frame_time_history.history&.len() - 1];
+                if prev_frame_time > 17_000 {
+                    prev_tick_count := state.tick_count_history.history&[state.tick_count_history.history&.len() - 1];
+                    ns_per_tick := prev_frame_time * 1000 / prev_tick_count;
+                    state.ticks_per_eval = max(16_900_000 / ns_per_tick, 1);
+                } else {
+                    recalibrate = 2;
+                };
+            } else {
+                ave_tick_count := state.tick_count_history&.get();
+                ns_per_tick := ave_frame_time * 1000 / ave_tick_count;
+                state.ticks_per_eval = max(16_900_000 / ns_per_tick, 1);
+            };
         };
-        dt_us := delta_time / 1000;
-        state.frame_time_history_sum += dt_us;
-        state.frame_time_history&.push_back(dt_us, panicking_allocator);
-        // TODO: could also use this to throttle the tick rate down so don't drop frames if the circuit is too big. 
     } else {
         delta_time = min(delta_time, 16 * NS_PER_MS);
         prev_timestamp = this_timestamp - delta_time;
     };
     
-    count := @if(state.auto_eval, state.ticks_per_eval, 1);
+    count := @if(state.auto_eval, state.ticks_per_eval * recalibrate, 1);
+    state.tick_count_history&.push(count);
+    
     root_component := state.tree[0].component.unwrap();
     o_n, i_n := world[root_component]&.arity();
     values := temp().alloc_zeroed(i64, o_n + i_n);
+    have_level := values.len != 0;
     // lifting the division out of the loop instead of `clock := prev_timestamp + delta_time*i/count;` 
     // is fine if running slower than 1GHz which would mean simulating a tick in ~3 real cycles which is not a risk. 
     clock_step := delta_time / count;  
-    world.timestamp_ns = (Some = prev_timestamp);
+    clock := prev_timestamp;
+    state.halted_without_wire_values = count != 1;
     range(0, count) { i |
         // the idea here is to spread the times evenly instead of all the ticks being grouped together each frame with 16ms gaps.
-        world.timestamp_ns.Some += clock_step;
-        
+        clock += clock_step;
+        world.timestamp_ns = (Some = clock);
         state.service_keyboard_device();
-        state.tick += 1;
         
-        if values.len != 0 {
+        if have_level {
+            state.tick += 1;
             state'level'before(state.level.userdata, values);
         };
         
         save_wire_values := i == count - 1;
-        state.halted_without_wire_values = !save_wire_values;
         evaluate(world, values, root_component, 0, save_wire_values);
         
         if world.tc_halt_device != -1 {
+            if !have_level {
+                state.tick += i;
+            };
+            state.halted_without_wire_values = i != count - 1;
             return do_halt(state);
         };
         
-        if values.len != 0 {
+        if have_level {
             win := state'level'after(state.level.userdata, values);
             if win {
                 @fmt(state.halt_message&, "solved in % ticks", state.tick);
@@ -164,6 +190,10 @@ do_eval :: fn(state: *State) void = {
                 return();
             }
         };
+    };
+    state.halted_without_wire_values = false;
+    if !have_level {
+        state.tick += count;
     };
 };
 
@@ -248,10 +278,19 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         if state.edit.enable {
             @fmt(out, "edit mode (press e to exit); right click to select/place. space to rotate. backspace to delete.");
         } else {
-        frame_time := state.frame_time_history_sum / max(1, state.frame_time_history&.len());
-        @fmt(out, "(paused=%, tick_rate=%, tick=%, keyboard=%, frame_time=%ms) ", 
-            !state.auto_eval, state.ticks_per_eval, state.tick, state.keyboard_device_focused, frame_time/1000);
-        @if(state.load_time != 0) @fmt(out, "load_time=%ms", state.load_time);
+            frame_time := state.frame_time_history&.get();
+            @fmt(out, "(paused=%, tick_rate=%, tick=%, keyboard=%, frame_time=%ms, adapt_tick_rate=%) ", 
+                !state.auto_eval, state.ticks_per_eval, state.tick, state.keyboard_device_focused, frame_time/1000, state.adapt_tick_rate);
+            @if(state.load_time != 0) @fmt(out, "load_time=%ms ", state.load_time);
+            
+            if state.auto_eval && frame_time != 0 {
+                hz0 := state.tick_count_history&.get() * US_PER_S / frame_time;
+                mhz, hz1 := hz0.div_mod(1_000_000);
+                khz, hz2 := hz1.div_mod(1_000);
+                @if(mhz > 0 || khz > 800) @fmt(out, "%MHz+", mhz);
+                @fmt(out, "%KHz", khz);
+                @if(mhz == 0 && khz < 50) @fmt(out, "+%Hz", hz2);
+            }
         };
     };
     if !state.edit.enable {
@@ -381,6 +420,11 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             @match(it.kind.name(.Tc2)) {
                 fn Segment_display() => self.segment_display(gate, c, i, it);
                 fn Screen() => self.screen(gate, c, i, it);
+                fn Push_button() => {
+                    // TODO: base_instance. once i allow in cc, need to unpress if you ESC to do up while holding mouse. 
+                    on := state.left_mouse_down && self.hovering_node(self.tc_to_world_pos(gate.pos));
+                    state.world.storage[c.instance_offset_by_gate[i]] = int(on);
+                };
                 @default => ();
             };
         };
@@ -745,6 +789,10 @@ fn draw_gate_squares(self: *Draw, circuit: *Tc.Circuit) void = {
                     state.clicked = false;
                     state.open_gate(.None, (Some = g_gate_index), false);
                 };
+            };
+            
+            if group(it.kind) == .Tc2 && Tc'gate_name(it.kind, .Tc2) == .Push_button {
+                sgl.color = pack_rgba(255 * int(!state.left_mouse_down), 255 * int(state.left_mouse_down), 0, 255);
             };
         };
         sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
@@ -1611,7 +1659,8 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     state.halt_message = list(a);
     state.key_buffer = init(a, 64);
-    state.frame_time_history = init(a, 128);
+    state.frame_time_history.history = init(a, 64);
+    state.tick_count_history.history = init(a, 64);
     state.tree = list(a);
     state.dirty = true;
     state.ticks_per_eval = 1;
@@ -1640,8 +1689,8 @@ fn recenter(state: *State) void = {
 }
 
 fn reset(state: *State) void = {
-    state.frame_time_history_sum = 0;
     state.frame_time_history&.clear();
+    state.tick_count_history&.clear();
 
     state.tick = 0;
     state.halt_message&.clear();
@@ -1819,6 +1868,9 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 fn RIGHT_BRACKET() => if state.ticks_per_eval + tick_off < 1_000_000 {
                     state.ticks_per_eval += tick_off;
                 }
+                fn P() => {
+                    state.adapt_tick_rate = !state.adapt_tick_rate;
+                }
                 fn LEFT_SHIFT() => { state.show_wire_ref_lines = true; }
                 fn L() => if !e.enable {
                     if state.loader.progress == .Idle {
@@ -1912,6 +1964,15 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         fn MOUSE_DOWN() => if event.mouse_button == .RIGHT {
             state.mouse_pos = mouse;
             state.clicked = true;
+        } else {
+            if event.mouse_button == .LEFT {
+                state.left_mouse_down = true;
+            }
+        };
+        fn MOUSE_UP() => {
+            if event.mouse_button == .LEFT {
+                state.left_mouse_down = false;
+            }
         }
         fn CLIPBOARD_PASTED() => if event.pasted.contains("CIRCUIT v1") {
             state.load_path_async(event.pasted, true);
@@ -2238,3 +2299,19 @@ convert_number_prefixed :: fn(s: Str) Ty(i64, Str) = {
     value *= @if(negative, -1, 1);
     (value, extra)
 };
+
+RollingAverage :: @struct(history: RawDeque(i64), sum := 0);
+fn push(self: *RollingAverage, new: i64) void = {
+    if self.history&.len() == self.history&.capacity() {
+        old := self.history&.pop_front().unwrap();
+        self.sum -= old;
+    };
+    self.sum += new;
+    self.history&.push_back(new, panicking_allocator);
+}
+fn clear(self: *RollingAverage) void = {
+    self.history&.clear();
+    self.sum = 0;
+}
+fn get(self: *RollingAverage) i64 = 
+    self.sum / max(1, self.history&.len());

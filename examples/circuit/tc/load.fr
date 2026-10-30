@@ -526,12 +526,10 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         gates = gates.items(),
         name = name,
         wire_count = wire_count,
-        bit_width = bit_width,
-        wire_bit_width = wire_bit_width,
         has_bidirectional_pins = c.has_bidirectional_pins,
     );
     c.bit_width = bit_width;
-    if calculate_usage(components.items(), components.len - 1, a, warn) {
+    if calculate_usage(components.items(), a, warn) {
         components.len -= 1;
         c.compiled = .None;
         each c.gates { it |
@@ -539,6 +537,10 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         };
         return();
     };
+    usage := components[components.len - 1].usage;
+    usage.bit_width = bit_width;
+    usage.wire_bit_width = wire_bit_width;
+    
     find_links_for_lastest_component(c, components.items(), linkables, warn);
 }
 
@@ -591,7 +593,7 @@ find_links_for_lastest_component :: fn(c: *Circuit, components: []Component, lin
                 @fmtln(warn, "TODO: console's linked ram doesn't have logical_gate_index");
                 continue();
             };
-            if get_storage_count(components, component.gates[ram.logical_gate_index]&) == 0 {
+            if !has_storage(components, component.gates[ram.logical_gate_index].kind) {
                 @fmtln(warn, "TODO: console's linked component doesn't have storage");
                 continue()
             };
@@ -660,7 +662,7 @@ assign_port_param :: fn(gates: []Circuit.Gate, logical: []Component.Gate, linkab
         @if(gate.logical_gate_index == -1) continue();
         
         p := logical[gate.logical_gate_index]&.get_param(.Ram_v2)[];
-        ram_size_bytes, little_endian := (p.get(.ram_size_bytes), p.get(.little_endian));
+        ram_size_bytes, little_endian := (p.get(.ram_size_bytes), p.get(.little_endian) == 1);
         
         i := gate.port_linked_list;
         while => i != -1 {
@@ -668,7 +670,8 @@ assign_port_param :: fn(gates: []Circuit.Gate, logical: []Component.Gate, linkab
             g := logical[it.logical_gate_index]&;
             @debug_assert(it.kind.is_port() && g.kind.id == it.kind.id, "expected port");
             p := g.get_param(.Port);
-            p.set(.little_endian, little_endian);
+            // dont need to byteswap if it's only one byte
+            p.set(.little_endian, int(little_endian || p[].get(.width) == 8));
             p.set(.ram_size_bytes, ram_size_bytes);
             p.set(.connected, 1);
             i = it.port_linked_list;
@@ -853,7 +856,7 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
     n := 0;
     range_rev(0, order.len) { i |
         it := gates[order[i]]&;
-        if !it.kind.is_port() && get_storage_count(components, it) != 0 && it.outputs.len != 0 {
+        if !it.kind.is_port() && has_storage(components, it.kind) && it.outputs.len != 0 {
             // TODO: :NotReorderingTheseBreaksOvertureLegNandverture && inputs.len!=pure_eval.len
             x := order&.ordered_remove(i).unwrap();
             order&.push(x);
@@ -983,9 +986,6 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8), uni
                     @if(size < it.data.len) @fmtln(warn, "TODO: rom file too small for storage");
                     it.data = it.data.slice(0, min(size, it.data.len));
                 };
-                
-                // :NonZeroStorage don't allow storage_count=0 because then compiler won't pass `instance` and signeture will be wrong. 
-                s&.set(.storage_size, max(s.get(.storage_size), 1));
                 
                 param = s.repr.bitcast();
             };
@@ -1278,6 +1278,7 @@ fn get_bit_width(components: []Component, it: *Component.Gate) []u8 = {
         return get_bit_width(shape, it.param);
     };
     kind: i64 = it.kind.id.zext();
+    @if(components[kind].usage.is_null()) return(empty());
     return components[kind].bit_width;
 }
 

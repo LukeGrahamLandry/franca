@@ -1,4 +1,5 @@
-- <https://franca.lukegrahamlandry.ca/?file=examples%2Fcircuit%2Fgui.fr>
+- <https://franca.lukegrahamlandry.ca/?lang=aot&file=examples%2Fcircuit%2Fgui.fr> 
+  - (blazingly 15% native speed)
 
 this is a logic gate simulator. it understands two forms of circuit programs (`defs` and `tc`). 
 circuit graphs are compiled into franca code and then jitted. 

@@ -19,20 +19,18 @@ Component :: @struct {
     // storage_count is measured in i64-s. how many slots of world.storage all these gates need
     storage_count := 0; // use get_storage_count instead if it could be a tc/builtin
     primitive_arity := (-1, -1); // (out, in)
-    labels: []GateLabel = empty();
     fast_eval := zeroed(rawptr);
     compile_order := zeroed(Array([]Op, 2));
     has_param := false;
     is_switch := false;
     has_bidirectional_pins := false;  // always inlined so doesn't need to be compiled
-    bit_width: []u8 = empty();  // io only
-    wire_bit_width: []u8 = empty();
+    signeture: u8 = 255;  // see eval_compiled
     
     usage: *Usage #use = zeroed(*Usage);
     Usage :: @struct {
         wire_depth := 0;  // recursive max wire_count of children
         wire_sum := 0;    // like ^ but don't reset scratch for each child so can use it for visualization
-        gate_sum := 0;
+        gate_sum := 0;    // inline heuristic
         
         // indices in inputs of gates[0] that are needed to eval if not writing to delay() storage. 
         // TODO: just make this a StaticBitSet(64)
@@ -40,6 +38,9 @@ Component :: @struct {
         gates_needed_for_pure_eval := zeroed DynamicBitSet;
         instance_offset_by_gate: []i64 = empty();
         wires_used := zeroed DynamicBitSet;
+        
+        bit_width: []u8 = empty();  // io only
+        wire_bit_width: []u8 = empty();
     };
     
     Gate :: @struct {
@@ -55,15 +56,12 @@ Component :: @struct {
     };
 };
 
-GateLabel :: @struct(name: Str, bit_size: i64, gate_index: i64);
-
 ComponentId :: @struct(id: u32);
 WireId :: @struct(id: u32);
 GateId :: @struct(id: u32);
 
 #use("@/lib/collections/map.fr");
 compile_defs :: fn(components: *List(Component)) void = {
-    start_count := components.len;
     map: HashMap(Symbol, ComponentId) = init(temp());
 
     //User := Main.defs;
@@ -201,15 +199,13 @@ compile_defs :: fn(components: *List(Component)) void = {
             name = name.str(),
             gates = gates.items(),
             wire_count = wire_count,
-            wire_bit_width = bit_width.items(),
         );
+        calculate_usage(components.items(), ast_alloc(), @ref u8.list(temp()));
+        components[components.len - 1].usage.wire_bit_width = bit_width.items();
+        
         map&.insert(name, (id = components.len.trunc() - 1));
     };
     NONE :WireId: (id = 0xFFFFFFFF);
-    
-    warn := @ref u8.list(temp());
-    calculate_usage(components.items(), start_count, ast_alloc(), warn);
-    print(warn.items());
 }
 
 builtin_components :: {
@@ -327,29 +323,28 @@ layout_components :: fn(components: []Component, out: *List(u8)) void = {
 Tc :: import("@/examples/circuit/tc/load.fr");
 TcBuiltins :: Tc.Builtin.impl;
 
-calculate_usage :: fn(components: []Component, off: i64, a: Alloc, warn: *List(u8)) bool = {
+calculate_usage :: fn(components: []Component, a: Alloc, warn: *List(u8)) bool = {
     @assert_lt(components.len, MAX_u32, "too many components");
     error := false;
-    range(off, components.len) { i |
-        continue :: local_return;
+    i := components.len - 1;
         id := @as(ComponentId) (id = i.trunc());
         component_i := i;
         c := components.index(i);
         c.usage = a.box_zeroed(Component.Usage);
-        if c.gates.len == 0 {
-            c.gate_sum = 1;
-            continue();
-        };
+        @assert_ne(c.gates.len, 0);
         
         @assert_lt(c.gates.len, MAX_u32, "too many gates");
         gate_sum, wire_sum, wire_depth := (0, 0, 0);
         storage_count := 0;
+        need_storage := false;
         enumerate c.gates { i, it |
             child := components[it.kind.id.zext()]&;
             wire_sum += child.wire_sum;
             wire_depth = max(wire_depth, child.wire_depth);
             gate_sum += child.gate_sum;
             storage_count += get_storage_count(components, it);
+            need_storage = need_storage || has_storage(components, it.kind);
+            
             if i != 0 && i != c.gates.len - 1 {
                 gate_i := i;
                 // give a better error message than array length mismatch when typechecking the generated code.
@@ -360,6 +355,12 @@ calculate_usage :: fn(components: []Component, off: i64, a: Alloc, warn: *List(u
                 };
             };
         };
+        
+        if storage_count == 0 && need_storage {
+            // ex. a ram with zero size still needs to pass instance because the signeture will expect it. 
+            storage_count = 1;
+        };
+        
         c.wire_depth = wire_depth + c.wire_count;
         c.wire_sum = wire_sum + c.wire_count;
         c.gate_sum = gate_sum + c.gates.len;
@@ -441,7 +442,6 @@ calculate_usage :: fn(components: []Component, off: i64, a: Alloc, warn: *List(u
         c.instance_offset_by_gate = instance_offset_by_gate;
         wires_used.bits.gpa = panicking_allocator;
         c.wires_used = wires_used;
-    };
     error
 }
 
@@ -449,8 +449,8 @@ fn get_storage_count(components: []Component, it: *Component.Gate) i64 =
     get_storage_count(components, it.kind, it.param);
 
 fn get_storage_count(components: []Component, kind: ComponentId, param: i64) i64 = {
-    k: i64 = kind.id.zext();
     if !@is(kind.group(), .Tc1, .Tc2) {
+        k: i64 = kind.id.zext();
         return components[k].storage_count;
     };
     shape := get_builtin_shape(kind);
@@ -461,6 +461,11 @@ fn get_storage_count(components: []Component, kind: ComponentId, param: i64) i64
     0
 }
 
+fn has_storage(components: []Component, kind: ComponentId) bool = 
+    @if(@is(kind.group(), .Tc1, .Tc2), 
+        get_builtin_shape(kind)[].compute_storage.is_some(), 
+        components[kind.id.zext()].storage_count != 0);
+
 CompileGates :: @struct {
     components: []Component;
     c: *Component;
@@ -470,19 +475,16 @@ CompileGates :: @struct {
     doing_pre_read := false;
     doing_pre_read_local := false;
     compile_order: List(Component.Op);
-    // TODO
-    // for now this is just so maybe if the pins are messed up you can still draw. should get rid of it once more confident. 
-    // tho maybe for runtime loading circuits should keep something like this and turn it into error to show in ui instead of just crashing. 
+    // TODO: dont allow run if failed=true
     failed := false;
     warn: *List(u8);
 };
 
-// TODO: arrange for builtins to have const known param/doing_pre_read
 fn compile_gate(self: *CompileGates, gate_i: i64) void = {
     out := self.out;
     it := self.c.gates[gate_i]&;
     child := self.components[it.kind.id.zext()]&;
-    child_storage_count := get_storage_count(self.components, it);
+    child_has_storage := has_storage(self.components, it.kind);
     
     if !self.c.gates_needed_for_pure_eval&.get(gate_i) && self.doing_pre_read && !self.doing_pre_read_local {
         return();
@@ -490,12 +492,12 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
 
     // TODO: for things with storage that were already pre_read, also compile a version that only does the writes and propagates not needing outputs
     discard_outputs := !self.doing_pre_read && it.outputs.len > 0 && self.wires_evaluated&.get(it.outputs[0].id.zext());
-    if discard_outputs && child_storage_count == 0 && !child.is_switch {
+    if discard_outputs && !child_has_storage && !child.is_switch {
         return();
     };
 
     // if needed local pre_read because the output was caluclated before the memory gate, dont do an extra preread for the parent.
-    if self.doing_pre_read && child_storage_count != 0 && it.outputs.len > 0 
+    if self.doing_pre_read && child_has_storage && it.outputs.len > 0 
     && self.wires_evaluated&.get(it.outputs[0].id.zext()) {
         return();
     };
@@ -525,13 +527,11 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
             };
             it := self.c.gates[gate_i]&;
             child := self.components[it.kind.id.zext()]&;
-            child_storage_count := get_storage_count(self.components, it);
-            if child_storage_count == 0 {
+            if !has_storage(self.components, it.kind) {
                 @fmtln(self.warn, "TODO: use-before-def without memory w% in (%)", wire.id, self.c.name);
                 self.failed = true;
                 return();
             };
-            @debug_assert(child_storage_count != 0, "use-before-def without memory");
             changed := false;
             
             if it.kind.is_port() {
@@ -594,12 +594,18 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
         @case("output") => @fmt(out, "out[] = i;\n");
         @case("switch8") => @if(result_used) @fmt(out, "if w% != 0 {| w% = w%; };\n", it.inputs[1].id, it.outputs[0].id, it.inputs[0].id);
         @default => {
-            if child.gate_sum < 30 && !child.name.ends_with("Display") && child.name != "FileLoader" {
+            // TODO: inlining enthusiasm could be a slider in the ui. 
+            //       ex. 30->20 makes "7 Segment Display" compile 10x faster but "Timestamp" run at half speed. 
+            inline := child.gate_sum < 30;
+            if child.gates.len == 0 {
+                inline = child.name != "DotMatrixDisplay" && child.name != "SpriteDisplay" && child.name != "Screen" && child.name != "FileLoader";
+            };
+            if inline {
                 @fmt(out, "@inline ");
             };
             @fmt(out, "%(world, o&, i&", mangle(self.components, it.kind.id.zext()));
             @if(child.has_param) @fmt(out, ", %", it.param);
-            @if(child_storage_count != 0) @fmt(out, ", instance + %, %", self.c.instance_offset_by_gate[gate_i], self.doing_pre_read);
+            @if(child_has_storage) @fmt(out, ", instance + %, %", self.c.instance_offset_by_gate[gate_i], self.doing_pre_read);
             @fmt(out, ");\n");
             
             // TODO :NotReorderingTheseBreaksOvertureLegNandverture  
@@ -654,6 +660,7 @@ compile_gates :: fn(fr: CompCtx, components: []Component) void = {
     enumerate components { i, it |
         it.fast_eval = fast_eval[i];
     };
+    set_eval_signetures(components);
 };
 
 // side effect: sets Component.compile_order which the interpreter needs
@@ -668,7 +675,6 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
         id := @as(ComponentId) (id = i.trunc());
         if c.gates.len == 0 {
             g := group(id);
-            // TODO: quarantine this in ./tc/*.fr
             if g == .Tc1 {
                 shape := get_builtin_shape(id);
                 if shape.fid.is_some() {
@@ -701,7 +707,7 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
         
         @debug_assert(!c.has_param, "only builtins have param");
         out_n, in_n := (c.gates[c.gates.len - 1].inputs.len, c.gates[0].outputs.len);
-        have_storage := self.c.storage_count != 0;  // :NonZeroStorage 
+        have_storage := has_storage(components, id);
         @fmt(out, "% :: fn(world: *World, out: *Array(WireValue, %), in: *Array(WireValue, %)", mangle(components, i), out_n, in_n);
         @if(have_storage) @fmt(out, ", instance: i64, doing_pre_read: bool");
         @fmt(out, ") void ");
@@ -733,8 +739,8 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
     };
     
     @fmt(out, "dispatch :: @const_slice(@as(rawptr) ");
-    range(0, components.len) { i |
-        if !components[i].has_bidirectional_pins && i >= first_index_that_needs_fast_eval && (FEAT_COMPILE || components[i].gates.len == 0) {
+    range(first_index_that_needs_fast_eval, components.len) { i |
+        if !components[i].has_bidirectional_pins && (FEAT_COMPILE || components[i].gates.len == 0) {
             @fmt(out, "%, ", mangle(components, i));
         } else {
             @fmt(out, "ZR, ");
@@ -943,6 +949,27 @@ fill_fast_eval :: fn(components: []Component, callee: rawptr) void = {
     fast_eval := callee();
     first_index_that_needs_fast_eval := builtin_components.len();
     range(first_index_that_needs_fast_eval, components.len) { i |
-        components[i].fast_eval = fast_eval[i];
+        components[i].fast_eval = fast_eval[i - first_index_that_needs_fast_eval];
     };
+    set_eval_signetures(components);
 };
+
+set_eval_signetures :: fn(components: []Component) void = {
+    enumerate components { i, it |
+        if it.gates.len != 0 {
+            it.primitive_arity = it.arity();
+        };
+        if it.fast_eval.is_null() {
+            it.signeture = 4;
+        } else {
+            kind: ComponentId = (id = i.trunc());
+            has_storage := has_storage(components, kind);
+            o_n, i_n := it.arity();
+            if it.has_param {
+                it.signeture = @if(has_storage, 0, 1);
+            } else {
+                it.signeture = @if(has_storage, 2, 3);
+            };
+        };
+    };
+}
