@@ -1,0 +1,387 @@
+
+#use("@/lib/collections/map.fr");
+compile_defs :: fn(components: *List(Component)) void = {
+    map: HashMap(Symbol, ComponentId) = init(temp());
+
+    User :: import("@/examples/circuit/defs.fr");
+    S := Type.scope_of(DefsBuiltins);
+    for get_constants(S) { name |
+        shape := (*Tc.Builtin.Template).get_constant(S, name)
+            || @panic("missing %", str(name));
+        @ct_assert(get_constant(User, name).is_none(), @source_location(), "defs has conflict with builtin name: %", name.str());
+        map&.insert(name, shape.kind);
+    };
+    
+    s := @slice("input", "output");
+    enumerate s { i, name |
+        map&.insert(sym(name[]), (id = i.trunc()));
+    };
+    
+    S := User;
+    for get_constants(S) { name |
+        continue :: local_return;
+        it := FatExpr.get_constant(S, name) || continue();
+        gates := @ref Component.Gate.list(ast_alloc());
+        @ct_assert(it.expr&.is(.Block), it.loc, "expected block body");
+        block := it.expr.Block&;
+        defs: HashMap(WireId, ComponentId) = init(temp());
+        
+        for str(name) { c |
+            ok := c.is_ascii_alpha() || c.is_ascii_digit() || c == "_".ascii();
+            @ct_assert(ok, it.loc, "invalid identifier");  // possible because of @"raw identifiers"
+        };
+        
+        bit_width := @ref u8.list(ast_alloc());
+        for block.body { it |
+            continue :: local_return;
+            in, out, kind := (@ref WireId.list(ast_alloc()), @ref WireId.list(ast_alloc()), @symbol none);
+            param := 0;
+            
+            do_value :: fn(expr: *FatExpr) void => {
+                @ct_assert(expr.expr&.is(.Call), expr.loc, "expected call expr");
+                call := expr.expr.Call&;
+                kind = call.f.ident()
+                    || compile_error("expected identifier (gate name)", call.f.loc);
+                
+                if kind == sym("const") {
+                    param = i64.const_eval(call.arg[]);
+                };
+                
+                @if(!call.arg.expr&.is(.Value))
+                each call.arg.items() { it |
+                    name := it.ident()
+                        || compile_error("expected identifier (wire id)", it.loc);
+                    in.push(to_wire_id(name, it.loc, bit_width));
+                };
+            };
+            
+            to_wire_id :: fn(name: Symbol, loc: Span, bit_width: *List(u8)) WireId = {
+                name := name.str();
+                @if(name == "_") return(NONE);
+                @ct_assert(name.starts_with("w") || name.starts_with("W"), loc, "expected wire name start with 'w'");
+                i, extra := convert_number(name.rest(1), 10, dec_digit);
+                @ct_assert(extra.len == 0, loc, "expected number after 'w' in wire name");
+                width: u8 = @if(name.starts_with("w"), 1, 8);
+                while => bit_width.len <= i {
+                    bit_width.push(0);
+                };
+                if bit_width[i] != 0 && bit_width[i] != width {
+                    compile_error(@tfmt("bit width conflict %", name), loc);
+                };
+                bit_width[i] = width;
+                (id = i.trunc())
+            };
+            
+            @match(it.stmt&) {
+                fn Decl(it) => {
+                    out.push(to_wire_id(it[].ident().unwrap(), it.default.loc, bit_width));
+                    do_value(it.default&);
+                }
+                fn DeclVarPattern(it) => {
+                    each it.binding.bindings { it |
+                        out.push(to_wire_id(it.ident().unwrap(), it.default.loc, bit_width));
+                    };
+                    do_value(it.value&);
+                }
+                fn Eval(it) => do_value(it);
+                fn Noop() => continue();
+                @default => compile_error("bad stmt type", it.loc);
+            };
+            
+            is_io := kind == sym("input") || kind == sym("output");
+            kind := map&.get(kind)
+                || compile_error(@tfmt("undeclared component kind %", kind.str()), it.loc);
+            
+            for in { id |
+                @ct_assert(!(id& == @ref NONE), it.loc, "'_' (discard) cannot be used as an input");
+            };
+            for out { id |
+                defs&.insert(id, kind);
+            };
+            
+            gates.push(kind = kind, inputs = in.items(), outputs = out.items(), param = param);
+        };
+        
+        @ct_assert(gates.len >= 2, it.loc, "must have at least input() and output()");
+        @ct_assert(components[gates[0].kind.id.zext()].name == "input", it.loc, "first gate must be input");
+        @ct_assert(components[gates[gates.len - 1].kind.id.zext()].name == "output", it.loc, "last gate must be output");
+        
+        wire_count := 0;
+        had_placeholder := defs&.remove(NONE).is_some();
+        each defs& { k, _ |
+            wire_count = max(wire_count, k.id.zext());
+        };
+        wire_count += 1;
+        if had_placeholder {
+            each gates { it |
+                each it.outputs { it |
+                    if it == @ref NONE {
+                        it.id = wire_count.trunc();
+                        // unique every time so you can see the difference in the gui. wasteful when !save_wire_values. 
+                        wire_count += 1;
+                    };
+                };
+            };
+        };
+        
+        each gates { it |
+            each it.inputs { it |
+                _ := defs&.remove(it);
+            };
+        };
+        each defs& { k, _ |
+            @eprintln("[examples/circuit/parse_defs.fr] %: w% is unused (replace with '_')", str(name), k.id);
+        };
+        
+        components.push(
+            name = name.str(),
+            gates = gates.items(),
+            wire_count = wire_count,
+        );
+        calculate_usage(components.items(), ast_alloc(), @ref u8.list(temp()));
+        components[components.len - 1].usage.wire_bit_width = bit_width.items();
+        
+        map&.insert(name, (id = components.len.trunc() - 1));
+    };
+    NONE :WireId: (id = 0xFFFFFFFF);
+}
+
+layout_components :: fn(components: []Component, out: *List(u8)) void = {
+    out_components := @ref builtin_components.clone(temp());
+   
+    #use("@/graphics/vec.fr");
+    circuits := temp().alloc_zeroed(Tc.Circuit, components.len);
+    enumerate components { i, it |
+        c := circuits[i]&;
+        gates := @ref Tc.Circuit.Gate.list(temp());
+        wires := @ref Tc.Circuit.Wire.list(temp());
+        dependencies := @ref Tc.CustomId.list(temp());
+        
+        wire_pos := temp().alloc_init(?Vec2, it.wire_count, fn(_) => .None);
+        
+        enumerate it.gates[0].outputs { x, w |
+            do_io(@if(it.wire_bit_width[w.id.zext()] == 1, .Input1, .Input8), w, x, 0);
+        };
+        enumerate it.gates[it.gates.len - 1].inputs { x, w |
+            do_io(@if(it.wire_bit_width[w.id.zext()] == 1, .Output1, .Output8), w, x, 16);
+        };
+        do_io :: fn(kind: GateName(.Tc1), w: *WireId, x: i64, y: f32) => {
+            kind: ComponentId = (id = trunc(component_offset(.Tc1) + kind.raw().zext()));
+            gates.push(pos = (v=(x.float().cast()*8, y)), kind = kind, rotation = 0);
+            g2 := gates[gates.len - 1]&;
+            info := Tc'get_builtin_shape(kind);
+            for_pins(info, g2, circuits) { i, dx, dy |
+                pos := g2.pos + vec2(dx.float().cast(), dy.float().cast());
+                link_wire(pos, w[]);
+            };
+        };
+        
+        enumerate it.gates.slice(1, it.gates.len - 1) { y, g |
+            is_custom := g.kind.id.zext() >= builtin_components.len();
+            new: Tc.CustomId = (id = g.kind.id.zext() - builtin_components.len());
+            if is_custom {
+                if !dependencies.contains(fn(it) => it.id == new.id) {
+                    dependencies.push(new);
+                };
+            };
+            kind := g.kind;
+            
+            gates.push(pos = (v=(0,y.float().cast()*8+24)), kind = kind, rotation = 0, custom_id = new);
+            g2 := gates[gates.len - 1]&;
+            if is_custom {
+                g2.mystery_spice_minus_fifteen_for_custom_pins = circuits[new.id].cached_pin_radius.p;
+            };
+            if out_components[g.kind.id.zext()].name == "Constant8" {
+                #use("@/examples/circuit/eval.fr");
+                @switch(g.param) {
+                    @case(0) => { g2.kind = get_component_by_name("Off", builtin_components); };
+                    @case(1) => { g2.kind = get_component_by_name("On", builtin_components); };
+                    @default => { g2.settings&[0] = g.param; };
+                };
+            };
+            
+            info := Tc'get_builtin_shape(kind);
+            for_pins(info, g2, circuits) { i, dx, dy |
+                pos := g2.pos + vec2(dx.float().cast(), dy.float().cast());
+                w := @if(i < g.outputs.len, g.outputs[i], g.inputs[i - g.outputs.len]);
+                link_wire(pos, w);
+            };
+        };
+        
+        link_wire :: fn(pos, w) => {
+            slot := wire_pos[w.id.zext()]&;
+            if slot[] { prev |
+                new := @slice(@as(Tc.Circuit.WireNode) (pos = prev), (pos = pos));
+                wires.push(path = new.shallow_copy(temp()).as_raw_list(), teleport = true);
+            };
+            slot[] = (Some = pos);
+        };
+        
+        oa, ia := it.arity();
+        w := max(oa, ia).float().cast();
+        circuits[i] = (
+            id = (id = i),
+            wires = wires.as_raw(),
+            gates = gates.as_raw(),
+            programs = empty(),
+            min = (v=(-4,-4)),
+            max = (v=(w*8-4,it.gates.len.float().cast()*8+4)),
+            dependencies = dependencies.as_raw(),
+            name = it.name,
+            v2 = false,
+            default_tick_rate = 1,
+            is_arch = it.name == "overture" || it.name == "leg",  // hack
+            cached_pin_radius = (r=-1, p = vec2(-15, -16)),
+            compiled = .None,
+        );
+        
+        Tc'compile_circuit(circuits, i, out_components, temp(), @ref u8.list(temp()));
+    };
+    
+    #use("@/examples/circuit/save.fr");
+    write_save(circuits, empty(), .None, out, false);
+};
+
+
+DefsBuiltins :: @struct {
+    nand :: Tc.Builtin.impl.Nand;
+    byte_split :: Tc.Builtin.impl.Splitter8;
+    byte_make :: Tc.Builtin.impl.Maker8;
+    delay :: Tc.Builtin.impl.DelayLine1;
+    const :: Tc.Builtin.impl.Constant8;
+    switch1 :: Tc.Builtin.impl.Switch1;
+    switch8 :: Tc.Builtin.impl.Switch8;
+};
+
+AsmOverture :: @rec @struct {
+    reg :: @enum(u8) (reg0, reg1, reg2, reg3, reg4, reg5, io);
+    fn mov(a: *AsmOverture, dest: reg, src: reg) void = {
+        it := @or(src.raw().zext().shift_left(3), dest.raw().zext(), 0b10000000);
+        a.code&.push(trunc(it));
+    }
+    // reg3 = alu(reg1, reg2);
+    fn op(a: *AsmOverture, c: alu) void = a.code&.push(trunc(@or(c.raw().zext(), 0b01000000)));
+    alu :: @enum(u8) (or, nand, nor, and, add, sub);  
+    // if (cond(reg3)) ip = reg0;
+    fn jmp(a: *AsmOverture, c: cond) void = a.code&.push(trunc(@or(c.raw().zext(), 0b11000000)));
+    cond :: @enum(u8) (never, eq0, lt0, le0, always, ne0, ge0, gt0); 
+    // op tag for immediate is 0b00 so just use raw byte; reg0 = op;
+    fn imm(a: *AsmOverture, i: i64) void = {
+        @assert(i >= 0 && i < 64, "immediate % out of range", i);
+        a.code&.push(i.trunc());
+    }
+    
+    start :: fn() AsmOverture = (labels = Labels'start(64));
+    labels: Labels #use;
+    
+    disassemble :: fn(out: *List(u8), byte: u8) void = {
+        hi, lo := (byte.shift_right_logical(3).bit_and(0b111), byte.bit_and(0b111));
+        name :: @const_slice("r0", "r1", "r2", "r3", "r4", "r5", "io");
+        @switch(byte.shift_right_logical(6)) {
+            @case(0b00) => @fmt(out, "imm r0 %", { push_hex_byte(out, byte, true); "" });
+            @case(0b01) => @fmt(out, "% r3 r1 r2", @as(alu) lo);
+            @case(0b10) => @fmt(out, "mov % %", name[lo.zext()], name[hi.zext()]);
+            @case(0b11) => @fmt(out, "% r3", @as(cond) lo);
+            @default => unreachable();
+        };
+    };
+};
+
+Labels :: @struct {
+    code: List(u8);
+    names: HashMap(Str, Label);
+    immediate_range: i64;
+    Label :: @struct(use: List(i64), def: ?i64);
+
+    fn set_label(a: *Labels, name: Str) void = {
+        it := a.names&.get_or_insert(name, => (use = list(temp()), def = .None));
+        @assert(it.def.is_none(), "label % defined twice (%, %)", name, it.def.Some, a.code.len);
+        it.def = (Some = a.code.len);
+    }
+    
+    fn get_label(a: *Labels, name: Str) void = {
+        it := a.names&.get_or_insert(name, => (use = list(temp()), def = .None));
+        it.use&.push(a.code.len);
+        a.code&.push(0);
+    }
+    
+    start :: fn(immediate_range: i64) Labels = (code = list(256, temp()), names = init(temp()), immediate_range = immediate_range);
+    fn end(a: *Labels, out: Alloc) []u8 = {
+        each a.names& { name, it |
+            def := it.def || @panic("undefined label %", name);
+            @assert(def < a.code.len && def < a.immediate_range, "immediate out of range % for label %", def, name);
+            for it.use { off |
+                a.code[off] = def.trunc();
+            };
+        };
+        @assert_le(a.code.len, 256, "too much code");
+        a.code&.push_repeated(256 - a.code.len, 0);
+        a.code&.items().shallow_copy(out)
+    }
+};
+
+LabelsTrait :: fn(T) => T == *AsmLeg || T == *AsmOverture;
+fn set_label(a: ~T, name: Str) void #where(LabelsTrait) = a.labels&.set_label(name);
+fn get_label(a: ~T, name: Str) void #where(LabelsTrait) = a.labels&.get_label(name);
+fn end(a: ~T, out: Alloc) []u8 #where(LabelsTrait) = a.labels&.end(out);
+
+AsmLeg :: @rec @struct {
+    reg :: @tagged(r0: void, r1, r2, r3, r4, r5, _, io, imm: u8);
+    fn op(a: *AsmLeg, c: alu, dest: reg, a0: reg, a1: reg) void = 
+        a.encode_op(@as(u8) c, false, dest, a0, a1);
+    alu :: @enum(u8) (add, sub, and, or, not, xor, _0, _1);  
+    cond :: @enum(u8) (eq, ne, lt, le, gt, ge, _0, _1); 
+    
+    fn jmp(a: *AsmLeg, c: cond, a0: reg, a1: reg, label: Str) void = {
+        encode_op(a, @as(u8) c, true, (imm = 255), a0, a1);
+        a.code.len -= 1;
+        a.get_label(label);
+    };
+    
+    encode_op :: fn(a: *AsmLeg, op: u8, cond: bool, dest: reg, a0: reg, a1: reg) void = {
+        c0: u8 = trunc(@or(op.bit_and(0b111).zext(), 
+            int(cond).shift_left(5), 
+            int(a1&.is(.imm)).shift_left(6), 
+            int(a0&.is(.imm)).shift_left(7),
+        ));
+        a.code&.push(c0);
+        a.code&.push(encode_arg(a0));
+        a.code&.push(encode_arg(a1));
+        a.code&.push(encode_arg(dest));
+    };
+    encode_arg :: fn(a: reg) u8 = 
+        @if(a&.is(.imm), a.imm, trunc(@as(i64) @as(Tag(reg)) a&.tag()));
+    
+    start :: fn() AsmLeg = (labels = Labels'start(256));
+    labels: Labels #use;
+    
+    disassemble :: fn(out: *List(u8), o: u32) void = {
+        op, a0, a1, dest := (o.bit_and(0xFF), o.shift_right_logical(8).bit_and(0xFF), o.shift_right_logical(16).bit_and(0xFF), o.shift_right_logical(24).bit_and(0xFF));
+        is_cond := op.bit_and(32) != 0;
+        if is_cond {
+            @fmt(out, "j% ", @as(cond) @as(u8) op.bit_and(0b111).trunc());
+        } else {
+            @fmt(out, "% ", @as(alu) @as(u8) op.bit_and(0b111).trunc());
+        };
+        if !is_cond {
+            @fmt(out, "% ", @as(Tag(reg)) @as(i64) dest.bit_and(0b111).zext());
+        };
+        if op.bit_and(128) != 0 {
+            @fmt(out, "% ", { push_hex_byte(out, a0.trunc(), true); "" });
+        } else {
+            @fmt(out, "% ", @as(Tag(reg)) @as(i64) a0.zext());
+        };
+        if op.bit_and(64) != 0 {
+            @fmt(out, "% ", { push_hex_byte(out, a1.trunc(), true); "" });
+        } else {
+            @fmt(out, "% ", @as(Tag(reg)) @as(i64) a1.zext());
+        };
+        if is_cond {
+            @fmt(out, "->%", { push_hex_byte(out, dest.trunc(), true); "" });
+        };
+        @fmt(out, "\n");
+    };
+};
+
+#use("@/compiler/ast_external.fr");
+#use("@/examples/circuit/compile.fr");
