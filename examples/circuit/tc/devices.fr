@@ -1,0 +1,50 @@
+
+fn extract_screen_pixels(data: *ScreenData, texture: []u32, memory: []u8) void = {
+    width, height, bpp := data.size();
+    @debug_assert_eq(width * height * bpp, memory.len);
+    i := 0;
+    range(0, height) { y |
+        range(0, width) { x |
+            c := @match(data.mode) {
+                fn Pixel8() => decode_8bit_colour(memory[i]);
+                fn Pixel32() => {
+                    v: i64 = u32.reinterpret_bytes(memory)[i].zext();
+                    r, g, b := (v.shift_right_logical(16).bit_and(0xFF), v.shift_right_logical(8).bit_and(0xFF), v.bit_and(0xFF));
+                    pack_rgba(r, g, b, 255)
+                }
+                @default => unreachable();
+            };
+            texture[i] = c;
+            i += 1;
+        }
+    };
+}
+
+fn get_screen(world: *World, instance: i64) Ty(*ScreenData, []u8) = {
+    data := world.storage.rest(instance).interpret_as_bytes().peek_type(ScreenData);
+    @if(data.ram_size_bytes == 0) return(data, empty());
+    memory := world.storage.rest(data.ram_instance).interpret_as_bytes().slice(0, data.ram_size_bytes);
+    memory := memory.rest(data.offset);
+    width, height, bpp := data.size();
+    // TODO: bounds check or wrap?
+    memory := memory.slice(0, width * height * bpp);
+    (data, memory)
+}
+
+fn size(data: *ScreenData) Ty(i64, i64, i64) = {
+    width, height := @if(@is(data.mode, .Ascii8, .Ascii32),
+        (96, 40),
+        (data.resolution.zext() * 4, data.resolution.zext() * 3));
+    bpp := @if(@is(data.mode, .Ascii8, .Pixel8), 1, 4);
+    (width, height, bpp)
+}
+
+// for v2 screen, RRRGGGBB
+decode_8bit_colour :: fn(v: u8) u32 = {
+    X :: fn(a: u8, b: u8, c: f64) => (@as(i64) v.shift_right_logical(a).bit_and(b).zext()).float() / c;
+    r, g, b := (X(5, 0b111, 7), X(2, 0b111, 7), X(0, 0b11, 3));
+    pack_rgba(r, g, b, 1.0)
+};
+
+#use("@/examples/circuit/tc/builtin.fr");
+#use("@/examples/circuit/eval.fr");

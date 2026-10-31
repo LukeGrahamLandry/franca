@@ -20,6 +20,8 @@ fn run_tests(harness: *Harness) void = {
     harness.load("Tetris")
         .run(10_000_000, true)  // TODO: time depends on clock randomness for what pieces get chosen
         .halted("End of program execution.");
+    harness.load("Bad Apple").run(100000);
+    
     harness.load("NANDverture").maze(3775);
     harness.load("OVERTURE").maze(3775);
     harness.load("LEG").maze(4140);
@@ -46,17 +48,15 @@ fn run_tests(harness: *Harness) void = {
         "Mandelbrot",
         "TCMIPS",
         "Timestamp",
-        // TODO: image.fr do screen too
-        "Conway's Game of Life Symphony",
-        "Brainfk编译器",
-        "SYM32_BADAPPLE_OPTIMIZAED",
         "8-digit_Calculator",
     );
     for visual { it |
         harness.load(it).run(100);
     };
     
-    harness.load("Bad Apple").run(100000);
+    harness.load("Conway's Game of Life Symphony").run(20_000_000);
+    harness.load("SYM32_BADAPPLE_OPTIMIZAED").run(3_000_000);
+    harness.load("Brainfk编译器").run(6_000).screen_contains("Openness Cursed Level Community");
 }
 
 init_harness :: fn(image_callback: ?ImageFn) Harness = {
@@ -210,18 +210,10 @@ fn console_contains(self: *Harness, msg: Str) *Harness = {
 }
 
 fn for_consoles(self: *Harness, $body: @Fn(data: Str) void) void = {
-    root, world := (self.root || return(), self.world&);
-    circuit := self.circuits.find(fn(it) => it.compiled.is_some() && it.compiled.Some.id == root.id).unwrap();
-    c := world[root];
-    
-    each circuit.gates { gate |
+    world := self.world&;
+    for_gates(self, .Tc1, .Console) { c, i |
         continue :: local_return;
-        i := gate.logical_gate_index;
-        @if(i == -1) continue();
         it := c.gates[i]&;
-        @if(group(it.kind) != .Tc1) continue();
-        
-        if it.kind.name(.Tc1) == .Console {
             T :: Tc.Builtin.Settings.Console;
             param: T = (repr = it.param.bitcast());
             @if(param.get(.linked) == 0) continue();
@@ -230,9 +222,46 @@ fn for_consoles(self: *Harness, $body: @Fn(data: Str) void) void = {
             data := world.storage.interpret_as_bytes();
             data := data.subslice(param.get(.linked_ram_instance)*8 + offset*bytes_per_char, 80*24*bytes_per_char);
             body(data);
-        };
     };
 } 
+
+fn for_text_screens(self: *Harness, $body: @Fn(text: Str) void) void = {
+    #use("@/examples/circuit/tc/devices.fr");
+    world := self.world&;
+    for_gates(self, .Tc2, .Screen) { c, i |
+        continue :: local_return;
+        data, memory := world.get_screen(c.instance_offset_by_gate[i]);
+        width, height, _ := data.size();
+        text := @match(data.mode) {
+            fn Ascii8() => memory;
+            fn Ascii32() => temp().alloc_init(u8, width*height, fn(i) => u32.reinterpret_bytes(memory)[i].trunc());
+            @default => continue();
+        };
+        body(text);
+    };
+} 
+
+fn for_gates(self: *Harness, $g: Tc.GateGroup, k: GateName(g), $body: @Fn(c: *Component, i: i64) void) void #generic = {
+    root, world := (self.root || return(), self.world&);
+    circuit := self.circuits.find(fn(it) => it.compiled.is_some() && it.compiled.Some.id == root.id).unwrap();
+    c := world[root];
+    each circuit.gates { gate |
+        continue :: local_return;
+        i := gate.logical_gate_index;
+        @if(i == -1) continue();
+        it := c.gates[i]&;
+        @if(group(it.kind) != g || it.kind.name(g) != k) continue();
+        body(c, i);
+    };
+}
+
+fn screen_contains(self: *Harness, msg: Str) *Harness = {
+    for_text_screens self { data |
+        @if(data.contains(msg)) return(self);
+    };
+    @fmt(self.msg&, "\n- missing console message (%)", msg);
+    self
+}
 
 fn keyboard_input(self: *Harness, text: Str) *Harness = {
     // TODO

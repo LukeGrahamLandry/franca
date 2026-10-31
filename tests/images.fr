@@ -125,6 +125,8 @@ circuit :: fn(output: *Wasm4.Atlas) void = {
 
 #use("@/examples/circuit/tc/test.fr");
 snapshot_screens :: fn(harness: *Harness, output: rawptr) void = {
+    Tc :: import("@/examples/circuit/tc/load.fr");
+    #use("@/examples/circuit/tc/devices.fr");
     output := Wasm4.Atlas.ptr_from_raw(output);
     Screen :: @struct(x: i64, y: i64, data: []u32);
     screens := Screen.list(temp());
@@ -138,10 +140,19 @@ snapshot_screens :: fn(harness: *Harness, output: rawptr) void = {
         i := gate.logical_gate_index;
         @if(i == -1) continue();
         it := c.gates[i]&;
-        @if(it.kind.group() != .Tc1) continue();
-        gate_kind := it.kind.name(.Tc1);
         
-        if gate_kind == .DotMatrixDisplay {
+        if it.kind.group() == .Tc2 && it.kind.name(.Tc2) == .Screen {
+            data, memory := world.get_screen(c.instance_offset_by_gate[i]);
+            if @is(data.mode, .Pixel8, .Pixel32) {
+                width, height, _ := data.size();
+                buf := temp().alloc_uninit(u32, width * height);
+                extract_screen_pixels(data, buf, memory);
+                output.push(buf, width, height);
+            };
+        };
+        
+        // the v1 ones are so small that you need to tile them to do anything so the layout matters more. 
+        if it.kind.group() == .Tc1 && it.kind.name(.Tc1) == .DotMatrixDisplay {
             buf := world.storage.subslice(c.instance_offset_by_gate[i], 7*8*32/64);
             buf := u32.reinterpret_bytes(buf.interpret_as_bytes());
             screens&.push(x = gate.pos.x.cast().int(), y = gate.pos.y.cast().int(), data = buf);
