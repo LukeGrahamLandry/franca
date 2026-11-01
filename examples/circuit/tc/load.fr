@@ -506,9 +506,11 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     logical_to_circuit&.push_repeated(gates.len - logical_to_circuit.len, -1);
     new_gates, order := schedule_gates(c, gates, wire_count, a, out.items(), in.items(), components.items(), warn, logical_to_circuit.items());
     gates := new_gates;
-    @assert_eq(logical_to_circuit.len, gates.len, "confused gate tracking in (%)", c.name);
     
     enumerate order { i, o |
+        continue :: local_return;
+        @if(o[] >= logical_to_circuit.len) continue();  // it's a pre_read split
+    
         gate_i := logical_to_circuit[o[]];
         if gate_i != -1 {
             c.gates[gate_i].logical_gate_index = i;
@@ -718,6 +720,9 @@ inline_for_bidirectional_gates :: fn(child_logical: *Component, gates: *List(Com
         })[]
     };
     each child_gates { gate |
+        continue :: local_return;
+        @if(gate.pre_read != -1) continue();  // will re-schedule_gates so dont split multiple times
+        
         out, in := (gate.outputs.shallow_copy(a), gate.inputs.shallow_copy(a));
         each out { it |
             it[] = fix_wire(it[]);
@@ -745,19 +750,33 @@ fn push_inputs_outputs(gates: *List(Component.Gate), out: []WireId, in: []WireId
 
 // TODO: pull things without side effects closer to thier first use. 
 //       the most offensive one is constants, makes it hard to read. 
-// TODO: ports depend on the ones above them
-//       and cant pre_read a load port until the store above it is done. 
 schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, a: Alloc, out: []WireId, in: []WireId, components: []Component, warn: *List(u8), logical_to_circuit: []i64) Ty(List(Component.Gate), []i64) = {
-    order := i64.list(temp());
+    order := i64.list(temp());  // [new gate index] -> old gate index
     ready: DynamicBitSet = empty(temp()); // [WireId]
     done: DynamicBitSet = empty(temp());  // [index in gates]
     
     // inputs/outputs are fixed at start/end
+    output_gate_index := gates.len - 1;
     order&.push(0);
-    done&.set(gates.len - 1);
+    done&.set(output_gate_index);
     done&.set(0);
     for gates[0].outputs { id |
         ready&.set(id.id.zext());
+    };
+    
+    // components with memory can know their outputs before all inputs are ready. 
+    // split them into two gates that can be scheduled seperately. 
+    // pre_read needs fewer inputs and doesn't write memory.  
+    range(0, gates.len) { i |
+        gate := gates[i];
+        c := components[gate.kind.id.zext()]&;
+        o_n, i_n := c.arity();
+        if has_storage(components, gate.kind) && c.inputs_for_pure_eval.len != i_n && o_n != 0 {
+            @debug_assert(!gate.kind.is_port());
+            gate.pre_read = i;
+            gates[i].post_read = gates.len; 
+            gates&.push(gate);
+        };
     };
     
     switch_gates := i64.list(temp());
@@ -767,9 +786,22 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
             if !done&.get(i) {
                 kind := components[it.kind.id.zext()]&;
                 ok := true;
-                for kind.inputs_for_pure_eval { i |
-                    @assert(i < it.inputs.len, "% arity or inputs_for_pure_eval error", kind.name);
-                    ok = ok && ready&.get(it.inputs[i].id.zext());
+                
+                if it.pre_read != -1 {
+                    for kind.inputs_for_pure_eval { i |
+                        @assert(i < it.inputs.len, "% arity or inputs_for_pure_eval error", kind.name);
+                        ok = ok && ready&.get(it.inputs[i].id.zext());
+                    };
+                } else {
+                    for it.inputs { id |
+                        ok = ok && ready&.get(id.id.zext());
+                    };
+                    
+                    // even if all the inputs are ready so dont technically need to pre_read, 
+                    // read must be before write so dont see the new value a tick early. 
+                    if it.post_read != -1 {
+                        ok = ok && done&.get(it.post_read);
+                    };
                 };
                 
                 // :SLOW
@@ -785,6 +817,7 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
                     };
                 };
                 
+                // ports on the same ram execute top down. 
                 if ok && it.kind.is_port() {
                     g_i := logical_to_circuit[i];
                     @debug_assert_ne(g_i, -1, "port?");
@@ -809,12 +842,28 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
                     changed = true;
                     for switch_gates { i |
                         if !done&.get_set(i) {
-                            // TODO: why explain why it can already be done now that i added Template.SwitchablePin ??
                             order&.push(i);
-                        }
+                        } else {
+                            @fmtln(warn, "gate [%]% done too early (multiple defs)", order.index_of(fn(it) => it[] == i) || -1, components[gates[i].kind.id.zext()].name);
+                        };
                     };
                     for it.outputs { id |
+                        @debug_assert(it.post_read == -1 || ready&.get(id.id.zext()), "pre_read makes the outputs");
                         ready&.set(id.id.zext());
+                    };
+                    
+                    // TODO: dont split them if the pre can post immediately
+                    // :NotForCorrectness
+                    if it.pre_read != -1 {
+                        all_ready := true;
+                        for it.inputs { id |
+                            all_ready = all_ready && ready&.get(id.id.zext());
+                        };
+                        if all_ready {
+                            @debug_assert(!done&.get(it.pre_read));
+                            done&.set(it.pre_read);
+                            order&.push(it.pre_read);
+                        };
                     };
                 };
                 switch_gates&.clear();
@@ -852,25 +901,20 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
         };
     };
 
-    // confusing. see doing_pre_read in compile_gate()
-    n := 0;
-    range_rev(0, order.len) { i |
-        it := gates[order[i]]&;
-        if !it.kind.is_port() && has_storage(components, it.kind) && it.outputs.len != 0 {
-            // TODO: :NotReorderingTheseBreaksOvertureLegNandverture && inputs.len!=pure_eval.len
-            x := order&.ordered_remove(i).unwrap();
-            order&.push(x);
-            n += 1;
-        };
-    };
-    order.items().slice(order.len - n, order.len).reverse();
-    
-    order&.push(gates.len - 1);
+    order&.push(output_gate_index);
     
     gates2 := Component.Gate.list(gates.len, a);
     for order { i |
-        it := gates[i]&;
         gates2&.push(gates[i]);
+        new := gates2[gates2.len - 1]&;
+        if new.pre_read != -1 {
+            new.pre_read = order.index_of(fn(it) => it[] == new.pre_read).unwrap();  // :SLOW
+        };
+    };
+    enumerate order { new_i, old_i |
+        if gates[old_i[]].post_read != -1 {
+            gates2[new_i].post_read = order.index_of(fn(it) => it[] == gates[old_i[]].post_read).unwrap();  // :SLOW
+        }
     };
     gates&.drop();
     gates = gates2;

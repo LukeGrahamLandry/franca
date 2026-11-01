@@ -1,4 +1,30 @@
 
+## (Nov 1) circuit
+
+- ui lines so you can track gates between graphics and logic
+
+## (Oct 31) circuit
+
+- reify pre_read in schedule_gates instead of waiting until emitting the code. 
+  - getting rid of the compilicated doing_pre_read_local thing is going to be great 
+    (and now it should be easier to schedule uses close defs so its more readable). 
+  - i assume this is what tc1 uses the VirtualFoo components for but i feel its easier to add extra fields to Gate to tell which mode its in. 
+    doing_pre_read will be constant when primitives are inlined so it shouldn't be a speed problem to not seperate the read/write impls. 
+    tho it's a bit error prone that other places need to remember to check that field. 
+    ex. when assigning instances and anywhere that assumed instance_offset_by_gate would be sequential. 
+  - forgot to make old index of output() be the old length not the extended length
+  - broken
+    - my original graphical LEG. thought it might be about the sketchy multiple defs on the decoder3 but was just order changed so the hack init program was wrong. 
+    - test_defs becuase that doesnt go through schedual gates
+  - trying to have the version that does the write not also redo any gates that are only needed for the read part. 
+    - this might not be worth the hassle. very error prone, a bunch of stuff is still broken. 
+    - doesnt speed up life. it does make defs.overture faster tho (eval_compiled 120 -> 47 samples). 
+    - sad thing is it will be slower if read+write share lots of work inputs are ready 
+      so old way wouldn't need pre_read at all but now i can't merge them unless i spend more time compiling a third version. 
+    - i think i have to not do this right now. take the part that's a pure win first
+  - careful not to inflate when inline_for_bidirectional_gates (skip pre_read ones because they get reinserted)
+- bit concerning that i broke and somehow fixed the old Snake Game. gotta keep an eye on that...
+
 ## (Oct 30) circuit
 
 - button component for calculator

@@ -39,6 +39,9 @@ Component :: @struct {
         inputs: []WireId;
         outputs: []WireId;
         param := 0;
+        // TODO: shrink this
+        pre_read := -1;   // !=-1 means this is the pure eval one. points to the write gate. 
+        post_read := -1;  // !=-1 means this one writes. points to the pre_read gate. 
     };
     
     Op :: @struct {
@@ -87,8 +90,10 @@ calculate_usage :: fn(components: []Component, a: Alloc, warn: *List(u8)) bool =
             wire_sum += child.wire_sum;
             wire_depth = max(wire_depth, child.wire_depth);
             gate_sum += child.gate_sum;
-            storage_count += get_storage_count(components, it);
-            need_storage = need_storage || has_storage(components, it.kind);
+            if it.post_read == -1 {
+                storage_count += get_storage_count(components, it);
+                need_storage = need_storage || has_storage(components, it.kind);
+            };
             
             if i != 0 && i != c.gates.len - 1 {
                 gate_i := i;
@@ -114,8 +119,14 @@ calculate_usage :: fn(components: []Component, a: Alloc, warn: *List(u8)) bool =
         instance := 0;
         instance_offset_by_gate := a.alloc_zeroed(i64, c.gates.len);
         enumerate c.gates { i, it |
-            instance_offset_by_gate[i] = instance;
-            instance += get_storage_count(components, it);
+            if it.post_read == -1 {
+                instance_offset_by_gate[i] = instance;
+                instance += get_storage_count(components, it);
+            } else {
+                @debug_assert_lt(it.post_read, i, "post before pre");
+                instance_offset_by_gate[i] = instance_offset_by_gate[it.post_read];
+                @debug_assert_ne(i, c.gates.len - 1);
+            };
         };
         @debug_assert_eq(instance, c.storage_count);
 
@@ -145,7 +156,7 @@ calculate_usage :: fn(components: []Component, a: Alloc, warn: *List(u8)) bool =
                     need_this_gate = need_this_gate || needed&.get(id.id.zext());
                 };
                 
-                if need_this_gate { 
+                if need_this_gate && gate.post_read == -1 { 
                     child := components[gate.kind.id.zext()]&;
                     gates_needed&.set(gate_i);
                     for child.inputs_for_pure_eval { i |
@@ -161,6 +172,7 @@ calculate_usage :: fn(components: []Component, a: Alloc, warn: *List(u8)) bool =
         
         def_kind: HashMap(WireId, ComponentId) = init(temp());
         each c.gates { it |
+            @if(it.post_read == -1)
             for it.outputs { id |
                 prev := def_kind&.insert(id, it.kind);
                 if prev { prev |
@@ -212,14 +224,13 @@ fn has_storage(components: []Component, kind: ComponentId) bool =
         components[kind.id.zext()].storage_count != 0);
 
 CompileGates :: @struct {
+    have_storage: bool;
     components: []Component;
     c: *Component;
     out: *List(u8);
     wires_evaluated: DynamicBitSet;
-    need_pre_read: List(WireId);
     doing_pre_read := false;
-    doing_pre_read_local := false;
-    compile_order: List(Component.Op);
+    compile_order: List(Component.Op);  // todo: now use normal gates for the !pre_read case
     // TODO: dont allow run if failed=true
     failed := false;
     warn: *List(u8);
@@ -229,85 +240,11 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
     out := self.out;
     it := self.c.gates[gate_i]&;
     child := self.components[it.kind.id.zext()]&;
-    child_has_storage := has_storage(self.components, it.kind);
     
-    if !self.c.gates_needed_for_pure_eval&.get(gate_i) && self.doing_pre_read && !self.doing_pre_read_local {
+    if !self.c.gates_needed_for_pure_eval&.get(gate_i) && self.doing_pre_read{
         return();
     };
 
-    // TODO: for things with storage that were already pre_read, also compile a version that only does the writes and propagates not needing outputs
-    discard_outputs := !self.doing_pre_read && it.outputs.len > 0 && self.wires_evaluated&.get(it.outputs[0].id.zext());
-    if discard_outputs && !child_has_storage && !child.is_switch {
-        return();
-    };
-
-    // if needed local pre_read because the output was caluclated before the memory gate, dont do an extra preread for the parent.
-    if self.doing_pre_read && child_has_storage && it.outputs.len > 0 
-    && self.wires_evaluated&.get(it.outputs[0].id.zext()) {
-        return();
-    };
-    
-    if !self.doing_pre_read_local && self.c.storage_count > 0 {
-        X :: fn(it: WireId) => if !self.wires_evaluated&.get(it.id.zext()) {
-            self.need_pre_read&.push(it);
-        };
-        if self.doing_pre_read {
-            for child.inputs_for_pure_eval { i |
-                X(it.inputs[i]);
-            };
-        } else {
-            for it.inputs { it |
-                X(it);
-            };
-        };
-        
-        prev := self.doing_pre_read;
-        while => self.need_pre_read.len > 0 {
-            wire := self.need_pre_read[self.need_pre_read.len - 1];
-            // :SLOW should compute wireid -> defining gate once and reuse
-            gate_i := self.c.gates.index_of(fn(it) => it.outputs.contains(fn(it) => it.id == wire.id)) || {
-                @fmtln(self.warn, "missing def for w%", wire.id);
-                self.failed = true;
-                return();
-            };
-            it := self.c.gates[gate_i]&;
-            child := self.components[it.kind.id.zext()]&;
-            if !has_storage(self.components, it.kind) {
-                @fmtln(self.warn, "TODO: use-before-def without memory w% in (%)", wire.id, self.c.name);
-                self.failed = true;
-                return();
-            };
-            changed := false;
-            
-            if it.kind.is_port() {
-                @fmtln(self.warn, "TODO: preread load port needs to make sure it doesnt depend on a store port that hasnt run yet");
-            };
-            
-            for child.inputs_for_pure_eval { i |
-                it := it.inputs[i];
-                if !self.wires_evaluated&.get(it.id.zext()) {
-                    self.need_pre_read&.push(it);
-                    changed = true;
-                };
-            };
-            if !changed {
-                self.need_pre_read&.ordered_retain(fn(wire) => !it.outputs.contains(fn(it) => it.id == wire.id));
-                
-                @debug_assert(!self.doing_pre_read_local);
-                self.doing_pre_read = true;
-                self.doing_pre_read_local = true;
-                
-                self.compile_gate(gate_i);
-                
-                self.doing_pre_read = prev;
-                self.doing_pre_read_local = false;
-                
-                each it.outputs { it |
-                    self.wires_evaluated&.set(it.id.zext());
-                };
-            };
-        };
-    };
     name := child.name;
     if child.is_switch {
         name = "switch8";
@@ -331,7 +268,12 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
         };
     };
     
-    self.compile_order&.push(gate_i = gate_i, pre_read = self.doing_pre_read);
+    if it.pre_read == -1 {
+        self.compile_order&.push(gate_i = gate_i, pre_read = false);
+    } else {
+        self.compile_order&.push(gate_i = it.pre_read, pre_read = true);
+    };
+    
     result_used := it.outputs.len > 0 && self.c.wires_used&.get(it.outputs[0].id.zext());
     @switch(name) {
         @case("input") => @fmt(out, "o := in[];\n");
@@ -350,15 +292,11 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
             };
             @fmt(out, "%(world, o&, i&", mangle(self.components, it.kind.id.zext()));
             @if(child.has_param) @fmt(out, ", %", it.param);
-            @if(child_has_storage) @fmt(out, ", instance + %, %", self.c.instance_offset_by_gate[gate_i], self.doing_pre_read);
+            @if(has_storage(self.components, it.kind)) @fmt(out, ", instance + %, %", self.c.instance_offset_by_gate[gate_i], it.pre_read != -1);
             @fmt(out, ");\n");
-            
-            // TODO :NotReorderingTheseBreaksOvertureLegNandverture  
-            @if(self.doing_pre_read) @debug_assert_ne(it.outputs.len, 0, "no need to pre_read something without outputs");
-            //@if(self.doing_pre_read_local) @if(child_storage_count != 0) @debug_assert_ne(it.inputs.len, child.inputs_for_pure_eval.len, "no need to pre_read something that needs all inputs: %", child.name);
         };
     };
-    if simple && it.outputs.len > 0 && !discard_outputs {
+    if simple && it.outputs.len > 0 && it.post_read == -1 {
         enumerate it.outputs { i, it |
             // TODO: use this info to call specialized version for each set of discarded outputs?
             if self.c.wires_used&.get(it.id.zext()) {
@@ -368,7 +306,7 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
         @fmt(out, "\n");
     };
     
-    @if(!self.doing_pre_read) for it.inputs { it |
+    @if(it.pre_read == -1) for it.inputs { it |
         if !self.wires_evaluated&.get(it.id.zext()) {
             @fmtln(self.warn, "TODO: use-before-def without memory w% in (%).", it.id, self.c.name);
             self.failed = true;
@@ -442,17 +380,17 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
             continue();
         };
         
+        have_storage := has_storage(components, id);
         self: CompileGates = (
+            have_storage = have_storage,
             c = c, out = out, components = components,
             wires_evaluated = empty(temp()),
-            need_pre_read = WireId.list(temp()),
             compile_order = list(temp()),
             warn = warn,
         ); self := self&;
         
         @debug_assert(!c.has_param, "only builtins have param");
         out_n, in_n := (c.gates[c.gates.len - 1].inputs.len, c.gates[0].outputs.len);
-        have_storage := has_storage(components, id);
         @fmt(out, "% :: fn(world: *World, out: *Array(WireValue, %), in: *Array(WireValue, %)", mangle(components, i), out_n, in_n);
         @if(have_storage) @fmt(out, ", instance: i64, doing_pre_read: bool");
         @fmt(out, ") void ");

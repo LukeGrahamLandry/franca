@@ -1,6 +1,21 @@
 
 ---
 
+seriously the two biggest sources of unhappiness in my life are: 
+- debug_assert doesnt tell you where it was so you have to binary search with prints if its in a big function
+- the shit where `if (foo && bar) || baz {` can't find the overload if the expressions are too complex
+
+followed closedly by:
+- its painful to just quickly print things 
+  - #where doesnt work on complex expressions so fmt_hex is annoying to call
+  - you have to ::DeriveFmt for each level of struct and it doesnt tell you which one you missed 
+    (error just points to a place in the generic. same problem for hash/eq for maps)
+
+pretty embarrassing how long i've let this go on for 
+but im so afraid that i'll have to redo the whole overloading system to make it sane. 
+
+---
+
 DO THE FUCKING INLINING SORT ORDER THING   
 BECAUSE SEEING SAMPLES OF VEC(SUB,ADD,MAX)   
 IS GOING TO MAKE ME LOSE MY FUCKING MIND  
@@ -29,7 +44,6 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
   - allocate World contigously with .storage
   - wtf, it looks suspisously like transparency doesnt work on the first frame in draw_pin_lines.port_linked_list
   - Brainfk编译器 i have extra random chars on screen that the real one doesnt
-  - i think i broke the old Snake Game
   - merge GateName() enums so dont need to keep checking group()?
   - represent read/write of all memory components as seperate gates in the list 
     so dont have to deal with pre_read insanity. the new ports are so simple to understand in comparison. 

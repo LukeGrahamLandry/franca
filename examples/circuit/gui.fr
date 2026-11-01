@@ -312,10 +312,13 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         instance, parent_wire_offset, wire_offset := self.walk_component_tree(c&);
         
         if !state.halted_without_wire_values {
-            @debug_assert(world.scratch.len >= wire_offset + c.wire_count, "misconfigured scratch");
-            self.wires = world.scratch.items().subslice(wire_offset, c.wire_count);
-            self.logical = (Some = c);
+            if !(world.scratch.len >= wire_offset + c.wire_count) {
+                self.put_text("misconfigured scratch", self.text_spacing * vec2(0, 2), pack_rgba(255, 0, 0, 255));
+            } else {
+                self.wires = world.scratch.items().subslice(wire_offset, c.wire_count);
+            };
         };
+        self.logical = (Some = c);
         if state.show_wire_ref_lines {
             self.all_wire_positions = temp().alloc_zeroed(RawList(Vec2), c.wire_count);
         };
@@ -372,6 +375,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         self.draw_gate_squares(circuit);
         self.draw_wires(circuit);
         self.draw_pin_lines(circuit);
+        self.draw_gate_hover_line(circuit);
         self.update_edit(circuit, state.circuit);
     };
     
@@ -461,6 +465,7 @@ Draw :: @struct {
     wire_node_width: f32 = 0.025;
     wire_hover_count: f32 = 1;
     logical: ?*Component = .None;
+    hover_logical_code: ?i64 = .None;
 };
 
 fn do_option(self: *Draw, pos: Vec2, name: Str, selected: bool, value: ~T, new: *?T) void #where = {
@@ -558,19 +563,43 @@ fn draw_component_code(self: *Draw, c: *Component, instance: i64, parent_wire_of
 fn draw_gate_code(self: *Draw, it: *Component.Gate, hover: bool) void = {
     sdtx, world := (self.sdtx, self.world&);
     base_colour := @if(hover, pack_rgba(0, 255, 0, 255), pack_rgba(255, 255, 0, 255));
-    for(it.outputs, fn(it) => self.show_wire_value(it, false));
+    if it.post_read == -1 {
+        for(it.outputs, fn(it) => self.show_wire_value(it, false));
+    };
     sdtx.color = base_colour;
     child := world[it.kind]&;
     name := child.name;
-    @if(it.outputs.len > 0) sdtx.put("= ");
+    @if(it.outputs.len > 0 && it.post_read == -1) sdtx.put("= ");
     sdtx.put(@tfmt("%( ", name));
     if child.has_param {
         sdtx.color = self.wire_value_colour&[int(it.param != 0)];
         sdtx.put(@tfmt("% ", it.param));
     };
-    for(it.inputs, fn(it) => self.show_wire_value(it, false));
+    if it.pre_read == -1 {
+        for(it.inputs, fn(it) => self.show_wire_value(it, false));
+    } else {
+        for child.inputs_for_pure_eval { i |
+            self.show_wire_value(it.inputs[i], false);
+        };
+    };
     sdtx.color = base_colour;
     sdtx.put(");");
+    
+    sdtx.color = pack_rgba(200, 0, 200, 200);
+    @if(it.pre_read != -1) sdtx.put(" PRE");
+    @if(it.post_read != -1) sdtx.put(" POST");
+    if self.logical { c |
+        gate_i := ptr_diff(c.gates.ptr, it);
+        if hover {
+            self.hover_logical_code = (Some = gate_i);
+        };
+        
+        @if(it.pre_read != -1) sdtx.put(@tfmt(" #%", it.pre_read));
+        @if(it.post_read != -1) sdtx.put(@tfmt(" #%", gate_i));
+        sdtx.color = pack_rgba(200, 0, 200, 100);
+        @if(c.gates_needed_for_pure_eval&.get(gate_i)) sdtx.put(" R");
+    };
+    
 }
 
 fn draw_primitive_code(self: *Draw, instance: i64, parent_wire_offset: i64, hover: bool) void = {
@@ -744,6 +773,10 @@ fn draw_gate_squares(self: *Draw, circuit: *Tc.Circuit) void = {
         hover := self.hovering_node(b) && e.no_selection();
         sgl.color = pack_rgba(100, 100, 100, 255);
         if hover {
+            if it.logical_gate_index != -1 {
+                self.hover_logical_code = (Some = it.logical_gate_index);
+            };
+        
             info := Tc'get_builtin_shape(it.kind);
             sgl.color = pack_rgba(200, 200, 200, 255);
             sdtx.color = pack_rgba(255, 255, 255, 255);
@@ -883,6 +916,28 @@ fn draw_pin_lines(self: *Draw, circuit: *Tc.Circuit) void = {
                 self.wire_hover_count += 1;
             };
         };
+    };
+}
+
+fn draw_gate_hover_line(self: *Draw, circuit: *Tc.Circuit) void = {
+    @if(!self.show_wire_ref_lines) return();
+    logical_i := self.hover_logical_code || return();
+    c := self.logical || return();
+    it := c.gates[logical_i]&;
+    sgl := self.draw&;
+    sgl.color = pack_rgba(0, 255, 255, 255);
+    
+    code_x: f32 = -1;
+    a := vec2(code_x, -logical_i.float().cast() - 0.3) * self.text_spacing;
+    other_i := max(it.pre_read, it.post_read);
+    if other_i != -1 {
+        b := vec2(code_x, -other_i.float().cast() - 0.3) * self.text_spacing;
+        sgl.line(a, b, 0.005);
+    };
+    
+    if circuit.gates.find(fn(it) => it.logical_gate_index == logical_i) { it |
+        b := self.tc_to_world_pos(it.pos);
+        sgl.line(a, b, 0.005);
     };
 }
 
