@@ -504,7 +504,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     
     wire_bit_width := insert_bit_width_casts(components.items(), gates&, wire_count&, bit_width, warn);
     logical_to_circuit&.push_repeated(gates.len - logical_to_circuit.len, -1);
-    new_gates, order := schedule_gates(c, gates, wire_count, a, out.items(), in.items(), components.items(), warn, logical_to_circuit.items());
+    new_gates, order, error := schedule_gates(c, gates, wire_count, a, out.items(), in.items(), components.items(), warn, logical_to_circuit.items(), c.has_bidirectional_pins);
     gates := new_gates;
     
     enumerate order { i, o |
@@ -529,15 +529,11 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         name = name,
         wire_count = wire_count,
         has_bidirectional_pins = c.has_bidirectional_pins,
+        error = unimplemented || error,
     );
     c.bit_width = bit_width;
     if calculate_usage(components.items(), a, warn) {
-        components.len -= 1;
-        c.compiled = .None;
-        each c.gates { it |
-            it.logical_gate_index = -1;
-        };
-        return();
+        components[components.len - 1].error = true;
     };
     usage := components[components.len - 1].usage;
     usage.bit_width = bit_width;
@@ -720,8 +716,7 @@ inline_for_bidirectional_gates :: fn(child_logical: *Component, gates: *List(Com
         })[]
     };
     each child_gates { gate |
-        continue :: local_return;
-        @if(gate.pre_read != -1) continue();  // will re-schedule_gates so dont split multiple times
+        @debug_assert(gate.pre_read == -1, "shouldnt do real schedule if bidirectional");
         
         out, in := (gate.outputs.shallow_copy(a), gate.inputs.shallow_copy(a));
         each out { it |
@@ -750,7 +745,11 @@ fn push_inputs_outputs(gates: *List(Component.Gate), out: []WireId, in: []WireId
 
 // TODO: pull things without side effects closer to thier first use. 
 //       the most offensive one is constants, makes it hard to read. 
-schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, a: Alloc, out: []WireId, in: []WireId, components: []Component, warn: *List(u8), logical_to_circuit: []i64) Ty(List(Component.Gate), []i64) = {
+schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, a: Alloc, out: []WireId, in: []WireId, components: []Component, warn: *List(u8), logical_to_circuit: []i64, has_bidirectional_pins: bool) Ty(List(Component.Gate), []i64, bool) = {
+    if has_bidirectional_pins {
+        return(gates, temp().alloc_init(i64, gates.len, fn(i) => i), false);
+    };
+
     order := i64.list(temp());  // [new gate index] -> old gate index
     ready: DynamicBitSet = empty(temp()); // [WireId]
     done: DynamicBitSet = empty(temp());  // [index in gates]
@@ -758,7 +757,6 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
     // inputs/outputs are fixed at start/end
     output_gate_index := gates.len - 1;
     order&.push(0);
-    done&.set(output_gate_index);
     done&.set(0);
     for gates[0].outputs { id |
         ready&.set(id.id.zext());
@@ -780,101 +778,149 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
     };
     
     switch_gates := i64.list(temp());
-    dowhile {
-        changed := false;
-        enumerate gates { i, it |
-            if !done&.get(i) {
-                kind := components[it.kind.id.zext()]&;
-                ok := true;
-                
-                if it.pre_read != -1 {
-                    for kind.inputs_for_pure_eval { i |
-                        @assert(i < it.inputs.len, "% arity or inputs_for_pure_eval error", kind.name);
-                        ok = ok && ready&.get(it.inputs[i].id.zext());
-                    };
-                } else {
-                    for it.inputs { id |
-                        ok = ok && ready&.get(id.id.zext());
-                    };
-                    
-                    // even if all the inputs are ready so dont technically need to pre_read, 
-                    // read must be before write so dont see the new value a tick early. 
-                    if it.post_read != -1 {
-                        ok = ok && done&.get(it.post_read);
-                    };
-                };
-                
-                // :SLOW
-                // TODO: turn switches into a more sane phi representation so its ssa?
-                if ok && kind.is_switch {
-                    enumerate gates { x, jt |
-                        if jt.outputs.len == 1 && jt.outputs[0].id == it.outputs[0].id {
-                            @if(x != i) switch_gates&.push(x);
-                            for jt.inputs { id |
-                                ok = ok && ready&.get(id.id.zext());
-                            };
-                        };  
-                    };
-                };
-                
-                // ports on the same ram execute top down. 
-                if ok && it.kind.is_port() {
-                    g_i := logical_to_circuit[i];
-                    @debug_assert_ne(g_i, -1, "port?");
-                    g := c.gates[g_i]&;
-                    if g.port_linked_list != -1 {
-                        // adjacent load order doesnt matter, go up until a store
-                        while => g.port_linked_list != -1 && @is(name(c.gates[g.port_linked_list].kind, .Tc2), .Load_port, .Pipelined_load_port) {
-                            g = c.gates[g.port_linked_list]&;
-                        };
-                        
-                        if g.port_linked_list != -1 {
-                            i := logical_to_circuit.index_of(fn(it) => it[] == g.port_linked_list).unwrap();  // :SLOW
-                            if !done&.get(i) {
-                                ok = false;
-                            };
-                        };
-                    };
-                };
-                
-                if ok {
-                    switch_gates&.push(i);
-                    changed = true;
-                    for switch_gates { i |
-                        if !done&.get_set(i) {
-                            order&.push(i);
-                        } else {
-                            @fmtln(warn, "gate [%]% done too early (multiple defs)", order.index_of(fn(it) => it[] == i) || -1, components[gates[i].kind.id.zext()].name);
-                        };
-                    };
-                    for it.outputs { id |
-                        @debug_assert(it.post_read == -1 || ready&.get(id.id.zext()), "pre_read makes the outputs");
-                        ready&.set(id.id.zext());
-                    };
-                    
-                    // TODO: dont split them if the pre can post immediately
-                    // :NotForCorrectness
-                    if it.pre_read != -1 {
-                        all_ready := true;
-                        for it.inputs { id |
-                            all_ready = all_ready && ready&.get(id.id.zext());
-                        };
-                        if all_ready {
-                            @debug_assert(!done&.get(it.pre_read));
-                            done&.set(it.pre_read);
-                            order&.push(it.pre_read);
-                        };
-                    };
-                };
-                switch_gates&.clear();
-            }
+    stack := @ref i64.list(temp());
+    enumerate gates { i, it |
+        if it.outputs.len == 0 || it.post_read != -1 {
+            stack.push(i);
         };
-        changed
-    };    
+    };
     
-    if order.len != gates.len - 1 {
+    error := false;
+    wires_needed := @ref WireId.list(temp());
+    gates_needed := @ref i64.list(temp());
+    looping := 0;
+    while => stack.len > 0 && !error {
+        continue :: local_return;
+        switch_gates&.clear();
+        wires_needed.clear();
+        gates_needed.clear();
+        i := stack[stack.len - 1];
+        if done&.get(i) {
+            stack.pop().unwrap();
+            continue();
+        };
+        if looping > gates.len {
+            @fmtln(warn, "%: circular dependency", c.name);
+            error = true;
+            continue();
+        };
+        
+        it := gates[i]&;
+        kind := components[it.kind.id.zext()]&;
+        
+        ok := true;
+        if it.pre_read != -1 {
+            for kind.inputs_for_pure_eval { i |
+                @assert(i < it.inputs.len, "% arity or inputs_for_pure_eval error", kind.name);
+                if !ready&.get(it.inputs[i].id.zext()) {
+                    ok = false;
+                    wires_needed.push(it.inputs[i]);
+                };
+            };
+        } else {
+            for it.inputs { id |
+                if !ready&.get(id.id.zext()) {
+                    ok = false;
+                    wires_needed.push(id);
+                };
+            };
+            
+            // even if all the inputs are ready so dont technically need to pre_read, 
+            // read must be before write so dont see the new value a tick early. 
+            if it.post_read != -1 {
+                if !done&.get(it.post_read) {
+                    ok = false;
+                    gates_needed.push(it.post_read);
+                };
+            };
+        };
+        
+        if ok && kind.is_switch {
+            // TODO: decide if this still helps enough to be worth making it less readable by splitting up the switches
+            // output isnt ready until all the switches are but can move into output early so dont have to keep as many values live. 
+            //if !done&.get_set(i) {
+            //    order&.push(i);
+            //};
+        
+            enumerate gates { x, jt |
+                if !done&.get(x) && jt.outputs.len == 1 && jt.outputs[0].id == it.outputs[0].id {
+                    @if(x != i) switch_gates&.push(x);
+                    for jt.inputs { id |
+                        if !ready&.get(id.id.zext()) {
+                            ok = false;
+                            gates_needed.push(x);
+                        };
+                    };
+                };  
+            };
+        };
+        
+        // ports on the same ram execute top down. 
+        if ok && it.kind.is_port() {
+            g_i := logical_to_circuit[i];
+            @debug_assert_ne(g_i, -1, "port?");
+            g := c.gates[g_i]&;
+            if g.port_linked_list != -1 {
+                // adjacent load order doesnt matter, go up until a store
+                while => g.port_linked_list != -1 && @is(name(c.gates[g.port_linked_list].kind, .Tc2), .Load_port, .Pipelined_load_port) {
+                    g = c.gates[g.port_linked_list]&;
+                };
+                
+                if g.port_linked_list != -1 {
+                    i := logical_to_circuit.index_of(fn(it) => it[] == g.port_linked_list).unwrap();  // :SLOW
+                    if !done&.get(i) {
+                        gates_needed.push(i);
+                        ok = false;
+                    };
+                };
+            };
+        };
+        
+        @debug_assert_eq(ok, gates_needed.len == 0 && wires_needed.len == 0);
+        if !ok {
+            stack.push_all(gates_needed.items());
+            if gates_needed.len == 0 {
+                for wires_needed { id |
+                    enumerate gates { i, it |
+                        if it.outputs.contains(fn(it) => it.id == id.id) {
+                            stack.push(i);
+                        };
+                    };
+                };
+            };
+            looping += 1;
+            continue();
+        };
+        looping = 0;
+        
+        switch_gates&.push(i);
+        for switch_gates { i |
+            if !done&.get_set(i) && i != output_gate_index /* must be last */ {
+                order&.push(i);
+            };
+        };
+        for it.outputs { id |
+            @debug_assert(it.post_read == -1 || ready&.get(id.id.zext()), "pre_read makes the outputs");
+            ready&.set(id.id.zext());
+        };
+        
+        // :NotForCorrectness
+        if it.pre_read != -1 && !done&.get(it.pre_read) {
+            all_ready := true;
+            for it.inputs { id |
+                all_ready = all_ready && ready&.get(id.id.zext());
+            };
+            if all_ready {
+                done&.set(it.pre_read);
+                order&.push(it.pre_read);
+            };
+        };
+    };
+    
+    if error {
         enumerate gates { i, it |
-            if !done&.get_set(i) {
+            if !done&.get_set(i) && i != output_gate_index {
+                if stack.contains(fn(it) => it[] == i) {
                 it := gates[i]&;
                 kind := components[it.kind.id.zext()]&;
                 @fmtln(warn, "TODO: cycles! gate (%) in (%)", kind.name, c.name);
@@ -889,13 +935,14 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
                     g_i := logical_to_circuit[i];
                     g := c.gates[g_i]&;
                     if g.port_linked_list != -1 {
-                        i := logical_to_circuit.index_of(fn(it) => it[] == g.port_linked_list).unwrap();  // :SLOW
-                        if !done&.get(i) {
-                            @fmtln(warn, "- port not ready");
+                        if logical_to_circuit.index_of(fn(it) => it[] == g.port_linked_list) { i | // :SLOW
+                            if !done&.get(i) {
+                                @fmtln(warn, "- port not ready");
+                            };
                         };
                     };
                 };
-                
+                };
                 order&.push(i);
             }
         };
@@ -917,9 +964,30 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
         }
     };
     gates&.drop();
+    
+    // if all inputs are ready in time, don't need to pre_read at all
+    range_rev(1, gates2.len - 1) { i |
+        continue :: local_return;
+        it := gates2[i+1]&;
+        @if(it.post_read != i) continue();
+        for it.inputs { id |
+            @if(it.outputs.contains(fn(it) => it.id == id.id)) continue();
+        };
+        
+        @debug_assert_eq(gates2[i].pre_read, i+1);
+        @debug_assert_eq(it.kind.id, gates2[i].kind.id);
+        it.post_read = -1;
+        gates2&.ordered_remove(i);
+        order&.ordered_remove(i);
+        each gates2 { it |
+            if it.pre_read > i {| it.pre_read -= 1; };
+            if it.post_read > i {| it.post_read -= 1; };
+        };
+    };
+    
     gates = gates2;
     
-    (gates, order.items())
+    (gates, order.items(), error)
 };
 
 fn is_port(kind: ComponentId) bool = 

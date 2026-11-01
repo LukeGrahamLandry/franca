@@ -2,6 +2,17 @@
 ## (Nov 1) circuit
 
 - ui lines so you can track gates between graphics and logic
+- re-merging pre+post if they're adjacent has the same speedup for maze as propagating no outputs for write but is less confusing. 
+- for switches output isnt ready until all the switches are but can do the conditional move early 
+  so dont have to keep as many values live. does make it harder to read that they're not all together tho. 
+  it makes the ir shorter and life faster so it feels bad to not do it just because i think its ugly. 
+- tried scheduling a gate as soon as its inputs are ready, made life faster but bad apple slower. 
+- other direction, start at needed gates and do stack order of dependencies is more promising. 
+  - confused myself when has_bidirectional_pins but not bothering to schedule in that case makes more sense anyway
+  - broke defs.leg_choose_arg because i wasnt disabling the decoder and i dont check that only one switch is active at runtime so it was order dependent
+  - makes the code order sane and makes life ~23mz. messes up the maze again so now half the memory gets a redundant preread (75 samples). 
+- tests show hz
+- transparent line not working before running was just that i wasnt load_pipeline that enabled alpha unless needed texture
 
 ## (Oct 31) circuit
 

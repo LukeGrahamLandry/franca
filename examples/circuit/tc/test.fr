@@ -51,7 +51,7 @@ fn run_tests(harness: *Harness) void = {
         "8-digit_Calculator",
     );
     for visual { it |
-        harness.load(it).run(100);
+        harness.load(it).run(1000);
     };
     
     harness.load("Conway's Game of Life Symphony").run(20_000_000);
@@ -104,6 +104,8 @@ Harness :: @rec @struct {
     root: ?ComponentId = .None;
     image_callback: ImageFn;
     time := 0;
+    jit_time := 0;
+    hz := 0;
 };
 ImageFn :: @rec @struct(f: @FnPtr(self: *Harness, userdata: rawptr) void, userdata: rawptr);
 
@@ -113,11 +115,13 @@ fn reset_case(self: *Harness) void = {
     time := timestamp();
     if self.prev_msg_len == self.msg.len {
         @if(self.root.is_some())
-        @fmt(self.msg&, " [ok] %ms", time - self.time);
+        @fmt(self.msg&, " [ok] jit:%ms run:% total:%ms", self.jit_time, => format_hz(self.msg&, self.hz), time - self.time);
     } else {
         self.error += 1;
     };
     self.time = time;
+    self.hz = 0;
+    self.jit_time = 0;
 }
 
 fn load(self: *Harness, name: Str) *Harness = {
@@ -141,12 +145,21 @@ fn load(self: *Harness, name: Str) *Harness = {
     components.push_all(builtin_components);
     discard := u8.list(temp());
     Tc'compile_circuit(self.circuits, root_index, components, a, discard&);
+    
+    start := timestamp();
     jit_circuit(self.fr&, components.items(), a);
+    end := timestamp();
+    self.jit_time = end - start;
+    
     init(self.world&, a, true, components.items());
     self.world.tc_file_loader_device = self.tc_file_loader_device;
     
     self.root = self.circuits[root_index].compiled;
     kind := self.root || {
+        @fmt(self.msg&, "\n- failed to compile");
+        return self;
+    };
+    if self.world&[kind].error {
         @fmt(self.msg&, "\n- failed to compile");
         return self;
     };
@@ -159,16 +172,25 @@ fn run(self: *Harness, ticks: i64, allow_halt: bool) *Harness = {
     kind := self.root || return(self);
     o_n, i_n := self.world&[kind]&.arity();
     values := temp().alloc_zeroed(WireValue, o_n + i_n);
-    range(0, ticks) { i |
+    start := realtime_ns();
+    i := 0;
+    while => i < ticks {
+        self.world.timestamp_ns = (Some = start + i);
         evaluate(self.world&, values, kind, 0, false);
         
+        i += 1;
         if get_halt_message(self.world&, self.circuits) { msg |
             if !allow_halt {
                 @fmt(self.msg&, "\n- halted on tick % (%)", i, msg);
             };
-            return self;
+            ticks = i;
         };
     };
+    end := realtime_ns();
+    if ticks > 1 {  // dont forget the good value when using then_halt()
+        self.hz = ticks * NS_PER_S / (end - start);
+    };
+    
     self
 }
 
@@ -225,8 +247,8 @@ fn for_consoles(self: *Harness, $body: @Fn(data: Str) void) void = {
     };
 } 
 
+#use("@/examples/circuit/tc/devices.fr");
 fn for_text_screens(self: *Harness, $body: @Fn(text: Str) void) void = {
-    #use("@/examples/circuit/tc/devices.fr");
     world := self.world&;
     for_gates(self, .Tc2, .Screen) { c, i |
         continue :: local_return;
@@ -279,14 +301,18 @@ fn maze(self: *Harness, limit: i64) *Harness = {
     self.world.storage.subslice(c.instance_offset_by_gate[i], 256/8).interpret_as_bytes().copy_from(program);
     hack := int(name == "LEG");
     maze := @ref Maze'new(Maze.tc0);
+    in := maze.input();
+    start := realtime_ns();
     range(0, limit) { _ |
-        in := maze.input();
         values := @slice(0, 0, 0, @as(i64) in.zext());
         evaluate(self.world&, values, kind, 0, false);
         if values[1+hack] != 0 {
             maze.output(values[0+hack].trunc());
+            in = maze.input();
         };
     };
+    end := realtime_ns();
+    self.hz = limit * NS_PER_S / (end - start);
     if !maze.win {
         @fmt(self.msg&, "\n- didn't solve the maze within % ticks", limit);
     };
@@ -340,10 +366,11 @@ test_defs :: fn() void = {
         };
         
         n := 0;
+        in := maze.input();
         dowhile {
-            in := maze.input();
             if tick_defs_arch(world, root_component, in, false) { byte |
                 maze.output(byte);
+                in = maze.input();
             };
             n += 1;
             @assert_lt(n, 20000, "this is taking too long. broken?");

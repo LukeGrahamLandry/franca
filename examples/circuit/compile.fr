@@ -16,6 +16,7 @@ Component :: @struct {
     is_switch := false;
     has_bidirectional_pins := false;  // always inlined so doesn't need to be compiled
     signeture: u8 = 255;  // see eval_compiled
+    error := false;
     
     usage: *Usage #use = zeroed(*Usage);
     Usage :: @struct {
@@ -118,6 +119,7 @@ calculate_usage :: fn(components: []Component, a: Alloc, warn: *List(u8)) bool =
 
         instance := 0;
         instance_offset_by_gate := a.alloc_zeroed(i64, c.gates.len);
+        if !c.error {
         enumerate c.gates { i, it |
             if it.post_read == -1 {
                 instance_offset_by_gate[i] = instance;
@@ -129,6 +131,7 @@ calculate_usage :: fn(components: []Component, a: Alloc, warn: *List(u8)) bool =
             };
         };
         @debug_assert_eq(instance, c.storage_count);
+        };
 
         wires_used: DynamicBitSet = empty(a);
         each c.gates { it |
@@ -231,7 +234,6 @@ CompileGates :: @struct {
     wires_evaluated: DynamicBitSet;
     doing_pre_read := false;
     compile_order: List(Component.Op);  // todo: now use normal gates for the !pre_read case
-    // TODO: dont allow run if failed=true
     failed := false;
     warn: *List(u8);
 };
@@ -243,6 +245,9 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
     
     if !self.c.gates_needed_for_pure_eval&.get(gate_i) && self.doing_pre_read{
         return();
+    };
+    if child.error {
+        self.c.error = true;
     };
 
     name := child.name;
@@ -269,7 +274,7 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
     };
     
     if it.pre_read == -1 {
-        self.compile_order&.push(gate_i = gate_i, pre_read = false);
+        self.compile_order&.push(gate_i = gate_i, pre_read = self.doing_pre_read);
     } else {
         self.compile_order&.push(gate_i = it.pre_read, pre_read = true);
     };
@@ -292,7 +297,7 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
             };
             @fmt(out, "%(world, o&, i&", mangle(self.components, it.kind.id.zext()));
             @if(child.has_param) @fmt(out, ", %", it.param);
-            @if(has_storage(self.components, it.kind)) @fmt(out, ", instance + %, %", self.c.instance_offset_by_gate[gate_i], it.pre_read != -1);
+            @if(has_storage(self.components, it.kind)) @fmt(out, ", instance + %, %", self.c.instance_offset_by_gate[gate_i], it.pre_read != -1 || self.doing_pre_read);
             @fmt(out, ");\n");
         };
     };
@@ -306,7 +311,7 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
         @fmt(out, "\n");
     };
     
-    @if(it.pre_read == -1) for it.inputs { it |
+    @if(it.pre_read == -1 && !self.doing_pre_read) for it.inputs { it |
         if !self.wires_evaluated&.get(it.id.zext()) {
             @fmtln(self.warn, "TODO: use-before-def without memory w% in (%).", it.id, self.c.name);
             self.failed = true;
@@ -398,6 +403,7 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
         @fmt(out, "= {\n");
         
         if have_storage {
+            break :: local_return;
             range(0, 2) { iter_i |
                 self.wires_evaluated&.clear();
             
@@ -406,7 +412,7 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
                 self.compile_component(doing_pre_read);
                 @fmt(out, "return();\n};\n");
                 
-                @if(self.failed) continue(@fmt(out, "}"));
+                @if(self.failed) break();
                 // eval() skips one so input always needs to be first even if all inputs unused.
                 if self.compile_order[0].gate_i != 0 {
                     self.compile_order&.insert(0, (gate_i = 0, pre_read = false));
@@ -419,6 +425,9 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
             self.compile_component(false);
         };
         @fmt(out, "};\n");  // func
+        if self.failed {
+            self.c.error = true;
+        };
     };
     
     @fmt(out, "dispatch :: @const_slice(@as(rawptr) ");

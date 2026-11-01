@@ -115,6 +115,9 @@ main_use_output :: fn(state: *State, in: LoaderT.I, out: Result(void, void)) voi
 
 do_eval :: fn(state: *State) void = {
     world := state.world&;
+    root_component := state.tree[0].component.unwrap();
+    child := world[root_component]&;
+    @if(child.error) return();
     state.halt_message&.clear();
     state.want_eval = false;
     prev_timestamp := state.prev_timestamp_ns;
@@ -150,8 +153,7 @@ do_eval :: fn(state: *State) void = {
     count := @if(state.auto_eval, state.ticks_per_eval * recalibrate, 1);
     state.tick_count_history&.push(count);
     
-    root_component := state.tree[0].component.unwrap();
-    o_n, i_n := world[root_component]&.arity();
+    o_n, i_n := child.arity();
     values := temp().alloc_zeroed(i64, o_n + i_n);
     have_level := values.len != 0;
     // lifting the division out of the loop instead of `clock := prev_timestamp + delta_time*i/count;` 
@@ -284,11 +286,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             
             if state.auto_eval && frame_time != 0 {
                 hz0 := state.tick_count_history&.get() * US_PER_S / frame_time;
-                mhz, hz1 := hz0.div_mod(1_000_000);
-                khz, hz2 := hz1.div_mod(1_000);
-                @if(mhz > 0 || khz > 800) @fmt(out, "%MHz+", mhz);
-                @fmt(out, "%KHz", khz);
-                @if(mhz == 0 && khz < 50) @fmt(out, "+%Hz", hz2);
+                format_hz(out, hz0);
             }
         };
     };
@@ -309,6 +307,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     if have_logic {
         root_component := state.tree[0].component.unwrap();
         c := world[root_component]&;
+        @if(c.error) self.put_text("COMPILE ERROR", self.text_spacing * vec2(0, 2), pack_rgba(255, 0, 0, 255));
         instance, parent_wire_offset, wire_offset := self.walk_component_tree(c&);
         
         if !state.halted_without_wire_values {
@@ -355,8 +354,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     sgl.defaults();
     sgl.viewport(0, 0, app_w, app_h, true);
+    sgl.load_pipeline(state.pipe);
     if state.atlas.enable || state.screen.img.id != 0 {
-        sgl.load_pipeline(state.pipe);
         img := @if(state.atlas.enable, state.atlas.img, state.screen.img);
         sgl.texture(img, (id = 0));
         sgl.texturing_enabled = true;
@@ -585,7 +584,7 @@ fn draw_gate_code(self: *Draw, it: *Component.Gate, hover: bool) void = {
     sdtx.color = base_colour;
     sdtx.put(");");
     
-    sdtx.color = pack_rgba(200, 0, 200, 200);
+    sdtx.color = pack_rgba(200, 0, 200, 255);
     @if(it.pre_read != -1) sdtx.put(" PRE");
     @if(it.post_read != -1) sdtx.put(" POST");
     if self.logical { c |
@@ -935,6 +934,9 @@ fn draw_gate_hover_line(self: *Draw, circuit: *Tc.Circuit) void = {
         sgl.line(a, b, 0.005);
     };
     
+    if it.pre_read != -1 {
+        logical_i = it.pre_read;
+    };
     if circuit.gates.find(fn(it) => it.logical_gate_index == logical_i) { it |
         b := self.tc_to_world_pos(it.pos);
         sgl.line(a, b, 0.005);
@@ -1089,6 +1091,7 @@ fn sprite_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it
     };
 };
 
+#use("@/examples/circuit/tc/devices.fr");
 fn screen(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Component.Gate) void = {
     sdtx, world, sgl := (self.sdtx, self.world&, self.draw&);
     
@@ -1108,7 +1111,6 @@ fn screen(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Compo
     @if(data.ram_size_bytes == 0) return();
     
     width, height, _ := data.size();
-    #use("@/examples/circuit/tc/devices.fr");
     
     if @is(data.mode, .Pixel8, .Pixel32) {
         texture := temp().alloc_uninit(u32, width * height);
@@ -1834,6 +1836,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         if event.key_code == .K && event.type == .KEY_DOWN && event.modifiers.get(.shift) != 0  && event.modifiers.get(.super) != 0 {
             state.keyboard_device_focused = !state.keyboard_device_focused;
             state.dirty = true;
+            state.show_wire_ref_lines = state.show_wire_ref_lines && !state.keyboard_device_focused;
             return();
         }
     
