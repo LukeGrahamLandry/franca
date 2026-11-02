@@ -43,6 +43,9 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
   - why does circuit fetch the wasm4 dep. it uses that file for atlas but shouldn't be compiling the c? an overload signeture i guess, thats so annoying. 
   - allocate World contigously with .storage
   - merge GateName() enums so dont need to keep checking group()?
+  - decide if i care enough to bring back show_known_disassembly
+  - i'd really like if i could detect when Cc_output didnt need to be bidirectional. 
+    also should keep track of wire mappings somehow so can still show the nice components in the code ui. 
 - it technically works now but the circuit editor still feels incredibly bad to use. 
   deleting wires is the most obviously broken part. undiscoverable keybinds is also bad. 
   i feel like sometimes my clicks don't go. i actually wonder if my right mouse button is fucked because ive been annoyed by phantom double clicking in programs i didnt write too

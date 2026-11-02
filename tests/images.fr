@@ -14,6 +14,7 @@ main :: fn() void = {
     @mark_reset_temp life(output);
     end_line();
     @mark_reset_temp wasm4(output);
+    end_line();
     @mark_reset_temp circuit(output);
     end_line();
     @mark_reset_temp prospero(output);
@@ -147,6 +148,10 @@ snapshot_screens :: fn(harness: *Harness, output: rawptr) void = {
                 width, height, _ := data.size();
                 buf := temp().alloc_uninit(u32, width * height);
                 extract_screen_pixels(data, buf, memory);
+                shrink_texture(buf&, height&, width);
+                each buf { it |
+                    it[] = it[].rotate_left(8).byte_swap().bit_or(0xFF000000);
+                };
                 output.push(buf, width, height);
             };
         };
@@ -264,6 +269,20 @@ stbi_write_png :: fn(pixels: []u8, w: i32, h: i32, channels: i32) []u8 = {
 
 mark_reset_temp :: fn(e: FatExpr) FatExpr #macro = 
     @{ mark := temp().mark(); @must_return @[e]; temp().reset(mark); };
+
+shrink_texture :: fn(buf: *[]u32, height: *i64, width: i64) void = {
+    dowhile {
+        blank := height[] > 1;
+        for buf[].subslice(buf.len - width, width) { c |
+            blank = blank && c == 0xFF000000;
+        };
+        if blank {
+            height[] -= 1;
+            buf.len -= width;
+        };
+        blank
+    };
+};
 
 // TODO: annoying that overloads reference these even tho none are actually used
 GRAPHICS_TARGET_WEB :: false;

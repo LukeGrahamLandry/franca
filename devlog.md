@@ -1,4 +1,21 @@
 
+## (Nov 2) circuit
+
+- continuing chipping away at auto width. i should really make smaller tests so this isnt as soul crushing but its so much more exciting if i get something real to work. 
+- simplify the old ensure_assembled_and_update_size. can trust the size in the file. 
+  it being wrong for "Smol Cave Adventure" is because im outputting undeclared ident as 0 instead of ignoring it which shifts everything
+  but the last byte is 0 anyway and anything oob is 0 so it doesnt matter. no new v1 schematics are going to be made anyway. 
+- truncations for the ones that can move bits upward will be needed eventually but didnt help now
+- Less_s sign extend correctly based on the width. vc works. 
+- with cc_output as bidirectional that also got "RISC-V RV32IM" to the mandelbrot shape bit not the colourful dust
+- hmm saving the old infered param when inlining doesnt work if it might have changed. 
+- skipping disconnected concatenator pins makes fewer weird widths which is reassuring
+- somehow im inserting casts of both args of an And_word in the alu to 1. not even auto, param=32. 
+  wasnt in the list in get_bit_width but i dont understand why it wouldn't be zeroes. 
+  oh because `And64 :: And; And_word :: And64;` and if reused, the bit_width stomping happens in the copy that goes in the builtins array not the one in the constant. so thats error prone really shouldnt do it that way i guess. 
+  anyway now i guet the colourful dust and "Simplified Chess" as the right pieces instead of like 6 kings. 
+- that was grand strides, whole bunch of stuff works now. sadly i've also uglied up everything. 
+
 ## (Nov 1) circuit
 
 - ui lines so you can track gates between graphics and logic
@@ -13,7 +30,14 @@
   - makes the code order sane and makes life ~23mz. messes up the maze again so now half the memory gets a redundant preread (75 samples). 
 - tests show hz
 - transparent line not working before running was just that i wasnt load_pipeline that enabled alpha unless needed texture
-
+- working on auto width a bit
+  - concatenators are the biggest deal because widths matter for shift amount not only truncations
+  - the infered widths can be different at each callsite of a CC because inputs can be auto. 
+    so that needs to be treated like bidirectional and be inlined. 
+  - "Vim Compiler" gets text on the screen. new keyboard numbers. :c prints "OK BYTES: 384" but :r doesn't print anything. 
+  - improved by word using max of inputs not first. :r prints but only 5s. 
+  
+  
 ## (Oct 31) circuit
 
 - reify pre_read in schedule_gates instead of waiting until emitting the code. 

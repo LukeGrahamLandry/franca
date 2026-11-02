@@ -279,8 +279,6 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     in, out := (WireId.list(a), WireId.list(a));
     bit_width := u8.list(a);
     output_pin_count := 0;
-    // before: gates[_].kind.id is in just the tc range, now remap into `components`. 
-    // after this can't access the TcBuiltins.Shape anymore so any required into needs to get transfered out. 
     range(0, gates.len) { i |  // gate.push in this loop
         continue :: local_return;
         it := gates.index(i); 
@@ -299,7 +297,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
             c.has_bidirectional_pins = true;
         };
         
-        if shape.name.starts_with("Probe") {
+        if shape.name.starts_with("Probe") || shape.name == "Delay_line_word_asm" {
             // TODO
             kill&.set(i);
             continue();
@@ -356,6 +354,8 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
             };
         }
         
+        @if(shape.name == "Program") assemble_v1(c, it.get_param(.Ram), i, a, warn);
+                
         @match(shape.body) { 
             fn Unimplemented() => {
                 kill&.set(i);
@@ -399,6 +399,16 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                     @if(shape.name == "Cc_output", 64,   // :InferCc_output
                         @if(shape.bit_width.len == 0, 0, shape.bit_width[0])));
                 insert(bit_width&, dest, width);
+                
+                if shape.name == "Cc_input" && original_gate.settings[0] == MIN_i64 {
+                    // auto sized input can be different at each callsite. 
+                    c.has_bidirectional_pins = true;
+                };
+                
+                // TODO: i have to do this but i dont want to
+                if shape.name == "Cc_output" {
+                    c.has_bidirectional_pins = true;
+                };
                 
                 if is_switchable_output {
                     insert(custom_pins&, dest + 1, (HACK_NONE_PIN_POSITION, HACK_NONE_PIN_POSITION));
@@ -502,7 +512,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     insert_consts_for_dead_wires(components.items(), gates&);
     @debug_assert_eq(bit_width.len, custom_pins.len);
     
-    wire_bit_width := insert_bit_width_casts(components.items(), gates&, wire_count&, bit_width, warn);
+    wire_bit_width := insert_bit_width_casts(components.items(), gates&, wire_count&, bit_width, warn, c.has_bidirectional_pins);
     logical_to_circuit&.push_repeated(gates.len - logical_to_circuit.len, -1);
     new_gates, order, error := schedule_gates(c, gates, wire_count, a, out.items(), in.items(), components.items(), warn, logical_to_circuit.items(), c.has_bidirectional_pins);
     gates := new_gates;
@@ -540,6 +550,10 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     usage.wire_bit_width = wire_bit_width;
     
     find_links_for_lastest_component(c, components.items(), linkables, warn);
+    
+    @if(c.has_bidirectional_pins) each gates { it |
+        if it.temporary_auto_width {| it.param = 0; };
+    };
 }
 
 find_links_for_lastest_component :: fn(c: *Circuit, components: []Component, linkables: []i64, warn: *List(u8)) void = {
@@ -725,7 +739,7 @@ inline_for_bidirectional_gates :: fn(child_logical: *Component, gates: *List(Com
         each in { it |
             it[] = fix_wire(it[]);
         };
-        gates.push(kind = gate.kind, outputs = out, inputs = in, param = gate.param);
+        gates.push(kind = gate.kind, outputs = out, inputs = in, param = gate.param, temporary_auto_width = gate.temporary_auto_width, temporary_disconnected_pins_bitset = gate.temporary_disconnected_pins_bitset);
         extra_gates[] += 1;
     };
     //@fmtln(warn, "- inline added wires %..<%", original_wire_count, wire_count[]);
@@ -1051,6 +1065,7 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8), uni
             || shape.name == "Custom_v2"         // "
             || shape.name == "_0"                // placeholder for editor deleted gate
             || shape.name == "Ram_v2"            // pins are on the ports
+            || shape.name == "Delay_line_word_asm"
         ;
         if no_pins && !allow_no_pins {
             @fmtln(warn, "TODO: % has no pins", shape.name);
@@ -1060,6 +1075,13 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8), uni
         out, in := (w.slice(0, out_arity), w.rest(out_arity));
         second_output_is_unused := out.len >= 2 && out[1].id == 0xFFFFFFFF;
         
+        disconnected := 0;
+        enumerate w { i, id |
+            if id.id == 0xFFFFFFFF {
+                disconnected = disconnected.bit_or(1.shift_left(i));
+            };
+        };
+        
         // see insert_consts_for_dead_wires()
         enumerate w { i, it |
             if it.id == 0xFFFFFFFF {
@@ -1067,14 +1089,45 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8), uni
                 next_wire_id += 1;
             }
         };
+
+        logic_gates&.push(
+            outputs = out,
+            inputs = in,
+            kind = it.kind,
+            param = pack_param(circuits, c, it, gate_i, second_output_is_unused, unimplemented, warn),
+        );
         
-        param := 0;
-        if !shape.has_param && group(it.kind) == .Tc2 {
-            param = it.settings[0];
+        new := logic_gates[logic_gates.len - 1]&;
+        new.temporary_disconnected_pins_bitset = disconnected;
+        if shape.name == "Constant" {
+            new.temporary_bit_width_for_constant = it.settings[0];
+        } else {
+            if group(it.kind) == .Tc2 {
+                k := name(it.kind, .Tc2);
+                if it.settings[0] == MIN_i64 || @is(k, .Concatenator_2, .Concatenator_4, .Concatenator_8) {
+                    new.temporary_auto_width = true;
+                };
+            };
         };
-        
-        if shape.has_param {
-            k := @if(group(it.kind) != .Tc1, GateName(.Tc1)._0, name(it.kind, .Tc1));
+    };
+    
+    (logic_gates, next_wire_id.zext())
+};
+
+pack_param :: fn(circuits: []Circuit, c: *Circuit, it: *Circuit.Gate, gate_i: i64, second_output_is_unused: bool, unimplemented: *bool, warn: *List(u8)) i64 = {
+    shape := get_builtin_shape(it.kind);
+    if !shape.has_param {
+        if group(it.kind) == .Tc2 {
+            s0 := it.settings[0];
+            @if(s0 != MIN_i64 && s0.ugt(64)) @fmtln(warn, "bad width % for %", s0, shape.name);
+            return @if(s0 == MIN_i64, 0, s0);
+        };
+        return 0;
+    };
+    param := 0;
+    @match(group(it.kind)) {
+        fn Tc1() => {
+            k := name(it.kind, .Tc1);
             s0, s1 := (it.settings&[0], it.settings&[1]);
             param = s0;
             #use(Builtin.Settings);
@@ -1088,8 +1141,6 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8), uni
                 s: Ram = construct(storage_size = s0, word_size_index = s1, is_program = int(shape.name.starts_with("Program")));
                 if k != .Program {
                     s&.set(.storage_size, s.get(.storage_size).align_to(s.word_size()) / s.word_size());
-                } else {
-                    ensure_assembled_and_update_size(c, s&, gate_i, a, warn);
                 };
                 if k == .Rom {
                     size := s.get(.storage_size) * s.word_size();
@@ -1116,20 +1167,16 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8), uni
                 s: Builtin.Settings.Mul64 = construct(need_high = int(!second_output_is_unused));
                 param = s.repr.bitcast();
             }
-            
-            k := @if(group(it.kind) != .Tc2, GateName(.Tc2).None, name(it.kind, .Tc2));
-            
-            if @is(k, .Concatenator_2, .Concatenator_4, .Concatenator_8) {
-                @fmtln(warn, "TODO: concatenator");
-            };
+        };
+        fn Tc2() => {
+            k := name(it.kind, .Tc2);
             
             // TODO: check length and error
             s := it.settings;
-            // TODO: s[0]==MIN_i64 means auto width
-            // TODO: the number in concatenator means nothing, its just determined by inputs always
             @match(k) {
                 fn Static_indexer() => {
                     width, shift := (s[0], s[2]);
+                    @if(width == MIN_i64) @fmtln(warn, "auto width static indexer?");
                     s: Builtin.Settings.StaticIndex = construct(width = width, shift = shift.abs(), left = int(shift < 0));
                     param = s.repr.bitcast();
                 }
@@ -1138,10 +1185,16 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8), uni
                 }
                 fn Constant() => {
                     param = s[2];
+                    if s[0].ult(64) {
+                        // ex. if you type -1 in the box but set the width lower you dont get 64 1s
+                        param = param.bit_and(1.shift_left(s[0]) - 1);
+                    };
+                }
+                fn Keyboard_v2() => {
+                    param = s[2];
                 }
                 fn Maker_bit_2() => maker(2, 2);
                 fn Maker_bit_4() => maker(4, 4);
-                // fn Maker_bit_8() => maker(8, 8);
                 fn Maker_word_2() => maker(s[0], 2);
                 fn Maker_word_4() => maker(s[0], 4);
                 fn Maker_word_8() => maker(s[0], 8);
@@ -1154,8 +1207,11 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8), uni
                     param = s.repr.bitcast();
                 }
                 @default => {
-                    if @is(k, .Splitter_word_8, .Splitter_word_4, .Splitter_word_2) {
-                        param = s[0];
+                    if @is(k, .Splitter_word_8, .Splitter_word_4, .Splitter_word_2, .Less_s, .Asr) {
+                        param = @if(s[0] == MIN_i64, 0, s[0]);
+                    };
+                    if @is(k, .Splitter_bit_8, .Splitter_bit_4, .Splitter_bit_2) {
+                        param = 1;
                     };
                     if is_port(it.kind) {
                         p: Builtin.Settings.Port = (repr = 0);
@@ -1168,28 +1224,21 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8), uni
                     };
                 };
             };
-            // TODO: wrong. you're allowed to set it to ex. 3
             maker :: fn(output_bit_width, n) => {
-                x := output_bit_width.udiv(n);
-                param = 0;
-                range(0, n) { i |
-                    param = param.bit_or(x.shift_left(8*i));
+                if output_bit_width != MIN_i64 {
+                    x := output_bit_width.ualign_to(n).udiv(n);
+                    range(0, n) { i |
+                        param = param.bit_or(x.shift_left(8*i));
+                    };
                 };
             };
         };
-        
-        logic_gates&.push(
-            outputs = out,
-            inputs = in,
-            kind = it.kind,
-            param = param,
-        );
+        @default => ();
     };
-    
-    (logic_gates, next_wire_id.zext())
-};
+    param
+}
 
-fn ensure_assembled_and_update_size(circuit: *Circuit, s: *Builtin.Settings.Ram, gate_i: i64, a: Alloc, warn: *List(u8)) void = {
+fn assemble_v1(circuit: *Circuit, s: *Builtin.Settings.Ram, gate_i: i64, a: Alloc, warn: *List(u8)) void = {
     asm := circuit.programs.find(fn(it) => it.level_id == Circuit.Program.SANDBOX_LEVEL_ID && it.gate_index == gate_i) 
         || return(@fmtln(warn, "TODO: missing program assembly for gate[%]", gate_i));
     word_size := s[].word_size();
@@ -1202,9 +1251,6 @@ fn ensure_assembled_and_update_size(circuit: *Circuit, s: *Builtin.Settings.Ram,
             });
             asm.assembled = (Some = out.items());
         };
-    };
-    if asm.assembled { out |
-        s.set(.storage_size, out.len.align_to(word_size) / word_size);
     };
 };
 
@@ -1262,7 +1308,7 @@ fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, 
 }
 
 // TODO: what if a bidirectional pin is given too big a value?
-fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate), wire_count: *i64, bit_width: []u8, warn: *List(u8)) []u8 = {
+fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate), wire_count: *i64, bit_width: []u8, warn: *List(u8), has_bidirectional_pins: bool) []u8 = {
     a := gates.gpa;
     cast_id: ComponentId = (id = trunc(component_offset(.Tc2) - 1));
     @debug_assert_eq(components[cast_id.id.zext()].name, "SyntheticCast_FR");
@@ -1286,21 +1332,31 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
         c := components[gate.kind.id.zext()]&;
         name := c.name;
         o_n, i_n := c.arity();
-        @if(bit_width.len != o_n + i_n) continue(@fmtln(warn, "TODO: missing widths for %", name));
+        if bit_width.len != o_n + i_n {
+            @if(!gate.temporary_auto_width) @fmtln(warn, "TODO: missing widths for %", name);
+            continue();
+        };
         enumerate gate.outputs { i, id |
             // multiple switches of different sizes might ouput to the same wire
             width[id.id.zext()] = max(bit_width[i], width[id.id.zext()]);
         };
     };
     
+    work := infer_auto_width(components, gates.items(), width.items());
+    @if(!has_bidirectional_pins) for work { i |
+        @fmtln(warn, "failed to infer width of %", components[gates[i].kind.id.zext()].name);
+    };
+    
     K :: Ty(WireId, u8);
     ::AutoEq(K); ::AutoHash(K, TrivialHasher);
     casts: HashMap(K, WireId) = init(temp());
     
-    maybe_cast :: fn(want: u8, id: *WireId) => {
+    maybe_cast :: fn(want: u8, id: *WireId, gate) => {
         break :: local_return;
         found := width[id.id.zext()];
-        @if(found == 0 && !error_wires&.get_set(id.id.zext())) @fmtln(warn, "TODO: unknown wire size w%", id.id);
+        if !gate.temporary_auto_width || !has_bidirectional_pins {
+            @if(found == 0 && !error_wires&.get_set(id.id.zext())) @fmtln(warn, "TODO: unknown wire size w% (for %)", id.id, components[gate.kind.id.zext()].name);
+        };
         if want < found && want != 0 {
             old := id[];
             if get(casts&, (old, want)) { new |
@@ -1330,20 +1386,34 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
         @if(bit_width.len == 0) continue();
         gate := gate[];
         enumerate gate.inputs { i, id |
-            maybe_cast(bit_width[i + gate.outputs.len], id);
+            maybe_cast(bit_width[i + gate.outputs.len], id, gate);
+        };
+        
+        // TODO: rotate needs to wrap at the right bit
+        if !has_bidirectional_pins && group(gate.kind) == .Tc2 && @is(name(gate.kind, .Tc2), .Not_word, .Xnor_word, .Nor_word, .Nand_word, .Neg, .Add, .Mul, .Div, .Mod, .Inc, .Lsl, .Rol, .Ror, .Asr) {
+            want := bit_width[0];
+            if want != 0 && want != 64 {
+                new: WireId = (id = wire_count[].trunc());
+                wire_count[] += 1;
+                width.push(want);
+                gates.push(
+                    kind = cast_id,
+                    inputs = a.alloc_init(WireId, 1, fn(_) => new),
+                    outputs = a.alloc_init(WireId, 1, fn(_) => gates[gate_i].outputs[0]),
+                    param = want.zext(),
+                );
+                gates[gate_i].outputs[0] = new;
+            };
         };
     };
     
     @if(known)
     enumerate outputs { i, id |
-        maybe_cast(bit_width[i], id);
+        maybe_cast(bit_width[i], id, gates[0]&);
     };
     
     gates.items().swap(original_output_index, gates.len - 1);
     @debug_assert_eq(components[gates[gates.len - 1].kind.id.zext()].name, "output");
-    n := gates.len - original_output_index - 1;
-    //@if(n != 0) @fmtln(warn, "- inserted % casts", n);
-    
     
     // :InferCc_output
     @if(known) enumerate outputs { i, id |
@@ -1352,6 +1422,77 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
     
     width.items()
 }
+
+infer_auto_width :: fn(components: []Component, gates: []Component.Gate, width: []u8) []i64 = {
+    work := @ref i64.list(temp());
+    range(1, gates.len - 1) { i |
+        it := gates[i]&;
+        if group(it.kind) == .Tc2 && it.temporary_auto_width && it.param == 0 {
+            work.push(i);
+        };
+    };
+
+    dowhile {
+        changed := false;
+        unordered_retain(work) { gate_i |
+            continue :: local_return;
+            gate := gates.index(gate_i[]);
+            for gate.inputs { id |
+                @if(width[id.id.zext()] == 0) continue(true); 
+            };
+            param := 0; 
+            k := name(gate.kind, .Tc2);   
+            
+            if @is(k, .Splitter_word_8, .Splitter_word_4, .Splitter_word_2) {
+                param = width[gate.inputs[0].id.zext()].zext().align_to(gate.outputs.len).div(gate.outputs.len);
+            };
+            
+            if @is(k, .Maker_word_2, .Maker_word_4, .Maker_word_8) {
+                x: u8 = 0;
+                enumerate gate.inputs { i, id |
+                    x = max(x, width[id.id.zext()]);
+                };
+                x = min(x, 64 / gate.inputs.len.trunc());
+                range(0, gate.inputs.len) { i |
+                    param = param.bit_or(x.zext().shift_left(8*i));
+                };
+            };
+            
+            if @is(k, .Concatenator_2, .Concatenator_4, .Concatenator_8) {
+                // disconnected input pins contribute zero bits of width, not one. 
+                enumerate gate.inputs { i, id |
+                    if gate.temporary_disconnected_pins_bitset.bit_and(1.shift_left(i + 1)) == 0 {
+                        param = param.bit_or(width[id.id.zext()].zext().shift_left(8*i));
+                    };
+                };
+            };
+            
+            shape := get_builtin_shape(gate.kind);
+            if !shape.has_param || @is(k, .Less_s, .Asr) {
+                x: u8 = 0;
+                enumerate gate.inputs { i, id |
+                    x = max(x, width[id.id.zext()]);
+                };
+                param = x.zext();
+            };
+            
+            if param != 0 {
+                gate.param = param;
+                changed = true;
+                bit_width := get_bit_width(components, gate);
+                out := @if(k == .Add, gate.outputs.slice(0, 1), gate.outputs);
+                enumerate out { i, id |
+                    width[id.id.zext()] = max(bit_width[i], width[id.id.zext()]);
+                };
+            };
+            
+            param == 0
+        };
+        changed
+    };
+    
+    work.items()
+};
 
 // this can't be in find_pins because it has to be after bidirectional components are inlined
 insert_consts_for_dead_wires :: fn(components: []Component, gates: *List(Component.Gate)) void = {
@@ -1385,8 +1526,15 @@ insert_consts_for_dead_wires :: fn(components: []Component, gates: *List(Compone
 
 fn get_bit_width(components: []Component, it: *Component.Gate) []u8 = {
     if @is(it.kind.group(), .Tc1, .Tc2) {
+        if it.temporary_auto_width && it.param == 0 {
+            return empty();
+        };
         shape := get_builtin_shape(it.kind);
-        return get_bit_width(shape, it.param);
+        r := get_bit_width(shape, it.param);
+        if shape.name == "Constant" && it.temporary_bit_width_for_constant.ult(64) {
+            r[0] = it.temporary_bit_width_for_constant.trunc();
+        };
+        return r;
     };
     kind: i64 = it.kind.id.zext();
     @if(components[kind].usage.is_null()) return(empty());
@@ -1411,18 +1559,25 @@ fn get_bit_width(shape: *Tc.Builtin.Template, param: i64) []u8 = {
             return r;
         };
         
-        if @is(k, .Or_word, .Nand_word, .Xor_word, .Delay_line_word) {  // all same
+        if @is(k, .Or_word, .And_word, .Xor_word, .Delay_line_word) {  // all same
             return r;
         };
         
-        // TODO: but outputs need truncations because bits can spill out if less than 64 bit
-        if @is(k, .Not_word, .Xnor_word, .Nor_word, .Neg, .Mul, .Div, .Mod, .Inc) {
+        if @is(k, .Not_word, .Xnor_word, .Nor_word, .Nand_word, .Neg, .Mul, .Div, .Mod, .Inc) {
             return r;
         };
         
-        // and outputs will need truncations
-        //if @is(k, .Lsl, .Lsr, .Rol, .Ror, .Asr) {  // one input is smaller
-        //};
+        if @is(k, .Lsl, .Lsr, .Rol, .Ror, .Asr) {  // one input is smaller
+            up_pow2 :: fn(w: i64) i64 = {
+                n := 63 - w.leading_zeros();
+                @if(1.shift_left(n) == w, w, 1.shift_left(n + 1))
+            };
+            wrap := up_pow2(r[0].zext()).trailing_zeros();
+            if wrap != 64.trailing_zeros() {
+                r[2] = wrap.trunc();
+            };  // else: the instruction already does mod 64 so dont need to truncate
+            return r;
+        };
         
         if @is(k, .Equal, .Less_u, .Less_s) {  // bool out
             r[0] = 1;
@@ -1452,6 +1607,10 @@ fn get_bit_width(shape: *Tc.Builtin.Template, param: i64) []u8 = {
         };
         
         @match(k) {
+            fn Add() => {
+                r[1] = 1;  // carry out
+                r[2] = 1;  // carry in
+            };
             fn Mux() => { r[1] = 1; };
             fn Counter() => { r[2] = 1; };
             fn Switch_word() => { r[2] = 1; };
@@ -1550,7 +1709,7 @@ set_initial_data :: fn(world: *World, circuits: []Tc.Circuit, root: ComponentId,
             data.ram_instance = instance_base + c.instance_offset_by_gate[ram_logical_i];
             data.ram_size_bytes = c.gates[ram_logical_i]&.get_param(.Ram_v2)[].get(.ram_size_bytes);
             data.foreground_colour = 0xff;
-            data.resolution = 1;
+            data.resolution = 256;
             continue();
         };
         

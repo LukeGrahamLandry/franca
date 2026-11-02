@@ -104,7 +104,7 @@ templates :: collect_templates(impl, .Tc1, pin_layouts) { it, k |
 
 templates2 :: collect_templates(impl2, .Tc2, pin_layouts2) { it, k |
     it.bit_width = get_width_data2(it);
-    it.has_param = it.has_param || @is(k, .Static_indexer, .Segment_display, .Load_port, .Store_port, .Ram_v2);
+    it.has_param = it.has_param || @is(k, .Static_indexer, .Segment_display, .Load_port, .Store_port, .Ram_v2, .Keyboard_v2);
     if @is(k, .Register_word, .Register_bit, .Delay_line_word, .Delay_line_bit, .Counter) {
         it.inputs_for_pure_eval = empty();
     };
@@ -135,9 +135,9 @@ Settings :: @struct {
         gate_i := 32,
     );
     Mul64 :: @bit_fields(need_high := 1, _ := 63);
-    StaticIndex :: @bit_fields(width := 8, shift := 6, left := 1, _ := 49);
-    Port :: @bit_fields(width := 8, little_endian := 1, connected := 1, ram_size_bytes := 54);
-    Ram_v2 :: @bit_fields(little_endian := 1, init := 8, ram_size_bytes := 55);
+    StaticIndex :: @bit_fields(width := 8, shift := 8, left := 1, _ := 47);
+    Port :: @bit_fields(width := 8, ram_size_bytes := 48, little_endian := 1, connected := 1, _ := 6);
+    Ram_v2 :: @bit_fields(init := 8, ram_size_bytes := 48, little_endian := 1, _ := 7);
 };
 
 fn word_size(param: Settings.Ram) i64 = 1.shift_left(param.get(.word_size_index)); // [1, 2, 4, 8, 16, 32]
@@ -396,10 +396,9 @@ _57 :: todo();
 _58 :: todo();
 // out: (event waiting, key value, key up)
 Keyboard :: device(3, 1, 
-    fn(_) => 64,
+    fn(_) => size_of(KeyboardData) * 8,
     fn(world: *World, o: *Array(i64, 3), i: *Array(i64, 1), _: i64, instance: i64, doing_pre_read: bool) void = {
         read_next := i[0] != 0;
-        @assert_eq(size_of(KeyboardData), size_of(WireValue));
         data := bit_cast_unchecked(*WireValue, *KeyboardData, world.storage.index(instance));
         o[] = (int(data.have_next > 0 || data.prev_value != 0), data.prev_value.int(), data.prev_up.int());
         if read_next {
@@ -880,7 +879,9 @@ Xnor_word :: impl.Xnor64;
 Switch_word :: impl.Switch64;
 Equal :: impl.Equal64;
 Less_u :: impl.LessU64;
-Less_s :: impl.LessI64;
+Less_s :: math_param(1, 2) { o, i, p | 
+    o[0] = int(lt(i[0].sign_extend_impl(p-1), i[1].sign_extend_impl(p-1)));
+};
 Neg :: impl.Neg64;
 Add :: impl.Add64;
 Mul :: math(1, 2) { o, i | 
@@ -893,7 +894,9 @@ Lsl :: impl.Shl64;
 Lsr :: impl.Shr64;
 Rol :: impl.Rol64;
 Ror :: impl.Ror64;
-Asr :: impl.Ashr64;
+Asr :: math_param(1, 2) { o, i, p | 
+    o[0] = i[0].sign_extend_impl(p-1).shift_right_arithmetic(i[1]);
+};
 Counter :: device(1, 2, 
     impl.Counter64.compute_storage.unwrap(),
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 2), instance: i64, doing_pre_read: bool) void = {
@@ -947,10 +950,10 @@ Load_port :: device(1, 2,
         data := world.storage.rest(instance).interpret_as_bytes().slice(0, param.get(.ram_size_bytes));
         address := address.umod(data.len);  // TODO: i think its always a power of 2
         
-        if ((address + param.get(.width)/8).ugt(data.len)) {
-            o[0] = 0;
-            return();
-        };
+        //if ((address + param.get(.width)/8).ugt(data.len)) {
+        //    o[0] = 0;
+        //    return();
+        //};
         data := data.rest(address);
         value := @switch(param.get(.width)) {
             @case(8) => data[0].int();
@@ -979,7 +982,7 @@ Store_port :: device(0, 3,
         instance := world.storage[instance];  // the linked ram
         data := world.storage.rest(instance).interpret_as_bytes().slice(0, param.get(.ram_size_bytes));
         address := address.umod(data.len);  // TODO: i think its always a power of 2
-        @if((address + param.get(.width)/8).ugt(data.len)) return();
+        //@if((address + param.get(.width)/8).ugt(data.len)) return();
         data := data.rest(address);
         @switch(param.get(.width)) {
             @case(8) => { data[0] = value.trunc(); };
@@ -1056,7 +1059,6 @@ Screen :: device(0, 3,
             };
             @default => ();
         }
-        // TODO
     },
 );
 Time :: device_no_storage(1, 0, 
@@ -1069,10 +1071,12 @@ Time :: device_no_storage(1, 0,
     },
 );
 Keyboard_v2 :: device(3, 1, 
-    fn(_) => 64,
-    fn(world: *World, o: *Array(i64, 3), i: *Array(i64, 1), instance: i64, doing_pre_read: bool) void = {
-        // TODO
-        o[] = (0, 0, 0);
+    impl.Keyboard.compute_storage.unwrap(),
+    fn(world: *World, o: *Array(i64, 3), i: *Array(i64, 1), param: i64, instance: i64, doing_pre_read: bool) void = {
+        (@run impl'Keyboard'fid.unwrap())(world, o, i, param, instance, doing_pre_read);
+        if o[0] != 0 {
+            o[2] = o[2].bit_xor(1);  // up -> down
+        };
     },
 );
 Static_eval :: todo();
@@ -1458,7 +1462,7 @@ get_width_data2 :: fn(it: *Template) []u8 = {
         fn Splitter_bit_8() => @slice(0x01, 1, 1, 1, 1, 1, 1, 1, 8);
         fn Splitter_bit_4() => @slice(0x01, 1, 1, 1, 4);
         fn Splitter_bit_2() => @slice(0x01, 1, 2);
-        fn Keyboard_v2() => @slice(0x01, 0x10, 0x01, 0x01);
+        fn Keyboard_v2() => @slice(0x01, 0x08, 0x01, 0x01);
         fn Screen() => @slice(0x01, 64, 64);
         @default => it.bit_width;
     };

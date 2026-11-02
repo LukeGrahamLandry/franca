@@ -48,7 +48,7 @@ State :: @rec @struct {
     gfx_error_last_frame: bool;
     halted_without_wire_values: bool;
     keyboard_data: ?*Tc.Builtin.KeyboardData;
-    keyboard_character_mode: bool;
+    keyboard_character_mode: @enum(Char, V1, V2);
     
     circuit: []Tc.Circuit;
     circuit_index: i64;
@@ -125,6 +125,10 @@ do_eval :: fn(state: *State) void = {
     state.prev_timestamp_ns = this_timestamp;
     delta_time := this_timestamp - prev_timestamp;
     recalibrate := 1;
+    
+    if state.adapt_tick_rate {
+        state.ticks_per_eval = min(state.ticks_per_eval, 1666666);
+    };
     if state.eval_last_frame {
         state.frame_time_history&.push(delta_time / 1000);
         
@@ -515,11 +519,16 @@ fn walk_component_tree(self: *Draw, c: **Component) Ty(i64, i64, i64) = {
     self.put_text(self.text_spacing * vec2(0, 1), pack_rgba(255, 255, 255, 255)) { out |
         for state.tree { it |
             if it.logical_gate { it |
+                if c.gates[it].pre_read != -1 {
+                    it = c.gates[it].pre_read;
+                };
                 parent_wire_offset = wire_offset;
                 wire_offset += c.wire_count;
                 range(0, it) { i |
-                    child := state.world&[c.gates[i].kind]&;
-                    wire_offset += child.wire_sum;
+                    if c.gates[i].pre_read == -1 {
+                        child := state.world&[c.gates[i].kind]&;
+                        wire_offset += child.wire_sum;
+                    }
                 };
                 @fmt(out, "%[%], ", c.name, it);
                 instance += c.instance_offset_by_gate[it];
@@ -571,8 +580,17 @@ fn draw_gate_code(self: *Draw, it: *Component.Gate, hover: bool) void = {
     @if(it.outputs.len > 0 && it.post_read == -1) sdtx.put("= ");
     sdtx.put(@tfmt("%( ", name));
     if child.has_param {
-        sdtx.color = self.wire_value_colour&[int(it.param != 0)];
-        sdtx.put(@tfmt("% ", it.param));
+        buf := i64.cast_to_bytes(it.param&);
+        while => buf.len > 1 && buf[buf.len - 1] == 0 {
+            buf.len -= 1;
+        };
+        out := self.out;
+        for_rev buf { c |
+            push_hex_byte(out, c, false);
+        };
+        sdtx.put(out.items());
+        sdtx.put(" ");
+        self.out.clear();
     };
     if it.pre_read == -1 {
         for(it.inputs, fn(it) => self.show_wire_value(it, false));
@@ -598,7 +616,10 @@ fn draw_gate_code(self: *Draw, it: *Component.Gate, hover: bool) void = {
         sdtx.color = pack_rgba(200, 0, 200, 100);
         @if(c.gates_needed_for_pure_eval&.get(gate_i)) sdtx.put(" R");
     };
-    
+    if it.temporary_auto_width {
+        sdtx.color = pack_rgba(200, 0, 200, 100);
+        sdtx.put(" *");
+    };
 }
 
 fn draw_primitive_code(self: *Draw, instance: i64, parent_wire_offset: i64, hover: bool) void = {
@@ -703,6 +724,7 @@ fn show_wire_value(self: *Draw, id: WireId, force_hover: bool) = {
             for_rev i64.cast_to_bytes(value&).slice(0, w) { c |
                 push_hex_byte(out, c, false);
             };
+            @if(false) @fmt(out, ":%", bit_width);
         };
     };
     sdtx.put(out.items());
@@ -1139,16 +1161,16 @@ fn screen(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Compo
             range(0, width) { x |
                 char, fore := @match(data.mode) {
                     fn Ascii8() => (memory[i], foreground);
+                    // TODO: idk if this is the right way around
                     fn Ascii32() => {
                         v := u32.reinterpret_bytes(memory)[i];
-                        //back := decode_8bit_colour();
-                        //if back != pack_rgba(0, 0, 0, 255) {
-                        //    sdtx.color = back;
-                        //    sdtx.put("\x8F");
-                        //    sdtx.pos.x -= 1;
-                        //};
-                        panic("TODO: ascii32");
-                        //(v.trunc(), decode_8bit_colour())
+                        back := decode_8bit_colour(v.shift_right_logical(16).trunc());
+                        if back != pack_rgba(0, 0, 0, 255) {
+                            sdtx.color = back;
+                            sdtx.put("\x8F");
+                            sdtx.pos.x -= 1;
+                        };
+                        (@as(u8) v.trunc(), decode_8bit_colour(v.shift_right_logical(8).trunc()))
                     }
                     @default => unreachable();
                 };
@@ -1768,7 +1790,8 @@ fn service_keyboard_device(state: *State, data: *Tc.Builtin.KeyboardData) void =
     if buf.len > 0 && !data.valid {
         key := buf[0].key;
         // TODO: i have EventType.CHAR which does some of this (but not all because this still wants shift, etc.)
-        key := if state.keyboard_character_mode {
+        key := @match(state.keyboard_character_mode) {
+        fn Char() => {
             c := @as(i64) zext(@as(u16) key);
             if c < 127 && c.trunc().is_ascii_alpha() && !buf[0].shift {
                 c = c.trunc().ascii_to_lower().zext();
@@ -1796,8 +1819,19 @@ fn service_keyboard_device(state: *State, data: *Tc.Builtin.KeyboardData) void =
             };
             
             c
-        } else {
-            (key_order.index_of(fn(it) => it[] == key) || -13) + 13
+        };
+            fn V1() => (key_order.index_of(fn(it) => it[] == key) || -13) + 13;
+            fn V2() => {
+                break :: local_return;
+                for key_order_v2 { high, keys |
+                    enumerate keys { low, it |
+                        if key == it[] {
+                            break(low.bit_or(high.zext()));
+                        }
+                    };
+                };
+                0
+            }
         };
         
         data.value = key.trunc();
@@ -1816,12 +1850,17 @@ fn find_keyboard(state: *State) void = {
     root := state.tree[0].component || return();
     world := state.world&;
     c := world[root]&;
-    gate_i := c.gates.index_of(fn(it) => group(it.kind) == .Tc1 && name(it.kind, .Tc1) == .Keyboard)
-        || return();
+    gate_i := c.gates.index_of(fn(it) => @match(group(it.kind)) {
+        fn Tc1() => name(it.kind, .Tc1) == .Keyboard;
+        fn Tc2() => name(it.kind, .Tc2) == .Keyboard_v2;
+        @default => false;
+    }) || return();
     instance := c.instance_offset_by_gate[gate_i];
     data := bit_cast_unchecked(*WireValue, *Tc.Builtin.KeyboardData, world.storage.index(instance));
     state.keyboard_data = (Some = data);
-    state.keyboard_character_mode = c.gates[gate_i].param != 0;
+    v2 := group(c.gates[gate_i].kind) == .Tc2;
+    state.keyboard_character_mode = @if(c.gates[gate_i].param != int(v2), .Char, @if(v2, .V2, .V1));
+    // TODO: v2 locations are different
 }
 
 #use("@/lib/collections/deque.fr");
@@ -2269,6 +2308,17 @@ key_order :: @const_slice(Sapp.Keycode.GRAVE_ACCENT, ._1, ._2, ._3, ._4, ._5, ._
     .LEFT_SHIFT, .Z, .X, .C, .V, .B, .N, .M, .COMMA, .PERIOD, .SLASH, 
     .LEFT_CONTROL, .LEFT_SUPER, .LEFT_ALT, .SPACE, .LEFT, .UP, .RIGHT, .DOWN,
 );
+
+key_order_v2 :: @const_slice(
+    (0x10, @const_slice(Sapp.Keycode.GRAVE_ACCENT, ._1, ._2, ._3, ._4, ._5, ._6, ._7, ._8, ._9, ._0, .MINUS, .EQUAL, .BACKSPACE)),
+    (0x20, @const_slice(Sapp.Keycode.TAB, .Q, .W, .E, .R, .T, .Y, .U, .I, .O, .P, .LEFT_BRACKET, .RIGHT_BRACKET, .BACKSLASH)),
+    (0x30, @const_slice(Sapp.Keycode.CAPS_LOCK, .A, .S, .D, .F, .G, .H, .J, .K, .L, .SEMICOLON, .APOSTROPHE, .ENTER)), 
+    (0x40, @const_slice(Sapp.Keycode.LEFT_SHIFT, .Z, .X, .C, .V, .B, .N, .M, .COMMA, .PERIOD, .SLASH, .RIGHT_SHIFT)),
+    (0x50, @const_slice(Sapp.Keycode.LEFT_CONTROL, .LEFT_SUPER, .LEFT_ALT, .SPACE, .RIGHT_ALT)),
+    (0xc0, @const_slice(Sapp.Keycode.INVALID, .UP)),
+    (0xd0, @const_slice(Sapp.Keycode.LEFT, .DOWN, .RIGHT)),
+);
+
 segment_colours :: @const_slice(
     pack_rgba(255, 255, 255, 255),
     pack_rgba(255, 0, 0, 255),
