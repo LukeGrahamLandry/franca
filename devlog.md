@@ -1,4 +1,19 @@
 
+## (Nov 3) circuit
+
+- reviewing what inline_for_bidirectional_gates does, found a bug in duplicates. 
+- clearly need to make smaller tests. the auto width stuff especially has a lot of arbitrary choices that are subtle. 
+  - found some bugs. add carry pin in wrong place. maker size shouldn't align_to. 
+  - started adding another test but ugghh i cant deal with keyboard rn
+- did probes as an easy way for the tests to express that they pass. 
+  - draw them outside CCs so "Game Of Life 32x32" looks good
+  - good excuse to make the device graphics work in CCs
+- thats distracted me from what i was actually trying to do which was keep enough information
+  when inlining to show the graphical/logical relation in the ui. 
+  the idea of just keep a map of the changes made is so simple but 
+  it's going to be a nightmare to retrofit into state.tree for the ui to deal with. 
+  got the locator lines working with one level of inlining.   
+
 ## (Nov 2) circuit
 
 - continuing chipping away at auto width. i should really make smaller tests so this isnt as soul crushing but its so much more exciting if i get something real to work. 
@@ -13,7 +28,7 @@
 - somehow im inserting casts of both args of an And_word in the alu to 1. not even auto, param=32. 
   wasnt in the list in get_bit_width but i dont understand why it wouldn't be zeroes. 
   oh because `And64 :: And; And_word :: And64;` and if reused, the bit_width stomping happens in the copy that goes in the builtins array not the one in the constant. so thats error prone really shouldnt do it that way i guess. 
-  anyway now i guet the colourful dust and "Simplified Chess" as the right pieces instead of like 6 kings. 
+  anyway now i get the colourful dust and "Simplified Chess" as the right pieces instead of like 6 kings. 
 - that was grand strides, whole bunch of stuff works now. sadly i've also uglied up everything. 
 
 ## (Nov 1) circuit
@@ -36,7 +51,6 @@
     so that needs to be treated like bidirectional and be inlined. 
   - "Vim Compiler" gets text on the screen. new keyboard numbers. :c prints "OK BYTES: 384" but :r doesn't print anything. 
   - improved by word using max of inputs not first. :r prints but only 5s. 
-  
   
 ## (Oct 31) circuit
 

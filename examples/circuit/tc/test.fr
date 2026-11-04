@@ -1,5 +1,10 @@
 
 fn run_tests(harness: *Harness) void = {
+    // TODO: enable next update
+    if cli_args().contains(fn(it) => it[] == "-local") {
+    harness.load("ComponentTests").run(1).check_probes();
+    };
+
     harness.load("BMP file loader enhanced")
         .run(15_999).then_halt("Done");
     harness.load("QOI Image viewer")
@@ -49,12 +54,16 @@ fn run_tests(harness: *Harness) void = {
         "TCMIPS",
         "Timestamp",
         "8-digit_Calculator",
-        // TODO: RUNNING...\n16\n0\n5\n4\n3\n5\n10\n15\n[DONE]\n
+        // "Game Of Life 32x32", // TODO: compiles so slowly
         "Vim Compiler",
     );
     for visual { it |
         harness.load(it).run(1000);
     };
+    
+    // TODO: its just such a nightmare to input keys
+    //       can't even `::import("@/graphics/app.fr").Keycode;` without the extra variables inserted by build_for_graphics
+    // harness.load("Vim Compiler").run(1000).screen_contains_lines("RUNNING...\n16\n0\n5\n4\n3\n5\n10\n15\n[DONE]");    
     
     harness.load("Conway's Game of Life Symphony").run(20_000_000);
     harness.load("SYM32_BADAPPLE_OPTIMIZAED").run(3_000_000);
@@ -68,7 +77,7 @@ fn run_tests(harness: *Harness) void = {
 
 init_harness :: fn(image_callback: ?ImageFn) Harness = {
     test_defs();
-    root := Foreign'tc_archive();
+    root := @if(cli_args().contains(fn(it) => it[] == "-local"), "../TuringCompleteSchematicArchive", Foreign'tc_archive());
 
     name := "Tetris";
     path := @tfmt("%/v1/schematics/architecture/%/circuit.data", root, name);
@@ -240,7 +249,7 @@ fn console_contains(self: *Harness, msg: Str) *Harness = {
 
 fn for_consoles(self: *Harness, $body: @Fn(data: Str) void) void = {
     world := self.world&;
-    for_gates(self, .Tc1, .Console) { c, i |
+    for_gates(self, .Tc1, .Console) { c, i, _ |
         continue :: local_return;
         it := c.gates[i]&;
             T :: Tc.Builtin.Settings.Console;
@@ -257,7 +266,7 @@ fn for_consoles(self: *Harness, $body: @Fn(data: Str) void) void = {
 #use("@/examples/circuit/tc/devices.fr");
 fn for_text_screens(self: *Harness, $body: @Fn(text: Str) void) void = {
     world := self.world&;
-    for_gates(self, .Tc2, .Screen) { c, i |
+    for_gates(self, .Tc2, .Screen) { c, i, _ |
         continue :: local_return;
         data, memory := world.get_screen(c.instance_offset_by_gate[i]);
         width, height, _ := data.size();
@@ -270,7 +279,7 @@ fn for_text_screens(self: *Harness, $body: @Fn(text: Str) void) void = {
     };
 } 
 
-fn for_gates(self: *Harness, $g: Tc.GateGroup, k: GateName(g), $body: @Fn(c: *Component, i: i64) void) void #generic = {
+fn for_gates(self: *Harness, $g: Tc.GateGroup, k: GateName(g), $body: @Fn(c: *Component, i: i64, gate: *Tc.Circuit.Gate) void) void #generic = {
     root, world := (self.root || return(), self.world&);
     circuit := self.circuits.find(fn(it) => it.compiled.is_some() && it.compiled.Some.id == root.id).unwrap();
     c := world[root];
@@ -280,7 +289,7 @@ fn for_gates(self: *Harness, $g: Tc.GateGroup, k: GateName(g), $body: @Fn(c: *Co
         @if(i == -1) continue();
         it := c.gates[i]&;
         @if(group(it.kind) != g || it.kind.name(g) != k) continue();
-        body(c, i);
+        body(c, i, gate);
     };
 }
 
@@ -292,9 +301,33 @@ fn screen_contains(self: *Harness, msg: Str) *Harness = {
     self
 }
 
-fn keyboard_input(self: *Harness, text: Str) *Harness = {
-    // TODO
+// TODO: the ones that need this also need keyboard
+fn screen_contains_lines(self: *Harness, expect: Str) *Harness = {
+    expect := expect.split("\n", temp());
+    for_text_screens self { text |
+        if index_of_slice(text, expect[i]) { _ |
+            for expect { it |
+                if index_of_slice(text, it) { i |
+                    text = text.rest(i);
+                } else {
+                    @fmt(self.msg&, "\n- screen missing line: '%'", it);
+                    return(self);
+                };
+            };
+            return(self);
+        };
+    };
+    @fmt(self.msg&, "\n- screen missing lines");
     self
+}
+
+fn check_probes(self: *Harness) void = {
+    world := self.world&;
+    for_gates(self, .Tc2, .Probe_wire_bit) { c, i, gate |
+        if world.storage[c.instance_offset_by_gate[i]] == 0 {
+            @fmt(self.msg&, "\n- probe off: %", gate.label);
+        };
+    };
 }
 
 Maze :: import("@/examples/circuit/levels/maze.fr").Maze;

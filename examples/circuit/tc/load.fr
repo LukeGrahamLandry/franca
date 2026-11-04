@@ -28,6 +28,7 @@ Circuit :: @struct {
     has_arch_pins := false;
     v2: bool;
     is_arch := false;
+    has_probes := false;
     default_tick_rate: i64;
     
     compiled: ?ComponentId = .None;
@@ -36,6 +37,8 @@ Circuit :: @struct {
     pins: []Ty(i64, i64) = empty();
     bit_width: []u8 = empty();  // io only
     switches: []SwitchablePin = empty();
+    
+    inlined: RawList(InlineRecord) = empty();
     
     // this is annoying becuase mystery_spice_minus_fifteen_for_custom_pins is stored on the gate not the circuit so can be different each time but it never is? hopefully i'll understand when i need to edit custom components myself. probably about centering on the field?
     cached_pin_radius: @struct(r: f32 = -1, p := vec2(0)) = ();
@@ -65,6 +68,7 @@ Circuit :: @struct {
         // port points to the one above it, which it depends on, they're executed top to bottom (reverse order of the linked list)
         port_linked_list := -1;  // index in Circuit.gates
         watched: []Watched = empty();
+        inline_record: u32 = 0xFFFFFFFF;  // only on the CC that was inlined. index in Circuit.inlined. 
     };
     Watched :: @struct(id: i64, inner_id: i64, name: Str, offset: i64, word_size: i64);
     Program :: @struct {
@@ -80,6 +84,12 @@ Circuit :: @struct {
     SwitchablePin :: @struct {
         value_output_index: i64;     // components[compiled].gates[-1].inputs[_]
         condition_output_index: i64; // ^
+    };
+    
+    InlineRecord :: @struct {
+        gate_i: i64;      // index in Circuit.gates
+        wires: []WireId;  // [child] -> parent
+        gates: []i64;     // [child] -> parent (index in Component.gates)
     };
 };
 
@@ -270,6 +280,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     gates, wire_count := find_pins(c, a, circuits, warn, unimplemented&);
     custom_pins := Ty(i64, i64).list(a);
     switches := Circuit.SwitchablePin.list(a);
+    cc_output := @ref WireId.list(temp());
     
     CONST_INDEX := { xx := CONST_INDEX; /*:compiler*/ xx.id };
     @debug_assert_eq(components[CONST_INDEX.zext()].name, "Off");
@@ -283,7 +294,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         continue :: local_return;
         it := gates.index(i); 
         if i >= c.gates.len {
-            // new_false_wire CONST_INDEX is already remapped. TODO: this is more error prone than it needs to be
+            // new_false_wire
             @assert(it.inputs.len == 0 && it.kind.id == CONST_INDEX, "CONST_INDEX HACK"); 
             logical_to_circuit&.push(-1);
             continue();
@@ -297,11 +308,14 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
             c.has_bidirectional_pins = true;
         };
         
-        if shape.name.starts_with("Probe") || shape.name == "Delay_line_word_asm" {
+        @if(shape.body == .Unimplemented) if shape.name.starts_with("Probe") || shape.name == "Delay_line_word_asm" {
             // TODO
             kill&.set(i);
             continue();
         }
+        if shape.name.starts_with("Probe") { 
+            c.has_probes = true;
+        };
         
         if shape.name.starts_with("Buffer") {
             // HLL-Interpreter's DEC 4 has one of these. it seems to be invisible in the game? and i can't find it in the menus. does nothing? TODO: is this fine?
@@ -405,9 +419,8 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                     c.has_bidirectional_pins = true;
                 };
                 
-                // TODO: i have to do this but i dont want to
                 if shape.name == "Cc_output" {
-                    c.has_bidirectional_pins = true;
+                    cc_output.push(it.inputs[0]);
                 };
                 
                 if is_switchable_output {
@@ -447,6 +460,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                     unimplemented = true;
                 };
                 
+                it := ();
                 @if(!unimplemented)
                 if child.has_bidirectional_pins {
                     @if(SPAM_LOG) @fmtln(warn, "(%) calls (%) with bidirectional pins", c.name, child.name);
@@ -457,26 +471,8 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                         continue();
                     };
                     child_logical := components.index(child_logical.id.zext());
-                    duplicates := inline_for_bidirectional_gates(child_logical, gates&, wire_count&, extra_gates&, it[], a);
-                    it = gates.index(i);
-                    
-                    // TODO: this is is TRASHHHH and :SLOW 
-                    if duplicates.raw.len_including_tombstones != 0 {
-                        X :: fn(its) => each its { it |
-                            if duplicates&.get(it[]) { new |
-                                it[] = new;
-                            };
-                        };
-                        each gates { it |
-                            X(it.inputs);
-                            X(it.outputs);
-                        };
-                        X(in);
-                        X(out);
-                        each c.wires { it |
-                            X(it.logical&.slice(1));
-                        };
-                    };
+                    original_gate.inline_record = c.inlined.len.trunc();
+                    inline_for_bidirectional_gates(c, child_logical, gates&, wire_count&, extra_gates&, i, a, @slice(in.items(), out.items(), cc_output.items()));
                 };
             } 
         };
@@ -491,6 +487,28 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         }
     };  
     logical_to_circuit&.push_repeated(extra_gates, -1);
+    
+    // (v2) outputs are always bidirectional but i'd rather they not be 
+    //      so try to find situations where it doesn't matter. 
+    if cc_output.len != 0 {
+        break :: local_return;
+        for cc_output { id |
+            has_def := false;
+            each gates { it |
+                if it.outputs.contains(fn(it) => it.id == id.id) {
+                    if components[it.kind.id.zext()].is_switch {
+                        c.has_bidirectional_pins = true;
+                        break();
+                    };
+                    has_def = true;
+                };
+            };
+            if !has_def && !in.contains(fn(it) => it.id == id.id) {
+                c.has_bidirectional_pins = true;
+                break();
+            };
+        };
+    };
     
     // after `kill` so no more reordering the graphical ones
     linkables := assign_port_links(c.gates.items(), warn);    
@@ -524,8 +542,12 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         gate_i := logical_to_circuit[o[]];
         if gate_i != -1 {
             c.gates[gate_i].logical_gate_index = i;
+            if gates[i].inline_record != 0xFFFFFFFF {
+                c.inlined[gates[i].inline_record.zext()].gates[gates[i].inline_index.zext()] = i;
+            };
         };
     };
+    logical_to_circuit := ();
     assign_port_param(c.gates.items(), gates.items(), linkables);
     
     each gates { it |
@@ -540,6 +562,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         wire_count = wire_count,
         has_bidirectional_pins = c.has_bidirectional_pins,
         error = unimplemented || error,
+        has_probes = c.has_probes,
     );
     c.bit_width = bit_width;
     if calculate_usage(components.items(), a, warn) {
@@ -691,59 +714,94 @@ assign_port_param :: fn(gates: []Circuit.Gate, logical: []Component.Gate, linkab
     };
 };
 
-// TODO: in the child: don't try to schedual gates and don't only treat bidirectional pins as output? 
-// TODO: instead of inlining, compile multiple versions for different sets of outputs that need different sets of inputs? that would be nicer to show in the ui. 
-inline_for_bidirectional_gates :: fn(child_logical: *Component, gates: *List(Component.Gate), wire_count: *i64, extra_gates: *i64, it: Component.Gate, a: Alloc) HashMap(WireId, WireId) = {
+inline_for_bidirectional_gates :: fn(parent: *Circuit, child_logical: *Component, gates: *List(Component.Gate), wire_count: *i64, extra_gates: *i64, target_gate_i: i64, a: Alloc, parent_io: [][]WireId) void = {
+    parent.inlined&.push((
+        gate_i = target_gate_i,
+        wires = a.alloc_init(WireId, child_logical.wire_count, fn(_) => (id = 0xFFFFFFFF)),
+        gates = a.alloc_init(i64, child_logical.gates.len, fn(_) => -1),
+    ), a);
+    record := parent.inlined[parent.inlined.len - 1]&;
+
+    it := gates[target_gate_i];
     original_wire_count := wire_count[];
     child_gates := child_logical.gates.slice(1, child_logical.gates.len - 1);
     parent_out, parent_in := (it.outputs, it.inputs);
     child_out, child_in := (child_logical.gates[child_logical.gates.len - 1].inputs, child_logical.gates[0].outputs);
-    // TODO: maybe instead of mapping, insert copies for in/out and just translate all wire values with an offset. 
-    //       but that doesn't really work because then you need to know which direction the wire goes and you don't for bidirectional pins which is the whole point of this operation. 
-    map: HashMap(WireId, WireId) = init(temp());
+    map: HashMap(WireId, WireId) = init(temp());  // child -> parent
     duplicates: HashMap(WireId, WireId) = init(temp());
 
-    @assert_eq(child_out.len, parent_out.len, "inline bad arity?");
-    range(0, parent_out.len) { i |
-        prev := map&.insert(child_out[i], parent_out[i]);
-        if prev { prev |
-            // TODO: if i know its an output not bidirectional can just insert a copy? outputs are supposed to coerce Z to zero anyway. 
-            x := duplicates&.insert(prev, parent_out[i]);
-            @assert(x.is_none(), "TODO: multiple duplicates?");
-        };
-    };
-    @assert_eq(child_in.len, parent_in.len, "inline bad arity?");
-    range(0, parent_in.len) { i |
-        prev := map&.insert(child_in[i], parent_in[i]);
-        //@assert(prev.is_none(), "collision on input wire");
-        if prev { prev |
-            x := duplicates&.insert(prev, parent_in[i]);
-            @assert(x.is_none(), "TODO: multiple duplicates?");
+    // TODO: (v1) normal outputs are still supposed to coerce Z even if some other pins are bidirectional. 
+    pairs := @slice((child_out, parent_out), (child_in, parent_in));
+    for pairs { child_wires, parent_wires |
+        @assert_eq(child_wires.len, parent_wires.len, "inline bad arity?");
+        range(0, parent_wires.len) { i |
+            prev := map&.insert(child_wires[i], parent_wires[i]);
+            if prev { prev |
+                collide := duplicates&.insert(prev, parent_wires[i]);
+                @assert(collide.is_none(), "TODO: multiple duplicates?");
+                each duplicates& { k, v |
+                    if v.id == prev.id { 
+                        v[] = parent_wires[i];
+                    }
+                };
+            };
         };
     };
     
-    fix_wire :: fn(child_wire: WireId) WireId => {
-        map&.get_or_insert(child_wire, => {
-            new: WireId = (id = wire_count[].trunc());
-            wire_count[] += 1;
-            new
-        })[]
-    };
-    each child_gates { gate |
+    enumerate child_gates { rel_gate_i, gate |
         @debug_assert(gate.pre_read == -1, "shouldnt do real schedule if bidirectional");
         
         out, in := (gate.outputs.shallow_copy(a), gate.inputs.shallow_copy(a));
-        each out { it |
-            it[] = fix_wire(it[]);
+        wires := @slice(out, in);
+        for wires { wires |
+            each wires { it |
+                it[] = map&.get_or_insert(it[], => {
+                    new: WireId = (id = wire_count[].trunc());
+                    wire_count[] += 1;
+                    new
+                })[]
+            };
         };
-        each in { it |
-            it[] = fix_wire(it[]);
-        };
-        gates.push(kind = gate.kind, outputs = out, inputs = in, param = gate.param, temporary_auto_width = gate.temporary_auto_width, temporary_disconnected_pins_bitset = gate.temporary_disconnected_pins_bitset);
+        
+        record.gates[rel_gate_i + 1] = gates.len;
+        gates.push(
+            kind = gate.kind, 
+            outputs = out, 
+            inputs = in, 
+            param = gate.param, 
+            temporary_auto_width = gate.temporary_auto_width, 
+            temporary_disconnected_pins_bitset = gate.temporary_disconnected_pins_bitset,
+            inline_record = parent.inlined.len.trunc() - 1,
+            inline_index = rel_gate_i.trunc() + 1,
+        );
         extra_gates[] += 1;
     };
-    //@fmtln(warn, "- inline added wires %..<%", original_wire_count, wire_count[]);
-    duplicates
+    // TODO: just use this as the map
+    each map& { child, parent |
+        record.wires[child.id.zext()] = parent[];
+    };
+    
+    @if(duplicates.raw.len_including_tombstones == 0) return();
+    // :SLOW
+    // when one wire in the child is connected to multiple io pins, 
+    // and parent can have different wires connected to those pins;
+    // the inlining reveals they're actually the same wire and everywhere else in the parent 
+    // that references one of those wires needs to be remapped.
+    X :: fn(its) => each its { it |
+        if duplicates&.get(it[]) { new |
+            it[] = new;
+        };
+    };
+    each gates { it |
+        X(it.inputs);
+        X(it.outputs);
+    };
+    for parent_io { it |
+        X(it);
+    };
+    each parent.wires { it |
+        X(it.logical&.slice(1));
+    };
 }
 
 #use("@/lib/collections/bit_set.fr");
@@ -1099,16 +1157,13 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8), uni
         
         new := logic_gates[logic_gates.len - 1]&;
         new.temporary_disconnected_pins_bitset = disconnected;
-        if shape.name == "Constant" {
-            new.temporary_bit_width_for_constant = it.settings[0];
-        } else {
             if group(it.kind) == .Tc2 {
                 k := name(it.kind, .Tc2);
+                new.temporary_bit_width_for_constant = it.settings[0];
                 if it.settings[0] == MIN_i64 || @is(k, .Concatenator_2, .Concatenator_4, .Concatenator_8) {
                     new.temporary_auto_width = true;
                 };
             };
-        };
     };
     
     (logic_gates, next_wire_id.zext())
@@ -1226,7 +1281,7 @@ pack_param :: fn(circuits: []Circuit, c: *Circuit, it: *Circuit.Gate, gate_i: i6
             };
             maker :: fn(output_bit_width, n) => {
                 if output_bit_width != MIN_i64 {
-                    x := output_bit_width.ualign_to(n).udiv(n);
+                    x := output_bit_width.udiv(n);
                     range(0, n) { i |
                         param = param.bit_or(x.shift_left(8*i));
                     };
@@ -1409,7 +1464,7 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
     
     @if(known)
     enumerate outputs { i, id |
-        maybe_cast(bit_width[i], id, gates[0]&);
+        maybe_cast(bit_width[i], id, gates[original_output_index]&);
     };
     
     gates.items().swap(original_output_index, gates.len - 1);
@@ -1452,7 +1507,7 @@ infer_auto_width :: fn(components: []Component, gates: []Component.Gate, width: 
                 enumerate gate.inputs { i, id |
                     x = max(x, width[id.id.zext()]);
                 };
-                x = min(x, 64 / gate.inputs.len.trunc());
+                x = trunc(min(x.zext() * gate.inputs.len, 64) / gate.inputs.len);
                 range(0, gate.inputs.len) { i |
                     param = param.bit_or(x.zext().shift_left(8*i));
                 };
@@ -1480,8 +1535,7 @@ infer_auto_width :: fn(components: []Component, gates: []Component.Gate, width: 
                 gate.param = param;
                 changed = true;
                 bit_width := get_bit_width(components, gate);
-                out := @if(k == .Add, gate.outputs.slice(0, 1), gate.outputs);
-                enumerate out { i, id |
+                enumerate gate.outputs { i, id |
                     width[id.id.zext()] = max(bit_width[i], width[id.id.zext()]);
                 };
             };
@@ -1531,8 +1585,16 @@ fn get_bit_width(components: []Component, it: *Component.Gate) []u8 = {
         };
         shape := get_builtin_shape(it.kind);
         r := get_bit_width(shape, it.param);
-        if shape.name == "Constant" && it.temporary_bit_width_for_constant.ult(64) {
-            r[0] = it.temporary_bit_width_for_constant.trunc();
+        
+        if group(it.kind) == .Tc2 {
+            k := name(it.kind, .Tc2);
+            if k == .Constant && it.temporary_bit_width_for_constant.ule(64) {
+                r[0] = it.temporary_bit_width_for_constant.trunc();
+            };
+            if @is(k, .Maker_word_2, .Maker_word_4, .Maker_word_8) {
+                // if output didnt divide pin count, input sizes round down but output size remembers the requested one. 
+                r[0] = max(r[0], it.temporary_bit_width_for_constant.trunc());
+            };
         };
         return r;
     };
@@ -1545,13 +1607,8 @@ fn get_bit_width(shape: *Tc.Builtin.Template, param: i64) []u8 = {
     if group(shape.kind) == .Tc2 {
         break :: local_return;
         k := name(shape.kind, .Tc2);
+        @if(k == .Cc_output) return(empty());
         r := temp().alloc_init(u8, shape.pins.len, fn(_) => param.trunc());
-        
-        if k == .Cc_output {
-            // TODO
-            r[0] = 64;
-            return r;
-        };
         
         if k == .Constant {
             // TODO: this is wrong if i try to use it for the static eval width math
@@ -1559,7 +1616,7 @@ fn get_bit_width(shape: *Tc.Builtin.Template, param: i64) []u8 = {
             return r;
         };
         
-        if @is(k, .Or_word, .And_word, .Xor_word, .Delay_line_word) {  // all same
+        if @is(k, .Or_word, .And_word, .Xor_word, .Delay_line_word, .Probe_wire_word) {  // all same
             return r;
         };
         

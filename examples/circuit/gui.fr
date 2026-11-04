@@ -85,6 +85,7 @@ State :: @rec @struct {
 CircuitNode :: @struct {
     diagram_circuit: ?i64 = .None;  // index in state.circuit
     logical_gate: ?i64 = .None;  // index in previous component
+    graphical_gate: ?i64 = .None;  // index in previous circuit.gates
     component: ?ComponentId = .None;
     saved := zeroed(@struct(pos: Vec2, scale: f32));
 };
@@ -313,7 +314,9 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         c := world[root_component]&;
         @if(c.error) self.put_text("COMPILE ERROR", self.text_spacing * vec2(0, 2), pack_rgba(255, 0, 0, 255));
         instance, parent_wire_offset, wire_offset := self.walk_component_tree(c&);
+        self.base_instance = instance;
         
+        // TODO: even if halted_without_wire_values can show values of probes (from world.storage) on hover
         if !state.halted_without_wire_values {
             if !(world.scratch.len >= wire_offset + c.wire_count) {
                 self.put_text("misconfigured scratch", self.text_spacing * vec2(0, 2), pack_rgba(255, 0, 0, 255));
@@ -326,7 +329,32 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             self.all_wire_positions = temp().alloc_zeroed(RawList(Vec2), c.wire_count);
         };
         
-        self.draw_component_code(c, instance, parent_wire_offset);
+        if state.tree.len == 1 || state.tree[state.tree.len - 1].logical_gate.is_some() {
+            self.draw_component_code(c, instance, parent_wire_offset);
+        } else {
+            // TODO: doesnt work if you enter a normal cc inside something inlined
+            if state.tree[state.tree.len - 1].graphical_gate { i |
+                parent_circuit := state.circuit[state.tree[state.tree.len - 2].diagram_circuit.unwrap()]&;
+                it := parent_circuit.gates[i]&;
+                if it.inline_record != 0xFFFFFFFF {
+                    record := parent_circuit.inlined[it.inline_record.zext()]&;
+                    prev_wires := self.wires;
+                    if !state.halted_without_wire_values {
+                        self.wires = temp().alloc_init(WireValue, record.wires.len, fn(i) => {
+                            id := record.wires[i];
+                            @if(id.id == 0xFFFFFFFF, 0, prev_wires[id.id.zext()])
+                        });
+                    };
+                    
+                    c := world[it.kind]&;
+                    self.logical = (Some = c);
+                    self.draw_component_code(c, 0, 0);
+                    self.wires = prev_wires;
+                    // don't restore self.logical because draw_gate_hover_line needs it to be the same one hover_logical_code references
+                };
+            };
+        
+        };
         
         // TODO: more sane way of doing positioning
         state'level'render(state.level.userdata);
@@ -393,12 +421,16 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         };
     };
 
-    @if(state.tree.len == 1 || state.split_graphics_and_wires)
-    if have_logic && state.tree[0].diagram_circuit.is_some() {
+    if have_logic {
+        break :: local_return;
+        circuit := state.tree[state.tree.len - 1].diagram_circuit || break();
+        c := state.tree[state.tree.len - 1].component || break();
+        
         need_draw = true;
-        circuit := state.circuit[state.tree[0].diagram_circuit.unwrap()]&;
+        circuit := state.circuit[circuit]&;
         // TODO: allow console in custom component too (use last element in the tree and offset by its base instance)
-        c := world[state.tree[0].component.unwrap()]&;
+        c := world[c]&;
+        @if(c.error) break(); 
         if state.split_graphics_and_wires {
             self.diagram_pos += self.tc_to_world_pos(vec2(0, 0)) - self.tc_to_world_pos(vec2(0, abs(circuit.max.y - circuit.min.y)));
         };
@@ -420,6 +452,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                 fn SegmentDisplay() => self.segment_display(gate, c, i, it);
                 fn DotMatrixDisplay() => self.dot_matrix_display(gate, c, i, it);
                 fn SpriteDisplay() => self.sprite_display(gate, c, i, it);
+                fn ProbeWireBit() => self.probe_bit(gate.pos, c, i);
                 @default => ();
             };
             @if(it.kind.group() == .Tc2)
@@ -427,11 +460,19 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                 fn Segment_display() => self.segment_display(gate, c, i, it);
                 fn Screen() => self.screen(gate, c, i, it);
                 fn Push_button() => {
-                    // TODO: base_instance. once i allow in cc, need to unpress if you ESC to do up while holding mouse. 
+                    // TODO: in cc need to unpress if you ESC to do up while holding mouse. 
                     on := state.left_mouse_down && self.hovering_node(self.tc_to_world_pos(gate.pos));
-                    state.world.storage[c.instance_offset_by_gate[i]] = int(on);
+                    state.world.storage[self.base_instance + c.instance_offset_by_gate[i]] = int(on);
                 };
+                fn Probe_wire_bit() => self.probe_bit(gate.pos, c, i);
                 @default => ();
+            };
+            
+            if it.kind.group() == .Loaded {
+                child_instance := c.instance_offset_by_gate[i];
+                self.base_instance += child_instance;
+                self.child_probes(gate);
+                self.base_instance -= child_instance;
             };
         };
         
@@ -469,6 +510,7 @@ Draw :: @struct {
     wire_hover_count: f32 = 1;
     logical: ?*Component = .None;
     hover_logical_code: ?i64 = .None;
+    base_instance := 0;
 };
 
 fn do_option(self: *Draw, pos: Vec2, name: Str, selected: bool, value: ~T, new: *?T) void #where = {
@@ -517,7 +559,8 @@ fn walk_component_tree(self: *Draw, c: **Component) Ty(i64, i64, i64) = {
     state := self.state;
     instance, parent_wire_offset, wire_offset := (0, 0, 0);
     self.put_text(self.text_spacing * vec2(0, 1), pack_rgba(255, 255, 255, 255)) { out |
-        for state.tree { it |
+        ends_in_inlined := false;
+        enumerate state.tree { tree_i, it |
             if it.logical_gate { it |
                 if c.gates[it].pre_read != -1 {
                     it = c.gates[it].pre_read;
@@ -533,9 +576,15 @@ fn walk_component_tree(self: *Draw, c: **Component) Ty(i64, i64, i64) = {
                 @fmt(out, "%[%], ", c.name, it);
                 instance += c.instance_offset_by_gate[it];
                 c[] = state.world&[c.gates[it].kind]&;
+            } else {
+                @if(tree_i != 0) if it.component { kind |
+                    @if(!ends_in_inlined) @fmt(out, "%, ", c.name);
+                    ends_in_inlined = true;
+                    @fmt(out, "(%), ", state.world&[kind].name);
+                };
             };
         };
-        out.push_all(c.name);
+        @if(!ends_in_inlined) out.push_all(c.name);
     };
     (instance, parent_wire_offset, wire_offset)
 }
@@ -797,7 +846,13 @@ fn draw_gate_squares(self: *Draw, circuit: *Tc.Circuit) void = {
             if it.logical_gate_index != -1 {
                 self.hover_logical_code = (Some = it.logical_gate_index);
             };
-        
+            if state.show_wire_ref_lines && it.inline_record != 0xFFFFFFFF {
+                if self.logical { c |
+                    sgl.color = pack_rgba(0, 150, 255, 255);
+                    self.highlight_inlined(it.inline_record, c);
+                };
+            };
+            
             info := Tc'get_builtin_shape(it.kind);
             sgl.color = pack_rgba(200, 200, 200, 255);
             sdtx.color = pack_rgba(255, 255, 255, 255);
@@ -963,10 +1018,30 @@ fn draw_gate_hover_line(self: *Draw, circuit: *Tc.Circuit) void = {
         b := self.tc_to_world_pos(it.pos);
         sgl.line(a, b, 0.005);
     };
+    if it.inline_record != 0xFFFFFFFF { // && !circuit.has_bidirectional_pins {
+        sgl.color = pack_rgba(0, 150, 255, 255);
+        b := self.tc_to_world_pos(circuit.gates[circuit.inlined[it.inline_record.zext()].gate_i].pos);
+        sgl.line(a, b, 0.005);
+        
+        self.highlight_inlined(it.inline_record, c);
+    };
+}
+
+fn highlight_inlined(self: *Draw, inline_record: u32, c: *Component) void = {
+    sgl := self.draw&;
+    code_x: f32 = -1;
+    enumerate c.gates { y, gate |
+        if gate.inline_record == inline_record {
+            a := vec2(code_x - 0.3, -y.float().cast() + 0.1) * self.text_spacing;
+            b := vec2(code_x - 0.3, -y.float().cast() - 0.9) * self.text_spacing;
+            sgl.line(a, b, 0.01);
+        };
+    };
 }
 
 fn console(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Component.Gate) void = {
     sdtx, world, sgl := (self.sdtx, self.world&, self.draw&);
+    @if(self.base_instance != 0) return();  // TODO: console in cc
     
     sdtx.pos = vec2(0);
     a := self.tc_to_world_pos(gate.pos + vec2(-16, -8));
@@ -1038,7 +1113,7 @@ fn segment_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, i
     w: f32 = 0.02;
     s: f32 = 0.06;
     colour_index := it.param.clamp(0, 3);
-    mask := world.storage[c.instance_offset_by_gate[i]];
+    mask := world.storage[self.base_instance + c.instance_offset_by_gate[i]];
     empty := pack_rgba(0, 0, 0, 255);
     // TODO: don't have the lines overlap
     range(0, 8) { i |  // TODO: make calling for_bits more convenient
@@ -1050,10 +1125,39 @@ fn segment_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, i
     };
 }
 
+fn probe_bit(self: *Draw, pos: Vec2, c: *Component, i: i64) void = {
+    state, sgl, W := (self.state, self.draw&, self.wire_node_width * 0.8);
+    value := state.world.storage[self.base_instance + c.instance_offset_by_gate[i]] != 0;
+    b := self.tc_to_world_pos(pos);
+    sgl.color = pack_rgba(255 * int(!value), 255 * int(value), 0, 255);
+    sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
+}
+
+// TODO: collect the list of probes like i do for pins :SLOW
+// TODO: include this in circuit bounds
+// TODO: word probes? static value. 
+// TODO: have it work when has_bidirectional_pins
+fn child_probes(self: *Draw, gate: *Tc.Circuit.Gate) void = {
+    state, world := (self.state, self.world&);
+    c := world[gate.kind]&;
+    @if(!c.has_probes) return();
+    child := state.circuit.find(fn(it) => it.compiled.is_some() && it.compiled.Some.id == gate.kind.id) || return();
+    pos := gate.pos + gate.mystery_spice_minus_fifteen_for_custom_pins + vec2(15.5);
+    each child.gates { it |
+        i := it.logical_gate_index;
+        is_probe := false
+            || (it.kind.group() == .Tc1 && it.kind.name(.Tc1) == .ProbeWireBit)
+            || (it.kind.group() == .Tc2 && it.kind.name(.Tc2) == .Probe_wire_bit);
+        if i != -1 && is_probe {
+            self.probe_bit(pos + it.pos/8, c, i);
+        };
+    };
+}
+
 // TODO: should write a texture instead of doing it with 6 vertices per pixel
 fn dot_matrix_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, _: *Component.Gate) void = {
     world, sgl := (self.world&, self.draw&);
-    buf := world.storage.subslice(c.instance_offset_by_gate[i], 7*8*32/64);
+    buf := world.storage.subslice(self.base_instance + c.instance_offset_by_gate[i], 7*8*32/64);
     buf := u32.reinterpret_bytes(buf.interpret_as_bytes());
     
     i := 0;
@@ -1073,7 +1177,7 @@ fn dot_matrix_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64
 
 fn sprite_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Component.Gate) void = {
     state, world, sgl := (self.state, self.world&, self.draw&);
-    data := world.storage.subslice(c.instance_offset_by_gate[i], size_of(Tc.Builtin.SpriteData) * 256);
+    data := world.storage.subslice(self.base_instance + c.instance_offset_by_gate[i], size_of(Tc.Builtin.SpriteData) * 256);
     data := Tc.Builtin.SpriteData.reinterpret_bytes(data.interpret_as_bytes());
     p := self.tc_to_world_pos(gate.pos + vec2(-16.5, 12));
     @debug_assert(state.atlas.enable, "SpriteDisplay but no atlas");
@@ -1618,7 +1722,6 @@ fn open_gate(state: *State, logical_gate_index: ?i64, diagram_gate_index: ?i64, 
             g := c.gates[i];
             if g.logical_gate_index != -1 {
                 logical_gate_index = (Some = g.logical_gate_index);
-                new_component = (Some = g.kind);
             };
         };
         
@@ -1665,6 +1768,7 @@ fn open_gate(state: *State, logical_gate_index: ?i64, diagram_gate_index: ?i64, 
             diagram_circuit = new_diagram_circuit,
             logical_gate = logical_gate_index,
             component = new_component,
+            graphical_gate = diagram_gate_index,
         );
     }
 }
@@ -1797,6 +1901,7 @@ fn service_keyboard_device(state: *State, data: *Tc.Builtin.KeyboardData) void =
                 c = c.trunc().ascii_to_lower().zext();
             };
             
+            // TODO: v2 has different numbers (enter is 10)
             c = @match(key) {
                 fn ENTER() => 5;
                 fn BACKSPACE() => 4;
@@ -1888,6 +1993,9 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         if state.keyboard_device_focused && buf.len() < buf.capacity() {
             buf.push_back((key = event.key_code, up = event.type == .KEY_UP, shift = event.modifiers.get(.shift) != 0), panicking_allocator);
             state.dirty = state.dirty || buf.len < 2;
+            return();
+        };
+        if state.keyboard_device_focused {
             return();
         };
     };
@@ -2105,7 +2213,7 @@ worker_get_source :: fn(state: *State, in: *LoaderT.I) Result(Str, void) = {
             if state.download_schematic_archive_before_trying_to_load && !it.is_bytes {
                 state.download_schematic_archive_before_trying_to_load = false;
                 root := Foreign'tc_archive();
-                filter := @const_slice("ploter", "3D Engine", "Screenverture", "Dungeon Crawler", "Platformer Game", "ASM computer 64bit", "Game of Life 32x32", "Matrix Animation Studio 3000", "Snake on matrix display with LEG++");
+                filter := @const_slice("ploter", "3D Engine", "Screenverture", "Dungeon Crawler", "Platformer Game", "ASM computer 64bit", "Matrix Animation Studio 3000", "Snake on matrix display with LEG++");
                 template :: "%/v1/schematics/architecture/%/circuit.data";
                 for filter { path |
                     _ := Syscall'remove(@fmt_cstr(template, root, path));
