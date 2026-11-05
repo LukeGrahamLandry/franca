@@ -1,4 +1,12 @@
 
+## (Nov 4) circuit
+
+- visualizing inlining better
+  - always make tree of the graphical path even if you skip inlined levels by clicking a logical one
+  - fix inline_index for order was inside the check for graphical gate which of course there never was
+  - render the display components when clicked into a CC (even if its inlined so can't just use self.base_instance)
+  - painful that everywhere that needs the instance of a gate now needs to do the loop through the inline records
+
 ## (Nov 3) circuit
 
 - reviewing what inline_for_bidirectional_gates does, found a bug in duplicates. 

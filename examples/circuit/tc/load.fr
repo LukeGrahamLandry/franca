@@ -402,11 +402,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                     );
                 };
                 
-                OFF :: 256*256;  // idk dont fuck with negative numbers
-                p := original_gate.pos;
-                x, y := (p.x.cast().int() + OFF, p.y.cast().int() + OFF);
-                x = (x.align_to(8) - OFF)/8;
-                y = (y.align_to(8) - OFF)/8;
+                x, y := fix_pin_position(original_gate.pos);
                 insert(custom_pins&, dest, (x, y));
                 width: u8 = @if(shape.name == "Cc_input" || shape.name == "Level_input_switched",
                     original_gate.settings[0].trunc(),
@@ -527,7 +523,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     push_inputs_outputs(gates&, out.items(), in.items());
     logical_to_circuit&.insert(0, -1);  // in
     logical_to_circuit&.push(-1);       // out
-    insert_consts_for_dead_wires(components.items(), gates&);
+    insert_consts_for_dead_wires(components.items(), gates&, @if(c.has_bidirectional_pins, cc_output.items(), empty()));
     @debug_assert_eq(bit_width.len, custom_pins.len);
     
     wire_bit_width := insert_bit_width_casts(components.items(), gates&, wire_count&, bit_width, warn, c.has_bidirectional_pins);
@@ -535,16 +531,19 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     new_gates, order, error := schedule_gates(c, gates, wire_count, a, out.items(), in.items(), components.items(), warn, logical_to_circuit.items(), c.has_bidirectional_pins);
     gates := new_gates;
     
+    @debug_assert_eq(gates.len, order.len);
     enumerate order { i, o |
         continue :: local_return;
+        
+        if gates[i].inline_record != 0xFFFFFFFF {
+            c.inlined[gates[i].inline_record.zext()].gates[gates[i].inline_index.zext()] = i;
+        };
+        
         @if(o[] >= logical_to_circuit.len) continue();  // it's a pre_read split
     
         gate_i := logical_to_circuit[o[]];
         if gate_i != -1 {
             c.gates[gate_i].logical_gate_index = i;
-            if gates[i].inline_record != 0xFFFFFFFF {
-                c.inlined[gates[i].inline_record.zext()].gates[gates[i].inline_index.zext()] = i;
-            };
         };
     };
     logical_to_circuit := ();
@@ -628,20 +627,17 @@ find_links_for_lastest_component :: fn(c: *Circuit, components: []Component, lin
                 @fmtln(warn, "TODO: console's linked ram doesn't have logical_gate_index");
                 continue();
             };
-            if !has_storage(components, component.gates[ram.logical_gate_index].kind) {
-                @fmtln(warn, "TODO: console's linked component doesn't have storage");
+            // it needs to be one that uses Settings.Ram because that's what tc'init expects
+            // TODO: be more safe about that but this check should be enough because most stuff wont be in `linkables`
+            ram_kind := component.gates[ram.logical_gate_index].kind;
+            if ram_kind.group() != .Tc1 || ram_kind.id == it.kind.id {
+                @fmtln(warn, "console must link to v1 ram");
                 continue()
             };
-            instance := component.instance_offset_by_gate[ram.logical_gate_index];
-            
             it.port_linked_list = ram_index[];
-            // TODO: do this like how ports do so can allow console in custom component where base instance wont be 0
             logical_gate := component.gates[it.logical_gate_index]&;
-            T :: Builtin.Settings.Console;
-            param: T = (repr = logical_gate.param.bitcast());
-            param&.set(.linked_ram_instance, instance);
-            param&.set(.linked, 1);
-            logical_gate.param = param.repr.bitcast();  // :PatchConsoleLink
+            param := logical_gate.get_param(.Console);
+            param.set(.linked, 1);
     };
 };
 
@@ -763,7 +759,7 @@ inline_for_bidirectional_gates :: fn(parent: *Circuit, child_logical: *Component
             };
         };
         
-        record.gates[rel_gate_i + 1] = gates.len;
+        // not putting it in record.gates because it will be patched after schedual_gates (and it would be junk down anyway because `kill` removes gates)
         gates.push(
             kind = gate.kind, 
             outputs = out, 
@@ -801,6 +797,9 @@ inline_for_bidirectional_gates :: fn(parent: *Circuit, child_logical: *Component
     };
     each parent.wires { it |
         X(it.logical&.slice(1));
+    };
+    each parent.inlined { it |
+        X(it.wires);
     };
 }
 
@@ -1207,7 +1206,7 @@ pack_param :: fn(circuits: []Circuit, c: *Circuit, it: *Circuit.Gate, gate_i: i6
                 param = s.repr.bitcast();
             };
             if k == .Console {
-                s: Console = construct(colour = s0, font = s1, linked = 0, linked_ram_instance = 0/*:PatchConsoleLink*/);
+                s: Console = construct(colour = s0, font = s1, linked = 0);
                 param = s.repr.bitcast();
             }
             if k == .Halt {
@@ -1330,6 +1329,14 @@ fn get_arity(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit,
     child.arity
 }
 
+fix_pin_position :: fn(p: Vec2) Ty(i64, i64) = {
+    OFF :: 256*256;  // idk dont fuck with negative numbers
+    x, y := (p.x.cast().int() + OFF, p.y.cast().int() + OFF);
+    x = (x.align_to(8) - OFF)/8;
+    y = (y.align_to(8) - OFF)/8;
+    (x, y)
+}
+
 fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, $body: @Fn(pin_index: i64, dx: i64, dy: i64) void) void = {
     pins := shape.pins;
     dx, dy := (0, 0);
@@ -1409,7 +1416,7 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
     maybe_cast :: fn(want: u8, id: *WireId, gate) => {
         break :: local_return;
         found := width[id.id.zext()];
-        if !gate.temporary_auto_width || !has_bidirectional_pins {
+        if !has_bidirectional_pins {
             @if(found == 0 && !error_wires&.get_set(id.id.zext())) @fmtln(warn, "TODO: unknown wire size w% (for %)", id.id, components[gate.kind.id.zext()].name);
         };
         if want < found && want != 0 {
@@ -1549,7 +1556,7 @@ infer_auto_width :: fn(components: []Component, gates: []Component.Gate, width: 
 };
 
 // this can't be in find_pins because it has to be after bidirectional components are inlined
-insert_consts_for_dead_wires :: fn(components: []Component, gates: *List(Component.Gate)) void = {
+insert_consts_for_dead_wires :: fn(components: []Component, gates: *List(Component.Gate), cc_outputs: []WireId) void = {
     original_output_index := gates.len - 1;
     a := gates.gpa;
     wire_read: DynamicBitSet = empty(temp());
@@ -1561,6 +1568,10 @@ insert_consts_for_dead_wires :: fn(components: []Component, gates: *List(Compone
         for gate.outputs { id |
             wire_write&.set(id.id.zext());
         };
+    };
+    
+    for cc_outputs { id |  // bidirectional
+        wire_write&.set(id.id.zext());
     };
     
     // wires connected to an input but going nowhere are treated the same as if the pin was disconnected (auto zero)
@@ -1714,6 +1725,7 @@ set_initial_data :: fn(world: *World, circuits: []Tc.Circuit, root: ComponentId,
     @if(c.storage_count == 0 || c.gates.len == 0) return();
     circuit := circuits.find(fn(it) => it.compiled.is_some() && it.compiled.Some.id == root.id) || return();
     
+    // TODO: this needs to work for inlined CCs so children will have logical in parent but no graphical and source will have graphical but no logical
     instance_base := instance;
     enumerate circuit.gates { c_gate_i, c_gate |
         continue :: local_return;
@@ -1759,7 +1771,6 @@ set_initial_data :: fn(world: *World, circuits: []Tc.Circuit, root: ComponentId,
         
         if group(gate.kind) == .Tc2 && name(gate.kind, .Tc2) == .Screen {
             data := world.storage.rest(instance).interpret_as_bytes().peek_type(Builtin.ScreenData);
-            data.ram_size_bytes = 0;
             ram_graphical_i := c_gate.port_linked_list;
             @if(ram_graphical_i == -1) continue();
             ram_logical_i := circuit.gates[ram_graphical_i].logical_gate_index;
@@ -1780,6 +1791,16 @@ set_initial_data :: fn(world: *World, circuits: []Tc.Circuit, root: ComponentId,
                     || continue(@println("TODO: missing program assembly for gate[%]", gate_i));
                 asm.assembled.unwrap()
             };
+            fn Console() => {
+                data := dest.interpret_as_bytes().peek_type(Builtin.ConsoleData);
+                ram_graphical_i := c_gate.port_linked_list;
+                @if(ram_graphical_i == -1) continue();
+                ram_logical_i := circuit.gates[ram_graphical_i].logical_gate_index;
+                data.ram_instance = instance_base + c.instance_offset_by_gate[ram_logical_i];
+                param := c.gates[ram_logical_i]&.get_param(.Ram)[];
+                data.ram_size_bytes = param.get(.storage_size) * param.word_size();
+                continue()
+            }
             @default => continue();
         };
         dest.interpret_as_bytes().slice(0, src.len).copy_from(src);

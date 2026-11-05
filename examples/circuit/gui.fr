@@ -88,6 +88,10 @@ CircuitNode :: @struct {
     graphical_gate: ?i64 = .None;  // index in previous circuit.gates
     component: ?ComponentId = .None;
     saved := zeroed(@struct(pos: Vec2, scale: f32));
+    
+    inline_parent_diagram: ?i64 = .None;  // index in state.circuit
+    inline_index_logical: ?i64 = .None;    // index in ^.compiled.gates
+    inline_record: ?u32 = .None;
 };
 
 LevelApi :: import("@/examples/circuit/level_api.fr");
@@ -313,47 +317,56 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         root_component := state.tree[0].component.unwrap();
         c := world[root_component]&;
         @if(c.error) self.put_text("COMPILE ERROR", self.text_spacing * vec2(0, 2), pack_rgba(255, 0, 0, 255));
-        instance, parent_wire_offset, wire_offset := self.walk_component_tree(c&);
+        instance, parent_wire_offset, wire_offset, logical_c := self.walk_component_tree(c&);
         self.base_instance = instance;
+        // when `c` is inlined, `logical_c` is the first real parent (inline_parent_diagram). 
         
         // TODO: even if halted_without_wire_values can show values of probes (from world.storage) on hover
-        if !state.halted_without_wire_values {
-            if !(world.scratch.len >= wire_offset + c.wire_count) {
-                self.put_text("misconfigured scratch", self.text_spacing * vec2(0, 2), pack_rgba(255, 0, 0, 255));
-            } else {
-                self.wires = world.scratch.items().subslice(wire_offset, c.wire_count);
-            };
+        if !state.halted_without_wire_values && c.gates.len > 0 {
+            @debug_assert(world.scratch.len >= wire_offset + logical_c.wire_count, "misconfigured scratch");
+            self.wires = world.scratch.items().subslice(wire_offset, logical_c.wire_count);
         };
         self.logical = (Some = c);
         if state.show_wire_ref_lines {
-            self.all_wire_positions = temp().alloc_zeroed(RawList(Vec2), c.wire_count);
+            self.all_wire_positions = temp().alloc_zeroed(RawList(Vec2), logical_c.wire_count);
         };
         
         if state.tree.len == 1 || state.tree[state.tree.len - 1].logical_gate.is_some() {
             self.draw_component_code(c, instance, parent_wire_offset);
         } else {
-            // TODO: doesnt work if you enter a normal cc inside something inlined
-            if state.tree[state.tree.len - 1].graphical_gate { i |
-                parent_circuit := state.circuit[state.tree[state.tree.len - 2].diagram_circuit.unwrap()]&;
-                it := parent_circuit.gates[i]&;
-                if it.inline_record != 0xFFFFFFFF {
-                    record := parent_circuit.inlined[it.inline_record.zext()]&;
-                    prev_wires := self.wires;
-                    if !state.halted_without_wire_values {
-                        self.wires = temp().alloc_init(WireValue, record.wires.len, fn(i) => {
-                            id := record.wires[i];
-                            @if(id.id == 0xFFFFFFFF, 0, prev_wires[id.id.zext()])
-                        });
-                    };
-                    
-                    c := world[it.kind]&;
-                    self.logical = (Some = c);
-                    self.draw_component_code(c, 0, 0);
-                    self.wires = prev_wires;
-                    // don't restore self.logical because draw_gate_hover_line needs it to be the same one hover_logical_code references
-                };
+            break :: local_return;
+            // TODO: wire def lines dont work to the graphical here
+            new_wires := self.wires;
+            I := state.tree.len - 1;
+            while => world[state.tree[I].component || break()].has_bidirectional_pins {
+                I -= 1;
+                @if(I < 0) break();
             };
-        
+            c := c;
+            dowhile {
+                i := state.tree[I+1].graphical_gate || break();
+                parent_circuit := state.circuit[state.tree[I].diagram_circuit || break()]&;
+                it := parent_circuit.gates[i]&;
+                @if(it.inline_record == 0xFFFFFFFF) break();
+                record := parent_circuit.inlined[it.inline_record.zext()]&;
+                if !state.halted_without_wire_values {
+                    // TODO: same for wire sizes
+                    new_wires = temp().alloc_init(WireValue, record.wires.len, fn(i) => {
+                        id := record.wires[i];
+                        @if(id.id == 0xFFFFFFFF, 0, new_wires[id.id.zext()])
+                    });
+                };
+                c = world[it.kind]&;
+                I += 1;
+                I < state.tree.len - 1
+            };
+            
+            // don't restore self.logical because draw_gate_hover_line needs it to be the same one hover_logical_code references
+            self.logical = (Some = c);
+            prev_wires := self.wires;
+            self.wires = new_wires;
+            self.draw_component_code(c, 0, 0);
+            self.wires = prev_wires;
         };
         
         // TODO: more sane way of doing positioning
@@ -439,12 +452,12 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         sdtx.desc.char_width /= 1.5;
         sdtx.canvas(text_w, text_h);
         
+        // TODO: if select a primitive one, show just itself
         each circuit.gates { gate |
-            continue :: local_return;
             i := gate.logical_gate_index;
-            @if(i == -1) continue();
+            if i != -1 {
             it := c.gates[i]&;
-            
+            @debug_assert_eq(it.inline_record, 0xFFFFFFFF);
             // TODO: all these need to know the thing's rotation
             @if(it.kind.group() == .Tc1)
             @match(it.kind.name(.Tc1)) {
@@ -462,21 +475,23 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                 fn Push_button() => {
                     // TODO: in cc need to unpress if you ESC to do up while holding mouse. 
                     on := state.left_mouse_down && self.hovering_node(self.tc_to_world_pos(gate.pos));
-                    state.world.storage[self.base_instance + c.instance_offset_by_gate[i]] = int(on);
+                    state.world.storage[self.instance_by_gate(c, i)] = int(on);
                 };
                 fn Probe_wire_bit() => self.probe_bit(gate.pos, c, i);
                 @default => ();
             };
+            };
             
-            if it.kind.group() == .Loaded {
-                child_instance := c.instance_offset_by_gate[i];
-                self.base_instance += child_instance;
-                self.child_probes(gate);
-                self.base_instance -= child_instance;
+            if gate.kind.group() == .Loaded {  // i==-1 means inlined
+                self.child_probes(gate, circuit);
             };
         };
         
         state.finish_screens();
+    };
+    
+    if self.open_gate&.take() { a, b, c |  // wait until done rendering components to change the tree. 
+        state.open_gate(a, b, c);
     };
     
     sgl.end();
@@ -511,6 +526,7 @@ Draw :: @struct {
     logical: ?*Component = .None;
     hover_logical_code: ?i64 = .None;
     base_instance := 0;
+    open_gate: ?Ty(?i64, ?i64, bool) = .None;
 };
 
 fn do_option(self: *Draw, pos: Vec2, name: Str, selected: bool, value: ~T, new: *?T) void #where = {
@@ -555,13 +571,33 @@ fn level_selection(self: *Draw) ?*LevelApi.Exports = {
     new
 }
 
-fn walk_component_tree(self: *Draw, c: **Component) Ty(i64, i64, i64) = {
+fn walk_component_tree(self: *Draw, c: **Component) Ty(i64, i64, i64, *Component) = {
+    logical_c := c[];
     state := self.state;
     instance, parent_wire_offset, wire_offset := (0, 0, 0);
     self.put_text(self.text_spacing * vec2(0, 1), pack_rgba(255, 255, 255, 255)) { out |
-        ends_in_inlined := false;
-        enumerate state.tree { tree_i, it |
-            if it.logical_gate { it |
+        enumerate state.tree.items().rest(1) { tree_i, tree_it |
+            logical_gate := tree_it.logical_gate;
+            if logical_gate { it |
+                if c.has_bidirectional_pins {
+                    @fmt(out, "(%)", c.name);
+                    logical_gate = .None;
+                    if tree_it.inline_index_logical { ii |
+                        if tree_it.inline_parent_diagram { ci |
+                            ci := state.circuit[ci]&;
+                            if ci.compiled { parent_kind |
+                                logical_gate = (Some = ii);
+                                c[] = state.world&[parent_kind]&;
+                            };
+                        };
+                    };
+                } else {
+                    @fmt(out, "%[%]", c.name, it);
+                };
+                @fmt(out, ", ");
+            };
+            
+            if logical_gate { it |
                 if c.gates[it].pre_read != -1 {
                     it = c.gates[it].pre_read;
                 };
@@ -573,20 +609,29 @@ fn walk_component_tree(self: *Draw, c: **Component) Ty(i64, i64, i64) = {
                         wire_offset += child.wire_sum;
                     }
                 };
-                @fmt(out, "%[%], ", c.name, it);
                 instance += c.instance_offset_by_gate[it];
                 c[] = state.world&[c.gates[it].kind]&;
+                logical_c = c[];
             } else {
-                @if(tree_i != 0) if it.component { kind |
-                    @if(!ends_in_inlined) @fmt(out, "%, ", c.name);
-                    ends_in_inlined = true;
-                    @fmt(out, "(%), ", state.world&[kind].name);
+                if tree_it.component { kind |
+                    @if(tree_it.logical_gate.is_none()) @if(c.has_bidirectional_pins, @fmt(out, "(%), ", c.name), @fmt(out, "%, ", c.name));
+                    c[] = state.world&[kind]&;
                 };
             };
         };
-        @if(!ends_in_inlined) out.push_all(c.name);
+        @if(c.has_bidirectional_pins, @fmt(out, "(%)", c.name), out.push_all(c.name));
     };
-    (instance, parent_wire_offset, wire_offset)
+    (instance, parent_wire_offset, wire_offset, logical_c)
+}
+
+fn instance_by_gate(self: *Draw, c: *Component, i: i64) i64 = {
+    @if(!c.has_bidirectional_pins) return(self.base_instance + c.instance_offset_by_gate[i]);
+    
+    state, world := (self.state, self.world&);
+    @debug_assert(identical(c, world[state.tree[state.tree.len - 1].component.expect("component")]&), "TODO: instance_by_gate not of bottom");
+    parent_ci, logical_gate_index := find_index_in_real_parent(state, false, i).unwrap();
+    parent := world[state.circuit[parent_ci].compiled.expect("compiled")]&;
+    self.base_instance + parent.instance_offset_by_gate[logical_gate_index]
 }
 
 fn draw_component_code(self: *Draw, c: *Component, instance: i64, parent_wire_offset: i64) void = {
@@ -612,11 +657,12 @@ fn draw_component_code(self: *Draw, c: *Component, instance: i64, parent_wire_of
         pos.y -= self.text_spacing.y;
         
         if state.clicked && hover {
-            state.open_gate((Some = i), .None, i == 0 || i == c.gates.len - 1);
+            self.open_gate = (Some = ((Some = i), .None, i == 0 || i == c.gates.len - 1));
         };
     };
 };
 
+// TODO: show the right inferred (param, wire widths) for a temporary_auto_width inside a has_bidirectional_pins
 fn draw_gate_code(self: *Draw, it: *Component.Gate, hover: bool) void = {
     sdtx, world := (self.sdtx, self.world&);
     base_colour := @if(hover, pack_rgba(0, 255, 0, 255), pack_rgba(255, 255, 0, 255));
@@ -684,7 +730,8 @@ fn draw_primitive_code(self: *Draw, instance: i64, parent_wire_offset: i64, hove
     parent := world[parent_kind]&;
     it := parent.gates[gate_i]&;
     n := get_storage_count(world.components, it);
-    if !state.halted_without_wire_values {
+    // TODO: make this work when has_bidirectional_pins
+    if !state.halted_without_wire_values && !parent.has_bidirectional_pins {
         // show callsite in the parent
         self.wires = world.scratch.items().subslice(parent_wire_offset, parent.wire_count);
         self.logical = (Some = parent);
@@ -895,12 +942,14 @@ fn draw_gate_squares(self: *Draw, circuit: *Tc.Circuit) void = {
                     };
                 } else {
                     state.clicked = false;
-                    state.open_gate(.None, (Some = g_gate_index), false);
+                    self.open_gate = (Some = (.None, (Some = g_gate_index), false));
                 };
             };
             
             if group(it.kind) == .Tc2 && Tc'gate_name(it.kind, .Tc2) == .Push_button {
-                sgl.color = pack_rgba(255 * int(!state.left_mouse_down), 255 * int(state.left_mouse_down), 0, 255);
+                paused := !state.auto_eval;
+                r, g := (int(!state.left_mouse_down || paused), int(state.left_mouse_down || paused));
+                sgl.color = pack_rgba(255 * r, 255 * g, 0, 255);
             };
         };
         sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
@@ -1041,7 +1090,6 @@ fn highlight_inlined(self: *Draw, inline_record: u32, c: *Component) void = {
 
 fn console(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Component.Gate) void = {
     sdtx, world, sgl := (self.sdtx, self.world&, self.draw&);
-    @if(self.base_instance != 0) return();  // TODO: console in cc
     
     sdtx.pos = vec2(0);
     a := self.tc_to_world_pos(gate.pos + vec2(-16, -8));
@@ -1051,22 +1099,25 @@ fn console(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Comp
     sgl.color = pack_rgba(0, 0, 0, 255);
     sgl.line(vec2(a.x, b.y + s.y/2), vec2(b.x, b.y + s.y/2), s.y);
     
-    T :: Builtin.Settings.Console;
-    param: T = (repr = it.param.bitcast());
+    param := it.get_param(.Console)[];
     @if(param.get(.linked) == 0) return();
     // TODO: font https://int10h.org/oldschool-pc-fonts/fontlist/font?ibm_bios-2y
-    // TODO: need to bounds check offset against the size of the ram so maybe delay the instance conversion to here
-    offset := world.storage[c.instance_offset_by_gate[i]];
     
     bytes_per_char := @if(param.get(.colour) == 0, 1, 8);
-    data := world.storage.interpret_as_bytes();
-    data := data.subslice(param.get(.linked_ram_instance)*8 + offset*bytes_per_char, 80*24*bytes_per_char);
+    w, h := (80, 24);
+    data := {
+        data := world.storage.rest(self.instance_by_gate(c, i)).interpret_as_bytes().peek_type(Tc.Builtin.ConsoleData);
+        buf := world.storage.rest(data.ram_instance).interpret_as_bytes().slice(0, data.ram_size_bytes);
+        start, count := (data.offset*bytes_per_char, w*h*bytes_per_char);
+        @if(start.uge(buf.len) || (start + count).ugt(buf.len)) return();  // TODO: is it supposed to wrap?
+        buf.subslice(start, count)
+    };
     
     if param.get(.colour) == 0 {
         sdtx.color = pack_rgba(255, 255, 255, 255);
-        range(0, 24) { y |
-            range(0, 80) { x |
-                value := data[y*80 + x];
+        range(0, h) { y |
+            range(0, w) { x |
+                value := data[y*w + x];
                 if value == 0 || value == "\n".ascii() || value == "\t".ascii() || value == "\r".ascii() {
                     sdtx.pos.x += 1;
                 } else {
@@ -1078,9 +1129,9 @@ fn console(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Comp
         };
     } else {
         data := i64.reinterpret_bytes(data);
-        range(0, 24) { y |
-            range(0, 80) { x |
-                value := data[y*80 + x];
+        range(0, h) { y |
+            range(0, w) { x |
+                value := data[y*w + x];
                 sdtx.color = pack_rgba(value.shift_right_logical(48).bit_and(0xFF), value.shift_right_logical(40).bit_and(0xFF), value.shift_right_logical(32).bit_and(0xFF), 255);
                 my_solid_char := "\x8F".index(0)[];
                 if sdtx.color != 0xff000000 {  // there's already a black background, don't bother
@@ -1109,14 +1160,14 @@ fn console(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Comp
 
 fn segment_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Component.Gate) void = {
     world, sgl := (self.world&, self.draw&);
-    base := self.tc_to_world_pos(gate.pos + vec2(-1, -1.5));
+    base := self.tc_to_world_pos(gate.pos + vec2(-1, -1.5 - @if(gate.kind.group() == .Tc2, 1, 0)));
     w: f32 = 0.02;
     s: f32 = 0.06;
     colour_index := it.param.clamp(0, 3);
-    mask := world.storage[self.base_instance + c.instance_offset_by_gate[i]];
+    mask := world.storage[self.instance_by_gate(c, i)];
     empty := pack_rgba(0, 0, 0, 255);
     // TODO: don't have the lines overlap
-    range(0, 8) { i |  // TODO: make calling for_bits more convenient
+    range_rev(0, 8) { i |  // TODO: make calling for_bits more convenient
         on := mask.bit_and(1.shift_left(i)) != 0;
         sgl.color = @if(on, segment_colours[colour_index], empty);
         da, db := segment_lines[i];
@@ -1126,8 +1177,12 @@ fn segment_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, i
 }
 
 fn probe_bit(self: *Draw, pos: Vec2, c: *Component, i: i64) void = {
+    self.probe_bit(pos, self.instance_by_gate(c, i));
+}
+
+fn probe_bit(self: *Draw, pos: Vec2, instance: i64) void = {
     state, sgl, W := (self.state, self.draw&, self.wire_node_width * 0.8);
-    value := state.world.storage[self.base_instance + c.instance_offset_by_gate[i]] != 0;
+    value := state.world.storage[instance] != 0;
     b := self.tc_to_world_pos(pos);
     sgl.color = pack_rgba(255 * int(!value), 255 * int(value), 0, 255);
     sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
@@ -1136,28 +1191,45 @@ fn probe_bit(self: *Draw, pos: Vec2, c: *Component, i: i64) void = {
 // TODO: collect the list of probes like i do for pins :SLOW
 // TODO: include this in circuit bounds
 // TODO: word probes? static value. 
-// TODO: have it work when has_bidirectional_pins
-fn child_probes(self: *Draw, gate: *Tc.Circuit.Gate) void = {
+fn child_probes(self: *Draw, gate: *Tc.Circuit.Gate, parent: *Tc.Circuit) void = {
     state, world := (self.state, self.world&);
+    inlined := gate.logical_gate_index == -1;
     c := world[gate.kind]&;
     @if(!c.has_probes) return();
     child := state.circuit.find(fn(it) => it.compiled.is_some() && it.compiled.Some.id == gate.kind.id) || return();
-    pos := gate.pos + gate.mystery_spice_minus_fifteen_for_custom_pins + vec2(15.5);
+    pos := gate.pos + gate.mystery_spice_minus_fifteen_for_custom_pins + vec2(15);
+    
+    prev_instance := self.base_instance;
+    parent_c := world[parent.compiled.unwrap()]&;
+    if !inlined {
+        self.base_instance = self.instance_by_gate(parent_c, gate.logical_gate_index);
+    };
     each child.gates { it |
         i := it.logical_gate_index;
         is_probe := false
             || (it.kind.group() == .Tc1 && it.kind.name(.Tc1) == .ProbeWireBit)
             || (it.kind.group() == .Tc2 && it.kind.name(.Tc2) == .Probe_wire_bit);
         if i != -1 && is_probe {
-            self.probe_bit(pos + it.pos/8, c, i);
+            x, y := Tc'fix_pin_position(it.pos);
+            pos := pos + vec2(x.float().cast(), y.float().cast());
+            if inlined {
+                i := parent.inlined[gate.inline_record].gates[i];
+                if i != -1 {
+                    off := parent_c.instance_offset_by_gate[i];
+                    self.probe_bit(pos, self.base_instance + off);
+                };
+            } else {
+                self.probe_bit(pos, c, i);
+            };
         };
     };
+    self.base_instance = prev_instance;
 }
 
 // TODO: should write a texture instead of doing it with 6 vertices per pixel
 fn dot_matrix_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, _: *Component.Gate) void = {
     world, sgl := (self.world&, self.draw&);
-    buf := world.storage.subslice(self.base_instance + c.instance_offset_by_gate[i], 7*8*32/64);
+    buf := world.storage.subslice(self.instance_by_gate(c, i), 7*8*32/64);
     buf := u32.reinterpret_bytes(buf.interpret_as_bytes());
     
     i := 0;
@@ -1177,7 +1249,7 @@ fn dot_matrix_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64
 
 fn sprite_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Component.Gate) void = {
     state, world, sgl := (self.state, self.world&, self.draw&);
-    data := world.storage.subslice(self.base_instance + c.instance_offset_by_gate[i], size_of(Tc.Builtin.SpriteData) * 256);
+    data := world.storage.subslice(self.instance_by_gate(c, i), size_of(Tc.Builtin.SpriteData) * 256);
     data := Tc.Builtin.SpriteData.reinterpret_bytes(data.interpret_as_bytes());
     p := self.tc_to_world_pos(gate.pos + vec2(-16.5, 12));
     @debug_assert(state.atlas.enable, "SpriteDisplay but no atlas");
@@ -1226,7 +1298,8 @@ fn screen(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Compo
     b := self.tc_to_world_pos(a_tc + vec2(4, 3)*13);
     s := abs(a - b);
     sgl.color = pack_rgba(0, 0, 0, 255);
-    data, memory := world.get_screen(c.instance_offset_by_gate[i]);
+    data, memory := world.get_screen(self.instance_by_gate(c, i));
+    @if(memory.len == 0) return();
     
     if data.mode == .Ascii8 {
         sgl.color = data.background_colour.decode_8bit_colour();
@@ -1703,8 +1776,9 @@ fn gate_selection(self: *Draw) void = {
     };
 }
 
-// TODO: doesn't work if you enter by logical text that was exposed by inlining something (so needs to do two+ layers of the diagram)
-// TODO: ugh this needs to not be so verbose
+fn index(self: RawList(Tc.Circuit.InlineRecord), i: u32) *Tc.Circuit.InlineRecord = self.index(i.zext());
+fn index(self: RawList(Tc.Circuit.Gate), i: u32) *Tc.Circuit.Gate = self.index(i.zext());
+
 fn open_gate(state: *State, logical_gate_index: ?i64, diagram_gate_index: ?i64, is_io: bool) void = {
     new_diagram_circuit: ?i64 = .None;
     new_component: ?ComponentId = .None;
@@ -1712,7 +1786,24 @@ fn open_gate(state: *State, logical_gate_index: ?i64, diagram_gate_index: ?i64, 
     @if(state.tree.len > 0)
     if logical_gate_index { i |
         if state.tree[state.tree.len - 1].component { parent |
-            new_component = (Some = state.world&[parent].gates[i].kind);
+            gate := state.world&[parent].gates[i]&;
+            if gate.pre_read != -1 {
+                // Circuit.Gate.logical_gate_index only points to the write one. swap so graphical can be found. 
+                logical_gate_index = (Some = gate.pre_read);
+            };
+            new_component = (Some = gate.kind);
+            
+            // entering something inlined, make the tree as though you had entered each graphical CC in order. 
+            if gate.inline_record != 0xFFFFFFFF {
+                if state.tree[state.tree.len - 1].diagram_circuit { parent_diagram |
+                    c := state.circuit[parent_diagram]&;
+                    if c.gates.index_of(fn(it) => it.inline_record == gate.inline_record) { source |
+                        open_gate(state, .None, (Some = source), false);
+                        open_gate(state, (Some = gate.inline_index.zext()), .None, false);
+                        return();
+                    };
+                };
+            };
         };
     };
 
@@ -1770,7 +1861,53 @@ fn open_gate(state: *State, logical_gate_index: ?i64, diagram_gate_index: ?i64, 
             component = new_component,
             graphical_gate = diagram_gate_index,
         );
+        
+        @debug_assert(state.tree.len >= 2, "just pushed");
+        new := state.tree[state.tree.len - 1]&;
+        if diagram_gate_index { i |
+            parent_ci := state.tree[state.tree.len - 2].diagram_circuit.unwrap();
+            parent := state.circuit[parent_ci]&;
+            r := parent.gates[i].inline_record;
+            if r != 0xFFFFFFFF {
+                new.inline_record = (Some = r);
+                if !parent.has_bidirectional_pins {
+                    new.inline_parent_diagram = (Some = parent_ci);
+                };
+            };
+        };
+        
+        if logical_gate_index { logical_gate_index |
+            if find_index_in_real_parent(state, true, logical_gate_index) { parent_ci, logical_gate_index |
+                new.inline_index_logical = (Some = logical_gate_index);
+                new.inline_parent_diagram = (Some = parent_ci);
+            };
+        };
+        state.recenter();
     }
+}
+
+find_index_in_real_parent :: fn(state: *State, in_tree: bool, logical_gate_index: i64) ?Ty(i64, i64) = {
+    start := state.tree.len - 1 - int(in_tree);
+    I := start;
+    loop {
+        @if(I < 0) return(.None);
+        parent_ci := state.tree[I].diagram_circuit || return(.None);
+        parent_c := state.circuit[parent_ci]&;
+        if parent_c.has_bidirectional_pins {
+            inline_record := state.tree[I].inline_record || return(.None);
+            @debug_assert(I > 0, "first circuit can't be inlined");
+            grand_parent_ci := state.tree[I-1].diagram_circuit || return(.None);
+            grand_parent_c := state.circuit[grand_parent_ci]&;
+            record := grand_parent_c.inlined[inline_record]&;
+            @debug_assert_eq(grand_parent_c.gates[record.gate_i].kind.id, parent_c.compiled.Some.id, "wrong inline record");
+            logical_gate_index = record.gates[logical_gate_index];
+            @if(logical_gate_index == -1) return(.None);
+            I -= 1;
+        } else {
+            @if(I == start) return(.None);
+            return(Some = (parent_ci, logical_gate_index));
+        };
+    };
 }
 
 fn pop_tree_node(state: *State) void = {
@@ -2441,7 +2578,7 @@ segment_lines :: @const_slice(
     (vec2(0, 2), vec2(0, 1)),
     (vec2(0, 1), vec2(0, 0)),
     (vec2(0, 1), vec2(1, 1)),
-    (vec2(1, 2), vec2(1.2, 2)),
+    (vec2(1.1, 2), vec2(1.4, 2)),
 );
 
 gate_selection_columns :: {

@@ -44,15 +44,15 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
   - allocate World contigously with .storage
   - merge GateName() enums so dont need to keep checking group()?
   - decide if i care enough to bring back show_known_disassembly
-  - i'd really like if i could detect when Cc_output didnt need to be bidirectional. 
-    also should keep track of wire mappings somehow so can still show the nice components in the code ui. 
   - "Game Of Life 32x32" takes 10s to compile. (insert_phis, spill, emit_expr, compile_expr). 
     its not even inlining anything big so idk what the big deal is. 
     i guess 1024 cells fully unrolled in an awkward way isnt super reasonable. 
     but its only 16k lines of code. yikes 380k lines of ir before i gets cleaned up tho. easy to forget how ass my frontend is cause it doesdent matter most of the time. 
+  - key to reload the circuits from disk (for when editing tests in the game)
+  - tests for gui showing remapped inlined gates now that its so convoluted
+  - set_initial_data for inlined CCs
 - it technically works now but the circuit editor still feels incredibly bad to use. 
   deleting wires is the most obviously broken part. undiscoverable keybinds is also bad. 
-  i feel like sometimes my clicks don't go. i actually wonder if my right mouse button is fucked because ive been annoyed by phantom double clicking in programs i didnt write too
 - its implied that `S :: @struct(f :: fn(s: Str) void = ()); S'f"foo"` would work because "foo".S'f() works
 - make types_size_guess growable. need to cope with not reallocating under the cache pointers tho
 - web: include examples for stackie and life

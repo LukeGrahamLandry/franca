@@ -26,10 +26,10 @@ it's all built up from those and simulated faithfully so you can click into sub-
 ## `tc`
 
 - <https://turingcomplete.game>
-- <https://github.com/Stuffe/save_monger/tree/22fa398d95c3d3a0b5e88a80e9daee613cab1823>
+- <https://github.com/Stuffe/save_monger> (v1: 22fa398d95c3d3a0b5e88a80e9daee613cab1823, v2: 2ef0e5b3b76915e1b0a23a88fcbd885371cdb68e)
 - <https://github.com/LukeGrahamLandry/TuringCompleteSchematicArchive>
 
-circuit.data save files from TuringComplete.Game (v6 / 0.1059 beta). 
+circuit.data save files from TuringComplete.Game (v1: 0.1059, v2: 2.1.334). 
 those files have the positions of wires/gates which i convert into the same graph representation as the `defs` language. 
 in this mode there are many more builtin gates (ex. a 64 bit xor compiles to one cpu instruction, etc.) so will run much faster than the `defs` one. 
 
@@ -42,20 +42,16 @@ it works well enough to run my overture/leg in the maze and a few things from th
 - devices
   - missing: network, hdd, sound
   - console: wrong font
-  - keyboard: character mode param. click to focus instead of a keybind. 
+  - keyboard: click to focus instead of a keybind. 
   - display: rotation
-  - probes (they render internal values on the outside of custom components)
   - latency ram, Stack
   - sprite display: positioning is wrong
   - dot display: wrong default colour
 - Mul64 high on wasm
-- bidirectional pins are sketchy 
-  - makes the visualization confusing because i always inline the whole custom component
 - assembler
   - expressions with spaces in them are wrong
   - what happens when a label is definied multiple times
 - need a better interface for choosing circuit/programs, showing memory contents
-- pre_read mistakes would be a lot easier to debug if they were made explicit seperate operations in the trace display. 
 - dropping file doesn't work in franca-web-playground (even when fixed will be annoying because need to feed it all the custom components individually)
 - needs the franca library folder available at runtime
 - from schematic hub
@@ -72,19 +68,11 @@ it works well enough to run my overture/leg in the maze and a few things from th
   - variable names
   - speed mode that cheats and implements components with native instructions (like tc) instead of nand gates
 - tc: at top level sort by type of IO maybe so don't have to add random offsets in the evaluator depending on the arch. ie in my overture and leg input and output are swapped because the order in save file is arbitrary. 
-- compile a version with save_wire_values so can get rid of the interpreter? 
 - fast mode that doesn't even save_wire_values once per frame
 - ui: allow copying the code to clipboard
 - `Main :: import().examples.circuit;` doesn't work in the web demo
 - nice ui for web gallery from my archive of the old schematic hub
-- option to do scenario test on circuit.data
-- less trash code. builtin.fr and gpu.fr are particularly bad.. 
-- deduplicate error checking between parse and load
-- handle all load errors gracefully. show in ui instead of log. also still try to show the circuit diagram just don't allow running it. 
-- don't spam "multiple defs must be switch" for bidirectional pins
 - show wire comments/colours in the ui
-- auto throttle tick rate to keep a sane frame rate even if you ask for something too high. (also report number in Hz instead of per frame so it's easy to compare to the game)
-- :NotReorderingTheseBreaksOvertureLegNandverture
 - it's annoying that you can't see the wire values if it halts on a tick that was evaled in fast mode. 
   delay all writes to the end somehow so can rerun the tick in slow mode after knowing it will halt?
 - use 32 bit instructions instead of bit_and(0xFFFFFFFF)
@@ -92,20 +80,12 @@ it works well enough to run my overture/leg in the maze and a few things from th
 - option to see generated source or -d logging in the ui
   - ^ would be nicer if i factor out examples/gpu/terminal.fr into a reusable textbox widgit and use that (also for showing ram contents). 
     the other option would just be rendering the whole sapp thingy into a texture which might be less annoying than infecting everything in the terminal with positioning code. 
+- document the components (especially the ones that dont exist in v2 so cant easily check the game)
 
 ## todo tc2
 
-
-  - outputs don't coerce z so need to check if that wire is a switch and compile to two outputs like the old OutputNz did
-    ;actually it's more convoluted than that, output pins are bidirectional pins now (ie they can be used as inputs or both depending on switches). 
-    so maybe should figure out a nicer way to compile bidirectional pins first. 
-    but the common case will be that the wire connecting to an output pin doesn't connect to any input pins of any components inside the CC so then it can be compiled the easy way. 
-  - components have configurable (sometimes auto?) wire size
-    - some of the logic ones can go up to 2048 bit but the concatenators don't seem to work so i don't really understand
-  - insert casts better
-  - Concatenator, Static_indexer_config, Delay_line_word_config, Static_eval, Keyboard, Static_value, Push_button, Pipelined_load_port, Register_word_config, Delay_line_word_asm, Clz, Ctz
+  - Static_indexer_config, Delay_line_word_config, Static_eval, Static_value, Pipelined_load_port, Register_word_config, Clz, Ctz
   - isa: assembly parser generator thingy https://github.com/Stuffe/isa_spec
-  - do screen in tests/images.fr
   - let the editor place the new components
 
 ---
