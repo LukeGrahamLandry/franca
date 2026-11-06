@@ -104,9 +104,12 @@ templates :: collect_templates(impl, .Tc1, pin_layouts) { it, k |
 
 templates2 :: collect_templates(impl2, .Tc2, pin_layouts2) { it, k |
     it.bit_width = get_width_data2(it);
-    it.has_param = it.has_param || @is(k, .Static_indexer, .Segment_display, .Load_port, .Store_port, .Ram_v2, .Keyboard_v2);
-    if @is(k, .Register_word, .Register_bit, .Delay_line_word, .Delay_line_bit, .Counter) {
+    it.has_param = it.has_param || @is(k, .Static_indexer, .Segment_display, .Load_port, .Store_port, .Ram_v2, .Keyboard_v2, .Static_indexer_config);
+    if @is(k, .Register_word, .Register_bit, .Delay_line_word, .Delay_line_bit, .Counter, .Static_eval, .Static_value) {
         it.inputs_for_pure_eval = empty();
+    };
+    if k == .Static_indexer_config {
+        it.inputs_for_pure_eval = ast_alloc().alloc_init(i64, 1, fn(_) => 0);
     };
     if k == .Load_port {
         it.switches = ast_alloc().alloc_init(Template.SwitchablePin, 1, fn(i) => (value_output_index = 0, condition_input_index = 0));
@@ -134,9 +137,11 @@ Settings :: @struct {
         gate_i := 32,
     );
     Mul64 :: @bit_fields(need_high := 1, _ := 63);
-    StaticIndex :: @bit_fields(width := 8, shift := 8, left := 1, _ := 47);
+    StaticIndex :: @bit_fields(width := 8, shift := 8, left := 1, valid := 1, _ := 46);
     Port :: @bit_fields(width := 8, ram_size_bytes := 48, little_endian := 1, connected := 1, _ := 6);
     Ram_v2 :: @bit_fields(init := 8, ram_size_bytes := 48, little_endian := 1, _ := 7);
+    // :NonZeroParam param=0 means not inferred yet so `valid` makes it work even if value is 0 (same in StaticIndex)
+    StaticValue :: @bit_fields(value := 32, _ := 31, valid := 1);  
 };
 
 fn word_size(param: Settings.Ram) i64 = 1.shift_left(param.get(.word_size_index)); // [1, 2, 4, 8, 16, 32]
@@ -1036,7 +1041,10 @@ Segment_display :: device(0, 1,
         world.storage[instance] = i[0];
     },
 );
-Static_value :: todo();
+Static_value :: math_param(2, 0) { o, i, p |
+    p: Settings.StaticValue = (repr = p.bitcast());
+    o[] = (p.get(.value), 0);  // (as value, as width)
+};
 Screen :: device(0, 3, 
     fn(_) => size_of(ScreenData) * 8,
     fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 3), instance: i64, _1: bool) void = {
@@ -1084,7 +1092,11 @@ Keyboard_v2 :: device(3, 1,
         };
     },
 );
-Static_eval :: todo();
+Static_eval :: math_param(2, 2) { o, i, p |
+    _ := i;  // comptime
+    p: Settings.StaticValue = (repr = p.bitcast());
+    o[] = (p.get(.value), 0);  // (as value, as width)
+};
 Verilog_input :: todo();
 Verilog_output :: todo();
 Maker_word_4 :: make_maker(4);
@@ -1120,7 +1132,13 @@ _10 :: todo();
 Concatenator_2 :: make_maker(2);
 Concatenator_4 :: make_maker(4);
 Concatenator_8 :: make_maker(8);
-Static_indexer_config :: todo();
+Static_indexer_config :: device_no_storage(1, 3, 
+    fn(w: *World, o: *Array(i64, 1), i: *Array(i64, 3), p: i64) void = {
+        _ := (i[1], i[2]);  // comptime
+        i := bit_cast_unchecked(*Array(i64, 3), *Array(i64, 1), i);
+        @inline ((@run Static_indexer.fid.unwrap())(w, o, i, p));
+    },
+);
 Ram_v2 :: device(0, 0,
     fn(it) => {
         param: Settings.Ram_v2 = (repr = it.param.bitcast());

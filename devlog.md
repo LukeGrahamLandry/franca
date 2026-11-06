@@ -1,4 +1,17 @@
 
+## (Nov 5) circuit
+
+- static value/eval/indexer_config
+  - as a start, reusing the old v1 assembler for static_eval expressions with different whitespace rules. we'll see how that goes.  
+  - unfortunately for me, static eval inputs can be zero so i can't use that as the sentinal. also will need more than 8 bits eventually. 
+  - negative widths say "level code broken" but i feel i shouldnt rely on that. 
+    surely you want that for Static_indexer_config to shift left so maybe the game's just broken.
+  - got some simple cases working (made tests) but not good enough for "RV32IM v1". 
+    for static_eval in something inlined, it needs to be recomputed because widths might change 
+    but dont have the graphical gate anymore so can't get the expression. (same reason i haven't finished set_initial_data yet). 
+- the number of parameters these functions have is getting unreasonable. i was trying to not give in to having a mega struct for the load stuff but perhaps this is even more confusing.
+- started documenting components
+
 ## (Nov 4) circuit
 
 - visualizing inlining better

@@ -283,7 +283,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     cc_output := @ref WireId.list(temp());
     
     CONST_INDEX := { xx := CONST_INDEX; /*:compiler*/ xx.id };
-    @debug_assert_eq(components[CONST_INDEX.zext()].name, "Off");
+    @debug_assert_eq(components[CONST_INDEX.zext()].name, "Constant");
     logical_to_circuit := i64.list(gates.len, temp());
     extra_gates := 0;
     kill: DynamicBitSet = empty(temp());
@@ -369,6 +369,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         }
         
         @if(shape.name == "Program") assemble_v1(c, it.get_param(.Ram), i, a, warn);
+        @if(shape.name == "Static_value") { c.has_bidirectional_pins = true; };
                 
         @match(shape.body) { 
             fn Unimplemented() => {
@@ -467,8 +468,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                         continue();
                     };
                     child_logical := components.index(child_logical.id.zext());
-                    original_gate.inline_record = c.inlined.len.trunc();
-                    inline_for_bidirectional_gates(c, child_logical, gates&, wire_count&, extra_gates&, i, a, @slice(in.items(), out.items(), cc_output.items()));
+                    inline_for_bidirectional_gates(c, child_logical, gates&, wire_count&, extra_gates&, i, a, @slice(in.items(), out.items(), cc_output.items()), original_gate);
                 };
             } 
         };
@@ -524,9 +524,10 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     logical_to_circuit&.insert(0, -1);  // in
     logical_to_circuit&.push(-1);       // out
     insert_consts_for_dead_wires(components.items(), gates&, @if(c.has_bidirectional_pins, cc_output.items(), empty()));
+    logical_to_circuit&.push_repeated(gates.len - logical_to_circuit.len, -1);
     @debug_assert_eq(bit_width.len, custom_pins.len);
     
-    wire_bit_width := insert_bit_width_casts(components.items(), gates&, wire_count&, bit_width, warn, c.has_bidirectional_pins);
+    wire_bit_width := insert_bit_width_casts(components.items(), gates&, wire_count&, bit_width, warn, c, logical_to_circuit.items(), circuits);
     logical_to_circuit&.push_repeated(gates.len - logical_to_circuit.len, -1);
     new_gates, order, error := schedule_gates(c, gates, wire_count, a, out.items(), in.items(), components.items(), warn, logical_to_circuit.items(), c.has_bidirectional_pins);
     gates := new_gates;
@@ -574,7 +575,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     find_links_for_lastest_component(c, components.items(), linkables, warn);
     
     @if(c.has_bidirectional_pins) each gates { it |
-        if it.temporary_auto_width {| it.param = 0; };
+        if it.temporary_auto_width && gate_name(it.kind, .Tc2) != .Static_value {| it.param = 0; };
     };
 }
 
@@ -710,7 +711,8 @@ assign_port_param :: fn(gates: []Circuit.Gate, logical: []Component.Gate, linkab
     };
 };
 
-inline_for_bidirectional_gates :: fn(parent: *Circuit, child_logical: *Component, gates: *List(Component.Gate), wire_count: *i64, extra_gates: *i64, target_gate_i: i64, a: Alloc, parent_io: [][]WireId) void = {
+inline_for_bidirectional_gates :: fn(parent: *Circuit, child_logical: *Component, gates: *List(Component.Gate), wire_count: *i64, extra_gates: *i64, target_gate_i: i64, a: Alloc, parent_io: [][]WireId, original_gate: *Circuit.Gate) void = {
+    original_gate.inline_record = parent.inlined.len.trunc();
     parent.inlined&.push((
         gate_i = target_gate_i,
         wires = a.alloc_init(WireId, child_logical.wire_count, fn(_) => (id = 0xFFFFFFFF)),
@@ -767,10 +769,29 @@ inline_for_bidirectional_gates :: fn(parent: *Circuit, child_logical: *Component
             param = gate.param, 
             temporary_auto_width = gate.temporary_auto_width, 
             temporary_disconnected_pins_bitset = gate.temporary_disconnected_pins_bitset,
+            temporary_bit_width_for_constant = gate.temporary_bit_width_for_constant,  // TODO: unit test that needs this
             inline_record = parent.inlined.len.trunc() - 1,
             inline_index = rel_gate_i.trunc() + 1,
         );
         extra_gates[] += 1;
+        
+        new := gates[gates.len - 1]&;
+        if group(new.kind) == .Tc2 && name(new.kind, .Tc2) == .Static_value && new.temporary_auto_width {
+            @debug_assert_eq(gate.inline_record, 0xFFFFFFFF);
+            link_id := new.param;
+            found := false;
+            static_values := original_gate.settings.rest(2);
+            range(0, static_values.len/2) { i |
+                id, value := (static_values[i*2], static_values[i*2+1]);
+                if !found && id == link_id {
+                    found = true;
+                    new.get_param(.StaticValue)[] = construct(value = value, valid = 1);  // :NonZeroParam
+                };
+            };
+            // now it's fixed even if this parent is inlined somewhere else
+            new.temporary_auto_width = false;
+            @if(!found) @println("warn: couldn't find inner Static_value");
+        };
     };
     // TODO: just use this as the map
     each map& { child, parent |
@@ -1159,7 +1180,7 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8), uni
             if group(it.kind) == .Tc2 {
                 k := name(it.kind, .Tc2);
                 new.temporary_bit_width_for_constant = it.settings[0];
-                if it.settings[0] == MIN_i64 || @is(k, .Concatenator_2, .Concatenator_4, .Concatenator_8) {
+                if it.settings[0] == MIN_i64 || @is(k, .Concatenator_2, .Concatenator_4, .Concatenator_8, .Static_eval, .Static_value, .Static_indexer_config) {
                     new.temporary_auto_width = true;
                 };
             };
@@ -1171,9 +1192,9 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8), uni
 pack_param :: fn(circuits: []Circuit, c: *Circuit, it: *Circuit.Gate, gate_i: i64, second_output_is_unused: bool, unimplemented: *bool, warn: *List(u8)) i64 = {
     shape := get_builtin_shape(it.kind);
     if !shape.has_param {
-        if group(it.kind) == .Tc2 {
+        if group(it.kind) == .Tc2 && name(it.kind, .Tc2) != .Custom_v2 {
             s0 := it.settings[0];
-            @if(s0 != MIN_i64 && s0.ugt(64)) @fmtln(warn, "bad width % for %", s0, shape.name);
+            @if(s0 != MIN_i64 && s0.ugt(64)) @fmtln(warn, "bad width % for % (in %)", s0, shape.name, c.name);
             return @if(s0 == MIN_i64, 0, s0);
         };
         return 0;
@@ -1231,7 +1252,7 @@ pack_param :: fn(circuits: []Circuit, c: *Circuit, it: *Circuit.Gate, gate_i: i6
                 fn Static_indexer() => {
                     width, shift := (s[0], s[2]);
                     @if(width == MIN_i64) @fmtln(warn, "auto width static indexer?");
-                    s: Builtin.Settings.StaticIndex = construct(width = width, shift = shift.abs(), left = int(shift < 0));
+                    s: Builtin.Settings.StaticIndex = construct(width = width, shift = shift.abs(), left = int(shift < 0), valid = 1);
                     param = s.repr.bitcast();
                 }
                 fn Segment_display() => {
@@ -1260,6 +1281,14 @@ pack_param :: fn(circuits: []Circuit, c: *Circuit, it: *Circuit.Gate, gate_i: i6
                     );
                     param = s.repr.bitcast();
                 }
+                fn Static_value() => { param = it.link_id; }
+                fn Halt_v2() => {
+                    s: Builtin.Settings.Halt = construct(
+                        gate_i = gate_i,
+                        circ_i = ptr_diff(circuits.ptr, c),
+                    );
+                    param = s.repr.bitcast();
+                };
                 @default => {
                     if @is(k, .Splitter_word_8, .Splitter_word_4, .Splitter_word_2, .Less_s, .Asr) {
                         param = @if(s[0] == MIN_i64, 0, s[0]);
@@ -1308,7 +1337,7 @@ fn assemble_v1(circuit: *Circuit, s: *Builtin.Settings.Ram, gate_i: i64, a: Allo
     };
 };
 
-CONST_INDEX :: get_component_by_name("Off", builtin_components);
+CONST_INDEX :: get_component_by_name("Constant", builtin_components);
 
 // TODO: save the index in param now that i call for_pins in the editor
 fn find_custom_impl(g_gate: *Circuit.Gate, circuits: []Circuit) ?*Circuit = {
@@ -1370,20 +1399,28 @@ fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, 
 }
 
 // TODO: what if a bidirectional pin is given too big a value?
-fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate), wire_count: *i64, bit_width: []u8, warn: *List(u8), has_bidirectional_pins: bool) []u8 = {
+fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate), wire_count: *i64, bit_width: []u8, warn: *List(u8), c: *Circuit, logical_to_circuit: []i64, circuits: []Circuit) []u8 = {
+    has_bidirectional_pins := c.has_bidirectional_pins;
     a := gates.gpa;
     cast_id: ComponentId = (id = trunc(component_offset(.Tc2) - 1));
     @debug_assert_eq(components[cast_id.id.zext()].name, "SyntheticCast_FR");
     width := @ref u8.list(a);
+    width_known: DynamicBitSet = empty(temp());
     width.push_repeated(wire_count[], 0);
     outputs, inputs := (gates[gates.len - 1].inputs, gates[0].outputs);
     known := outputs.len + inputs.len == bit_width.len;
     error_wires: DynamicBitSet = empty(temp());
     @if(!known) @fmtln(warn, "TODO: missing some io sizes? %+%!=%", outputs.len, inputs.len, bit_width.len);
     original_output_index := gates.len - 1;
+    // TODO: need to be tracking width_known seperately earlier because Cc_output is supposed to transmit static values (including 0)
     @if(known)
     enumerate inputs { i, id |
-        width[id.id.zext()] = bit_width[i + outputs.len];
+        x := bit_width[i + outputs.len];
+        width[id.id.zext()] = x;
+        if x != 0 {
+            width_known&.set(id.id.zext());
+        };
+        
     };
     
     // before schedule gates so won't be in order
@@ -1401,12 +1438,14 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
         enumerate gate.outputs { i, id |
             // multiple switches of different sizes might ouput to the same wire
             width[id.id.zext()] = max(bit_width[i], width[id.id.zext()]);
+            width_known&.set(id.id.zext());
         };
     };
     
-    work := infer_auto_width(components, gates.items(), width.items());
+    work := infer_auto_width(components, gates.items(), width.items(), c, logical_to_circuit, width_known&, circuits, warn);
     @if(!has_bidirectional_pins) for work { i |
-        @fmtln(warn, "failed to infer width of %", components[gates[i].kind.id.zext()].name);
+        // TODO: report the dependency chain of wires in a readable way
+        @fmtln(warn, "failed to infer width of % (in %)", components[gates[i].kind.id.zext()].name, c.name);
     };
     
     K :: Ty(WireId, u8);
@@ -1417,7 +1456,7 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
         break :: local_return;
         found := width[id.id.zext()];
         if !has_bidirectional_pins {
-            @if(found == 0 && !error_wires&.get_set(id.id.zext())) @fmtln(warn, "TODO: unknown wire size w% (for %)", id.id, components[gate.kind.id.zext()].name);
+            @if(!width_known&.get(id.id.zext()) && !error_wires&.get_set(id.id.zext())) @fmtln(warn, "TODO: unknown wire size w% (for %)", id.id, components[gate.kind.id.zext()].name);
         };
         if want < found && want != 0 {
             old := id[];
@@ -1432,6 +1471,7 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
             id[] = new;
             // @fmtln(warn, "cast % => % (want=%, found=%)", old.id, new.id, want, found);
             casts&.insert((old, want), new);
+            width_known&.set(new.id.zext());
             gates.push(
                 kind = cast_id,
                 inputs = a.alloc_init(WireId, 1, fn(_) => old),
@@ -1485,7 +1525,7 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
     width.items()
 }
 
-infer_auto_width :: fn(components: []Component, gates: []Component.Gate, width: []u8) []i64 = {
+infer_auto_width :: fn(components: []Component, gates: []Component.Gate, width: []u8, c: *Circuit, logical_to_circuit: []i64, width_known: *DynamicBitSet, circuits: []Circuit, warn: *List(u8)) []i64 = {
     work := @ref i64.list(temp());
     range(1, gates.len - 1) { i |
         it := gates[i]&;
@@ -1499,8 +1539,9 @@ infer_auto_width :: fn(components: []Component, gates: []Component.Gate, width: 
         unordered_retain(work) { gate_i |
             continue :: local_return;
             gate := gates.index(gate_i[]);
+            // TODO: you dont depend on all the inputs. ex. Static_indexer_config only needs the two comptime inputs not the runtime one
             for gate.inputs { id |
-                @if(width[id.id.zext()] == 0) continue(true); 
+                @if(!width_known.get(id.id.zext())) continue(true);
             };
             param := 0; 
             k := name(gate.kind, .Tc2);   
@@ -1527,6 +1568,35 @@ infer_auto_width :: fn(components: []Component, gates: []Component.Gate, width: 
                         param = param.bit_or(width[id.id.zext()].zext().shift_left(8*i));
                     };
                 };
+                if param == 0 {
+                    // no pins at all defaults to 2 for some reason. i dont make the rules man.
+                    param = 2;
+                    // TODO: one 1 bit pin also does this (but that pin needs to be the 2 bit one)
+                };
+            };
+            
+            @match(k) {
+                fn Static_eval() => {
+                    @debug_assert(gate_i[].ult(logical_to_circuit.len), "aaa");
+                    expression := find_static_eval_expression(circuits, c, logical_to_circuit, gate_i[], gate, components) || {
+                        @fmtln(warn, "didnt find inlined thing for static_eval");
+                        continue(true);
+                    };
+                    (A: i64, B: i64) := (width[gate.inputs[0].id.zext()].zext(), width[gate.inputs[1].id.zext()].zext());
+                    R := Tc'Asm'static_eval_expression(A, B, expression).or(fn(msg) => {
+                        @fmtln(warn, "failed to evaluate (%): %", expression, msg);
+                        continue(true);
+                    });
+                    p: Builtin.Settings.StaticValue = construct(value = R, valid = 1);  // :NonZeroParam
+                    param = p.repr.bitcast();
+                }
+                fn Static_value() => panic("after being inlined, temporary_auto_width=false so won't get here");
+                fn Static_indexer_config() => {
+                    (s: i64, w: i64) := (width[gate.inputs[1].id.zext()].zext(), width[gate.inputs[2].id.zext()].zext());
+                    p: Builtin.Settings.StaticIndex = construct(width = w, shift = s, left = 0, valid = 1 /* zero param means not done */);
+                    param = p.repr.bitcast();
+                }
+                @default => ();
             };
             
             shape := get_builtin_shape(gate.kind);
@@ -1544,6 +1614,7 @@ infer_auto_width :: fn(components: []Component, gates: []Component.Gate, width: 
                 bit_width := get_bit_width(components, gate);
                 enumerate gate.outputs { i, id |
                     width[id.id.zext()] = max(bit_width[i], width[id.id.zext()]);
+                    width_known.set(id.id.zext());
                 };
             };
             
@@ -1553,6 +1624,35 @@ infer_auto_width :: fn(components: []Component, gates: []Component.Gate, width: 
     };
     
     work.items()
+};
+
+// TODO: set_initial_data needs to do something similar to this
+find_static_eval_expression :: fn(circuits: []Circuit, c: *Circuit, logical_to_circuit: []i64, gate_i: i64, gate: *Component.Gate, components: []Component) ?Str = {
+    gi := logical_to_circuit[gate_i];
+    if gi != -1 {
+        return(Some = c.gates[gi].data);
+    };
+    gate_i := (); logical_to_circuit := ();
+    
+    loop {
+        if gate.inline_record == 0xFFFFFFFF {
+            eprintln("find_static_eval_expression: this should be unreachable");
+            return(.None);
+        };
+        
+        source_gate_i := c.inlined[gate.inline_record].gate_i;
+        source_kind := c.gates[source_gate_i].kind;
+        source := circuits.find(fn(it) => it.compiled.is_some() && it.compiled.Some == source_kind) 
+            || return(.None);
+        // :SLOW
+        if source.gates.find(fn(it) => it.logical_gate_index == gate.inline_index.zext()) { g_gate |
+            return(Some = g_gate.data);
+        };
+        
+        c = source;
+        logical := components[source_kind]&;
+        gate = logical.gates[gate.inline_index.zext()]&;
+    };
 };
 
 // this can't be in find_pins because it has to be after bidirectional components are inlined
@@ -1581,6 +1681,10 @@ insert_consts_for_dead_wires :: fn(components: []Component, gates: *List(Compone
                 outputs = a.alloc_init(WireId, 1, fn(_) => (id = i.trunc())),
                 inputs = empty(),
                 kind = CONST_INDEX,
+                param = 0,
+                // disconnected wire is 0 width for auto components
+                // TODO: this might make temporary_disconnected_pins_bitset redundant
+                temporary_bit_width_for_constant = 0,  
             );
         };
     };
@@ -1605,6 +1709,11 @@ fn get_bit_width(components: []Component, it: *Component.Gate) []u8 = {
             if @is(k, .Maker_word_2, .Maker_word_4, .Maker_word_8) {
                 // if output didnt divide pin count, input sizes round down but output size remembers the requested one. 
                 r[0] = max(r[0], it.temporary_bit_width_for_constant.trunc());
+            };
+            if k == .Static_value && it.temporary_auto_width {
+                // before being inlined, param=link_id (non-zero) but don't know width yet. 
+                @debug_assert_eq(it.inline_record, 0xFFFFFFFF);
+                return empty();
             };
         };
         return r;
@@ -1689,7 +1798,17 @@ fn get_bit_width(shape: *Tc.Builtin.Template, param: i64) []u8 = {
             fn Splitter_word_8() => { r[8] *= 8; }
             fn Static_indexer() => {
                 p: Builtin.Settings.StaticIndex = (repr = param.bitcast());
-                r.copy_from(@slice(@as(u8) p.get(.width).trunc(), 0x80));
+                r.copy_from(@slice(@as(u8) p.get(.width).trunc(), 0x40));
+            }
+            fn Static_eval() => {
+                r.copy_from(@slice(0x40, param.trunc(), 0x40, 0x40));
+            }
+            fn Static_value() => {
+                r.copy_from(@slice(0x40, param.trunc()));
+            }
+            fn Static_indexer_config() => {
+                p: Builtin.Settings.StaticIndex = (repr = param.bitcast());
+                r.copy_from(@slice(@as(u8) p.get(.width).trunc(), 0x40, 0x40, 0x40));
             }
             @default => break();
         };

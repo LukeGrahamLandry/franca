@@ -51,6 +51,7 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
   - key to reload the circuits from disk (for when editing tests in the game)
   - tests for gui showing remapped inlined gates now that its so convoluted
   - set_initial_data for inlined CCs
+  - larger than 8 bit static values
 - it technically works now but the circuit editor still feels incredibly bad to use. 
   deleting wires is the most obviously broken part. undiscoverable keybinds is also bad. 
 - its implied that `S :: @struct(f :: fn(s: Str) void = ()); S'f"foo"` would work because "foo".S'f() works
