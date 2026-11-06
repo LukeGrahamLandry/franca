@@ -15,6 +15,7 @@ Template :: @struct {
     switches: []SwitchablePin = empty();
     kind := zeroed(import("@/examples/circuit/compile.fr")'ComponentId);
     pin_radius: f32 = 0;  // used for speeding up placing wires in the editor
+    pin_names: []Str = empty();
     
     SwitchablePin :: @struct {
         value_output_index: i64;
@@ -70,6 +71,7 @@ collect_templates :: fn($impl: Type, $g: Tc.GateGroup, $pin_layouts: ~A, $body: 
             @assert_eq(it.pins.len, it.in_arity + it.out_arity, "pin count (%)", it.name);
             @assert_eq(it.bit_width.len, it.pins.len, "width count (%)", it.name);
         }
+        @assert_le(it.pins.len, max_in_out_wires, "builtin % has too many pins", it.name);
         if !reused {
             it = ast_alloc().boxed(Template, it[]);
         };
@@ -105,7 +107,7 @@ templates :: collect_templates(impl, .Tc1, pin_layouts) { it, k |
 templates2 :: collect_templates(impl2, .Tc2, pin_layouts2) { it, k |
     it.bit_width = get_width_data2(it);
     it.has_param = it.has_param || @is(k, .Static_indexer, .Segment_display, .Load_port, .Store_port, .Ram_v2, .Keyboard_v2, .Static_indexer_config);
-    if @is(k, .Register_word, .Register_bit, .Delay_line_word, .Delay_line_bit, .Counter, .Static_eval, .Static_value) {
+    if @is(k, .Register_word, .Register_bit, .Delay_line_word, .Delay_line_bit, .Counter, .Static_eval) {
         it.inputs_for_pure_eval = empty();
     };
     if k == .Static_indexer_config {
@@ -113,6 +115,10 @@ templates2 :: collect_templates(impl2, .Tc2, pin_layouts2) { it, k |
     };
     if k == .Load_port {
         it.switches = ast_alloc().alloc_init(Template.SwitchablePin, 1, fn(i) => (value_output_index = 0, condition_input_index = 0));
+    };
+    if pin_names.get(k) { names |
+        @assert_eq(names.len, it.pins.len, "% pin arity mismatch", k);
+        it.pin_names = names;
     };
 };
 
@@ -812,8 +818,7 @@ SpriteDisplay :: device(0, 4,
     fn(it) => size_of(SpriteData) * 256 * 8,
     fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 4), _0: i64, instance: i64, _1: bool) void = {
         command, sprite, position, size := (i[0], i[1], i[2], i[3]);
-        data := world.storage.subslice(instance, size_of(SpriteData) * 256);
-        data := SpriteData.reinterpret_bytes(data.interpret_as_bytes());
+        data := world.storage.rest(instance).interpret_as_bytes().peek_slice(SpriteData, 256);
         @switch(command) {
             @case(1) => {
                 s := data[sprite]&;
@@ -987,8 +992,8 @@ Store_port :: device(0, 3,
         instance := world.storage[instance];  // the linked ram
         data := world.storage.rest(instance).interpret_as_bytes().slice(0, param.get(.ram_size_bytes));
         address := address.umod(data.len);  // TODO: i think its always a power of 2
-        //@if((address + param.get(.width)/8).ugt(data.len)) return();
         data := data.rest(address);
+        @if(param.get(.width).udiv(8).ugt(data.len)) return();  // TODO: am i supposed to wrap the bytes seperately for unaligned store?
         @switch(param.get(.width)) {
             @case(8) => { data[0] = value.trunc(); };
             @case(16) => { u16.reinterpret_bytes(data)[0] = value.trunc(); };
@@ -1331,7 +1336,7 @@ pin_layouts2 :: @static @(parse_pin_layouts(.Tc2)) (
     ((2, 0), (-2, 0), (1, -1), (-1, -1))),
 ((.Time), 
     ((2, 0))),
-((.Equal, .Less_u, .Less_s, .Or_word, .And_word, .Nand_word, .Nor_word, .Xor_word, .Mul, .Div, .Mod, .Lsl, .Lsr, .Rol, .Ror, .Asr), 
+((.Equal, .Less_u, .Less_s, .Or_word, .And_word, .Nand_word, .Nor_word, .Xor_word, .Xnor_word, .Mul, .Div, .Mod, .Lsl, .Lsr, .Rol, .Ror, .Asr), 
     ((2, 0), (-1, -1), (-1, 1))),
 ((.Add), 
     ((2, 0), (1, 2), (0, -2), (-1, 1), (-1, -1))),
@@ -1500,23 +1505,45 @@ get_width_data2 :: fn(it: *Template) []u8 = {
     x.shallow_copy(a)
 }
 
-parse_pin_layouts :: fn($g: Tc.GateGroup) FuncId = (fn(e: FatExpr) FatExpr #macro = {
-    G :: GateName(g);
-    result: OptionalEnumMap(G, []Pin) = empty();
+pin_names :: @static @parse_pin_names(
+    ((.Load_port), ("", "Enable", "Address")),
+    ((.Store_port), ("Enable", "Address", "Value")),
+    ((.Switch_bit, .Switch_word), ("", "Value", "Enable")),
+    ((.Register_word, .Counter), ("Old", "EnableWrite", "Value")),
+    ((.Register_bit), ("Old", "Value", "EnableWrite")),
+    ((.Full_adder), ("Sum", "CarryOut", "A", "B", "CarryIn")),
+    ((.Add), ("Sum", "CarryOut", "CarryIn", "A", "B")),
+    ((.Mux), ("", "Condition", "In0", "In1")),
+    ((.Div, .Mod), ("", "Dividend", "Divisor")),
+    ((.Lsl, .Lsr, .Rol, .Ror, .Asr), ("", "In", "Shift")),
+    ((.Less_u, .Less_s), ("", "A", "B")),
+    ((.Screen), ("EnableSettingWrite", "SettingIndex", "SettingValue")),
+    ((.Time), ("Nanoseconds")),
+    ((.Keyboard_v2), ("EventWaiting", "KeyValue", "KeyDown", "Next")),
+    ((.Static_indexer_config), ("", "In", "Shift", "Width")),
+    ((.Static_eval), ("AsValue", "AsSize", "A", "B")),
+    ((.Static_value), ("AsValue", "AsSize")),
+    ((.Decoder_3), ("", "", "", "", "", "", "", "", "Index", "Disable")),
+);
+
+parse_pin_layouts :: fn($g: Tc.GateGroup) FuncId = parse_multi_map(GateName(g), Pin);
+parse_pin_names :: parse_multi_map(GateName(.Tc2), Str);
+parse_multi_map :: fn($G: Type, $Value: Type) FuncId = (fn(e: FatExpr) FatExpr #macro = {
+    result: OptionalEnumMap(G, []Value) = empty();
     each e&.items() { entry |
         e := entry.items();
         names, pins := (e[0]&, e[1]&);
-        pins_value := collect_values(Pin, pins);
+        pins_value := collect_values(Value, pins);
         names_value := collect_values(G, names);
         for names_value { name |
             prev := result&.insert(name, pins_value);
-            @ct_assert(prev.is_none(), entry.loc, "% used twice in pin_layouts", name);
+            @ct_assert(prev.is_none(), entry.loc, "% used twice", name);
         };
     };
     collect_values :: fn($T: Type, e: *FatExpr) []T #generic = {
         es := e.items();
         out := T.list(es.len, ast_alloc());
-        if !es[0].expr&.is(.Tuple) && !es[0].expr&.is(.ContextualField) {
+        if !es[0].expr&.is(.Tuple) && !es[0].expr&.is(.ContextualField) && !es[0].expr&.is(.String) {
             out&.push(T.const_eval(e[]));
         } else {
             each es { e |

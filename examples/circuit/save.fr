@@ -54,7 +54,7 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
             @fmt(out, " G % %,%,% ", it.kind.id, it.pos.x, it.pos.y, it.rotation);
             shape := get_builtin_shape(it.kind);
             
-            if group(it.kind) != .Tc2 && !shape.has_param {
+            if group(it.kind) == .Tc1 && !shape.has_param {
                 @fmt(out, "0 ");
             } else {
                 @fmt(out, "%", it.settings.len);
@@ -75,12 +75,12 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
                     need_files&.set(s[0]);
                 };
             };
-            if is_link_target(it.kind) {
-                @fmt(out, "% ", it.link_id);
+            if is_linkable(it.kind) {
+                @fmt(out, "id% ", it.link_id);
             };
             
-            @if(it.data.len > 0) write_bytes(out, it.data);
-            @if(it.label.len > 0) write_bytes(out, it.label);
+            @if(it.data.len > 0) { @fmt(out, "D"); write_bytes(out, it.data.items()); };
+            @if(it.label.len > 0) { @fmt(out, "L"); write_bytes(out, it.label); };
             
             @fmt(out, "\n");
         };
@@ -101,7 +101,9 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
             @fmt(out, "\n");
         };
         each c.programs { it |
-            @fmt(out, " P % % ", it.gate_index, it.level_id);
+            @fmt(out, " P % ", it.gate_index);
+            key := @if(it.level_name == "", @tfmt("%", it.level_id), it.level_name);
+            write_bytes(out, key);
             write_bytes(out, it.name);
             write_bytes(out, it.assembly || "");
             @fmt(out, "\n");
@@ -164,7 +166,7 @@ HELP :: """
  C https://franca.lukegrahamlandry.ca
  C H kind id ngates nwires ndeps nprograms min max tickrate isarch name
  C D []depid
- C G kind pos,rotation (id pinoffset) (s0,s1) (linkid) (data label)
+ C G kind pos,rotation (id pinoffset) [](settings) id(linkid) D(data) L(label)
  C W count []pos
  C M mnemonics
  C P gateindex levelid name assembly
@@ -225,7 +227,6 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
                 custom_id = zeroed(Tc.CustomId),
                 kind = (id = kind_id.trunc()),
                 pos = vec2(pos_x.float().cast(), pos_y.float().cast()),
-                data = "",
                 mystery_spice_minus_fifteen_for_custom_pins = vec2(0), 
                 link_id = -1,
                 label = "",
@@ -248,13 +249,13 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
                 gate.mystery_spice_minus_fifteen_for_custom_pins = vec2(tc_junk_x.float().cast(), tc_junk_y.float().cast());
             };
             
-            if is_link_target(shape.kind) {
+            if in&.pop_prefix("id") {
                 gate.link_id = get_int();
             };
-            if in.starts_with("#") {
-                gate.data = get_str();
+            if in&.pop_prefix("D") {
+                gate.data = get_str().as_raw_list();
             };
-            if in.starts_with("#") {
+            if in&.pop_prefix("L") {
                 gate.label = get_str();
             };
         };
@@ -275,8 +276,12 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
         
         mnemonics := @if(pop_prefix(in&, "M "), get_str(), "");
         while => pop_prefix(in&, "P ") {
-            gate, level, name, assembly := (get_int(), get_int(), get_str(), get_str());
-            programs&.push(level_id = level, name = name, gate_index = gate, assembly = @if(assembly.len == 0, .None, (Some = assembly)));
+            gate, key, name, assembly := (get_int(), get_str(), get_str(), get_str());
+            level := {
+                v, r := convert_number(key, 10, dec_digit);
+                @if(r.len == 0, v, -1)
+            };
+            programs&.push(level_id = level, level_name = key, name = name, gate_index = gate, assembly = @if(assembly.len == 0, .None, (Some = assembly)));
         };
         
         circuits.push(
@@ -339,8 +344,5 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
         s
     };
 }
-
-is_link_target :: fn(kind: ComponentId) bool = 
-    group(kind) == .Tc1 && @is(Tc'gate_name(kind, .Tc1), .Rom, .Hdd, .Ram, .RamFast, .RamDualLoad);
 
 #use("@/examples/circuit/eval.fr");

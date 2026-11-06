@@ -36,6 +36,7 @@ Circuit :: @struct {
     // these are based on layout of the implementation. 
     pins: []Ty(i64, i64) = empty();
     bit_width: []u8 = empty();  // io only
+    pin_names: []Str = empty();
     switches: []SwitchablePin = empty();
     
     inlined: RawList(InlineRecord) = empty();
@@ -59,7 +60,7 @@ Circuit :: @struct {
         // TODO: v2 sanely got rid of the -15 so move that just to the v1 loader
         mystery_spice_minus_fifteen_for_custom_pins: Vec2 = vec2(0);
         settings: []i64 = empty();
-        data: []u8 = "";
+        data: RawList(u8) = empty();
         logical_gate_index := -1;
         link_id: i64 = 0;  // ram.link_id is referenced by console.data. `{rom.link_id}.rom` file has init data. 
         label: Str = "";
@@ -198,12 +199,12 @@ load_all_circuits :: fn(original_root: Str, a: Alloc, warn: *List(u8)) Ty([]Circ
             check_file :: fn($name: Str, ext) => {
                 kind := get_component_by_name(name, builtin_components);
             if it.kind.id == kind.id {
-                it.data = "";
+                it.data = empty();
                 if read_entire_file(a, @tfmt("%%.%", dir, it.link_id, ext)) { data |
-                    it.data = data;
+                    it.data = data.as_raw_list();
                 };
                 if read_entire_file(a, @tfmt("%sandbox/%.%", dir, it.link_id, ext)) { data |
-                    it.data = data;
+                    it.data = data.as_raw_list();
                 };
                 continue();
             };
@@ -214,19 +215,19 @@ load_all_circuits :: fn(original_root: Str, a: Alloc, warn: *List(u8)) Ty([]Circ
             };
             file_index := it.settings&[0]&;
             file_index[] = -1;
-            if has_path_escapes(it.data) {
-                @fmtln(warn, "FileLoader path [%] is sketchy", it.data);
+            if has_path_escapes(it.data.items()) {
+                @fmtln(warn, "FileLoader path [%] is sketchy", it.data.items());
                 continue();
             };
-            @if(it.data == "") continue();  // none selected
+            @if(it.data.len == 0) continue();  // none selected
             
-            path := @tfmt("%%", dir, it.data);
+            path := @tfmt("%%", dir, it.data.items());
             data := read_entire_file(a, path) || {
                 @fmtln(warn, "- failed to read [%] for file loader in [%]", path, name);
                 continue();
             };
             file_index[] = tc_file_loader_device.len;
-            tc_file_loader_device&.push(name = it.data, data = data);
+            tc_file_loader_device&.push(name = it.data.items(), data = data);
         };
         
         circuits&.push(info);
@@ -279,6 +280,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     a := arena;
     gates, wire_count := find_pins(c, a, circuits, warn, unimplemented&);
     custom_pins := Ty(i64, i64).list(a);
+    pin_names := Str.list(a);
     switches := Circuit.SwitchablePin.list(a);
     cc_output := @ref WireId.list(temp());
     
@@ -405,6 +407,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 
                 x, y := fix_pin_position(original_gate.pos);
                 insert(custom_pins&, dest, (x, y));
+                pin_names&.insert(dest, original_gate.label);
                 width: u8 = @if(shape.name == "Cc_input" || shape.name == "Level_input_switched",
                     original_gate.settings[0].trunc(),
                     @if(shape.name == "Cc_output", 64,   // :InferCc_output
@@ -423,6 +426,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 if is_switchable_output {
                     insert(custom_pins&, dest + 1, (HACK_NONE_PIN_POSITION, HACK_NONE_PIN_POSITION));
                     insert(bit_width&, dest + 1, 1);
+                    pin_names&.insert(dest + 1, "");
                     output_pin_count += 1;
                 };
                 
@@ -432,6 +436,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 if /* shape.name == "LevelInputArch" ||*/ shape.name == "Level_input_switched" {
                     insert(custom_pins&, dest + 1, (HACK_NONE_PIN_POSITION, HACK_NONE_PIN_POSITION));
                     insert(bit_width&, dest + 1, 1);
+                    pin_names&.insert(dest + 1, "");
                 };
                 
                 output_pin_count += int(!is_input); 
@@ -468,6 +473,9 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                         continue();
                     };
                     child_logical := components.index(child_logical.id.zext());
+                    if child_logical.error {
+                        unimplemented = true;
+                    };
                     inline_for_bidirectional_gates(c, child_logical, gates&, wire_count&, extra_gates&, i, a, @slice(in.items(), out.items(), cc_output.items()), original_gate);
                 };
             } 
@@ -510,15 +518,11 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     linkables := assign_port_links(c.gates.items(), warn);    
     
     c.arity = (out.len, in.len);
-    if unimplemented { 
-        gates.len = 0;
-        logical_to_circuit.len = 0;
-        @fmtln(warn, "something was unimplemented in (%)", c.name);
-    };
     
     bit_width := bit_width.items();
     
     c.pins = custom_pins.items();
+    c.pin_names = pin_names.items();
     c.switches = switches.items();
     push_inputs_outputs(gates&, out.items(), in.items());
     logical_to_circuit&.insert(0, -1);  // in
@@ -609,7 +613,7 @@ find_links_for_lastest_component :: fn(c: *Circuit, components: []Component, lin
                 continue();
             };
             // TODO: can id be negative?
-            custom_string := it.data;
+            custom_string := it.data.items();
             linked0, s := convert_number(custom_string, 10, dec_digit);
             if s.len == custom_string.len {
                 if custom_string != "" {
@@ -629,7 +633,7 @@ find_links_for_lastest_component :: fn(c: *Circuit, components: []Component, lin
                 continue();
             };
             // it needs to be one that uses Settings.Ram because that's what tc'init expects
-            // TODO: be more safe about that but this check should be enough because most stuff wont be in `linkables`
+            // TODO: be more safe about that now that is_linkable has other stuff in it 
             ram_kind := component.gates[ram.logical_gate_index].kind;
             if ram_kind.group() != .Tc1 || ram_kind.id == it.kind.id {
                 @fmtln(warn, "console must link to v1 ram");
@@ -643,8 +647,8 @@ find_links_for_lastest_component :: fn(c: *Circuit, components: []Component, lin
 };
 
 fn is_linkable(kind: ComponentId) bool = @match(group(kind)) {
-    fn Tc1() => @is(name(kind, .Tc1), .Console, .Ram, .RamLatency, .RamFast, .RamDualLoad, .Program, .Rom);
-    fn Tc2() => kind.is_port() || @is(name(kind, .Tc2), .Ram_v2, .Screen);
+    fn Tc1() => @is(name(kind, .Tc1), .Console, .Ram, .RamLatency, .RamFast, .RamDualLoad, .Program, .Rom, .Hdd);
+    fn Tc2() => kind.is_port() || @is(name(kind, .Tc2), .Ram_v2, .Screen, .Static_value);
     @default => false;
 };
 
@@ -780,7 +784,8 @@ inline_for_bidirectional_gates :: fn(parent: *Circuit, child_logical: *Component
             @debug_assert_eq(gate.inline_record, 0xFFFFFFFF);
             link_id := new.param;
             found := false;
-            static_values := original_gate.settings.rest(2);
+            
+            static_values := @if(original_gate.settings.len > 2, original_gate.settings.rest(2), empty());
             range(0, static_values.len/2) { i |
                 id, value := (static_values[i*2], static_values[i*2+1]);
                 if !found && id == link_id {
@@ -1221,7 +1226,7 @@ pack_param :: fn(circuits: []Circuit, c: *Circuit, it: *Circuit.Gate, gate_i: i6
                     size := s.get(.storage_size) * s.word_size();
                     @if(size > it.data.len) @fmtln(warn, "TODO: rom file too large for storage");
                     @if(size < it.data.len) @fmtln(warn, "TODO: rom file too small for storage");
-                    it.data = it.data.slice(0, min(size, it.data.len));
+                    it.data.len = min(size, it.data.len).max(0);
                 };
                 
                 param = s.repr.bitcast();
@@ -1250,6 +1255,7 @@ pack_param :: fn(circuits: []Circuit, c: *Circuit, it: *Circuit.Gate, gate_i: i6
             s := it.settings;
             @match(k) {
                 fn Static_indexer() => {
+                    @if(s.len < 3) return(0);
                     width, shift := (s[0], s[2]);
                     @if(width == MIN_i64) @fmtln(warn, "auto width static indexer?");
                     s: Builtin.Settings.StaticIndex = construct(width = width, shift = shift.abs(), left = int(shift < 0), valid = 1);
@@ -1259,6 +1265,7 @@ pack_param :: fn(circuits: []Circuit, c: *Circuit, it: *Circuit.Gate, gate_i: i6
                     param = 0;  // v2 no colour
                 }
                 fn Constant() => {
+                    @if(s.len < 3) return(0);
                     param = s[2];
                     if s[0].ult(64) {
                         // ex. if you type -1 in the box but set the width lower you dont get 64 1s
@@ -1274,6 +1281,7 @@ pack_param :: fn(circuits: []Circuit, c: *Circuit, it: *Circuit.Gate, gate_i: i6
                 fn Maker_word_4() => maker(s[0], 4);
                 fn Maker_word_8() => maker(s[0], 8);
                 fn Ram_v2() => {
+                    @if(s.len < 3) return(0);
                     s: Builtin.Settings.Ram_v2 = construct(
                         init = s[s.len - 1], // InitDataKind
                         little_endian = s[s.len - 2],
@@ -1630,7 +1638,7 @@ infer_auto_width :: fn(components: []Component, gates: []Component.Gate, width: 
 find_static_eval_expression :: fn(circuits: []Circuit, c: *Circuit, logical_to_circuit: []i64, gate_i: i64, gate: *Component.Gate, components: []Component) ?Str = {
     gi := logical_to_circuit[gate_i];
     if gi != -1 {
-        return(Some = c.gates[gi].data);
+        return(Some = c.gates[gi].data.items());
     };
     gate_i := (); logical_to_circuit := ();
     
@@ -1646,7 +1654,7 @@ find_static_eval_expression :: fn(circuits: []Circuit, c: *Circuit, logical_to_c
             || return(.None);
         // :SLOW
         if source.gates.find(fn(it) => it.logical_gate_index == gate.inline_index.zext()) { g_gate |
-            return(Some = g_gate.data);
+            return(Some = g_gate.data.items());
         };
         
         c = source;
@@ -1904,7 +1912,7 @@ set_initial_data :: fn(world: *World, circuits: []Tc.Circuit, root: ComponentId,
         n := get_storage_count(world.components, gate);
         dest := world.storage.subslice(instance, n);
         src := @match(gate.kind.name(.Tc1)) {
-            fn Rom() => c_gate.data;
+            fn Rom() => c_gate.data.items();
             fn Program() => {
                 asm := circuit.programs.find(fn(it) => it.level_id == Tc.Circuit.Program.SANDBOX_LEVEL_ID && it.assembled.is_some() && it.gate_index == c_gate_i) 
                     || continue(@println("TODO: missing program assembly for gate[%]", gate_i));
@@ -2212,7 +2220,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
             kind = (id = kind.zext() + component_offset(.Tc1).trunc()),
             pos = pos,
             settings = shallow_copy(@slice(s1, s2), a),
-            data = custom_string.shallow_copy(a),
+            data = custom_string.shallow_copy(a).as_raw_list(),
             mystery_spice_minus_fifteen_for_custom_pins = custom_pos, 
             link_id = id,
             label = "",
@@ -2279,7 +2287,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
                     kind = (id = kind.zext() + trunc(component_offset(.Tc2))),
                     pos = pos,
                     settings = s.items(),
-                    data = custom_string.shallow_copy(a),
+                    data = custom_string.shallow_copy(a).as_raw_list(),
                     mystery_spice_minus_fifteen_for_custom_pins = vec2(-15), 
                     link_id = id,
                     label = user_label.shallow_copy(a),
