@@ -14,6 +14,10 @@ followed closedly by:
 pretty embarrassing how long i've let this go on for 
 but im so afraid that i'll have to redo the whole overloading system to make it sane. 
 
+also sad that i dont use the nice ?T for Option(T) syntax because my tagged unions always 
+have a gigantor 8 byte tag so using a u32 index with 0xFFFFFFFF reserved as a sentinal 
+for none is way more memory efficient. should let you use that syntax for cool niche shit instead.
+
 ---
 
 DO THE FUCKING INLINING SORT ORDER THING   
@@ -50,6 +54,8 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
     but its only 16k lines of code. yikes 380k lines of ir before i gets cleaned up tho. easy to forget how ass my frontend is cause it doesdent matter most of the time. 
   - key to reload the circuits from disk (for when editing tests in the game)
   - tests for gui showing remapped inlined gates now that its so convoluted
+    (could just have it spam render one frame at each possible place to enter a component). 
+  - kinda silly but should at least have temporary tests for myself that run the schematic hub things that are big/annoying enough that i dont want to keep them (yet another doom or linux or whatever)
   - set_initial_data for inlined CCs
   - larger than 8 bit static values
 - it technically works now but the circuit editor still feels incredibly bad to use. 

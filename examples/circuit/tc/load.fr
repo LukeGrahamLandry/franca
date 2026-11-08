@@ -292,6 +292,8 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     in, out := (WireId.list(a), WireId.list(a));
     bit_width := u8.list(a);
     output_pin_count := 0;
+    // note: gates starts out 1 to 1 with c.gates. some are appended in this loop when inlining. 
+    //       then some are killed at the beginning. more are appended for casts. then they're reordered for schedual. 
     range(0, gates.len) { i |  // gate.push in this loop
         continue :: local_return;
         it := gates.index(i); 
@@ -487,6 +489,13 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     };    
     range_rev(0, c.gates.len) { i |
         if kill&.get(i) {
+            // :SLOW
+            each gates { it |
+                if it.port_linked_list - 1/*:confusing*/ > i {
+                    it.port_linked_list -= 1;
+                };
+            };
+            
             gates&.ordered_remove(i);
         }
     };  
@@ -494,8 +503,14 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     
     // (v2) outputs are always bidirectional but i'd rather they not be 
     //      so try to find situations where it doesn't matter. 
+    // TODO: i think i need to give up on this. 
+    //       there can be a dependency cycle where there are disjoint sections in the CC  
+    //       and some of the inputs depend on some of the outputs but you only find that out at 
+    //       the usage site. (inputs_for_pure_eval can only help if pre_read can get ALL the inputs with some of the outputs). 
+    //       ex. "ITPC" in "Symphony-Pro"
     if cc_output.len != 0 {
         break :: local_return;
+        // @if(c.name == "ITPC") { c.has_bidirectional_pins = true; break(); }; // HACK example
         for cc_output { id |
             has_def := false;
             each gates { it |
@@ -542,6 +557,10 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         
         if gates[i].inline_record != 0xFFFFFFFF {
             c.inlined[gates[i].inline_record.zext()].gates[gates[i].inline_index.zext()] = i;
+        };
+        if gates[i].port_linked_list != -1 {
+            // :SLOW but will only happen for ports that were inlined
+            gates[i].port_linked_list = order.index_of(fn(it) => it[] == gates[i].port_linked_list).unwrap();
         };
         
         @if(o[] >= logical_to_circuit.len) continue();  // it's a pre_read split
@@ -694,9 +713,10 @@ assign_port_param :: fn(gates: []Circuit.Gate, logical: []Component.Gate, linkab
     for linkables { i |
         continue :: local_return;
         gate := gates[i]&;
-        @if(group(gate.kind) != .Tc2 || name(gate.kind, .Tc2) != .Ram_v2) continue();
         @if(gate.logical_gate_index == -1) continue();
-        
+        @if(gate.port_linked_list == -1) continue();
+        logical[gate.logical_gate_index].port_linked_list = gates[gate.port_linked_list].logical_gate_index;
+        @if(group(gate.kind) != .Tc2 || name(gate.kind, .Tc2) != .Ram_v2) continue();
         p := logical[gate.logical_gate_index]&.get_param(.Ram_v2)[];
         ram_size_bytes, little_endian := (p.get(.ram_size_bytes), p.get(.little_endian) == 1);
         
@@ -750,6 +770,7 @@ inline_for_bidirectional_gates :: fn(parent: *Circuit, child_logical: *Component
         };
     };
     
+    start_gate_count := gates.len;
     enumerate child_gates { rel_gate_i, gate |
         @debug_assert(gate.pre_read == -1, "shouldnt do real schedule if bidirectional");
         
@@ -776,6 +797,8 @@ inline_for_bidirectional_gates :: fn(parent: *Circuit, child_logical: *Component
             temporary_bit_width_for_constant = gate.temporary_bit_width_for_constant,  // TODO: unit test that needs this
             inline_record = parent.inlined.len.trunc() - 1,
             inline_index = rel_gate_i.trunc() + 1,
+            // :confusing, rel_gate_i off by one skip input but also push_inputs_outputs later
+            port_linked_list = @if(gate.port_linked_list == -1, -1, gate.port_linked_list + start_gate_count),
         );
         extra_gates[] += 1;
         
@@ -869,6 +892,7 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
         if has_storage(components, gate.kind) && c.inputs_for_pure_eval.len != i_n && o_n != 0 {
             @debug_assert(!gate.kind.is_port());
             gate.pre_read = i;
+            @debug_assert_eq(gate.port_linked_list, -1);
             gates[i].post_read = gates.len; 
             gates&.push(gate);
         };
@@ -954,8 +978,28 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
         
         // ports on the same ram execute top down. 
         if ok && it.kind.is_port() {
+            break :: local_return;
+            // TODO: doing these differently if already inlined or not is stupid
+            // :paste :paste :paste :paste
             g_i := logical_to_circuit[i];
-            @debug_assert_ne(g_i, -1, "port?");
+            if g_i == -1 {
+                it := it;
+                @debug_assert_ne(it.port_linked_list, i, "port cycle");
+                if it.port_linked_list != -1 {
+                    while => it.port_linked_list != -1 && @is(name(it.kind, .Tc2), .Load_port, .Pipelined_load_port) {
+                        it = gates[it.port_linked_list]&;
+                        @if(it.port_linked_list != -1) @debug_assert_ne(it.port_linked_list, gates[it.port_linked_list].port_linked_list, "port cycle");
+                    };
+                    
+                    if it.port_linked_list != -1 {
+                        i := it.port_linked_list;
+                        if !done&.get(i) {
+                            gates_needed.push(i);
+                            ok = false;
+                        };
+                    };
+                };
+            } else {
             g := c.gates[g_i]&;
             if g.port_linked_list != -1 {
                 // adjacent load order doesnt matter, go up until a store
@@ -971,9 +1015,10 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
                     };
                 };
             };
+            };
         };
         
-        @debug_assert_eq(ok, gates_needed.len == 0 && wires_needed.len == 0);
+        @if(!error) @debug_assert_eq(ok, gates_needed.len == 0 && wires_needed.len == 0);
         if !ok {
             stack.push_all(gates_needed.items());
             if gates_needed.len == 0 {
@@ -1030,6 +1075,7 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
                 
                 if it.kind.is_port() {
                     g_i := logical_to_circuit[i];
+                    if g_i != -1 {
                     g := c.gates[g_i]&;
                     if g.port_linked_list != -1 {
                         if logical_to_circuit.index_of(fn(it) => it[] == g.port_linked_list) { i | // :SLOW
@@ -1037,6 +1083,7 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
                                 @fmtln(warn, "- port not ready");
                             };
                         };
+                    };
                     };
                 };
                 };
@@ -1185,7 +1232,7 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8), uni
             if group(it.kind) == .Tc2 {
                 k := name(it.kind, .Tc2);
                 new.temporary_bit_width_for_constant = it.settings[0];
-                if it.settings[0] == MIN_i64 || @is(k, .Concatenator_2, .Concatenator_4, .Concatenator_8, .Static_eval, .Static_value, .Static_indexer_config) {
+                if it.settings[0] == MIN_i64 || @is(k, .Concatenator_2, .Concatenator_4, .Concatenator_8, .Static_eval, .Static_value, .Static_indexer_config, .Delay_line_word_config) {
                     new.temporary_auto_width = true;
                 };
             };
@@ -1197,7 +1244,7 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8), uni
 pack_param :: fn(circuits: []Circuit, c: *Circuit, it: *Circuit.Gate, gate_i: i64, second_output_is_unused: bool, unimplemented: *bool, warn: *List(u8)) i64 = {
     shape := get_builtin_shape(it.kind);
     if !shape.has_param {
-        if group(it.kind) == .Tc2 && name(it.kind, .Tc2) != .Custom_v2 {
+        if group(it.kind) == .Tc2 && name(it.kind, .Tc2) != .Custom_v2 && name(it.kind, .Tc2) != .Delay_line_word_config {
             s0 := it.settings[0];
             @if(s0 != MIN_i64 && s0.ugt(64)) @fmtln(warn, "bad width % for % (in %)", s0, shape.name, c.name);
             return @if(s0 == MIN_i64, 0, s0);
@@ -1298,7 +1345,7 @@ pack_param :: fn(circuits: []Circuit, c: *Circuit, it: *Circuit.Gate, gate_i: i6
                     param = s.repr.bitcast();
                 };
                 @default => {
-                    if @is(k, .Splitter_word_8, .Splitter_word_4, .Splitter_word_2, .Less_s, .Asr) {
+                    if @is(k, .Splitter_word_8, .Splitter_word_4, .Splitter_word_2, .Less_s, .Asr, .Clz, .Ctz) {
                         param = @if(s[0] == MIN_i64, 0, s[0]);
                     };
                     if @is(k, .Splitter_bit_8, .Splitter_bit_4, .Splitter_bit_2) {
@@ -1547,12 +1594,14 @@ infer_auto_width :: fn(components: []Component, gates: []Component.Gate, width: 
         unordered_retain(work) { gate_i |
             continue :: local_return;
             gate := gates.index(gate_i[]);
-            // TODO: you dont depend on all the inputs. ex. Static_indexer_config only needs the two comptime inputs not the runtime one
-            for gate.inputs { id |
+            k := name(gate.kind, .Tc2);
+            // the ones configurable by static pins don't care about the runtime pin widths. 
+            // TODO: there are more like this ex. mux/add have a 1 bit pin that doesnt matter
+            skip := @if(@is(k, .Delay_line_word_config, .Static_indexer_config), 1, 0);
+            for gate.inputs.rest(skip) { id |
                 @if(!width_known.get(id.id.zext())) continue(true);
             };
             param := 0; 
-            k := name(gate.kind, .Tc2);   
             
             if @is(k, .Splitter_word_8, .Splitter_word_4, .Splitter_word_2) {
                 param = width[gate.inputs[0].id.zext()].zext().align_to(gate.outputs.len).div(gate.outputs.len);
@@ -1604,11 +1653,14 @@ infer_auto_width :: fn(components: []Component, gates: []Component.Gate, width: 
                     p: Builtin.Settings.StaticIndex = construct(width = w, shift = s, left = 0, valid = 1 /* zero param means not done */);
                     param = p.repr.bitcast();
                 }
+                fn Delay_line_word_config() => {
+                    param = width[gate.inputs[1].id.zext()].zext();
+                }
                 @default => ();
             };
             
             shape := get_builtin_shape(gate.kind);
-            if !shape.has_param || @is(k, .Less_s, .Asr) {
+            @if(param == 0) if !shape.has_param || @is(k, .Less_s, .Asr, .Clz, .Ctz) {
                 x: u8 = 0;
                 enumerate gate.inputs { i, id |
                     x = max(x, width[id.id.zext()]);
@@ -1744,7 +1796,7 @@ fn get_bit_width(shape: *Tc.Builtin.Template, param: i64) []u8 = {
             return r;
         };
         
-        if @is(k, .Or_word, .And_word, .Xor_word, .Delay_line_word, .Probe_wire_word) {  // all same
+        if @is(k, .Or_word, .And_word, .Xor_word, .Delay_line_word, .Probe_wire_word, .Clz, .Ctz) {  // all same
             return r;
         };
         
@@ -1817,6 +1869,9 @@ fn get_bit_width(shape: *Tc.Builtin.Template, param: i64) []u8 = {
             fn Static_indexer_config() => {
                 p: Builtin.Settings.StaticIndex = (repr = param.bitcast());
                 r.copy_from(@slice(@as(u8) p.get(.width).trunc(), 0x40, 0x40, 0x40));
+            }
+            fn Delay_line_word_config() => {
+                r[2] = 0x40;
             }
             @default => break();
         };

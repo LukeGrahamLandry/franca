@@ -245,6 +245,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     world := state.world&;
     have_logic := state.loader.progress == .Idle && state.tree.len > 0 && state.tree[0].component.is_some() 
+        && state.world.components.len > 0
         && world[state.tree[0].component.Some].gates.len > 2  // HACK for load unimplemented
         && !state.edit.enable;
     eval_this_frame := have_logic && (state.want_eval || state.auto_eval);
@@ -491,6 +492,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         state.finish_screens();
     };
     
+    // without this you get a flicker and occasionally a bounds check assertion! for hopefully intuitive reasons. dear rust would like to have a word im sure.
     if self.open_gate&.take() { a, b, c |  // wait until done rendering components to change the tree. 
         state.open_gate(a, b, c);
     };
@@ -807,8 +809,8 @@ fn show_wire_value(self: *Draw, id: WireId, force_hover: bool) = {
     sdtx.color = self.wire_value_colour&[int(value != 0)];
     sdtx.put(@tfmt("w%", id.id));
     sdtx.color = pack_rgba(150, 150, 150, 255);
-    sdtx.put("=");
     if ok {
+        sdtx.put("=");
         c := self.logical.unwrap();
         bit_width: i64 = @if(i.ult(c.wire_bit_width.len), c.wire_bit_width[i].zext(), 64);
         if bit_width == 1 {
@@ -1225,6 +1227,17 @@ fn child_probes(self: *Draw, gate: *Tc.Circuit.Gate, parent: *Tc.Circuit) void =
         if i != -1 && is_probe {
             x, y := Tc'fix_pin_position(it.pos);
             pos := pos + vec2(x.float().cast(), y.float().cast());
+            
+            // TODO: screen->ram lines should be conditional like this too because the tend to be ugly going across a bunch of wires 
+            // so you can see who the probe belongs to
+            b := self.tc_to_world_pos(pos);
+            if self.hovering_node(b) {
+                a := self.tc_to_world_pos(gate.pos);
+                sgl, W := (self.draw&, self.wire_node_width);
+                sgl.color = pack_rgba(200, 50, 200, 150);
+                sgl.line(a, b, W/4);
+            };
+            
             if inlined {
                 i := parent.inlined[gate.inline_record].gates[i];
                 if i != -1 {
@@ -1411,6 +1424,11 @@ fn resize_screen_atlas(state: *State) void = {
     _ := s.atlas&.push(@slice(0xFFFFFFFF), 1, 1);  // :WhitePixelForDrawingSolidColours
     size := size.intcast();
     s.img = sg.make(width = size, height = size, pixel_format = .BGRA8, data = zeroed(Sg.ImageData), usage = .DYNAMIC);
+    
+    state.dirty = true;  // last frame wasn't fully drawn, retry. 
+    // without this it can't even draw the lines of the circuit on the frame it's resizing
+    // because it tries to use the texture but doesn't have the white pixel yet
+    sg.update_image(s.img, @ref SubImage(s.atlas.buf.interpret_as_bytes()));
 }
 
 display_name :: fn(info: *Builtin.Template, it: *Tc.Circuit.Gate, circuit: []Tc.Circuit) Str = {
@@ -1479,13 +1497,18 @@ EditState :: @struct {
 // TODO: be able to paste to add one circuit without stomping everything. choose (replace all, replace one, add new). same for dragndrop and cli. 
 // TODO: edit more params
 // TODO: allow enter custom component while in edit mode / make new custom components
+// - need to have some sort of feedback if you try to change the pin layout in a way that makes a usage site broken
 // TODO: copy paste a gate (or area)
 // TODO: route better 
 // - keep track of length/direction (dont forget to reconstruct in read_save) and use that to simplify split_for_node
 // - route around gates/pins/nodes so you have to click explicitly if you want it to connect
 // TODO: be able to delete just one wire by clicking on the segment instead of the node
 // TODO: be able to delete a redundant node and have the wires reconnect into a bigger one
+//       (inverse of split_for_node)
 // TODO: key to summon the add gate menu to your current place?
+// TODO: undo. especially because its easy to accidently delete a gate. 
+//       maybe NewGate should never reuse placeholders so deleted ones keep their data and undo can just mark it active again. 
+// TODO: visual feedback when trying to place a gate in a bad place 
 fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
     state := self.state;
     e := state.edit&;
@@ -2495,6 +2518,13 @@ fn load_circuit_index_worker(state: *State, root_index: i64, tc_file_loader_devi
     };
     state.world.components = components.items();
     state.current_jitted_source = src;
+    
+    if components[components.len - 1].error {
+        // might have generated something that will fail to compile. 
+        // but dont want to return .Err because still want to update world in worker_get_output so can see the attempted code
+        src = "{ dispatch :: zeroed([]rawptr); };";
+        state.current_jitted_source = "";
+    };
     (Ok = src)
 }
     

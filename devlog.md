@@ -1,4 +1,28 @@
 
+## (Nov 8) circuit
+
+- fixed the lines flickering away when "RESIZING" the screen texture (because no blank uv). 
+  was only super noticable because not setting state.dirty but even one empty frame looks jarring. 
+
+## (Nov 7) circuit
+
+- i wanted to make the editor better but then got sucked into dumb mistake trying to not compile the source if there was an error in the transpiling.
+  but if it knows theres nothing to compile it doesnt re-init the world and your left in a weird middle static with bogus component indices. 
+  and then oh i'll just add a quick few last components to make a couple schematic hub things work and suddenly its been hours of dubious progress. 
+- ctz,clz really care about width because that's the answer for 0. delay with a size pin. 
+- "Symphony-Pro" has the situation where an auto thing needs to know that its size doesnt depend on all the inputs
+  - also one where a CC just needs to be inlined to break a dep cycle on the outside, can't know from internals.
+- "SoC_RV32IM" has ram&ports inside a CC that gets inlined. 
+  once again trying to have some of the data only be on the graphical gate is a losing battle. 
+  maybe im just making everything over complicated who can say. 
+- blah and those are both big so its kinda sad to commit them and i dont get a satisfying payoff. tho the pro one is just a bunch of zeros (other is doom). 
+
+## (Nov 6) circuit
+
+- eventually i want the ui to be self explanitory without my supervision. 
+  labels on hover for ambiguous pins is biggest thing rn probably. 
+- edit more fields. keep the strings not just the number. 
+
 ## (Nov 5) circuit
 
 - static value/eval/indexer_config
