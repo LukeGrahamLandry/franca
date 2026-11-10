@@ -1,8 +1,21 @@
 
+## (Nov 9) circuit
+
+- now that the editor is somewhat usable, can find new exciting invalid states. 
+  - like load_port without any pins connected isn't a root in schedule_gates so assign_port_param gets confused
+- started making my own levels. bf code+solutions for `,.<>[]`. sad how much new code it takes to do anything at all. 
+  - confused myself by checking for win after resetting for last+1 test. but lead to making a little visualization so thats kinda worth it. 
+- showing the level text on the screen is pretty important. im doing ui in a clumsy way but it's better than nothing. 
+- terminal: fixed scrollbar positioning when at!=0
+
 ## (Nov 8) circuit
 
 - fixed the lines flickering away when "RESIZING" the screen texture (because no blank uv). 
   was only super noticable because not setting state.dirty but even one empty frame looks jarring. 
+- using terminal as text boxes for the editor. 
+  - apply_scissor_rect avoids needing to rely on the edges of the window for clipping and debugtext's layers makes it easy to control when each buffer is draw so it gets the right scissor
+  - nicer support for single line box
+- different fields by type of component
 
 ## (Nov 7) circuit
 

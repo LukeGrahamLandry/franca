@@ -16,6 +16,7 @@ Template :: @struct {
     kind := zeroed(import("@/examples/circuit/compile.fr")'ComponentId);
     pin_radius: f32 = 0;  // used for speeding up placing wires in the editor
     pin_names: []Str = empty();
+    fields: []EditField = empty();
     
     SwitchablePin :: @struct {
         value_output_index: i64;
@@ -23,6 +24,13 @@ Template :: @struct {
     };
     
     Body :: @enum(Unimplemented, Native, IO, Custom);
+};
+EditField :: @struct {
+    name: Str;
+    setting: ?i64 = .None;
+    data_string := false;
+    label_string := false;
+    allow_auto := false;
 };
 Pin :: Ty(i64, i64);
 Tc :: import("@/examples/circuit/tc/load.fr");
@@ -102,6 +110,13 @@ templates :: collect_templates(impl, .Tc1, pin_layouts) { it, k |
             || @is(k, .Program, .Console, .FileLoader, .Rom, .Halt, .Keyboard, .Mul64);
         
         it.bit_width = get_width_data(it);
+
+        fields := @ref EditField.list(ast_alloc());
+        if @is(k, .Constant8, .Constant16, .Constant32, .Constant64, .Counter8, .Counter16, .Counter32, .Counter64, .IndexerBit, .IndexerByte) {
+            fields.push(name = "Value", setting = (Some = 0));
+        };
+        @if(k == .Halt) fields.push(name = "Message", data_string = true);
+        it.fields = fields.items();
 };
 
 templates2 :: collect_templates(impl2, .Tc2, pin_layouts2) { it, k |
@@ -120,6 +135,24 @@ templates2 :: collect_templates(impl2, .Tc2, pin_layouts2) { it, k |
         @assert_eq(names.len, it.pins.len, "% pin arity mismatch", k);
         it.pin_names = names;
     };
+    
+    fields := @ref EditField.list(ast_alloc());
+    // TODO: static value on outside of cc
+    // TODO: Static_value on cc. size/endian on ram. mode on keyboard. 
+    if @is(k, .Constant, .Counter, .Register_word, .Delay_line_word, .Store_port, .Load_port) {
+        fields.push(name = "Width", setting = (Some = 0));
+    };
+    if @is(k, .Static_indexer, .Probe_wire_word, .Not_word, .Neg, .Inc, .Clz, .Ctz, .Equal, .Less_u, .Less_s, .Or_word, .And_word, .Nand_word, .Nor_word, .Xor_word, .Xnor_word, .Mul, .Div, .Mod, .Lsl, .Lsr, .Rol, .Ror, .Asr, .Add, .Mux, .Cc_input, .Cc_output, .Level_output_switched, .Level_input_switched, .Maker_word_2, .Maker_word_4, .Maker_word_8, .Splitter_word_2, .Splitter_word_4, .Splitter_word_8, .Switch_word) {
+        fields.push(name = "Width", setting = (Some = 0), allow_auto = true);
+    };
+    @if(k == .Halt_v2) fields.push(name = "Message", data_string = true);
+    @if(k == .Static_eval) fields.push(name = "Expression", data_string = true);
+    @if(k == .Static_indexer) fields.push(name = "Shift", setting = (Some = 2), data_string = true);
+    @if(k == .Constant) fields.push(name = "Value", setting = (Some = 2), data_string = true);
+    @if(k == .Ram_v2) fields.push(name = "Size", setting = (Some = 1));
+    @if(k == .Ram_v2) fields.push(name = "LittleEndian", setting = (Some = 5));
+    fields.push(name = "Label", label_string = true);
+    it.fields = fields.items();
 };
 
 #use("@/examples/circuit/eval.fr");
@@ -1537,6 +1570,8 @@ pin_names :: @static @parse_pin_names(
     ((.Static_eval), ("AsValue", "AsSize", "A", "B")),
     ((.Static_value), ("AsValue", "AsSize")),
     ((.Decoder_3), ("", "", "", "", "", "", "", "", "Index", "Disable")),
+    ((.Level_output_switched, .Level_input_switched), ("Value", "Enable")),
+    ((.Delay_line_word_config), ("Old", "Value", "Size")),
 );
 
 parse_pin_layouts :: fn($g: Tc.GateGroup) FuncId = parse_multi_map(GateName(g), Pin);

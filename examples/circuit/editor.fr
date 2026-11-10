@@ -1,0 +1,196 @@
+max_gate_text_fields :: 4;
+reserved_buffers :: 1;
+
+fn text_box_consumes_event(e: *EditState, event: *Sapp.Event) bool = {
+    @if(!e.enable && e.show_info_box.is_none()) return(false);
+    @if(event.key_code == .ESCAPE) return(false);  // i want it for closing the field
+    
+    t := e.text_box&;
+    if event.type == .MOUSE_DOWN {
+        Terminal'push_state(t) {
+            e.active_buffer_index = .None;
+            each(t.buffers, fn(buf) => { buf.active = false; });
+            if Terminal'find_mouse(event) { buf, _ |
+                i := t.selected_buffer;
+                I := reserved_buffers;
+                ok := false 
+                || (i < I && e.show_info_box.is_some())
+                || (i >= I && i - I < e.field_names.len && e.field_names[i - I] != "")
+                ;
+                
+                if ok {
+                    buf.active = true;
+                    e.active_buffer_index = (Some = t.selected_buffer);
+                };
+            };
+            if e.active_buffer_index.is_none() {
+                e.show_info_box = .None;
+            };
+        };
+    };
+    if e.active_buffer_index { i |
+        t.selected_buffer = i;  // still allow edit if mouse isn't hovering anymore
+        @if(i == 0, t.features&.unset(.Edit), t.features&.set(.Edit));  // TODO: have features per buffer?
+        on_event(t, t.app, event);
+        return true;
+    };
+    false
+}
+
+// TODO: pass in the sdtx so can use the same one (silly to compile the shader twice)
+fn draw_text_boxes(e: *EditState, sg: *Sg.Self) void = {
+    @if(!e.enable && e.show_info_box.is_none()) return();
+    t := e.text_box&;
+    Terminal'push_state(t) {
+        sdtx := t.text.default_context&;
+        I := reserved_buffers;
+        enumerate t.buffers& { i, b |
+            if i >= I {
+                name := @if(e.field_names.len > i-I, e.field_names[i-I], "");
+                if name != "" {
+                    sdtx.set_layer(i);
+                    with(b.line_lock&, => draw_text(b[]));
+                    sdtx.set_layer(i + t.buffers.len);
+                    sdtx.pos = vec2(0.5 + cast((b.at.pos.x + b.at.w) / t.scale), sdtx.pos.y - 1);
+                    sdtx.put(name);
+                };
+            } else {
+                if e.show_info_box { _ |
+                    sdtx.set_layer(i);
+                    with(b.line_lock&, => draw_text(b[]));
+                };
+            };
+        };
+        
+        range(I, t.buffers.len) { i |
+            sdtx.draw_layer(i + t.buffers.len);
+        };
+        
+        enumerate t.buffers& { i, b |
+            r := b.at;
+            sg.apply_scissor_rect(r.pos.x.cast(), r.pos.y.cast(), r.w.cast(), r.h.cast(), true);
+            sdtx.draw_layer(i);
+            i += 1;
+        };
+    };
+}
+
+fn hover_gate(e: *EditState, i: ?i64, c: *Circuit) void = {
+    t := e.text_box&;
+    @if((e.hovered_gate || -1) == (i || -1)) return();
+    @if(!e.enable) return();
+    
+    e.field_names.set_zeroed();
+    if e.field_names.len == 0 {
+        e.field_names = e.circuit_arena.alloc_zeroed(Str, max_gate_text_fields);
+    };
+    
+    I := reserved_buffers;
+    @if(e.has_text_field) if e.hovered_gate { old_i |
+        g := c.gates[old_i]&;
+        
+        out := @ref u8.list(temp());
+        shape := get_builtin_shape(g.kind);
+        enumerate shape.fields { i, field |
+            out.clear(); get_string(t.buffers[i+I], out); text := out.items();
+            
+            @if(field.data_string) { g.data&.clear(); g.data&.push_all(text, e.circuit_arena); };
+            @if(field.label_string) { g.label&.clear(); g.label&.push_all(text, e.circuit_arena); };
+
+            if field.setting { settings_index |
+                if settings_index >= g.settings.len {
+                    s := e.circuit_arena.alloc_zeroed(i64, settings_index+1);
+                    s.slice(0, g.settings.len).copy_from(g.settings);
+                    g.settings = s;
+                };
+                
+                // TODO: same expressions as Static_eval
+                value, extra := convert_number_prefixed(text);
+                if extra.len == 0 {
+                    g.settings&[settings_index] = value;
+                };
+                @if(field.allow_auto) if text == "auto" || value < 0 {
+                    g.settings&[settings_index] = MIN_i64;
+                };
+            };
+        };
+    };
+
+    for t.buffers { buf |
+        buf.clear_text();
+    };
+    
+    e.hovered_gate = i;
+    e.has_text_field = false;
+    i := i || return();
+    g := c.gates[i]&;
+    shape := get_builtin_shape(g.kind);
+    enumerate shape.fields { i, field |
+        e.field_names[i] = field.name;
+        buf := t.buffers[i+I];
+        @if(field.label_string) buf.append_string(g.label.items());
+        @if(field.data_string) buf.append_string(g.data.items()); 
+        @if(g.data.len == 0 || !field.data_string) if field.setting { settings_index |
+            n := @if(settings_index < g.settings.len, g.settings&[settings_index], 0);
+            if field.allow_auto && n == MIN_i64 {
+                buf.append_string("auto");
+            } else {
+                buf.append_string(@tfmt("%", n));
+            };
+        };
+    };
+    e.has_text_field = shape.fields.len > 0;
+}
+
+fn text_box_selection(self: *Draw) void = {
+    state := self.state;
+    e, sapp := (state.edit&, state.sapp);
+    no_code := e.enable || state.loader.progress != .Idle;
+    names := @slice(
+        ("Component Docs", include_bytes("examples/circuit/docs.md")),
+        ("Level Instructions", state.level.description), 
+        ("Level Code", state.level.quine), 
+        ("Circuit Data", @if(state.loader.progress == .Loading, "", "\n")),
+        ("Circuit Code", @if(no_code, "", state.current_jitted_source)), 
+        ("Warnings", @if(no_code, "", state.warnings.items())), 
+    );
+    prev := e.show_info_box;
+    if state.clicked {
+        e.show_info_box = .None;
+    };
+    range(0, names.len) { i |
+        pos := vec2(-20, (7 + i.float().cast()));
+        if names[i]._1 != "" {
+            self.do_option(pos, names[i]._0, e.show_info_box.is_some() && e.show_info_box.Some == i, i, e.show_info_box&);
+        };
+    };
+    if ((prev || -1) != (e.show_info_box || -1)) {
+        t := e.text_box&;
+        buf := t.buffers[0];
+        buf.clear_text();
+        e.active_buffer_index = .None;
+        each(t.buffers, fn(buf) => { buf.active = false; });
+        if e.show_info_box { i |
+            e.active_buffer_index = (Some = 0);
+            t.lock_to_bottom = false;
+            buf.active = true;
+            pad := 75.0;
+            buf.at = (pos = (x = pad, y = pad), w = sapp.width().float() - pad*2, h = sapp.height().float() - pad*2);
+            @if(names[i]._0 == "Level Instructions") buf.append_string(state.level.title);
+            buf.append_string(names[i]._1);
+            if names[i]._0 == "Circuit Data" {
+                out := @ref u8.list(temp());
+                Save'write_save(state.circuit, state.world.tc_file_loader_device, .None, out, true);
+                buf.append_string(out.items());
+            };
+        };
+    };
+};
+
+Terminal :: import("@/examples/gpu/terminal.fr");
+#use("@/examples/circuit/tc/load.fr");
+#use("@/examples/circuit/compile.fr");
+#use("@/examples/circuit/gui.fr");
+#use("@/graphics/lib.fr");
+
+// TODO: move more stuff out of gui.fr

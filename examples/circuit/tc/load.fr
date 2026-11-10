@@ -63,7 +63,7 @@ Circuit :: @struct {
         data: RawList(u8) = empty();
         logical_gate_index := -1;
         link_id: i64 = 0;  // ram.link_id is referenced by console.data. `{rom.link_id}.rom` file has init data. 
-        label: Str = "";
+        label: RawList(u8) = empty();
         // (screen, console) -> ram
         // ram -> ports
         // port points to the one above it, which it depends on, they're executed top to bottom (reverse order of the linked list)
@@ -409,7 +409,8 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 
                 x, y := fix_pin_position(original_gate.pos);
                 insert(custom_pins&, dest, (x, y));
-                pin_names&.insert(dest, original_gate.label);
+                // TODO: bad if you then edit the label (editor shows pin names on hover)
+                pin_names&.insert(dest, original_gate.label.items());
                 width: u8 = @if(shape.name == "Cc_input" || shape.name == "Level_input_switched",
                     original_gate.settings[0].trunc(),
                     @if(shape.name == "Cc_output", 64,   // :InferCc_output
@@ -684,13 +685,13 @@ assign_port_links :: fn(gates: []Circuit.Gate, warn: *List(u8)) []i64 = {
         @if(group(gate.kind) != .Tc2 || name(gate.kind, .Tc2) != .Ram_v2) continue();
         
         prev := gate;
-        port_pos := gate.pos + vec2(0, -7);
+        port_pos := gate.pos + vec2(0, height_of_port(name(gate.kind, .Tc2)));
         dowhile {
             found := false;
             for linkables { i |
                 it := gates[i]&;
                 if is_port(it.kind) {
-                    height: f32 = @if(name(it.kind, .Tc2) == .Store_port, 3, 2);
+                    height := height_of_port(name(it.kind, .Tc2));
                     if it.pos == port_pos - vec2(0, height) {
                         if prev.port_linked_list != -1 {
                             @fmtln(warn, "multiple ports in the same position");
@@ -723,6 +724,7 @@ assign_port_param :: fn(gates: []Circuit.Gate, logical: []Component.Gate, linkab
         i := gate.port_linked_list;
         while => i != -1 {
             it := gates[i]&;
+            @debug_assert_ne(it.logical_gate_index, -1, "[%] port_linked_list entry has no logical gate", i);
             g := logical[it.logical_gate_index]&;
             @debug_assert(it.kind.is_port() && g.kind.id == it.kind.id, "expected port");
             p := g.get_param(.Port);
@@ -901,7 +903,8 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
     switch_gates := i64.list(temp());
     stack := @ref i64.list(temp());
     enumerate gates { i, it |
-        if it.outputs.len == 0 || it.post_read != -1 {
+        // (load_port with no pins connected is still a root so port_linked_list always has a logical index)
+        if it.outputs.len == 0 || it.post_read != -1 || is_port(it.kind) {
             stack.push(i);
         };
     };
@@ -1245,6 +1248,9 @@ pack_param :: fn(circuits: []Circuit, c: *Circuit, it: *Circuit.Gate, gate_i: i6
     shape := get_builtin_shape(it.kind);
     if !shape.has_param {
         if group(it.kind) == .Tc2 && name(it.kind, .Tc2) != .Custom_v2 && name(it.kind, .Tc2) != .Delay_line_word_config {
+            if @is(name(it.kind, .Tc2), .Not_bit, .Or_bit, .And_bit, .Nand_bit, .Xor_bit, .Nor_bit, .Xnor_bit, .Switch_bit, .Delay_line_bit, .Register_bit, .Probe_wire_bit, .Full_adder, .Or_3_bit, .And_3_bit, .On_v2, .Off_v2) {
+                return 1;
+            };
             s0 := it.settings[0];
             @if(s0 != MIN_i64 && s0.ugt(64)) @fmtln(warn, "bad width % for % (in %)", s0, shape.name, c.name);
             return @if(s0 == MIN_i64, 0, s0);
@@ -2148,6 +2154,14 @@ fn get_param(gate: *Component.Gate, $N: SettingName) *SettingType(N) #generic = 
 fn is_placeholder(kind: ComponentId) bool =  // for deleting in editor
     group(kind) == .Tc1 && Tc'gate_name(kind, .Tc1) == ._0; 
 
+fn height_of_port(k: GateName(.Tc2)) f32 = @match(k) {
+    fn Ram_v2() => -7;
+    fn Store_port() => 3;
+    fn Load_port() => 2;
+    fn Pipelined_load_port() => 2;
+    @default => 0;
+};
+    
 InitDataKind :: @enum(Zeroes, Assembler, PunchCard, File, HexEditor, Persistent);  // order matters
 
 // https://github.com/Stuffe/save_monger/blob/22fa398d95c3d3a0b5e88a80e9daee613cab1823/versions/v6.nim CC0
@@ -2278,7 +2292,6 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
             data = custom_string.shallow_copy(a).as_raw_list(),
             mystery_spice_minus_fifteen_for_custom_pins = custom_pos, 
             link_id = id,
-            label = "",
         );
         } else {
                 settings := eatN(u16, i64);
@@ -2345,7 +2358,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
                     data = custom_string.shallow_copy(a).as_raw_list(),
                     mystery_spice_minus_fifteen_for_custom_pins = vec2(-15), 
                     link_id = id,
-                    label = user_label.shallow_copy(a),
+                    label = user_label.shallow_copy(a).as_raw_list(),
                     watched = watched.items(),
                 );
                 

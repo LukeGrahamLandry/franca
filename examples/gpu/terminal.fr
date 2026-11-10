@@ -30,12 +30,9 @@ Replay :: import("@/graphics/replay.fr");
 State :: @struct(
     HIGH_DPI :: true,
     text: *Sdtx.Self,
-    // TODO: `buffers` was from when i was going to have multiple text boxes, now is useless. 
-    //        OR make an example program that has this State as a field and uses it as a ui with multiple editable textboxes. 
     buffers: List(*TextBuffer),
     // these are the ones that aren't shown but can be popped back to. 
     buffer_stack: List(*TextBuffer),
-    // index in `buffers` but always 0 rn so should just get rid of it
     selected_buffer: i64,
     app: *Sapp.Self,
     sg: *Sg.Self,
@@ -56,6 +53,7 @@ State :: @struct(
     show_hover: bool,
     scrolling: bool,
     features: EnumSet(Feature),
+    full_screen_buffer: bool,
     
     // HACK: this is a pointer because it avoids the repl needing to compile the whole import_c(stb) thing (which needs `DISABLE_IMPORT_FRC::false` in toplevelscope)
     resample_font_f: AsFnPtr(resample_font),
@@ -82,6 +80,7 @@ feature :: fn(it: Feature) bool = state.features&.get(it);
 state :: @static_mut zeroed(*State);
 
 fn on_init(_state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = push_state _state {
+    state.full_screen_buffer = true;
     state.features = full();
     state.app = sapp;
     state.sg = sg;
@@ -382,6 +381,8 @@ handle_event :: fn(event: *Sapp.Event) void = {
             if state.scrolling {
                 update_scroll_position(b, pos);
                 fn update_scroll_position(b: *TextBuffer, pos: Pos) void = {
+                    @if(b.single_line) return();
+                    
                     percentage := (pos.y - b.render.y) / (b.num_lines_fit_on_screen - 2).float();
                     b.render.y = percentage * b.lines.len.float();
                     state.dirty = true;
@@ -452,7 +453,7 @@ handle_event :: fn(event: *Sapp.Event) void = {
         }
     };
     
-    if event.type == .RESIZED {
+    if event.type == .RESIZED && state.full_screen_buffer {
         // the main buffer always covers the whole window
         buffer := state.buffers[0]&;
         buffer.at.w = state.app.framebuffer_width.float();
@@ -620,6 +621,7 @@ handle_event :: fn(event: *Sapp.Event) void = {
         if event.key_code == .ENTER {
             enable := feature(.Exec) || feature(.Repl) || feature(.Help);
             if event.modifiers.get(.shift) != 0 || !enable {
+                @if(buffer.single_line) return();
                 buffer.insert_string("\n", buffer.cursor.x.int(), buffer.cursor.y.int());
                 buffer.cursor.x = 0;
                 return();
@@ -645,6 +647,7 @@ handle_event :: fn(event: *Sapp.Event) void = {
         last := buffer.lines[l]&;
         last.insert_at(buffer.cursor.x.int(), s, buffer.gpa);
         buffer.set_cursor(x = buffer.cursor.x + s.len.float(), y = buffer.cursor.y);
+        buffer.max_x = max(buffer.max_x, last.len().float());
     };
     
     @match(event.type) {
@@ -654,13 +657,17 @@ handle_event :: fn(event: *Sapp.Event) void = {
         fn MOUSE_SCROLL() => {
             scroll_speed :: -2.0;
             buffer.render.x += event.scroll_x.cast() * scroll_speed;
+            if !buffer.single_line {
             buffer.render.y += event.scroll_y.cast() * scroll_speed;
+            };
             update_hover(event);
         };
         fn MOUSE_MOVE() => if event.modifiers.get(.right_mouse) != 0 {
             state.dirty = true;
             buffer.render.x += event.mouse_dx.cast() * -1.0 / state.scale;
+            if !buffer.single_line {
             buffer.render.y += event.mouse_dy.cast() * -1.0 / (state.scale * 2);
+            };
         }
         fn FILES_DROPPED() => if event.drop.len == 1 && feature(.Edit) {
             buffer.append_string(event.drop[0]);
@@ -975,7 +982,7 @@ find_link_at :: fn(b: *TextBuffer, line: i64, col: i64) ?Ty(i64, i64, i64) = {
 }
 
 fn selected_buffer() ?*TextBuffer = {
-    if(state.selected_buffer >= state.buffers.len, => return(.None));
+    if(state.selected_buffer.uge(state.buffers.len), => return(.None));
     b := state.buffers[state.selected_buffer];
     @debug_assert_gt(b.lines.len, 0, "missing empty line");
     (Some = b)
@@ -1056,6 +1063,7 @@ TextStorage :: @struct(
 TextBuffer :: @struct(
     storage: *TextStorage #use,
     threads_ref_count: i64,
+    // changing `view` layout is a breaking change to maze_game's save file format!
     view: (@struct(
     at: Rect,
     cursor: Pos,
@@ -1071,6 +1079,9 @@ TextBuffer :: @struct(
     //       - when you type and add text to the line
     hover: ?Ty(i64, i64, i64),   // (line, start col, end col)
     )) #use,
+    // these are for when !full_screen_buffer
+    single_line: bool,
+    active: bool,
 );
 
 #use("@/lib/sys/sync/mutex.fr");
@@ -1116,12 +1127,25 @@ fn draw_text(self: *TextBuffer) void = {
     x := cast(self.at.pos.x / state.scale - (self.render.x - self.render.x.floor()));
     y := cast(self.at.pos.y / (state.scale * 2) - (self.render.y - self.render.y.floor()));
     sdtx.pos.x = x;
-    line_count := int(h / (state.scale * 2)) + 1;
+    line_count := int(h / (state.scale * 2)) + 2;
     self.num_lines_fit_on_screen = line_count;
     start := min(max(0, self.render.y.int()), self.lines.len);
-    end   := min(start + line_count + 1, self.lines.len);
+    end   := min(start + line_count, self.lines.len);
     chars_that_fit := int(w / state.scale) + 2;
     col := self.render.x.int();
+    
+    if !state.full_screen_buffer {
+        // so you can see where to click when using it as smaller text boxes (in examples/circuit/gui.fr)
+        sdtx.color = pack_rgba(0.1, 0.1, 0.1, 1);
+        sdtx.pos = vec2(x, y);
+        range(0, line_count) { row |
+            sdtx.pos = vec2(x, sdtx.pos.y);
+            range(0, chars_that_fit) { col |
+                sdtx.put(0);
+            };
+            sdtx.pos.y += 1;
+        };
+    };
     
     // building the highlight rectangle out of single char cells like this is stupid
     // and slow but like... it's fine for this program. 
@@ -1160,21 +1184,23 @@ fn draw_text(self: *TextBuffer) void = {
         };
     };
     
-    
-    {   // scroll bar
+    if !self.single_line {   // scroll bar
         bar := scrollbar_logical_pos(self);
-        sdtx.pos.x = cast(self.at.pos.x + bar.x - self.render.x);
-        sdtx.pos.y = cast(bar.y - self.render.y);
+        sdtx.pos.x = cast(self.at.pos.x/state.scale + bar.x - self.render.x);
+        sdtx.pos.y = cast(self.at.pos.y/state.scale/2 + bar.y - self.render.y);
         sdtx.color = state.theme.scrollbar; 
         sdtx.put(0);
     };
     
     // draw the cursor as a narrow bar
     // TODO: this is an overly hacky thing to do. just have another character slot with a narrow texture (like byte 1 or whatever)
-    {
+    if (((self.cursor.y.int() - start) < line_count) && ((self.cursor.x.int() - col) < chars_that_fit)) {
         sdtx.pos.x = x + (self.cursor.x.int() - col).float().cast();
         sdtx.pos.y = y + (self.cursor.y.int() - start).float().cast();
         sdtx.color = state.theme.cursor;
+        if !state.full_screen_buffer && !self.active {
+            sdtx.color = pack_rgba(0, 204, 255, 50);
+        };
         cursor_fraction :: @as(f32/*TODO: trash*/) 4.0;
         sdtx.glyph_size.x /= cursor_fraction;
         sdtx.pos.x *= cursor_fraction;
@@ -1185,6 +1211,9 @@ fn draw_text(self: *TextBuffer) void = {
     sdtx.pos.x = x;
     sdtx.pos.y = y;
     sdtx.color = state.theme.font; 
+    if !state.full_screen_buffer && !self.active {
+        sdtx.color = pack_rgba(180, 170, 130, 255);
+    };
     range(start, end) { i |
         line := self.lines&.index(i).str();
         

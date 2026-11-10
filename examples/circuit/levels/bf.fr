@@ -1,0 +1,342 @@
+
+#use("@/examples/circuit/level_api.fr");
+Self :: @struct {
+    sim: *Simulation;
+    rng: Random.Rng = (next = Random.xoshiro256SS, s = (1, 2, 3, 4));
+    test_index := 0;
+    test_count := 32;
+    debug_ip_instance: ?i64 = .None;
+    case: @struct {
+        current_tick := 0;
+        correct_halt_tick := 0;
+        input: []u8 = "";
+        next_input_index := 0;
+        output: []u8 = "";
+        next_output_index := 0;
+        prev_output: u8 = 0;
+        program: []u8 = "";
+    } #use = ();
+    state: (@enum(Running, Win, WrongHalt, OutputValue, OutputCount, InputCount, ProgramTooSmall, MissingProgram)) = .Running;
+    level: Level;
+    buf := zeroed(Array(u8, 512));
+};
+Level :: @enum(Ip, Io, Addr, Arith, If, Loop);
+
+level_spec :: @static @as(Exports) (
+// TODO: dont leak
+start = fn(sim) = {
+    self := general_allocator().boxed(Self, (
+        sim = sim,
+        level = @as(Level) sim.static_userdata,
+    ));
+    range(0, 256) { _ | _ := self.rng&.next(); };  // get a better starting seed
+    self.init_program();
+    Self.raw_from_ptr(self)
+},
+before = fn(self, values) = {
+    self := Self.ptr_from_raw(self);
+    @if(self.state != .Running) return();
+    value := @if(self.next_input_index >= self.input.len, 0, self.input[self.next_input_index].zext());
+    values[self.sim.shape.in] = value;
+},
+// TODO: halt the simulation on error so you can see what ip was when you got something wrong. 
+after = fn(self, values) = {
+    self := Self.ptr_from_raw(self);
+    @if(self.state != .Running) return(self.state == .Win);
+    
+    in_on := values[self.sim.shape.in_used] != 0;
+    if in_on {
+        if self.next_input_index >= self.input.len {
+            self.state = .InputCount;
+            return false;
+        };
+        self.next_input_index += 1;
+    };
+    out, out_on := (values[self.sim.shape.out], values[self.sim.shape.out_used] != 0);
+    if out_on {
+        self.prev_output = out.trunc();
+        if self.next_output_index >= self.output.len {
+            self.state = .OutputCount;
+            return false;
+        };
+        if self.prev_output != self.output[self.next_output_index] {
+            self.state = .OutputValue;
+            return false;
+        };
+        self.next_output_index += 1;
+    };
+    
+    msg := get_halt_message(self.sim.world, self.sim.circuits);
+    expect_halt := self.current_tick == self.correct_halt_tick;
+    if expect_halt != msg.is_some() {
+        self.state = .WrongHalt;
+        return false;
+    };
+    self.current_tick += 1;
+    if expect_halt {
+        o, i := (self.next_output_index == self.output.len, self.next_input_index == self.input.len);
+        if !o || !i {
+            self.state = @if(o, .InputCount, .OutputCount);
+            return false;
+        };
+        self.sim.world.tc_halt_device = -1;
+        self.test_index += 1;
+        if self.test_index == self.test_count {
+            self.state = .Win;
+            return true;
+        };
+        self.init_program();
+    };
+    false
+},
+// TODO: perhaps visuals should instead be expressed as a Screen component
+render = fn(self) = {
+    self := Self.ptr_from_raw(self);
+    out := @ref u8.list(temp());
+    msg := @match(self.state) {
+        fn Running() => @tfmt("test %/%, tick %/%", self.test_index, self.test_count, self.current_tick, self.correct_halt_tick);
+        fn WrongHalt() => if self.current_tick < self.correct_halt_tick {
+            @tfmt("failed test %. halted on tick % instead of tick %", self.test_index, self.current_tick, self.correct_halt_tick)
+        } else {
+            @tfmt("failed test %. expected to halt on tick % but didn't", self.test_index, self.correct_halt_tick)
+        };
+        fn OutputValue() => @tfmt("failed test %. output[%] was % but expected %.", self.test_index, self.next_output_index, self.prev_output, self.output[self.next_output_index]);
+        fn OutputCount() => @tfmt("failed test %. wrote % bytes of output but expected %.", self.test_index, self.next_output_index, self.output.len);
+        fn InputCount() => @tfmt("failed test %. read % bytes of input but expected %.", self.test_index, self.next_input_index, self.input.len);
+        fn ProgramTooSmall() => "the 'Program' ram is too small";
+        fn MissingProgram() => "must have a ram labeled 'Program' (double click to set label)";
+        fn Win() => "passed all tests";
+    };
+    c := pack_rgba(@if(self.state == .Win, 255, 50), 200, 150, 255);
+    p := vec2(-200, 20);
+    self.sim.put_text(p, c, msg);
+    
+    label, before, after := (pack_rgba(255, 255, 255, 255), pack_rgba(100, 255, 50, 255), pack_rgba(255, 100, 0, 255));
+    ip := @if(self.debug_ip_instance.is_some(), self.sim.world.storage[self.debug_ip_instance.unwrap()], 0);
+    entries := @slice(("in:   ", self.input, self.next_input_index), ("out:  ", self.output, self.next_output_index), ("code: ", self.program, ip));
+    if self.level == .Ip {  // no io yet
+        entries = entries.rest(2);
+    };
+    if @is(self.state, .Win, .ProgramTooSmall, .MissingProgram) {
+        entries.len = 0;
+    };
+    for entries { name, data, current |
+        p.y += 1;
+        self.sim.put_text(p, label, name);
+        current := current.max(0).min(data.len);
+        self.sim.put_text(p + vec2(name.len.float().cast(), 0), before, data.slice(0, current));
+        self.sim.put_text(p + vec2((name.len + current).float().cast(), 0), after, data.rest(current));
+    };
+},
+quine = include_bytes(@source_file_name()),
+);
+
+level_specs :: ast_alloc().alloc_init(*Exports, level_text.len(), fn(i) => {
+    @run @assert(names.len() == level_text.len() && names.len() == Level.enum_count(), "bf: level count mismatch");
+    it := level_spec[];
+    it.static_userdata = i;
+    it.title = names[i];
+    it.description = level_text[i];
+    ast_alloc().boxed(Exports, it)
+});
+
+init_program :: fn(self: *Self) void = {
+    root := self.sim.circuit.compiled.unwrap();
+    
+    // reset after each test
+    self.sim.world.storage.set_zeroed();
+    Tc'set_initial_data(self.sim.world, self.sim.circuits, root, 0);
+
+    // TODO
+    self.sim.shape = (out = 0, out_used = 1, in = 3, in_used = 2);
+    
+    ram := find_labeled_component(self.sim, "Program") || {
+        self.state = .MissingProgram;
+        return();
+    };
+    it := ram.graphical;
+    if !(it.kind.group() == .Tc2 && Tc'gate_name(it.kind, .Tc2) == .Ram_v2) {
+        self.state = .MissingProgram;
+        return();
+    };
+    count := self.rng&.rand_int(96);
+    ram_size_bytes := ram.logical.get_param(.Ram_v2)[].get(.ram_size_bytes);
+    if ram_size_bytes <= count {  // need at least 1 zero byte to halt
+        self.state = .ProgramTooSmall;
+        return();
+    };
+    data := ram.data;
+    if self.level == .Ip  {
+        data.slice(0, count).set_bytes("a".ascii());
+        self.case = (correct_halt_tick = count);
+    } else {
+        ops := ".,<>+-[]";
+        ops := ops.slice(0, @match(self.level) {
+            fn Io() => 2;
+            fn Addr() => 4;
+            fn Arith() => 6;
+            @default => 8;  // TODO
+        });
+        attempt := 0;
+        dowhile {
+            continue :: local_return;
+            attempt += 1;
+            n := 0;
+            open := 0;
+            range(0, count) { i |
+                data[i] = ops[self.rng&.rand_int(ops.len)];
+                if data[i] == ",".ascii() {
+                    self.buf&[n] = self.rng&.rand_int(65, 90).trunc();
+                    n += 1;
+                };
+                if data[i] == "[".ascii() {
+                    open += 1;
+                };
+                if data[i] == "]".ascii() {
+                    open -= 1;
+                };
+                @if(open < 0) continue(true);
+            };
+            @if(open != 0) continue(true);
+            input := self.buf&.items().slice(0, n);
+            output := fixed_list(self.buf&.items().rest(256));
+            mem_size :: 1.shift_left(15);
+            mem := temp().alloc_zeroed(u8, mem_size);  // :SLOW
+            ticks, input_read := reference_interpreter(mem, mem_size, data.slice(0, count), 512, input, output&)
+                || continue(true);
+            @if(data.find(fn(it) => it[] == "[".ascii()).is_none()) @debug_assert_eq(input.len, input_read);
+            @if(input_read > 256) continue(true);
+            self.buf&.items().subslice(n, input_read).set_zeroed();
+            self.case = (
+                correct_halt_tick = ticks, 
+                input = self.buf&.items().subslice(0, input_read),
+                output = self.buf&.items().subslice(256, output.len),
+            );
+            all_letters := true;
+            for self.case.output { c | 
+                if c < 65 || c >= 90 {
+                    all_letters = false;
+                };
+            };
+            attempt < 512 && !all_letters
+        };
+    };
+    data.rest(count).set_zeroed();
+    self.case.program = data.slice(0, count);
+    
+    if find_labeled_component(self.sim, "IP") { it |
+        self.debug_ip_instance = (Some = it.instance);
+    };
+}
+
+ComponentRef :: @struct(graphical: *Tc.Circuit.Gate, logical: *Component.Gate, instance: i64, data: []u8);
+fn find_labeled_component(sim: *Simulation, label: Str) ?ComponentRef = {
+    root := sim.circuit.compiled || return(.None);
+    c := sim.world[root]&;
+    i := sim.circuit.gates.index_of(fn(it) => it.label.items() == label) || return(.None);
+    g := sim.circuit.gates[i]&;
+    @if(g.logical_gate_index == -1) return(.None);
+    instance := c.instance_offset_by_gate[g.logical_gate_index];
+    l := c.gates[g.logical_gate_index]&;
+    n := get_storage_count(sim.world.components, l);
+    data := sim.world.storage.rest(instance).slice(0, n).interpret_as_bytes();
+    (Some = (graphical = g, logical = l, instance = instance, data = data))
+}
+
+reference_interpreter :: fn(mem: []u8, $mem_size: i64, code: []u8, tick_limit: i64, input: []u8, output: *List(u8)) ?Ty(i64, i64) = {
+    @assert_eq(mem.len, mem_size, "reference_interpreter wrong mem_size");
+    p, ip, i, ticks := (0, 0, 0, 0);
+    while => ip < code.len {
+        @switch(code[ip]) {
+            @case("+".ascii()) => { mem[p] += 1; };
+            @case("-".ascii()) => { mem[p] -= 1; };
+            @case(">".ascii()) => { p = umod(p + 1, mem_size); };
+            @case("<".ascii()) => { p = umod(p - 1, mem_size); };
+            @case(".".ascii()) => { 
+                @if(output.len == output.maybe_uninit.len) return(.None);
+                output.push(mem[p]);
+            };
+            @case(",".ascii()) => { mem[p] = @if(i < input.len, input[i], 0); i += 1 };
+            @case("[".ascii()) => @if(mem[p] == 0) Bf'loop(code, ip&, 1);
+            @case("]".ascii()) => @if(mem[p] != 0) Bf'loop(code, ip&, -1);
+            @default => ();
+        };
+        ip += 1;
+        ticks += 1;
+        @if(ticks > tick_limit) return(.None);
+    };
+    Bf :: import("@/examples/bf/interpreter.fr");
+    (Some = (ticks, i))
+}
+
+#use("@/examples/circuit/compile.fr");
+
+names :: @const_slice("Basic Foundations", "BF: IO", "BF: Memory", "BF: Arithmetic", "BF: Spring Forward", "BF: Fall Back");
+level_text :: """
+In this series of levels you will implement a well known esoteric instruction set. 
+
+Each instruction in the program is one byte. 
+Instruction 0x00 halts execution (enable a Halt_v2 component). 
+For now, all other bytes do nothing (except increment the instruction pointer by one). 
+You might notice this circuit is less like a computer and more like a strlen. 
+
+Your circuit must have a Ram_v2 component with the label "Program". 
+It will be initialized with the program bytes at the start of each test. 
+
+If the component storing the instruction pointer has the label "IP", 
+it will be used to show a debug visualization of the program's progress. 
+
+Currently you are required to execute exactly one instruction per tick. 
+How long your circuit takes to halt is an output that will be tested. 
+---
+
+Extend your circuit with an additional byte of storage. 
+Instruction 0x2C reads one byte of input and stores it for later. 
+Instruction 0x2E outputs the stored byte. 
+
+If the byte is output before taking any input, its value is zero. 
+
+IO is done with the Level_input_switched and Level_output_switched components. 
+These components each have an Enable pin. 
+Only enable the pin on ticks where you are processing an input/output instruction. 
+---
+
+Expand your storage to 32768 bytes (zero initialized). 
+Add an additional register that stores the data pointer. 
+The IO instructions (0x2C/0x2E) act on the byte in memory referenced by the data pointer. 
+Future levels will refer to that byte "the data byte". 
+
+Instruction 0x3E increments the data pointer. 
+Instruction 0x3C decrements the data pointer. 
+
+Access to the memory wraps around when the data pointer exceeds the size of the memory 
+(attempting to use the byte one past the end instead uses the first byte). 
+---
+
+Currently your computer can only output bytes it has previously recieved as input. 
+Now it's time to perform arithmetic which will grant the power to invent new bytes out of thin air. 
+
+Instruction 0x2B increments the data byte.
+Instruction 0x2D decrements the data byte.
+Overflow is wrapping (ex. increment(255)=0 and decrement(0)=255). 
+---
+
+Instruction 0x5B does nothing if the data byte is non-zero. 
+However, if the byte is zero, it jumps forward to a 0x5D instruction 
+(any 0x3E,0x3C,0x2B,0x2D instructions in between are not executed). 
+Note that pairs of 0x5B,0x5D can be nested. 
+If a second 0x5B is encountered while skipping instructions, 
+you must skip an additional 0x5D before resuming normal execution. 
+
+In a higher level language, 0x5B is like `if ((*p) != 0) {` and 0x5D is like `}`. 
+---
+
+When instruction 0x5D is encountered while the data byte is non-zero, 
+it jumps backward to the matching 0x5B instruction (instructions between are not executed). 
+As before, 0x5B,0x5D can be nested. 
+
+This allows programs with loops. The instructions inside a 0x5B,0x5D pair will be 
+execute repeatedly until they cause the data byte to be zero. 
+After this change, 0x5B is like `while ((*p) != 0) {` (and 0x5D is still like `}`). 
+
+""".split("---", ast_alloc());
