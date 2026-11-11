@@ -6,6 +6,7 @@
   - wasted more than zero time on commenting out a `== "LEG"` causing it to load the wrong program
   - i did notice that get_bit_width of v1 ram was in bytes not bits this whole time, yikes. 
 - thinking of more levels that aren't in tc. making the segment display out of probes. 
+- terminal: better editing. stomp selection for char/paste/backspace.
 
 ## (Nov 9) circuit
 

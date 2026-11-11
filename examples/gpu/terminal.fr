@@ -9,6 +9,9 @@
 // the other reason i want this is to embed it in a website when i get to the point of having wasm 
 // demos that want to let you interact with the compiler the same as when it's a native program. 
 // 
+// notably some of the other example programs (maze_game, circuit) 
+// embed this as a text box with the exec part disabled. 
+//
 
 // run commands that end with a semicolon as franca code. 
 FEAT_REPL :: true;  
@@ -208,6 +211,28 @@ fn load_font_pixels(scale: f64, a: Alloc) []u8 #use(StbTrueType) = {
         pixels.slice(base + 0, base + 32*W.int()).set_bytes(0xFF);
         pixels.slice(base + 128*W.int(), base + 255*W.int()).set_bytes(0xFF);
     };
+    
+    if H >= 16 && W >= 8 {
+        // i use 0 for drawing rectangles, but for the other bytes i can't draw (i dont do utf8 "yet"), 
+        // put the byte as hex in little text so you can at tell what's going on kinda. 
+        font_pixels := temp().alloc_uninit(u8, 256 * 8 * 8);
+        import("@/graphics/debugtext.fr")'unpack_font(Sdtx.font.cpc, font_pixels);
+        range(1, 256) { c |
+            if c <= 32 || c >= 127 {
+                nibbles := @slice(c.int().bit_and(0b1111), c.int().shift_right_logical(4));
+                enumerate nibbles { i, it |
+                    char := "0123456789ABCDEF"[it[]];
+                    range(0, 8) { y |
+                        range(0, 8) { x |
+                            // this line is write only, sorry :)
+                            pixels[c*W.int() + i*8*W.int()*256 + y*W.int()*256 + x + (W.int().sub(8).udiv(2)) + (H.int().sub(16).udiv(2)*W.int()*256)] = font_pixels[char.int()*8 + y*8*256 + x].bit_xor(0xff);
+                        };
+                    };
+                };
+            };
+        };
+    };
+    
     pixels
 }
 
@@ -542,12 +567,29 @@ handle_event :: fn(event: *Sapp.Event) void = {
             }
         }
         
-        if event.key_code == .C && event.modifiers.get(.super) != 0 {
-            copy_from_selection(buffer);
+        @if(event.modifiers.get(.super) != 0) @match(event.key_code) {
+            // fn V() is CLIPBOARD_PASTED instead. 
+            fn C() => copy_from_selection(buffer);
+            fn X() => {
+                copy_from_selection(buffer);
+                @if(feature(.Edit)) delete_selection(buffer);
+            }
+            fn A() => {  // cmd+a -> select all
+                // TODO: when doing terminal, it would make more sense to just select the current line. 
+                //       but full thing is what you want when using it as a more general text box. 
+                last := buffer.lines[buffer.lines.len - 1]&;
+                buffer.selection = (Some = (start = (x = 0, y = 0), end = (x = last.len().float(), y = buffer.lines.len.float() - 1)));
+            }
+            fn F() => search_for_selected(buffer);
+            @default => ();
         };
         
         if event.key_code == .BACKSPACE && feature(.Edit) {
             @debug_assert(buffer.cursor.y >= 0);
+            if buffer.selection.is_some() {
+                return delete_selection(buffer);
+            };
+            
             l := min(buffer.cursor.y.int(), buffer.lines.len - 1);
             last := buffer.lines[l]&;
             if last.len() > 0 {
@@ -601,10 +643,6 @@ handle_event :: fn(event: *Sapp.Event) void = {
             // TODO: off the end to next line?
         };
         
-        if event.key_code == .F && event.modifiers.get(.super) != 0 {
-            search_for_selected(buffer);
-        };
-        
         if event.key_code == .S && event.modifiers.get(.super) != 0 {
             if state.save_file { path |
                 // :SLOW
@@ -622,6 +660,8 @@ handle_event :: fn(event: *Sapp.Event) void = {
             enable := feature(.Exec) || feature(.Repl) || feature(.Help);
             if event.modifiers.get(.shift) != 0 || !enable {
                 @if(buffer.single_line) return();
+                @if(!feature(.Edit)) return();
+                delete_selection(buffer);
                 buffer.insert_string("\n", buffer.cursor.x.int(), buffer.cursor.y.int());
                 buffer.cursor.x = 0;
                 return();
@@ -642,6 +682,7 @@ handle_event :: fn(event: *Sapp.Event) void = {
     // if it's ascii and not a keyboard shortcut, insert a character at the cursor. 
     @if(feature(.Edit))
     if event.type == .CHAR && event.char_code < 127 && event.char_code >= 32 && event.modifiers.get(.super) == 0 {
+        delete_selection(buffer);
         s: Str = (ptr = ptr_cast_unchecked(u32, u8, event.char_code&), len = 1);
         l := min(buffer.cursor.y.int(), buffer.lines.len - 1);
         last := buffer.lines[l]&;
@@ -652,6 +693,7 @@ handle_event :: fn(event: *Sapp.Event) void = {
     
     @match(event.type) {
         fn CLIPBOARD_PASTED() => if feature(.Edit) {
+            delete_selection(buffer);
             buffer.insert_string(event.pasted, buffer.cursor.x.int(), buffer.cursor.y.int());
         }
         fn MOUSE_SCROLL() => {
@@ -705,6 +747,56 @@ get_selection :: fn(self: *TextBuffer, buf: *List(u8)) void = {
             buf.push("\n".ascii());
         }
     };
+}
+
+fn delete_selection(self: *TextBuffer) void = {
+    sel := fix(self.selection || return());
+    startL := clamp(sel.start.y.int(), 0, self.lines.len - 1);
+    endL := clamp(sel.end.y.int() + 1, 0, self.lines.len);
+
+    self.selection = .None;
+    self.cursor = (x = sel.start.x.clamp(0, self.lines[startL]&.len().float()), y = startL.float());
+    self.hover = .None;  // TODO: could remap the indices
+    
+    if startL == endL - 1 {
+        line := self.lines.index(startL);
+        delete_range(line, sel.start.x.int(), sel.end.x.int());
+        return();
+    };
+    
+    // trim the selected part of the edges and splice them together
+    first, last := (self.lines.index(startL), self.lines.index(endL - 1));
+    delete_range(first, sel.start.x.int(), MAX_i64);
+    delete_range(last, 0, sel.end.x.int());
+    first.insert_at(first.len(), last.str(), self.gpa);
+    
+    // kill any full lines (including the last one because it got spliced on to the first)
+    range(startL + 1, endL, fn(i) => self.lines.index(i).drop(self.gpa));
+    delete_range(Line, self.lines&, startL + 1, endL); 
+    if self.lines.len == 0 {
+        self.lines&.push(empty_line, self.gpa);  // invariant
+    };
+    
+    // TODO: fix (.render, .selection, .hover, .cursor) on other TextBuffer pointing at the same TextStorage
+    // TODO: fix command_markers
+}
+
+fn delete_range(line: *Line, start: i64, end: i64) void = {
+    if line.repr.len < 0 {
+        s := line.str().shallow_copy(temp()).as_raw_list();
+        delete_range(u8, s&, start, end);
+        line[] = empty_line;
+        line.insert_at(0, s.items(), panicking_allocator /* always shorter*/);
+    } else {
+        delete_range(u8, line.repr&, start, end);
+    };
+}
+
+fn delete_range($T: Type, self: *RawList(T), start: i64, end: i64) void #generic = {
+    self.ordered_retain(fn(it) => {
+        i := ptr_diff(self.ptr, it);
+        i < start || i >= end
+    });
 }
 
 move_in_history :: fn(b: *TextBuffer, up: bool) void = {
