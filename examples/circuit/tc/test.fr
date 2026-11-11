@@ -26,7 +26,7 @@ fn run_tests(harness: *Harness) void = {
     
     harness.load("NANDverture").maze(3775);
     harness.load("OVERTURE").maze(3775);
-    harness.load("LEG").maze(4140);
+    harness.load("LEG").maze(1035);
     
     /*
     harness.load("TCMIPS")
@@ -321,21 +321,32 @@ fn check_probes(self: *Harness) void = {
 Maze :: import("@/examples/circuit/levels/maze.fr").Maze;
 fn maze(self: *Harness, limit: i64) *Harness = {
     kind := self.root || return(self);
+    
+    circ := self.circuits.find(fn(it) => it.compiled.is_some() && it.compiled.unwrap() == kind).unwrap();
+    
     c := self.world&[kind]&;
     name := c.name;
     Defs :: import("@/examples/circuit/defs.fr");
     program := @if(name == "LEG", Defs.the_maze_leg, Defs.the_maze);
     i := c.gates.index_of(fn(it) => it.kind.group() == .Tc1 && Tc'gate_name(it.kind, .Tc1) == .Program).expect("program component");
     self.world.storage.subslice(c.instance_offset_by_gate[i], 256/8).interpret_as_bytes().copy_from(program);
-    hack := int(name == "LEG");
+    
+    shape := @anon_literal(
+        out = circ.pin_names.index_of("out") || 0,
+        out_used = circ.pin_names.index_of("out#on") || 0,
+        in = circ.pin_names.index_of("in") || 0,
+        in_used = circ.pin_names.index_of("in#on") || 0,
+    );
+    
     maze := @ref Maze'new(Maze.tc0);
     in := maze.input();
     start := realtime_ns();
+    values := @slice(0, 0, 0, 0);
     range(0, limit) { _ |
-        values := @slice(0, 0, 0, @as(i64) in.zext());
+        values[shape.in] = in.zext();
         evaluate(self.world&, values, kind, 0, false);
-        if values[1+hack] != 0 {
-            maze.output(values[0+hack].trunc());
+        if values[shape.out_used] != 0 {
+            maze.output(values[shape.out].trunc());
             in = maze.input();
         };
     };

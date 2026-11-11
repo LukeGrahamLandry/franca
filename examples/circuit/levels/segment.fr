@@ -1,0 +1,183 @@
+
+#use("@/examples/circuit/level_api.fr");
+Self :: @struct {
+    sim: *Simulation;
+    i := 0;
+    state: (@enum(Running, Win, Fail, MissingProbes, BadArity)) = .Running;
+    probe_data := zeroed(Array(*i64, 8));
+    prev_output := 0;
+    test_count: i64;
+};
+level_specs :: @const_slice(level_spec, level_spec2);
+level_spec :: @static @as(Exports) (
+// TODO: dont leak
+start = fn(sim) = {
+    self := general_allocator().boxed(Self, (
+        sim = sim,
+        test_count = 256,
+    ));
+    
+    o, i := self.sim.circuit.arity;
+    if o != 0 || i != 1 {
+        self.state = .BadArity;
+    };
+    
+    if true {
+        break :: local_return;
+        range(0, 8) { i |
+            name := number_chars.subslice(i, 1);
+            it := find_labeled_component(self.sim, name) 
+                || break({ self.state = .MissingProbes; });
+            if group(it.logical.kind) != .Tc2 || Tc'gate_name(it.logical.kind, .Tc2) != .Probe_wire_bit {
+                self.state = .MissingProbes;
+                break();
+            };
+            self.probe_data&[i] = it.data.peek_type(i64);
+        };
+    };
+    
+    Self.raw_from_ptr(self)
+},
+before = fn(self, values) = {
+    self := Self.ptr_from_raw(self);
+    @if(self.state != .Running) return();
+    values[values.len - 1] = self.i;
+},
+after = fn(self, values) = {
+    self := Self.ptr_from_raw(self);
+    @if(self.state != .Running) return(self.state == .Win);
+    
+    out := pack_byte(self.probe_data&);
+    if out != self.i {
+        self.state = .Fail;
+        return false;
+    };
+    self.i += 1;
+    if self.i == self.test_count {
+        self.state = .Win;
+        return true;
+    };
+    
+    false
+},
+render = fn(self) = {
+    self := Self.ptr_from_raw(self);
+    msg := @match(self.state) {
+        fn Running() => @tfmt("test %/%", self.i, self.test_count);
+        fn MissingProbes() => "you must have 8 Probe_wire_bit labeled 0,1,2,3,4,5,6,7";
+        fn Fail() => @tfmt("failed test %", self.i);
+        fn Win() => "passed all tests";
+        fn BadArity() => "must have one input and zero outputs";
+    };
+    c := pack_rgba(50, 200, 150, 255);
+    p := vec2(-200, 20);
+    self.sim.put_text(p, c, msg);
+    
+    if self.state != .MissingProbes {
+        A, B := (self.i - int(self.state == .Running), pack_byte(self.probe_data&));
+        draw_segments(self.sim, p - vec2(0, 2), A, B);
+    };
+},
+title = "Segment Display",
+description = """
+Old digital clocks made numbers out of seven togglable line segments (an eighth for a dot). 
+This simulator has a builtin Segment_display component 
+which you will recreate out of Probe_wire_bit components. 
+Probe_wire_bit takes 1 one bit input and displays a red or green square based on its value. 
+
+Your circuit recives one byte of input, 
+each bit of which controls one bit probe 
+(representing one segment of the display you're creating). 
+The probes must be labeled with their bit index (0..=7) 
+for the level test to detect them.
+
+You should arrange the probes vaguely like the diagram below. 
+ 0
+5 1
+ 6
+4 2
+ 3 7
+You can also place a Segment_display using the same input if you want to see the 
+correspondence between the builtin version and the new one you're building. 
+""",
+quine = include_bytes(@source_file_name()),
+);
+
+level_spec2 :: @static @as(Exports) (
+// TODO: dont leak
+start = fn(sim) = {
+    self := general_allocator().boxed(Self, (
+        sim = sim,
+        test_count = 10,
+    ));
+    o, i := self.sim.circuit.arity;
+    if o != 1 || i != 1 {
+        self.state = .BadArity;
+    };
+    Self.raw_from_ptr(self)
+},
+before = level_spec.before,
+after = fn(self, values) = {
+    self := Self.ptr_from_raw(self);
+    @if(self.state != .Running) return(self.state == .Win);
+    
+    self.prev_output = values[0];
+    if self.prev_output != number_segments[self.i].zext() {
+        self.state = .Fail;
+        return false;
+    };
+    self.i += 1;
+    if self.i == self.test_count {
+        self.state = .Win;
+        return true;
+    };
+    
+    false
+},
+render = fn(self) = {
+    self := Self.ptr_from_raw(self);
+    msg := @match(self.state) {
+        fn Running() => @tfmt("test %/%", self.i, self.test_count);
+        fn Fail() => @tfmt("failed test %", self.i);
+        fn Win() => "passed all tests";
+        fn BadArity() => "must have one input and one output";
+        fn MissingProbes() => unreachable();
+    };
+    c := pack_rgba(50, 200, 150, 255);
+    p := vec2(-200, 20);
+    self.sim.put_text(p, c, msg);
+    A, B := (@as(i64) number_segments[clamp(self.i - int(self.state == .Running), 0, 9)].zext(), self.prev_output);
+    draw_segments(self.sim, p - vec2(0, 2), A, B);
+},
+title = "SD: Decoder",
+description = """
+The input will be a number from 0 to 9. 
+You must output the bit mask of segments to display that number. 
+
+For example, the number 1 will have two bits set 
+(the ones for top-right and bottom-right to form a vertical line). 
+You might want to place a Segment_display to visualize your output. 
+""",
+quine = include_bytes(@source_file_name()),
+);
+
+draw_segments :: fn(sim: *Simulation, p: Vec2, A: i64, B: i64) void = {
+    lines := import("@/examples/circuit/gui.fr").segment_lines;
+    range(0, 8) { i |
+        bit :: fn(x) => @if(x.bit_and(1.shift_left(i)) != 0, 255, 0);
+        c := pack_rgba(bit(B), bit(A), bit(B), 255);
+        off := lines[i]._0 + lines[i]._1;
+        off.y *= -1;
+        name := number_chars.subslice(i, 1);
+        sim.put_text(p+off, c, name);
+    };
+};
+
+number_segments :: @const_slice(0b00111111, 0b00000110, 0b01011011, 0b01001111, 0b01100110, 0b01101101, 0b01111101, 0b00000111, 0b01111111, 0b01100111);
+number_chars :: "0123456789";
+
+pack_byte :: fn(in: *Array(*i64, 8)) i64 = {
+    o := 0; range(0, 8) { i | o = o.bit_or(in[i][].shift_left(i)); }; o
+};
+
+#use("@/examples/circuit/compile.fr");

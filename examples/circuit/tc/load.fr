@@ -410,7 +410,17 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 x, y := fix_pin_position(original_gate.pos);
                 insert(custom_pins&, dest, (x, y));
                 // TODO: bad if you then edit the label (editor shows pin names on hover)
-                pin_names&.insert(dest, original_gate.label.items());
+                name := original_gate.label.items();
+                if name == "" {
+                    if shape.name == "Level_input_switched" || shape.name == "LevelInputArch" {
+                        name = "in";
+                    };
+                    if shape.name == "Level_output_switched" || shape.name == "LevelOutputArch" {
+                        name = "out";
+                    };
+                };
+                
+                pin_names&.insert(dest, name);
                 width: u8 = @if(shape.name == "Cc_input" || shape.name == "Level_input_switched",
                     original_gate.settings[0].trunc(),
                     @if(shape.name == "Cc_output", 64,   // :InferCc_output
@@ -429,17 +439,20 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 if is_switchable_output {
                     insert(custom_pins&, dest + 1, (HACK_NONE_PIN_POSITION, HACK_NONE_PIN_POSITION));
                     insert(bit_width&, dest + 1, 1);
-                    pin_names&.insert(dest + 1, "");
+                    pin_names&.insert(dest + 1, @afmt(a, "%#on", name));
                     output_pin_count += 1;
                 };
                 
                 // TODO: be consistant about treating these the same as cc ones. rn dest is wrong 
                 //       but also this wouldnt work at all if you tried to put them in a cc anyway. 
                 //       cause would need to chain them from the top which is convoluted. 
-                if /* shape.name == "LevelInputArch" ||*/ shape.name == "Level_input_switched" {
-                    insert(custom_pins&, dest + 1, (HACK_NONE_PIN_POSITION, HACK_NONE_PIN_POSITION));
-                    insert(bit_width&, dest + 1, 1);
-                    pin_names&.insert(dest + 1, "");
+                if shape.name == "LevelInputArch" || shape.name == "Level_input_switched" {
+                    d := output_pin_count;
+                    insert(custom_pins&, d, (HACK_NONE_PIN_POSITION, HACK_NONE_PIN_POSITION));
+                    insert(bit_width&, d, 1);
+                    pin_names&.insert(d, @afmt(a, "%#on", name));
+                    output_pin_count += 1;
+                    c.has_arch_pins = true;
                 };
                 
                 output_pin_count += int(!is_input); 
@@ -1232,7 +1245,7 @@ find_pins :: fn(c: *Circuit, a: Alloc, circuits: []Circuit, warn: *List(u8), uni
         
         new := logic_gates[logic_gates.len - 1]&;
         new.temporary_disconnected_pins_bitset = disconnected;
-            if group(it.kind) == .Tc2 {
+            if group(it.kind) == .Tc2 && it.settings.len > 0 {
                 k := name(it.kind, .Tc2);
                 new.temporary_bit_width_for_constant = it.settings[0];
                 if it.settings[0] == MIN_i64 || @is(k, .Concatenator_2, .Concatenator_4, .Concatenator_8, .Static_eval, .Static_value, .Static_indexer_config, .Delay_line_word_config) {
@@ -1895,7 +1908,7 @@ fn get_bit_width(shape: *Tc.Builtin.Template, param: i64) []u8 = {
         // inputs don't matter because writes truncate in the impl so oversized 64 bits from get_width_data is fine.
         // outputs would be fine oversized but doing it right here avoids inserting useless casts. 
         param: Builtin.Settings.Ram = (repr = param.bitcast());
-        size: u8 = param.word_size().min(64).trunc();
+        size: u8 = param.word_size().mul(8).min(64).trunc();
         out := shape.bit_width.shallow_copy(temp());
         range(0, shape.out_arity) { i |
             out[i] = size;

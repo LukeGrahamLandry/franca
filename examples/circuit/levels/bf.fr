@@ -6,6 +6,7 @@ Self :: @struct {
     test_index := 0;
     test_count := 32;
     debug_ip_instance: ?i64 = .None;
+    shape := zeroed(IoShape);
     case: @struct {
         current_tick := 0;
         correct_halt_tick := 0;
@@ -16,11 +17,11 @@ Self :: @struct {
         prev_output: u8 = 0;
         program: []u8 = "";
     } #use = ();
-    state: (@enum(Running, Win, WrongHalt, OutputValue, OutputCount, InputCount, ProgramTooSmall, MissingProgram)) = .Running;
+    state: (@enum(Running, Win, WrongHalt, OutputValue, OutputCount, InputCount, ProgramTooSmall, MissingProgram, BadArity)) = .Running;
     level: Level;
     buf := zeroed(Array(u8, 512));
 };
-Level :: @enum(Ip, Io, Addr, Arith, If, Loop);
+Level :: @enum(Ip, Io, Addr, Arith, If, Loop, Hello);
 
 level_spec :: @static @as(Exports) (
 // TODO: dont leak
@@ -30,21 +31,22 @@ start = fn(sim) = {
         level = @as(Level) sim.static_userdata,
     ));
     range(0, 256) { _ | _ := self.rng&.next(); };  // get a better starting seed
-    self.init_program();
+    self.init_program(true);
     Self.raw_from_ptr(self)
 },
 before = fn(self, values) = {
     self := Self.ptr_from_raw(self);
-    @if(self.state != .Running) return();
+    @if(self.state != .Running || self.level == .Ip) return();
     value := @if(self.next_input_index >= self.input.len, 0, self.input[self.next_input_index].zext());
-    values[self.sim.shape.in] = value;
+    values[self.shape.in] = value;
 },
 // TODO: halt the simulation on error so you can see what ip was when you got something wrong. 
 after = fn(self, values) = {
     self := Self.ptr_from_raw(self);
     @if(self.state != .Running) return(self.state == .Win);
     
-    in_on := values[self.sim.shape.in_used] != 0;
+    if self.level != .Ip {
+    in_on := values[self.shape.in_used] != 0;
     if in_on {
         if self.next_input_index >= self.input.len {
             self.state = .InputCount;
@@ -52,10 +54,11 @@ after = fn(self, values) = {
         };
         self.next_input_index += 1;
     };
-    out, out_on := (values[self.sim.shape.out], values[self.sim.shape.out_used] != 0);
+    out, out_on := (values[self.shape.out], values[self.shape.out_used] != 0);
     if out_on {
         self.prev_output = out.trunc();
         if self.next_output_index >= self.output.len {
+            self.next_output_index += 1;
             self.state = .OutputCount;
             return false;
         };
@@ -64,6 +67,7 @@ after = fn(self, values) = {
             return false;
         };
         self.next_output_index += 1;
+    };
     };
     
     msg := get_halt_message(self.sim.world, self.sim.circuits);
@@ -85,7 +89,7 @@ after = fn(self, values) = {
             self.state = .Win;
             return true;
         };
-        self.init_program();
+        self.init_program(false);
     };
     false
 },
@@ -106,8 +110,9 @@ render = fn(self) = {
         fn ProgramTooSmall() => "the 'Program' ram is too small";
         fn MissingProgram() => "must have a ram labeled 'Program' (double click to set label)";
         fn Win() => "passed all tests";
+        fn BadArity() => "must have Level_input_switched and Level_output_switched (both with no label)"
     };
-    c := pack_rgba(@if(self.state == .Win, 255, 50), 200, 150, 255);
+    c := pack_rgba(50, 200, 150, 255);
     p := vec2(-200, 20);
     self.sim.put_text(p, c, msg);
     
@@ -140,15 +145,19 @@ level_specs :: ast_alloc().alloc_init(*Exports, level_text.len(), fn(i) => {
     ast_alloc().boxed(Exports, it)
 });
 
-init_program :: fn(self: *Self) void = {
+init_program :: fn(self: *Self, first: bool) void = {
     root := self.sim.circuit.compiled.unwrap();
-    
-    // reset after each test
-    self.sim.world.storage.set_zeroed();
-    Tc'set_initial_data(self.sim.world, self.sim.circuits, root, 0);
-
-    // TODO
-    self.sim.shape = (out = 0, out_used = 1, in = 3, in_used = 2);
+    if first {
+        it := find_io_shape(self.sim.circuit);
+        self.shape = it || {
+            self.state = .BadArity;
+            return();
+        };
+    } else {
+        // reset after each test
+        self.sim.world.storage.set_zeroed();
+        Tc'set_initial_data(self.sim.world, self.sim.circuits, root, 0);
+    };
     
     ram := find_labeled_component(self.sim, "Program") || {
         self.state = .MissingProgram;
@@ -189,6 +198,14 @@ init_program :: fn(self: *Self) void = {
                     self.buf&[n] = self.rng&.rand_int(65, 90).trunc();
                     n += 1;
                 };
+                
+                if self.level == .If && open != 0 && !"[]".contains(data[i]) {
+                    // this level doesnt require ] loop back yet so make sure the inside doesn't change 
+                    // contents of memory so if non-zero at start it stays that way 
+                    // so reference_interpreter gets the same answer. 
+                    data[i] = ".".ascii();
+                };
+                
                 if data[i] == "[".ascii() {
                     open += 1;
                 };
@@ -198,11 +215,21 @@ init_program :: fn(self: *Self) void = {
                 @if(open < 0) continue(true);
             };
             @if(open != 0) continue(true);
+            
+            if self.level == .Hello {
+                self.test_count = 1;
+                attempt = 9999;
+                n = 0;
+                p := Bf.HELLO_WORLD;
+                count = p.len;
+                data.slice(0, count).copy_from(p);
+            };
+            
             input := self.buf&.items().slice(0, n);
             output := fixed_list(self.buf&.items().rest(256));
             mem_size :: 1.shift_left(15);
             mem := temp().alloc_zeroed(u8, mem_size);  // :SLOW
-            ticks, input_read := reference_interpreter(mem, mem_size, data.slice(0, count), 512, input, output&)
+            ticks, input_read := reference_interpreter(mem, mem_size, data.slice(0, count), 4096, input, output&)
                 || continue(true);
             @if(data.find(fn(it) => it[] == "[".ascii()).is_none()) @debug_assert_eq(input.len, input_read);
             @if(input_read > 256) continue(true);
@@ -229,20 +256,6 @@ init_program :: fn(self: *Self) void = {
     };
 }
 
-ComponentRef :: @struct(graphical: *Tc.Circuit.Gate, logical: *Component.Gate, instance: i64, data: []u8);
-fn find_labeled_component(sim: *Simulation, label: Str) ?ComponentRef = {
-    root := sim.circuit.compiled || return(.None);
-    c := sim.world[root]&;
-    i := sim.circuit.gates.index_of(fn(it) => it.label.items() == label) || return(.None);
-    g := sim.circuit.gates[i]&;
-    @if(g.logical_gate_index == -1) return(.None);
-    instance := c.instance_offset_by_gate[g.logical_gate_index];
-    l := c.gates[g.logical_gate_index]&;
-    n := get_storage_count(sim.world.components, l);
-    data := sim.world.storage.rest(instance).slice(0, n).interpret_as_bytes();
-    (Some = (graphical = g, logical = l, instance = instance, data = data))
-}
-
 reference_interpreter :: fn(mem: []u8, $mem_size: i64, code: []u8, tick_limit: i64, input: []u8, output: *List(u8)) ?Ty(i64, i64) = {
     @assert_eq(mem.len, mem_size, "reference_interpreter wrong mem_size");
     p, ip, i, ticks := (0, 0, 0, 0);
@@ -257,23 +270,38 @@ reference_interpreter :: fn(mem: []u8, $mem_size: i64, code: []u8, tick_limit: i
                 output.push(mem[p]);
             };
             @case(",".ascii()) => { mem[p] = @if(i < input.len, input[i], 0); i += 1 };
-            @case("[".ascii()) => @if(mem[p] == 0) Bf'loop(code, ip&, 1);
-            @case("]".ascii()) => @if(mem[p] != 0) Bf'loop(code, ip&, -1);
+            @case("[".ascii()) => {
+                old := ip;
+                @if(mem[p] == 0) Bf'loop(code, ip&, 1);
+                ticks += abs(old - ip);
+            };
+            @case("]".ascii()) => {
+                old := ip;
+                @if(mem[p] != 0) Bf'loop(code, ip&, -1);
+                ticks += abs(old - ip);
+            };
             @default => ();
         };
         ip += 1;
         ticks += 1;
         @if(ticks > tick_limit) return(.None);
     };
-    Bf :: import("@/examples/bf/interpreter.fr");
     (Some = (ticks, i))
 }
 
 #use("@/examples/circuit/compile.fr");
 
-names :: @const_slice("Basic Foundations", "BF: IO", "BF: Memory", "BF: Arithmetic", "BF: Spring Forward", "BF: Fall Back");
+names :: @const_slice("Basic Foundations", "BF: IO", "BF: Memory", "BF: Arithmetic", "BF: Spring Forward", "BF: Fall Back", "Bf: Victory Lap");
 level_text :: """
-In this series of levels you will implement a well known esoteric instruction set. 
+A configuration error at the Global Strategic Maple Syrup Reserve 
+has caused the boilers to go into meltdown. Unfortunately the contractor 
+responsible for resetting the system has been fired (didn't adopt enough slop). 
+We managed to confiscate a program that outputs the password to access the boiler 
+controls before they left. However we don't have a computer capable of running it. 
+We do have a spec for the (somewhat esoteric) instruction set. This series of levels 
+will guide you through that spec to create a computer and retrieve the password. 
+Without it, the GSMSR will explode and a river of high temperature syrup will endanger 
+the lives of the tens of people living in rural Quebec. We're counting on you!
 
 Each instruction in the program is one byte. 
 Instruction 0x00 halts execution (enable a Halt_v2 component). 
@@ -339,4 +367,12 @@ This allows programs with loops. The instructions inside a 0x5B,0x5D pair will b
 execute repeatedly until they cause the data byte to be zero. 
 After this change, 0x5B is like `while ((*p) != 0) {` (and 0x5D is still like `}`). 
 
+This level is a jump in difficulty from the previous ones, 
+but it's the last thing needed for a technically fully functional computer. 
+---
+
+Your computer is finally ready to compute the password required to reset the syrup boilers. 
+The program will be loaded automatically, as before, all you have to do is run it.
+
 """.split("---", ast_alloc());
+Bf :: import("@/examples/bf/interpreter.fr");

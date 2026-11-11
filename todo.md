@@ -58,6 +58,11 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
   - kinda silly but should at least have temporary tests for myself that run the schematic hub things that are big/annoying enough that i dont want to keep them (yet another doom or linux or whatever)
   - set_initial_data for inlined CCs
   - larger than 8 bit static values
+  - save.fr: stop having the other ones change based on which one you compiled
+  - annoying that you can't skip to specific subtest (or tick) that you fail on
+  - for bf need to display non-letters better
+  - test where you need to auto truncate output of a memory
+  - test all the bfs (and that previous circuit doesnt pass the next test)
 - it technically works now but the circuit editor still feels incredibly bad to use. 
   deleting wires is the most obviously broken part. undiscoverable keybinds is also bad. 
 - its implied that `S :: @struct(f :: fn(s: Str) void = ()); S'f"foo"` would work because "foo".S'f() works

@@ -1,4 +1,12 @@
 
+## (Nov 10) circuit
+
+- spent a long time on loop backwards bf circuit off by two
+- trying to not hardcode arch io order
+  - wasted more than zero time on commenting out a `== "LEG"` causing it to load the wrong program
+  - i did notice that get_bit_width of v1 ram was in bytes not bits this whole time, yikes. 
+- thinking of more levels that aren't in tc. making the segment display out of probes. 
+
 ## (Nov 9) circuit
 
 - now that the editor is somewhat usable, can find new exciting invalid states. 

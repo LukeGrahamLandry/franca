@@ -101,6 +101,7 @@ Maze :: @struct {
 #use("@/examples/circuit/level_api.fr");
 Self :: @struct {
     sim: *Simulation;
+    shape := zeroed(IoShape);
     maze: Maze;
 };
 
@@ -116,11 +117,11 @@ start = fn(sim) = {
 },
 before = fn(self, values) = {
     self := Self.ptr_from_raw(self);
-    values[self.sim.shape.in] = self.maze&.input().zext();
+    values[self.shape.in] = self.maze&.input().zext();
 },
 after = fn(self, values) = {
     self := Self.ptr_from_raw(self);
-    out, out_on := (values[self.sim.shape.out], values[self.sim.shape.out_used] != 0);
+    out, out_on := (values[self.shape.out], values[self.shape.out_used] != 0);
     @if(out_on) self.maze&.output(out.trunc());
     self.maze.win
 },
@@ -160,13 +161,15 @@ init_program :: fn(self: *Self) void = {
     is_leg := name == "leg" || name == "LEG";
     known := is_defs || non_defs;
     
-    // TODO
-    self.sim.shape = (
-        out = 0 + int(non_defs && is_leg),
-        out_used = 1 + int(non_defs && is_leg),
-        in = 3,
-        in_used = 2,
-    );
+    if is_defs {
+        self.shape = (out=0,out_used=1,in=3,in_used=2);
+    } else {
+        // TODO: else report error
+        if find_io_shape(self.sim.circuit) { it |
+            self.shape = it;
+        };
+    };
+    
     @if(!known) return();
     Defs :: import("@/examples/circuit/defs.fr");
     program := @if(is_leg, Defs.the_maze_leg, Defs.the_maze);

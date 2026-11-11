@@ -18,6 +18,29 @@ Exports :: @struct {
     render: (@FnPtr(userdata: rawptr) void) = (fn(_0)=());
 };
 
+ComponentRef :: @struct(graphical: *Tc.Circuit.Gate, logical: *Component.Gate, instance: i64, data: []u8);
+fn find_labeled_component(sim: *Simulation, label: Str) ?ComponentRef = {
+    root := sim.circuit.compiled || return(.None);
+    c := sim.world[root]&;
+    i := sim.circuit.gates.index_of(fn(it) => it.label.items() == label) || return(.None);
+    g := sim.circuit.gates[i]&;
+    @if(g.logical_gate_index == -1) return(.None);
+    instance := c.instance_offset_by_gate[g.logical_gate_index];
+    l := c.gates[g.logical_gate_index]&;
+    n := get_storage_count(sim.world.components, l);
+    data := sim.world.storage.rest(instance).slice(0, n).interpret_as_bytes();
+    (Some = (graphical = g, logical = l, instance = instance, data = data))
+}
+
+fn find_io_shape(circ: *Tc.Circuit) ?IoShape = {
+    (Some = (
+        out = circ.pin_names.index_of("out") || return(.None),
+        out_used = circ.pin_names.index_of("out#on") || return(.None),
+        in = circ.pin_names.index_of("in") || return(.None),
+        in_used = circ.pin_names.index_of("in#on") || return(.None),
+    ))
+}
+
 fn put_text(sim: *Simulation, pos: Vec2, c: u32, msg: Str) void =
     sim'put_text(sim, pos, c, msg);
 
@@ -26,7 +49,6 @@ Imports :: @rec @struct {
 };
 Simulation :: @rec @struct {
     fns: *Imports #use;
-    shape := zeroed(IoShape);
     world: *World;
     circuit: *Tc.Circuit;
     circuits: []Tc.Circuit;
