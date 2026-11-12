@@ -5,6 +5,7 @@ Self :: @struct {
     i := 0;
     state: (@enum(Running, Win, Fail, MissingProbes, BadArity)) = .Running;
     probe_data := zeroed(Array(*i64, 8));
+    probes_found_mask := 0;
     prev_output := 0;
     test_count: i64;
 };
@@ -20,20 +21,7 @@ start = fn(sim) = {
     if o != 0 || i != 1 {
         self.state = .BadArity;
     };
-    
-    if true {
-        break :: local_return;
-        range(0, 8) { i |
-            name := number_chars.subslice(i, 1);
-            it := find_labeled_component(self.sim, name) 
-                || break({ self.state = .MissingProbes; });
-            if group(it.logical.kind) != .Tc2 || Tc'gate_name(it.logical.kind, .Tc2) != .Probe_wire_bit {
-                self.state = .MissingProbes;
-                break();
-            };
-            self.probe_data&[i] = it.data.peek_type(i64);
-        };
-    };
+    self.find_bit_probes();
     
     Self.raw_from_ptr(self)
 },
@@ -64,7 +52,7 @@ render = fn(self) = {
     self := Self.ptr_from_raw(self);
     msg := @match(self.state) {
         fn Running() => @tfmt("test %/%", self.i, self.test_count);
-        fn MissingProbes() => "you must have 8 Probe_wire_bit labeled 0,1,2,3,4,5,6,7";
+        fn MissingProbes() => "position 8 Probe_wire_bit to match the diagram";
         fn Fail() => @tfmt("failed test %", self.i);
         fn Win() => "passed all tests";
         fn BadArity() => "must have one input and zero outputs";
@@ -76,8 +64,12 @@ render = fn(self) = {
     if self.state != .MissingProbes {
         A, B := (self.i - int(self.state == .Running), pack_byte(self.probe_data&));
         draw_segments(self.sim, p - vec2(0, 2), A, B);
+    } else {
+        A, B := (1.shift_left(8)-1, self.probes_found_mask.bit_not());
+        draw_segments(self.sim, p - vec2(0, 2), A, B);
     };
 },
+suggested_components = fn(_) = @const_slice("Cc_input", "Segment_display", "Probe_wire_bit", "Splitter_word_8"),
 title = "Segment Display",
 description = """
 Old digital clocks made numbers out of seven togglable line segments (an eighth for a dot). 
@@ -88,15 +80,18 @@ Probe_wire_bit takes 1 one bit input and displays a red or green square based on
 Your circuit recives one byte of input, 
 each bit of which controls one bit probe 
 (representing one segment of the display you're creating). 
-The probes must be labeled with their bit index (0..=7) 
-for the level test to detect them.
 
-You should arrange the probes vaguely like the diagram below. 
- 0
-5 1
- 6
-4 2
- 3 7
+Since the goal is to display information visually, the physical layout of your components matters in this level. 
+The probes must be arranged exactly like the diagram below for the test to detect them.
+.0..
+5.1.
+.6..
+4.2.
+.3.7
+Numbers are bit probes and dots are empty cells.
+The number in the diagram is the index of the bit that should control that probe (0 is least significant). 
+You can press SPACE while holding a component to rotate it (so the pins face a different direction). 
+
 You can also place a Segment_display using the same input if you want to see the 
 correspondence between the builtin version and the new one you're building. 
 """,
@@ -149,6 +144,7 @@ render = fn(self) = {
     A, B := (@as(i64) number_segments[clamp(self.i - int(self.state == .Running), 0, 9)].zext(), self.prev_output);
     draw_segments(self.sim, p - vec2(0, 2), A, B);
 },
+suggested_components = fn(_) = @const_slice("Cc_input", "Cc_output", "Segment_display"),
 title = "SD: Decoder",
 description = """
 The input will be a number from 0 to 9. 
@@ -179,5 +175,31 @@ number_chars :: "0123456789";
 pack_byte :: fn(in: *Array(*i64, 8)) i64 = {
     o := 0; range(0, 8) { i | o = o.bit_or(in[i][].shift_left(i)); }; o
 };
+
+
+fn find_bit_probes(self: *Self) void = {
+    c := self.sim.circuit;
+    is_probe :: fn(it) => group(it.kind) == .Tc2 && Tc'gate_name(it.kind, .Tc2) == .Probe_wire_bit;
+    start := c.max;
+    each c.gates { it |
+        if is_probe(it) && it.pos.y < start.y {
+            start = it.pos;
+        }
+    };
+    found := 0;
+    offsets := @const_slice(vec2(0), vec2(1), vec2(1, 3), vec2(0, 4), vec2(-1, 3), vec2(-1, 1), vec2(0, 2), vec2(2, 4));
+    range(0, 8) { i |
+        continue :: local_return;
+        pos := start + offsets[i];
+        I := c.gates.index_of(fn(it) => is_probe(it) && it.pos == pos) || continue();
+        it := self.sim.get_component_by_graphical_index(I) || continue();
+        found = found.bit_or(1.shift_left(i));
+        self.probe_data&[i] = it.data.peek_type(i64);
+    };
+    self.probes_found_mask = found;
+    if found != 1.shift_left(8) - 1 {
+        self.state = .MissingProbes;
+    };
+}
 
 #use("@/examples/circuit/compile.fr");

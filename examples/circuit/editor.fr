@@ -6,16 +6,14 @@ fn text_box_consumes_event(e: *EditState, event: *Sapp.Event) bool = {
     @if(event.key_code == .ESCAPE) return(false);  // i want it for closing the field
     
     t := e.text_box&;
-    if event.type == .MOUSE_DOWN {
+    if event.type == .MOUSE_DOWN && event.mouse_button != .MIDDLE {
         Terminal'push_state(t) {
             e.active_buffer_index = .None;
             each(t.buffers, fn(buf) => { buf.active = false; });
-            
             done := false;
             pos: Terminal.Pos = (x = event.mouse_x.cast(), y = event.mouse_y.cast());
             enumerate t.buffers& { i, buf |
                 if buf.at.contains(pos) {
-                t.selected_buffer = i;
                 I := reserved_buffers;
                 ok := false 
                 || (i < I && e.show_info_box.is_some())
@@ -23,6 +21,7 @@ fn text_box_consumes_event(e: *EditState, event: *Sapp.Event) bool = {
                 ;
                 
                 if !done && ok {
+                    t.selected_buffer = i;
                     done = true;
                     buf.active = true;
                     e.active_buffer_index = (Some = t.selected_buffer);
@@ -30,12 +29,12 @@ fn text_box_consumes_event(e: *EditState, event: *Sapp.Event) bool = {
                 };
             };
             if e.active_buffer_index.is_none() {
-                e.show_info_box = .None;
+                t.dirty = true;
             };
         };
     };
     if e.active_buffer_index { i |
-        @if(i == 0, t.features&.unset(.Edit), t.features&.set(.Edit));  // TODO: have features per buffer?
+        @if(i == 0 && !e.info_box_is_settings, t.features&.unset(.Edit), t.features&.set(.Edit));  // TODO: have features per buffer?
         on_event(t, t.app, event);
         return true;
     };
@@ -80,6 +79,7 @@ fn draw_text_boxes(e: *EditState, sg: *Sg.Self) void = {
     };
 }
 
+// TODO: make sure this can't happen while loader.progress==.Loading because circuit_arena will be used on the other thread
 fn hover_gate(e: *EditState, i: ?i64, c: *Circuit) void = {
     t := e.text_box&;
     @if((e.hovered_gate || -1) == (i || -1)) return();
@@ -120,7 +120,7 @@ fn hover_gate(e: *EditState, i: ?i64, c: *Circuit) void = {
                 g.watched.set_zeroed();
                 @if(text != "") if c.gates.find(fn(it) => it.label.items() == text) { target |
                     if target.link_id == 0 || target.link_id == -1 {
-                        target.link_id = import("@/examples/circuit/eval.fr")'realtime_ns();
+                        target.link_id = realtime_ns();
                     };
                     w := e.circuit_arena.alloc_zeroed(Circuit.Watched, 1);
                     g.watched = w;
@@ -164,20 +164,24 @@ fn hover_gate(e: *EditState, i: ?i64, c: *Circuit) void = {
     e.has_text_field = shape.fields.len > 0;
 }
 
-fn text_box_selection(self: *Draw) void = {
+fn text_box_selection(self: *Draw) bool = {
     state := self.state;
     e, sapp := (state.edit&, state.sapp);
     no_code := e.enable || state.loader.progress != .Idle;
+    // note: the "\n" ones are computed later
     names := @slice(
         ("Component Docs", include_bytes("examples/circuit/docs.md")),
         ("Level Instructions", state.level.description), 
         ("Level Code", state.level.quine), 
-        ("Circuit Data", @if(state.loader.progress == .Loading, "", "\n")),
+        ("Settings", @if(state.loader.progress == .Idle, "\n", "")), 
+        ("This Circuit", @if(state.loader.progress == .Loading, "", "\n")),
+        ("All Circuits", @if(state.loader.progress == .Loading, "", "\n")),
         ("Circuit Code", @if(no_code, "", state.current_jitted_source)), 
         ("Warnings", @if(no_code, "", state.warnings.items())), 
+        ("New Circuit", "\n"),
     );
     prev := e.show_info_box;
-    if state.clicked {
+    if state.clicked || state.either_clicked {
         e.show_info_box = .None;
     };
     range(0, names.len) { i |
@@ -187,12 +191,21 @@ fn text_box_selection(self: *Draw) void = {
         };
     };
     if ((prev || -1) != (e.show_info_box || -1)) {
+        state.dirty = true;
         t := e.text_box&;
         buf := t.buffers[0];
+        @if(e.info_box_is_settings) do_settings(state, buf, false);
         buf.clear_text();
         e.active_buffer_index = .None;
         each(t.buffers, fn(buf) => { buf.active = false; });
         if e.show_info_box { i |
+            if names[i]._0 == "New Circuit" {
+                e.show_info_box = .None;
+                state.set_edit_mode(true);
+                state.new_circuit();
+                return true;
+            };
+            
             e.active_buffer_index = (Some = 0);
             t.lock_to_bottom = false;
             buf.active = true;
@@ -200,19 +213,156 @@ fn text_box_selection(self: *Draw) void = {
             buf.at = (pos = (x = pad, y = pad), w = sapp.width().float() - pad*2, h = sapp.height().float() - pad*2);
             @if(names[i]._0 == "Level Instructions") buf.append_string(state.level.title);
             buf.append_string(names[i]._1);
-            if names[i]._0 == "Circuit Data" {
+            
+            if names[i]._0 == "This Circuit" || names[i]._0 == "All Circuits" {
                 out := @ref u8.list(temp());
-                Save'write_save(state.circuit, state.world.tc_file_loader_device, .None, out, true);
+                i: ?i64 = @if(names[i]._0 == "All Circuits", .None, state.tree[0].diagram_circuit);
+                Save'write_save(state.circuit, state.world.tc_file_loader_device, i, out, true);
                 buf.append_string(out.items());
             };
+            e.info_box_is_settings = names[i]._0 == "Settings";
+            @if(e.info_box_is_settings) do_settings(state, buf, true);
         };
     };
+    false
 };
+
+do_settings :: fn(state: *State, buf: *Terminal.TextBuffer, read: bool) void = {
+    @if(state.tree.len == 0) return();
+    c := state.tree[state.tree.len - 1].diagram_circuit || return();
+    c := state.circuit[c]&;
+    out := @ref u8.list(temp());
+    if read {
+        @fmt(out, "# you can edit these values\n\n");
+        @fmt(out, "# circuit settings (saved in the circuit file)\n");
+        walk_settings_fields c { name, p |
+            @fmt(out, "%=%\n", name, p[]);
+        };
+        @fmt(out, "\n# simulator settings (not saved)\n");
+        walk_state_settings_fields state { name, p |
+            @fmt(out, "%=%\n", name, p[]);
+        };
+        buf.append_string(out.items());
+    } else {
+        state.dirty = true;
+        get_string(buf, out);
+        lines := out.items().split("\n", temp());
+        walk_settings_fields c { name, p |
+            WRITE(name, p);
+        };
+        walk_state_settings_fields state { name, p |
+            WRITE(name, p);
+        };
+        
+        WRITE :: fn(name, p) #duplicated => {
+            for lines { it | 
+                if it&.pop_prefix(name) && it&.pop_prefix("=") && it.len != 0 {
+                    @inline_switch(@type p[]) {
+                        @case(f32) => {
+                            @if_let(Tc'Asm'constant_eval_expression(it)) fn Ok(value) => {
+                                p[] = value.float().cast();
+                            };
+                        };
+                        @case(Str) => if p[] != it {
+                            p[] = it.shallow_copy(state.edit.circuit_arena);
+                        };
+                        @case(i64) => {
+                            @if_let(Tc'Asm'constant_eval_expression(it)) fn Ok(value) => {
+                                p[] = value;
+                            };
+                        };
+                        @case(bool) => { p[] = it == "true"; };
+                        @default => @run @panic("TODO: new settings type: %", (@type p[]).typename().str());
+                    };
+                };
+            };
+        };
+        
+    };
+    
+    walk_settings_fields :: fn(c: *Circuit, $X: FuncId #duplicated) void = {
+        X("name", c.name&);
+        X("default_ticks_per_frame", c.default_tick_rate&);
+        X("max_x", c.max.x&);
+        X("max_y", c.max.y&);
+        X("min_x", c.min.x&);
+        X("min_y", c.min.y&);
+        // TODO: but if you set it wrong i crash about the pins so can't let you just fuck around
+        // X("is_arch", c.is_arch&);
+    };
+    
+    walk_state_settings_fields :: fn(s: *State, $X: FuncId #duplicated) void = {
+        X("ticks_per_frame", s.ticks_per_eval&);
+        X("adapt_tick_rate", s.adapt_tick_rate&);
+        X("new_component_default_bit_width", s.edit.default_word_width&);
+        X("show_suggested_components", s.show_suggested_components&);
+        // TODO: selected level/circuit/edit_mode but they need to do something on change
+    };
+};
+
+fn set_edit_mode(state: *State, new_edit_mode: bool) void = {
+    e := state.edit&;
+    @if(e.enable == new_edit_mode) return();
+    @if(state.loader.progress != .Idle) return();
+    @if(state.tree.len == 0) return();
+    i := state.tree[0].diagram_circuit || return();
+    state.end_level();
+    
+    if e.enable {
+        if state.tree[state.tree.len - 1].diagram_circuit { i |
+            c := state.circuit[i]&;
+            hover_gate(e, .None, c);
+        };
+    };
+    e[] = (enable = !e.enable, dont_reset = e.dont_reset);
+    
+    @if(e.enable) return();
+    // recompile when exiting edit mode. 
+    // TODO: this leaks arena space forever so eventually need to dump save and reload to reset it
+    state.warnings&.clear();
+    // forget that loaded it before
+    each state.circuit { c |
+        if c.compiled.is_some() {
+            each c.gates { it |
+                it.logical_gate_index = -1;
+            };
+            each c.wires { it |
+                it.logical.id = 0xFFFFFFFF;
+            };
+        }
+    };
+    
+    load_circuit_index_async(state, i, state.world.tc_file_loader_device);
+}
+
+fn new_circuit(state: *State) void = {
+    @if(state.loader.progress != .Idle) return();
+    a := state.edit.circuit_arena;
+    c := a.alloc_uninit(Tc.Circuit, state.circuit.len + 1);
+    c.slice(0, state.circuit.len).copy_from(state.circuit);
+    c[c.len-1] = (
+        id = (id = realtime_ns()),
+        name = @afmt(a, "Untitled_%", c.len),
+        gates = empty(),
+        wires = empty(),
+        programs = empty(),
+        min = vec2(0),
+        max = vec2(100),
+        dependencies = empty(),
+        v2 = false,
+        default_tick_rate = 1,
+        is_arch = true,
+    );
+    state.circuit = c;
+    state.tree&.clear();
+    state.tree&.push(diagram_circuit = (Some = c.len-1));
+}
 
 Terminal :: import("@/examples/gpu/terminal.fr");
 #use("@/examples/circuit/tc/load.fr");
 #use("@/examples/circuit/compile.fr");
 #use("@/examples/circuit/gui.fr");
+#use("@/examples/circuit/eval.fr");
 #use("@/graphics/lib.fr");
 
 // TODO: move more stuff out of gui.fr

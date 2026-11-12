@@ -37,7 +37,7 @@ it works well enough to run my overture/leg in the maze and a few things from th
 
 > i've started to support circuits the 2.x rewrite of the game 
 
-## TODO
+## TODO (v1)
 
 - devices
   - missing: network, hdd, sound
@@ -51,9 +51,6 @@ it works well enough to run my overture/leg in the maze and a few things from th
 - assembler
   - expressions with spaces in them are wrong
   - what happens when a label is definied multiple times
-- need a better interface for choosing circuit/programs, showing memory contents
-- dropping file doesn't work in franca-web-playground (even when fixed will be annoying because need to feed it all the custom components individually)
-- needs the franca library folder available at runtime
 - from schematic hub
   - 3D Engine: "str scratch frame"
   - screenvurture: "H" as char literal in expression
@@ -67,28 +64,14 @@ it works well enough to run my overture/leg in the maze and a few things from th
   - nested expressions
   - variable names
   - speed mode that cheats and implements components with native instructions (like tc) instead of nand gates
-- tc: at top level sort by type of IO maybe so don't have to add random offsets in the evaluator depending on the arch. ie in my overture and leg input and output are swapped because the order in save file is arbitrary. 
-- fast mode that doesn't even save_wire_values once per frame
 - ui: allow copying the code to clipboard
 - `Main :: import().examples.circuit;` doesn't work in the web demo
 - nice ui for web gallery from my archive of the old schematic hub
-- show wire comments/colours in the ui
 - it's annoying that you can't see the wire values if it halts on a tick that was evaled in fast mode. 
   delay all writes to the end somehow so can rerun the tick in slow mode after knowing it will halt?
 - use 32 bit instructions instead of bit_and(0xFFFFFFFF)
 - arm has nice merged (and,or)+shift in one instruction
-- option to see generated source or -d logging in the ui
-  - ^ would be nicer if i factor out examples/gpu/terminal.fr into a reusable textbox widgit and use that (also for showing ram contents). 
-    the other option would just be rendering the whole sapp thingy into a texture which might be less annoying than infecting everything in the terminal with positioning code. 
-- document the components (especially the ones that dont exist in v2 so cant easily check the game)
-
-## todo tc2
-
-  - Static_indexer_config, Delay_line_word_config, Static_eval, Static_value, Pipelined_load_port, Register_word_config, Clz, Ctz
-  - isa: assembly parser generator thingy https://github.com/Stuffe/isa_spec
-  - let the editor place the new components
-
----
+- option to see -d jit logging in the ui
 
 ```
 // TODO: don't always recompile everything when loading a new circuit. it might reuse some custom components. 

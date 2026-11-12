@@ -63,14 +63,15 @@ render = fn(self) = {
     self := Self.ptr_from_raw(self);
     w := self.grid_width;
     msg := @match(self.state) {
-        fn Running() => @tfmt("test %/%", self.i, self.test_count);
+        fn Running() => @tfmt("test %/% (%)", self.i, self.test_count, pattern_names[self.i]);
         fn MissingDevices() => @tfmt("you must have a ram labeled 'Framebuffer' (%*6*8*4 bytes) and %x% DotMatrixDisplay", w*w, w, w);
-        fn Fail() => @tfmt("failed test %: %", self.i, self.find_error() || @if(self.split_flush, "all displays must be flushed on the same tick", "unreachable"));
+        fn Fail() => @tfmt("failed test % (%): %", self.i, pattern_names[self.i], self.find_error() || @if(self.split_flush, "all displays must be flushed on the same tick", "unreachable"));
         fn Win() => "passed all tests";
     };
     self.sim.put_text( vec2(-200, 20), pack_rgba(50, 200, 150, 255), msg);
 },
 quine = include_bytes(@source_file_name()),
+suggested_components = fn(_) = @const_slice("DotMatrixDisplay", "Ram_v2", "Load_port", "Counter"),
 );
 
 fn init_test(self: *Self) void = {
@@ -105,7 +106,7 @@ fn find_devices(self: *Self) bool = {
     tile_step := vec2(3, 4);
     range(0, w) { y |
         range(0, w) { x |
-            I := c.gates.index_of(fn(it) => it.pos == pos) || return(false);
+            I := c.gates.index_of(fn(it) => is_dot(it) && it.pos == pos) || return(false);
             it := self.sim.get_component_by_graphical_index(I) || return(false);
             @debug_assert_eq(it.data.len, size_of(Tc.Builtin.DotData));
             self.dots&[y*w+x] = it.data.peek_type(Tc.Builtin.DotData);
@@ -118,6 +119,7 @@ fn find_devices(self: *Self) bool = {
     true
 }
 
+pattern_names :: @const_slice("block", "xor", "gradient");
 fn pattern(self: *Self, x: i64, y: i64) u32 = {
     w := self.grid_width;
     screen_index := y/8*w + x/6;

@@ -1,4 +1,13 @@
 
+## (Nov 12) circuit
+
+- trying to make the controls less annoying. in edit mode, just let you edit withotu holding control and make moving more annoying. left click on buttons. 
+- remember hovered wire so can highlight the whole thing. make the wire hover lines less spam. 
+- wire colours for imported circuits
+- i like detecting the display's position so you dont need labels. did that for the probes level too. 
+- let you edit a bunch of settings as text. this might be too weird and i'll need to switch to conventional fields but we'll see. 
+- highlight suggested components for the current level so you're not just staring at a wall of text
+
 ## (Nov 11) circuit
 
 - expressions in number boxes

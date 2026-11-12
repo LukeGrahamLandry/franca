@@ -41,8 +41,10 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
 - annoying that you cant run_tests build_graphics alone because "failed to record cross_repro"
 - `if (1*2).ult(3) {` parses wrong
 - circuit
-  - order of outputs is based on order in the file so caller of an arch needs to not just assume. 
-    (which maze in gui&test and cubes both do wrong rn)
+  - show contents of ram as text box instead of the annoying spacial thing i do currently
+  - could have an option to exec the assembly parser generator thingy https://github.com/Stuffe/isa_spec
+  - Pipelined_load_port, Register_word_config
+  - cubes get ioshape by label like the other levels
   - tests for the editor. ex. wire routing/splitting
   - why does circuit fetch the wasm4 dep. it uses that file for atlas but shouldn't be compiling the c? an overload signeture i guess, thats so annoying. 
   - allocate World contigously with .storage
@@ -68,11 +70,30 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
   - careful of "truncation in bitfield set" ex. asking for normal static_indexer with "auto" width
   - show size of dot matrix / segment display in edit mode for ease of tiling. 
   - using too small a component (especially constant is error prone). should show widths more prominantly. 
+    - option to emphasize wires that don't match pin width?
   - not having copy/paste/(move group) is really annoying
-  - editor wire comments/colours
+  - edit wire comments/colours
+  - show wire comments in the ui without needing to hover a specific wire
   - now that i have enough to compare, try to make the level code less verbose
-- it technically works now but the circuit editor still feels incredibly bad to use. 
-  deleting wires is the most obviously broken part. undiscoverable keybinds is also bad. 
+```
+// TODO: bundle the source files the jit needs so binary is self contained
+// TODO: autosave & web localstorage
+// TODO: be able to paste to add one circuit without stomping everything. choose (replace all, replace one, add new). same for dragndrop and cli. 
+// TODO: allow enter custom component while in edit mode / make new custom components
+// - need to have some sort of feedback if you try to change the pin layout in a way that makes a usage site broken
+// TODO: copy paste a gate (or area)
+// TODO: route better 
+// - keep track of length/direction (dont forget to reconstruct in read_save) and use that to simplify split_for_node
+// - route around gates/pins/nodes so you have to click explicitly if you want it to connect
+// TODO: be able to delete just one wire by clicking on the segment instead of the node
+// TODO: be able to delete a redundant node and have the wires reconnect into a bigger one
+//       (inverse of split_for_node)
+// TODO: key to summon the add gate menu to your current place?
+// TODO: undo. especially because its easy to accidently delete a gate. 
+//       maybe NewGate should never reuse placeholders so deleted ones keep their data and undo can just mark it active again. 
+// TODO: visual feedback when trying to place a gate in a bad place 
+```
+
 - its implied that `S :: @struct(f :: fn(s: Str) void = ()); S'f"foo"` would work because "foo".S'f() works
 - make types_size_guess growable. need to cope with not reallocating under the cache pointers tho
 - web: include examples for stackie and life

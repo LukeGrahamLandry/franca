@@ -31,6 +31,7 @@ State :: @rec @struct {
     world: World;
     tree: List(CircuitNode);
     clicked: bool;
+    either_clicked: bool;
     left_mouse_down: bool;
     want_eval: bool;
     auto_eval: bool;
@@ -39,6 +40,7 @@ State :: @rec @struct {
     sim: LevelApi.Simulation;
     level: *LevelApi.Exports;
     level_active: bool;
+    level_suggested: StaticBitSet(builtin_components.len());
     levels: List(*LevelApi.Exports);
     tick: i64;
     halt_message: List(u8);
@@ -81,6 +83,11 @@ State :: @rec @struct {
         to_drop: ?Sg.Image;
     };
     edit: EditState;
+    show_suggested_components: bool;
+    
+    // only know part way through rendering so won't highlight all the parts on the first frame. 
+    // remember for next frame to get all the nodes. 
+    prev_emphasized_wire: ?WireId;
 };
 
 CircuitNode :: @struct {
@@ -289,7 +296,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     self.put_text(self.text_spacing * vec2(0, 3), pack_rgba(255, 255, 255, 255)) { out |
         if state.edit.enable {
-            @fmt(out, "edit mode (press e to exit); right click to select/place. space to rotate. backspace to delete. double click gate to configure. (holding control: left drag to move/place, right click to delete)");
+            @fmt(out, "edit mode (press e to exit); left drag to move/place. space to rotate. right click to delete. middle drag to pan. double click gate to configure.");
         } else {
             frame_time := state.frame_time_history&.get();
             @fmt(out, "(paused=%, tick_rate=%, tick=%, keyboard=%, frame_time=%ms, adapt_tick_rate=%) ", 
@@ -308,8 +315,10 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         self.gate_selection();
     };
     
-    self.text_box_selection();
-    
+    if self.text_box_selection() {
+        have_logic = false;
+    };
+        
     if self.arch_selection() { i |
         @if(state.loader.progress == .Idle) if !state.edit.enable || state.edit&.no_selection() {
         state.clicked = false;
@@ -334,9 +343,6 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             self.wires = world.scratch.items().subslice(wire_offset, logical_c.wire_count);
         };
         self.logical = (Some = c);
-        if state.show_wire_ref_lines {
-            self.all_wire_positions = temp().alloc_zeroed(RawList(Vec2), logical_c.wire_count);
-        };
         
         if state.tree.len == 1 || state.tree[state.tree.len - 1].logical_gate.is_some() {
             self.draw_component_code(c, instance, parent_wire_offset);
@@ -434,13 +440,14 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         self.update_edit(circuit, state.circuit);
     };
     
-    if self.hovered_wire_index { wire, position_index |
+    positions := self.emphasized_wire_positions;
+    @if(positions.len > 0)
+    if self.hovered_wire_index { position_index |
         need_draw = true;
-        positions := self.all_wire_positions[wire.id.zext()];
         a := self.text_to_world_pos(positions[position_index]);
         for positions { b |
             b := self.text_to_world_pos(b);
-            sgl.color = pack_rgba(255, 255, 255, 255);
+            sgl.color = pack_rgba(255, 255, 255, 200);
             sgl.line(a, b, 0.005);
         };
     };
@@ -513,6 +520,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.gfx_error_last_frame = gfx_error;
     
     state.clicked = false;
+    state.either_clicked = false;
     Easy'glue_begin_pass(sapp, sg, ClearAction(r = 0.15, g = 0.15, b = 0.15, a = 1));
     @if(need_draw) sgl.draw_layer(sg, 0);
     sdtx.draw_layer(0);
@@ -527,8 +535,8 @@ Draw :: @struct {
     screen_scale: Vec2;
     sdtx: *Sdtx.Context;
     have_logic: bool;
-    all_wire_positions: []RawList(Vec2) = empty();
-    hovered_wire_index: ?Ty(WireId, i64) = .None;
+    emphasized_wire_positions: RawList(Vec2) = empty();
+    hovered_wire_index: ?i64 = .None;
     mouse_world_pos: Vec2;
     wires: []WireValue = empty();
     wire_value_colour: Array(u32, 2) = (pack_rgba(150, 150, 255, 255), pack_rgba(255, 0, 150, 255));
@@ -540,6 +548,7 @@ Draw :: @struct {
     hover_logical_code: ?i64 = .None;
     base_instance := 0;
     open_gate: ?Ty(?i64, ?i64, bool) = .None;
+    set_hover_wire := false;
 };
 
 fn do_option(self: *Draw, pos: Vec2, name: Str, selected: bool, value: ~T, new: *?T) void #where = {
@@ -549,7 +558,8 @@ fn do_option(self: *Draw, pos: Vec2, name: Str, selected: bool, value: ~T, new: 
     hover := p.x > sdtx.pos.x && p.x < sdtx.pos.x + name.len.float().cast() && p.y > sdtx.pos.y && p.y < sdtx.pos.y + 1;
     sdtx.color = pack_rgba(200, 200*int(!selected), 200*int(!hover), 255);
     sdtx.put(name);
-    if hover && state.clicked&.take() {
+    if hover && state.either_clicked&.take() {
+        state.clicked = false;
         new[] = (Some = value);
     };
 }
@@ -797,20 +807,25 @@ fn draw_primitive_code(self: *Draw, instance: i64, parent_wire_offset: i64, hove
     };
 }
 
-fn show_wire_value(self: *Draw, id: WireId, force_hover: bool) = {
+fn show_wire_value(self: *Draw, id: WireId, is_for_graphical_node: bool) = {
     sdtx, state, wires, out := (self.sdtx, self.state, self.wires, self.out);
     @if(!self.have_logic) return();
     i := id.id.zext();
-    if state.show_wire_ref_lines && self.all_wire_positions.len != 0 {
+    if state.show_wire_ref_lines {
         start := sdtx.pos;
         end := start + vec2(6, 1);
         p := self.world_to_text_pos(self.mouse_world_pos);
         hover := p.x > start.x && p.x < end.x && p.y > start.y && p.y < end.y;
-        positions := self.all_wire_positions[i]&;
-        // collecting all these is a bit unreasonably :SLOW but here we are. it's only when holding shift so maybe it's fine 
-        positions.push(sdtx.pos, temp());
-        if self.hovered_wire_index.is_none() && (hover || force_hover) {
-            self.hovered_wire_index = (Some = (id, positions.len - 1));
+        if hover {
+            self.set_hover_wire = true;
+            state.prev_emphasized_wire = (Some = id);
+            self.hovered_wire_index = (Some = self.emphasized_wire_positions.len);
+        };
+    
+        if state.prev_emphasized_wire { prev |
+            if !is_for_graphical_node && prev.id == id.id {
+                self.emphasized_wire_positions&.push(sdtx.pos, temp());
+            };
         };
     };
 
@@ -978,49 +993,72 @@ fn draw_gate_squares(self: *Draw, circuit: *Tc.Circuit) void = {
 //       (can see the difference when hover so colour changes)
 fn draw_wires(self: *Draw, circuit: *Tc.Circuit) void = {
     sdtx, sgl, W, state := (self.sdtx, self.draw&, self.wire_node_width, self.state);
+    prev_hover := state.prev_emphasized_wire&;
+    already_wrote_position := false;
     enumerate circuit.wires { wire_i, wire |
         teleport := wire.teleport;
+        base_colour := pack_rgba(100, 50, 50 * int(!teleport), 255);
+        if wire.colour != 0 && wire.colour < wire_colours.len().trunc() {
+            base_colour = wire_colours[wire.colour.zext()];
+        };
+        hover_colour := pack_rgba(150, 50, 50, 255);
         enumerate wire.path { i, it |
-            sgl.color = pack_rgba(100, 50, 50 * int(!teleport), 255);
+            sgl.color = base_colour;
             b := self.tc_to_world_pos(it.pos);
+            hover := self.hovering_node(b);
+            if hover && wire.logical.id != 0xFFFFFFFF && !already_wrote_position {
+                self.set_hover_wire = true;
+                prev_hover[] = (Some = wire.logical);
+                self.hovered_wire_index = (Some = self.emphasized_wire_positions.len);
+                self.emphasized_wire_positions&.push(self.world_to_text_pos(b), temp());
+            };
+            if prev_hover[] { prev |
+                // in edit mode, logical wires haven't been merged yet so meaningless
+                if !state.edit.enable && state.show_wire_ref_lines && prev.id == wire.logical.id {
+                    sgl.color = hover_colour;
+                };
+            };
             if i != 0 && !teleport {
                 a := self.tc_to_world_pos(wire.path[i - 1].pos);
                 sgl.line(a, b, W/2.5);
             };
-            hover := self.hovering_node(b);
-            @if(state.show_wire_ref_lines && wire.is_end(it.pos))
-            if hover && state.edit.enable && state.edit&.no_selection() && state.clicked&.take() {
-                state.edit.placing_wire_start = (Some = (wire_i, i));
-            };
-            this_hover := hover;
-            if self.hovered_wire_index.is_some() && self.hovered_wire_index.Some._0.id == wire.logical.id && (i == 0 || i == wire.path.len - 1) {
-                // TODO: these will be kinda useless because it doesn't reset wire_hover_count when for the next wire that's at a different x position. 
-                hover = true;
-            };
+            
             // TODO: be able to hover the pin of a disconnected gate where there's no graphical wire to see value
             if hover {
-                sgl.color = pack_rgba(200, 50, 50, 255);
                 sdtx.pos = self.world_to_text_pos(b) + vec2(0, self.wire_hover_count);
                 base := sdtx.pos.x;
                 sdtx.color = pack_rgba(255, 255, 255, 255);
-                sdtx.put(@tfmt("% (%, %) ", wire_i, it.pos.x, it.pos.y));
-                if !circuit.has_bidirectional_pins {
-                    @if(wire.logical.id != 0xFFFFFFFF) self.show_wire_value(wire.logical, true);
+                sdtx.put(@tfmt("% % ", wire_i, wire.colour));
+                if !circuit.has_bidirectional_pins && wire.logical.id != 0xFFFFFFFF {
+                    if !already_wrote_position || wire.logical.id != prev_hover.Some.id {
+                        self.show_wire_value(wire.logical, true);
+                    };
+                };
+                sdtx.color = pack_rgba(255, 255, 255, 255);
+                if !already_wrote_position {
+                    sdtx.put(@tfmt(" (%, %)", it.pos.x, it.pos.y));
+                    already_wrote_position = true;
                 };
                 self.wire_hover_count += 1;
                 
-                if this_hover && wire.comment.len != 0 {
+                if wire.comment.len != 0 {
                     sdtx.color = pack_rgba(200, 200, 200, 255);
                     sdtx.pos = self.world_to_text_pos(b) + vec2(0, self.wire_hover_count);
                     self.wire_hover_count += 1;
                     sdtx.put(wire.comment);
                 };
+                
+                sgl.color = hover_colour;
             };
             
             real := i == 0 || i == wire.path.len - 1;  // else: only for routing, can't connect to pins
             s: f32 = @if(real, 1, 0.6);
             sgl.line(b - vec2(0, W/2*s), b + vec2(0, W/2*s), W*s);
         };
+    };
+    if !self.set_hover_wire && prev_hover.is_some() {
+        prev_hover[] = .None;
+        state.dirty = true;
     };
 }
 
@@ -1515,32 +1553,17 @@ EditState :: @struct {
     is_double_click := false;
     has_text_field := false;
     
+    dont_reset: @struct {
     circuit_arena: Alloc;
-    
-    default_word_width := 8;  // TODO: ui for changing this
+    default_word_width := 8;
     text_box: Terminal.State;
+    } #use;
     active_buffer_index: ?i64 = .None;
     field_names: []Str = empty();
     show_info_box: ?i64 = .None;
+    info_box_is_settings := false;
 };
 
-// TODO: bundle the source files the jit needs so binary is self contained
-// TODO: autosave & web localstorage
-// TODO: be able to paste to add one circuit without stomping everything. choose (replace all, replace one, add new). same for dragndrop and cli. 
-// TODO: edit more params
-// TODO: allow enter custom component while in edit mode / make new custom components
-// - need to have some sort of feedback if you try to change the pin layout in a way that makes a usage site broken
-// TODO: copy paste a gate (or area)
-// TODO: route better 
-// - keep track of length/direction (dont forget to reconstruct in read_save) and use that to simplify split_for_node
-// - route around gates/pins/nodes so you have to click explicitly if you want it to connect
-// TODO: be able to delete just one wire by clicking on the segment instead of the node
-// TODO: be able to delete a redundant node and have the wires reconnect into a bigger one
-//       (inverse of split_for_node)
-// TODO: key to summon the add gate menu to your current place?
-// TODO: undo. especially because its easy to accidently delete a gate. 
-//       maybe NewGate should never reuse placeholders so deleted ones keep their data and undo can just mark it active again. 
-// TODO: visual feedback when trying to place a gate in a bad place 
 fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
     state := self.state;
     e := state.edit&;
@@ -1603,26 +1626,13 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
                 e.placing_wire_start = .None;
                 break();
             };
-            if state.show_wire_ref_lines && w.is_end(start) {
-                // holding shift, allow placing routing nodes
-                if path_i != 0 {
-                    for route { pos |
-                        w.path&.push((pos = pos), a);
-                        e.placing_wire_start.Some._1 += 1;
-                    };
-                } else {
-                    for route { pos |
-                        w.path&.insert(0, (pos = pos), a);
-                    };
-                };
-            } else {
+            
                 e.placing_wire_start = .None;
                 
                 for route { pos |
                     split_for_node(c.wires&, pos, a);
                     w.path&.push((pos = pos), a);
                 };
-            };
         };
     };
     
@@ -1825,7 +1835,10 @@ fn gate_selection(self: *Draw) void = {
     
     do_button :: fn(column_i: i64, row_i: i64, name: Str, kind: ComponentId) => {
         pos := vec2(column_i.float().cast() * 24, -row_i.float().cast());
-        self.do_option(pos, name, false, kind, new&);
+        i := kind.id.zext();
+        // TODO: reusing the `selected` purple might be too aggressive
+        suggested := state.show_suggested_components && i < builtin_components.len() && state.level_suggested&.get(i);
+        self.do_option(pos, name, suggested, kind, new&);
     };
     
     @if(state.edit&.no_selection())
@@ -1980,6 +1993,7 @@ fn push_tree_node(state: *State, it: CircuitNode) void = {
 }
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
+    state.show_suggested_components = true;
     t := state.edit.text_box&;
     // TODO: don't init_from_cli_args
     on_init(t, sapp, sg);
@@ -2000,7 +2014,9 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     init(state.loader&, state);
     state.screen.to_drop = .None;
     state.keyboard_data = .None;
-    state.edit = (circuit_arena = panicking_allocator, text_box = state.edit.text_box);
+    state.prev_emphasized_wire = .None;
+    state.circuit_arena = init(general_allocator(), 1.shift_left(16));
+    state.edit = (circuit_arena = state.circuit_arena&.borrow(), text_box = state.edit.text_box);
     sapp.desc.enable_clipboard = true;
     sapp.desc.enable_dragndrop = true;
     state.sg = sg; state.sapp = sapp;
@@ -2036,7 +2052,6 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.reset();
     state.prev_timestamp_ns = realtime_ns();
     
-    state.circuit_arena = init(general_allocator(), 1.shift_left(16));
     for cli_args() { path |
         path := path.str();
         if path.ends_with("circuit.data") || path.ends_with(".txt") {
@@ -2099,6 +2114,15 @@ fn reset(state: *State) void = {
     // TODO: dont start the level if circuit.compiled.is_none or .error
     state.level.userdata = state'level'start(state.sim&);
     state.level_active = state.level.title != "Sandbox";
+    
+    // :SLOW
+    state.level_suggested&.clear();
+    suggested := state'level'suggested_components(state.level.userdata);
+    for suggested { name |
+        if builtin_components.index_of(fn(it) => it.name == name) { i |
+            state.level_suggested&.set(i);
+        };
+    };
     
     world.scratch.len = world.scratch.cap;
     world.scratch.items().set_zeroed();
@@ -2195,14 +2219,19 @@ fn find_keyboard(state: *State) void = {
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     e := state.edit&;
-    if text_box_consumes_event(e, event) {
-        return();
-    };
-
     screen := vec2(sapp.framebuffer_width.float().cast(), sapp.framebuffer_height.float().cast()) 
         / 2;
     mouse := vec2(event.mouse_x, -event.mouse_y) / screen + vec2(-1.0, 1.0);
     delta_mouse := vec2(event.mouse_dx, -event.mouse_dy) / screen;
+    
+    if text_box_consumes_event(e, event) {
+        if event.type == .MOUSE_MOVE {
+            // need this or the click to exit will still be on the button and enter again
+            state.mouse_pos = mouse;
+        };
+        return();
+    };
+    
     
     if !event.key_repeat && @is(event.type, .KEY_DOWN, .KEY_UP) {
         if event.key_code == .K && event.type == .KEY_DOWN && event.modifiers.get(.shift) != 0  && event.modifiers.get(.super) != 0 {
@@ -2235,13 +2264,18 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         fn RESIZED() => ();
         fn MOUSE_MOVE() => {
             state.mouse_pos = mouse;
-            if event.modifiers.get(.left_mouse) != 0 && event.modifiers.get(.control) == 0 {
+            move := (event.modifiers.get(.middle_mouse) != 0)
+                || (!e.enable && event.modifiers.get(.left_mouse) != 0)
+                || (e.enable && event.modifiers.get(.left_mouse) != 0 && event.modifiers.get(.control) != 0)
+                || (e.enable && event.modifiers.get(.right_mouse) != 0 && event.modifiers.get(.control) != 0);
+            if move {
                 state.pos += delta_mouse;
             }
         }
         fn MOUSE_SCROLL() => {
             (lo: f32, hi: f32) := (0.03, 100);
-            delta := event.scroll_y * state.scale * 3 / screen.x;
+            delta := event.scroll_y + event.scroll_x;  // still zoom like normal when becomes x for holding shift
+            delta := delta * state.scale * 3 / screen.x;
             delta := clamp(state.scale + delta, lo, hi) - state.scale;
             
             pos := (mouse - state.pos) / state.scale;
@@ -2255,6 +2289,8 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             tick_off := @if(event.modifiers.get(.super) == 1, 1000, tick_off);
             @match(event.key_code) {
                 fn ESCAPE() => {
+                    @if(e.show_info_box.is_some() && e.info_box_is_settings) do_settings(state, e.text_box.buffers[0], false);
+                    
                     e.show_info_box = .None;
                     e.active_buffer_index = .None;
                     if e.enable {
@@ -2314,60 +2350,12 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                         };
                     };
                 };
-                fn E() => if state.loader.progress == .Idle {
-                    @if(state.tree.len == 0) return();
-                    i := state.tree[0].diagram_circuit || return();
-                    state.end_level();
-                    
-                    if e.enable {
-                        if state.tree[state.tree.len - 1].diagram_circuit { i |
-                            c := state.circuit[i]&;
-                            hover_gate(e, .None, c);
-                        };
-                    };
-                    e[] = (enable = !e.enable, circuit_arena = state.circuit_arena&.borrow(), text_box = e.text_box);
-                    
-                    // recompile when exiting edit mode. 
-                    // TODO: this leaks arena space forever so eventually need to dump save and reload to reset it
-                    if !e.enable {
-                        state.warnings&.clear();
-                            // forget that loaded it before
-                            each state.circuit { c |
-                                if c.compiled.is_some() {
-                                    each c.gates { it |
-                                        it.logical_gate_index = -1;
-                                    };
-                                    each c.wires { it |
-                                        it.logical.id = 0xFFFFFFFF;
-                                    };
-                                }
-                            };
-                            
-                            load_circuit_index_async(state, i, state.world.tc_file_loader_device);
-                    };
-                }
+                fn E() => state.set_edit_mode(!e.enable);
                 fn BACKSPACE() => {
                     e.action = .Delete;
                 }
                 fn M() => if e.enable {
-                    c := state.circuit_arena&.borrow().alloc_uninit(Tc.Circuit, state.circuit.len + 1);
-                    c.slice(0, state.circuit.len).copy_from(state.circuit);
-                    c[c.len-1] = (
-                        id = (id = realtime_ns()),
-                        name = "New Circuit",
-                        gates = empty(),
-                        wires = empty(),
-                        programs = empty(),
-                        min = vec2(0),
-                        max = vec2(100),
-                        dependencies = empty(),
-                        v2 = false,
-                        default_tick_rate = 1,
-                        is_arch = true,
-                    );
-                    state.circuit = c;
-                    state.tree&.clear();
-                    state.tree&.push(diagram_circuit = (Some = c.len-1));
+                    state.new_circuit();
                 }
                 @default => return();
             };
@@ -2380,19 +2368,24 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         }
         fn MOUSE_DOWN() => {
             e.is_double_click = false;
+            if event.mouse_button == .LEFT {
+                state.left_mouse_down = true;
+            };
+            state.either_clicked = @is(event.mouse_button, .LEFT, .RIGHT);
             
-            if event.mouse_button == .RIGHT && event.modifiers.get(.control) == 1 && e.no_selection() {
+            if e.enable && event.mouse_button == .RIGHT && e.no_selection() && event.modifiers.get(.control) == 0 {
                 e.action = .Delete;
                 // fall through to select the thing you're clicking on
             };
             
-            if event.mouse_button == .RIGHT || event.modifiers.get(.control) == 1 {
+            if event.mouse_button == .RIGHT && event.modifiers.get(.control) == 0 {
                 state.mouse_pos = mouse;
                 state.clicked = true;
-            } else {
-                if event.mouse_button == .LEFT {
-                    state.left_mouse_down = true;
-                }
+            };
+            
+            if e.enable && event.mouse_button == .LEFT && event.modifiers.get(.control) == 0 {
+                state.mouse_pos = mouse;
+                state.clicked = true;
             };
             
             if event.mouse_button == .LEFT {
@@ -2409,7 +2402,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         }
         fn MOUSE_UP() => {
             if event.mouse_button == .LEFT {
-                if event.modifiers.get(.control) == 1 && !e.no_selection() {
+                if e.enable && !e.no_selection() && event.modifiers.get(.control) == 0 {
                     state.clicked = true;
                 };
                 
@@ -2780,3 +2773,7 @@ fn clear(self: *RollingAverage) void = {
 }
 fn get(self: *RollingAverage) i64 = 
     self.sum / max(1, self.history&.len());
+
+// turing complete's fixed palette
+wire_colours :: @const_slice(0xff000000, 0xff34a9a3, 0xff34aa71, 0xff71aa34, 0xffaaaa34, 0xffb04545, 0xffaa3471, 0xff9734aa, 0xff3b52aa, 0xff3477aa, 0xff5c5c5c);
+// bright: @const_slice(0xff000000, 0xff45e3db, 0xff45e396, 0xff96e345, 0xffe3e345, 0xffeb5c5c, 0xffe34596, 0xffc945e3, 0xff4f6ee3, 0xff459ee3, 0xff7a7a7a);
