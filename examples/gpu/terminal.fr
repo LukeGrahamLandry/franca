@@ -36,7 +36,7 @@ State :: @struct(
     buffers: List(*TextBuffer),
     // these are the ones that aren't shown but can be popped back to. 
     buffer_stack: List(*TextBuffer),
-    selected_buffer: i64,
+    selected_buffer: i64,  // set from the outside if embedded with multiple text boxes
     app: *Sapp.Self,
     sg: *Sg.Self,
     process: ?ProcessInfo,
@@ -445,18 +445,20 @@ handle_event :: fn(event: *Sapp.Event) void = {
             break :: local_return;
             if state.click_count == 0 {
                 // double click -> select word
+                state.click_count += 1;  // start counting for triple click even if past the end of the line
                 _, start, end := find_link_at(b, line, col) || break();
                 b.selection = (Some = (
                     start = (x = start.float(), y = line.float()),
                     end   = (x = end.float(),   y = line.float()),
                 ));
-                state.click_count += 1;
             } else {
                 // triple click -> select line
+                if line.ult(b.lines.len) {
                 b.selection = (Some = (
                     start = (x = 0, y = line.float()),
                     end   = (x = b.lines[line]&.len().float(), y = line.float()),
                 ));
+                };
                 state.click_count = 0;
             }
             b.set_cursor(b.selection.Some.end);
@@ -859,17 +861,15 @@ update_hover :: fn(event: *Sapp.Event) void = {
 }
 
 find_mouse :: fn(event: *Sapp.Event) ?Ty(*TextBuffer, Pos) = {
+    b := selected_buffer() || return(.None);
     pos: Pos = (x = event.mouse_x.cast(), y = event.mouse_y.cast());
-    enumerate state.buffers& { i, b |
         if b.at.contains(pos) {
-            state.selected_buffer = i;
             pos: Pos = (
                 x = (pos.x - b.at.pos.x) / state.scale + b.render.x, 
                 y = (pos.y - b.at.pos.y) / (state.scale * 2) + b.render.y,
             );
-            return(Some = (b[], pos));
+            return(Some = (b, pos));
         };
-    };
     .None
 }
 

@@ -1,5 +1,3 @@
-// TODO: v2: gate.watched for screen link
-
 write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *List(u8), spec: bool) void = {
     out.reserve(1.shift_left(21));
     #use("@/lib/collections/bit_set.fr");
@@ -77,6 +75,13 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
             };
             if is_linkable(it.kind) {
                 @fmt(out, "id% ", it.link_id);
+                if it.watched.len > 0 {
+                    @fmt(out, "link% ", it.watched.len);
+                    each it.watched { it |
+                        @fmt(out, "%,%,%,%,", it.id, it.inner_id, it.offset, it.word_size);
+                        write_bytes(out, it.name);
+                    };
+                };
             };
             
             @if(it.data.len > 0) { @fmt(out, "D"); write_bytes(out, it.data.items()); };
@@ -166,7 +171,7 @@ HELP :: """
  C https://franca.lukegrahamlandry.ca
  C H kind id ngates nwires ndeps nprograms min max tickrate isarch name
  C D []depid
- C G kind pos,rotation (id pinoffset) [](settings) id(linkid) D(data) L(label)
+ C G kind pos,rotation (id pinoffset) [](settings) id(linkid) link(n [](id,in,off,size,name)) D(data) L(label)
  C W count []pos
  C M mnemonics
  C P gateindex levelid name assembly
@@ -250,6 +255,13 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
             
             if in&.pop_prefix("id") {
                 gate.link_id = get_int();
+                if in&.pop_prefix("link") {
+                    n := get_int();
+                    gate.watched = a.alloc_zeroed(Tc.Circuit.Watched, n);
+                    range(0, n) { i |
+                        gate.watched[i] = (id=get_int(), inner_id=get_int(), offset=get_int(), word_size=get_int(), name=get_str());
+                    };
+                };
             };
             if in&.pop_prefix("D") {
                 gate.data = get_str().as_raw_list();

@@ -63,6 +63,14 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
   - for bf need to display non-letters better
   - test where you need to auto truncate output of a memory
   - test all the bfs (and that previous circuit doesnt pass the next test)
+  - since my circuit format is text, should store auto as -1 instead of max_i64 so it's shorter
+  - be able to set initial contents of ram
+  - careful of "truncation in bitfield set" ex. asking for normal static_indexer with "auto" width
+  - show size of dot matrix / segment display in edit mode for ease of tiling. 
+  - using too small a component (especially constant is error prone). should show widths more prominantly. 
+  - not having copy/paste/(move group) is really annoying
+  - editor wire comments/colours
+  - now that i have enough to compare, try to make the level code less verbose
 - it technically works now but the circuit editor still feels incredibly bad to use. 
   deleting wires is the most obviously broken part. undiscoverable keybinds is also bad. 
 - its implied that `S :: @struct(f :: fn(s: Str) void = ()); S'f"foo"` would work because "foo".S'f() works

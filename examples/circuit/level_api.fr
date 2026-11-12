@@ -11,6 +11,7 @@ Exports :: @struct {
     userdata := zeroed(rawptr);  // result of start()
     // called on reset
     start: (@FnPtr(sim: *Simulation) rawptr) = (fn(_0)=zeroed(rawptr));
+    end: (@FnPtr(userdata: rawptr) void) = (fn(_0)=());
     // called once per tick
     before: (@FnPtr(userdata: rawptr, values: []i64) void) = (fn(_0,_1)=());
     after: (@FnPtr(userdata: rawptr, values: []i64) bool) = (fn(_0,_1)=false);
@@ -20,9 +21,14 @@ Exports :: @struct {
 
 ComponentRef :: @struct(graphical: *Tc.Circuit.Gate, logical: *Component.Gate, instance: i64, data: []u8);
 fn find_labeled_component(sim: *Simulation, label: Str) ?ComponentRef = {
+    i := sim.circuit.gates.index_of(fn(it) => it.label.items() == label) || return(.None);
+    sim.get_component_by_graphical_index(i)
+}
+
+fn get_component_by_graphical_index(sim: *Simulation, i: i64) ?ComponentRef = {
     root := sim.circuit.compiled || return(.None);
     c := sim.world[root]&;
-    i := sim.circuit.gates.index_of(fn(it) => it.label.items() == label) || return(.None);
+    @if(i.uge(sim.circuit.gates.len)) return(.None);
     g := sim.circuit.gates[i]&;
     @if(g.logical_gate_index == -1) return(.None);
     instance := c.instance_offset_by_gate[g.logical_gate_index];
@@ -39,6 +45,17 @@ fn find_io_shape(circ: *Tc.Circuit) ?IoShape = {
         in = circ.pin_names.index_of("in") || return(.None),
         in_used = circ.pin_names.index_of("in#on") || return(.None),
     ))
+}
+
+fn make_level_sequence(level_spec: *Exports, level_text: []Str, names: []Str) []*Exports = {
+    @assert_eq(names.len(), level_text.len(), "level count mismatch");
+    ast_alloc().alloc_init(*Exports, level_text.len(), fn(i) => {
+        it := level_spec[];
+        it.static_userdata = i;
+        it.title = names[i];
+        it.description = level_text[i];
+        ast_alloc().boxed(Exports, it)
+    })
 }
 
 fn put_text(sim: *Simulation, pos: Vec2, c: u32, msg: Str) void =

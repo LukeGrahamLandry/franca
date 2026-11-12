@@ -31,6 +31,7 @@ EditField :: @struct {
     data_string := false;
     label_string := false;
     allow_auto := false;
+    is_link_label := false;
 };
 Pin :: Ty(i64, i64);
 Tc :: import("@/examples/circuit/tc/load.fr");
@@ -120,7 +121,12 @@ templates :: collect_templates(impl, .Tc1, pin_layouts) { it, k |
             fields.push(name = "Value", setting = (Some = 0));
         };
         @if(k == .Halt) fields.push(name = "Message", data_string = true);
+        fields.push(name = "Label", label_string = true);
         it.fields = fields.items();
+        
+        if k == .DotMatrixDisplay {
+            it.pin_names = @const_slice("Pixels", "EnableX", "Colour", "EnableY");
+        };
 };
 
 templates2 :: collect_templates(impl2, .Tc2, pin_layouts2) { it, k |
@@ -155,6 +161,7 @@ templates2 :: collect_templates(impl2, .Tc2, pin_layouts2) { it, k |
     @if(k == .Constant) fields.push(name = "Value", setting = (Some = 2), data_string = true);
     @if(k == .Ram_v2) fields.push(name = "Size", setting = (Some = 1));
     @if(k == .Ram_v2) fields.push(name = "LittleEndian", setting = (Some = 5));
+    @if(k == .Screen) fields.push(name = "LinkedRamLabel", is_link_label = true);
     fields.push(name = "Label", label_string = true);
     it.fields = fields.items();
 };
@@ -305,6 +312,9 @@ ScreenData :: @struct {
     ram_instance: i64;
     ram_size_bytes: i64;
 };
+// `flush_timestamp` lets the level test check if it was flushed this tick (because world.timestamp_ns is cached). 
+// bit sad to waste memory just for that but its only ~2%. 
+DotData :: @struct(active: Array(u32, 6*8), scratch: Array(u32, 6*8), flush_timestamp: i64);
 
 // these are in order by their ComponentKind value in the circuit.data format. 
 impl :: @struct {
@@ -580,17 +590,15 @@ NorNorLatch :: todo();
 LessU8 :: LessU64;
 LessI8 :: math(1, 2) { o, i | o[0] = int(lt(i[0].sign_extend(7), i[1].sign_extend(7))); }
 DotMatrixDisplay :: device(0, 4, 
-    fn(_) => 48*32*2,
+    fn(_) => size_of(DotData)*8,
     fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 4), param: i64, instance: i64, _: bool) void = {
         coloumn_major_pixels := param == 1;
-        n := 48*32*2/64;
-        buf := world.storage.subslice(instance, n);
+        data := world.storage.rest(instance).interpret_as_bytes().peek_type(DotData);
         enable, pixel_mask, colour := (i[1] != 0 && i[3] != 0, i[0], i[2]);
         @if(!enable) return();
         flush := pixel_mask.shift_right_logical(56) == 1;
         
-        buf := u32.reinterpret_bytes(buf.interpret_as_bytes());
-        active, scratch := (buf.subslice(0, 48), buf.subslice(48, 48));
+        active, scratch := (data.active&.items(), data.scratch&.items());
         // TODO: for_bits
         if coloumn_major_pixels {
             range(0, 48) { i |
@@ -610,6 +618,7 @@ DotMatrixDisplay :: device(0, 4,
         
         if flush {
             active.copy_from(scratch);
+            data.flush_timestamp = world.timestamp_ns || 0;
         };
     },
 );
@@ -1157,7 +1166,9 @@ Static_indexer :: math_param(1, 1) { o, i, p |
     } else {
         o[0] = i[0].shift_right_logical(p.get(.shift));
     };
-    o[0] = o[0].bit_and(1.shift_left(p.get(.width)) - 1);
+    if p.get(.width) < 64 {
+        o[0] = o[0].bit_and(1.shift_left(p.get(.width)) - 1);
+    };
 };
 _7 :: todo();
 _8 :: todo();

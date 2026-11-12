@@ -543,6 +543,16 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         };
     };
     
+    // TODO: a bunch of the rendering stuff relies on the top most thing being 
+    //      has_bidirectional_pins=false. but if you place a disconnected cc_output 
+    //      or an auto width cc_input in your arch it infers has_bidirectional_pins=true. 
+    //      i guess report error if theres something that requires being inlined?
+
+    // the visualisation relies on the top level thing not being inline only
+    if c.is_arch {
+        c.has_bidirectional_pins = false;
+    };
+    
     // after `kill` so no more reordering the graphical ones
     linkables := assign_port_links(c.gates.items(), warn);    
     
@@ -623,6 +633,7 @@ find_links_for_lastest_component :: fn(c: *Circuit, components: []Component, lin
         it := c.gates[i]&;
         if group(it.kind) == .Tc2 && name(it.kind, .Tc2) == .Screen {
             screen := it;
+            screen.port_linked_list = -1;
             each screen.watched { watched |
                 if linkables.find(fn(it) => c.gates[it[]].link_id == watched.id) { i |
                     i := i[];
@@ -1349,8 +1360,8 @@ pack_param :: fn(circuits: []Circuit, c: *Circuit, it: *Circuit.Gate, gate_i: i6
                 fn Ram_v2() => {
                     @if(s.len < 3) return(0);
                     s: Builtin.Settings.Ram_v2 = construct(
-                        init = s[s.len - 1], // InitDataKind
-                        little_endian = s[s.len - 2],
+                        init = @if(s.len <= 6, 0, s[6]), // InitDataKind
+                        little_endian = s[5],
                         ram_size_bytes = @if(s[1] == 0, 256, s[1].clamp(0, 1.shift_left(40))),
                     );
                     param = s.repr.bitcast();
@@ -2342,6 +2353,9 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
                 s.push_all(settings);
                 
                 if kind == 118 { // com_ram
+                    if settings.len != 3 {
+                        @eprintln("TODO: un-hardcode endien/init index when setting param and in field editor");
+                    };
                     s.push(int(is_little_endian));
                     s.push(int(init_data_kind));
                 };

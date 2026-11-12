@@ -10,17 +10,23 @@ fn text_box_consumes_event(e: *EditState, event: *Sapp.Event) bool = {
         Terminal'push_state(t) {
             e.active_buffer_index = .None;
             each(t.buffers, fn(buf) => { buf.active = false; });
-            if Terminal'find_mouse(event) { buf, _ |
-                i := t.selected_buffer;
+            
+            done := false;
+            pos: Terminal.Pos = (x = event.mouse_x.cast(), y = event.mouse_y.cast());
+            enumerate t.buffers& { i, buf |
+                if buf.at.contains(pos) {
+                t.selected_buffer = i;
                 I := reserved_buffers;
                 ok := false 
                 || (i < I && e.show_info_box.is_some())
-                || (i >= I && i - I < e.field_names.len && e.field_names[i - I] != "")
+                || (i >= I && i - I < e.field_names.len && e.field_names[i - I] != "" && e.show_info_box.is_none())
                 ;
                 
-                if ok {
+                if !done && ok {
+                    done = true;
                     buf.active = true;
                     e.active_buffer_index = (Some = t.selected_buffer);
+                };
                 };
             };
             if e.active_buffer_index.is_none() {
@@ -29,10 +35,6 @@ fn text_box_consumes_event(e: *EditState, event: *Sapp.Event) bool = {
         };
     };
     if e.active_buffer_index { i |
-        t.selected_buffer = i;  // still allow edit if mouse isn't hovering anymore
-        // TODO: ^ not good enough, update_hover changes it back
-        
-        
         @if(i == 0, t.features&.unset(.Edit), t.features&.set(.Edit));  // TODO: have features per buffer?
         on_event(t, t.app, event);
         return true;
@@ -106,14 +108,23 @@ fn hover_gate(e: *EditState, i: ?i64, c: *Circuit) void = {
                     s.slice(0, g.settings.len).copy_from(g.settings);
                     g.settings = s;
                 };
-                
-                // TODO: same expressions as Static_eval
-                value, extra := convert_number_prefixed(text);
-                if extra.len == 0 {
+                @if_let(Tc'Asm'constant_eval_expression(text)) fn Ok(value) => {
                     g.settings&[settings_index] = value;
                 };
-                @if(field.allow_auto) if text == "auto" || value < 0 {
+                @if(field.allow_auto) if text == "auto" || g.settings&[settings_index] < 0 {
                     g.settings&[settings_index] = MIN_i64;
+                };
+            };
+            
+            if field.is_link_label {
+                g.watched.set_zeroed();
+                @if(text != "") if c.gates.find(fn(it) => it.label.items() == text) { target |
+                    if target.link_id == 0 || target.link_id == -1 {
+                        target.link_id = import("@/examples/circuit/eval.fr")'realtime_ns();
+                    };
+                    w := e.circuit_arena.alloc_zeroed(Circuit.Watched, 1);
+                    g.watched = w;
+                    w[0].id = target.link_id;
                 };
             };
         };
@@ -139,6 +150,14 @@ fn hover_gate(e: *EditState, i: ?i64, c: *Circuit) void = {
                 buf.append_string("auto");
             } else {
                 buf.append_string(@tfmt("%", n));
+            };
+        };
+        if field.is_link_label && g.watched.len > 0 && g.watched[0].id != 0 {
+            if c.gates.find(fn(it) => it.link_id == g.watched[0].id) { target |
+                if target.label.items() == "" {
+                    target.label&.push_all(@tfmt("%", g.watched[0].id), e.circuit_arena);
+                };
+                buf.append_string(target.label.items());
             };
         };
     };

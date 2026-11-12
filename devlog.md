@@ -1,4 +1,15 @@
 
+## (Nov 11) circuit
+
+- expressions in number boxes
+- fix buffer selection. old one didnt work because big info box covered the small ones and choose first. 
+- static indexer was trying to truncate to 64 and wrapped to 0
+- ui field for linking the screen
+- levels about the dot matrix. that's the first time ive actually used them. 
+  now understand the cute trick about reusing the wire for grid. 
+  so that was worth it to me even if im the only one who ever plays them. 
+- term: fixed a crash with triple clicking past the bottom still counting. hopefully that's the rare one that's been plaguing me. 
+
 ## (Nov 10) circuit
 
 - spent a long time on loop backwards bf circuit off by two

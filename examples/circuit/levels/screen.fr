@@ -1,0 +1,189 @@
+
+#use("@/examples/circuit/level_api.fr");
+Self :: @struct {
+    sim: *Simulation;
+    i := 0;
+    state: (@enum(Running, Win, Fail, MissingDevices)) = .Running;
+    dots := zeroed(Array(*Tc.Builtin.DotData, 4));
+    source_ram: []u8 = empty();
+    test_count := 3;
+    grid_width := 0;
+    split_flush := false;
+    world_timestamp := 0;
+};
+
+level_specs :: make_level_sequence(level_spec, level_text, names);
+level_spec :: @static @as(Exports) (
+start = fn(sim) = {
+    self := general_allocator().boxed(Self, (
+        sim = sim,
+        grid_width = sim.static_userdata + 1,
+    ));
+    
+    self.state = @if(self.find_devices(), self.state, .MissingDevices);
+    self.init_test();
+    
+    Self.raw_from_ptr(self)
+},
+end = fn(self) = general_allocator().dealloc_one(Self, Self.ptr_from_raw(self)),
+before = fn(self, values) = {
+    self := Self.ptr_from_raw(self);
+    @if(self.state != .Running) return();
+    // end of eval() clears this back to None
+    self.world_timestamp = self.sim.world.timestamp_ns.unwrap();
+},
+after = fn(self, values) = {
+    self := Self.ptr_from_raw(self);
+    @if(self.state != .Running) return(self.state == .Win);
+    
+    w, n := (self.grid_width, 0);
+    range(0, w*w) { i |
+        n += int(self.dots&[i].flush_timestamp == self.world_timestamp);
+    };
+    
+    @if(n != 0) if n == w*w {
+        if self.i + 1 == self.test_count {
+            self.state = @if(self.split_flush, .Fail, .Win);
+            return self.state == .Win;
+        };
+        if self.find_error().is_some() {
+            self.state = .Fail;
+        } else {
+            self.i += 1;
+            self.init_test();
+        };
+    } else {
+        // dont allow winning the level like this but keep going and report other errors first so you can debug by looking at it. 
+        self.split_flush = true;
+    };
+    
+    false
+},
+render = fn(self) = {
+    self := Self.ptr_from_raw(self);
+    w := self.grid_width;
+    msg := @match(self.state) {
+        fn Running() => @tfmt("test %/%", self.i, self.test_count);
+        fn MissingDevices() => @tfmt("you must have a ram labeled 'Framebuffer' (%*6*8*4 bytes) and %x% DotMatrixDisplay", w*w, w, w);
+        fn Fail() => @tfmt("failed test %: %", self.i, self.find_error() || @if(self.split_flush, "all displays must be flushed on the same tick", "unreachable"));
+        fn Win() => "passed all tests";
+    };
+    self.sim.put_text( vec2(-200, 20), pack_rgba(50, 200, 150, 255), msg);
+},
+quine = include_bytes(@source_file_name()),
+);
+
+fn init_test(self: *Self) void = {
+    @if(self.state != .Running) return();
+    w := self.grid_width;
+    pixels := u32.reinterpret_bytes(self.source_ram);
+    range(0, 8*w) { y |
+        range(0, 6*w) { x |
+            pixels[y*6*w + x] = self.pattern(x, y);
+        };
+    };
+}
+
+fn find_devices(self: *Self) bool = {
+    w := self.grid_width;
+    it := find_labeled_component(self.sim, "Framebuffer") 
+        || return(false);
+    self.source_ram = it.data;
+    @if(it.data.len < 6*8*4*w*w) return(false);
+
+    c := self.sim.circuit;
+    is_dot :: fn(it) => group(it.kind) == .Tc1 && Tc'gate_name(it.kind, .Tc1) == .DotMatrixDisplay;
+    
+    top_left := c.max;
+    each c.gates { it |
+        if is_dot(it) {
+            top_left = min(it.pos, top_left);
+        }
+    };
+    
+    pos := top_left;
+    tile_step := vec2(3, 4);
+    range(0, w) { y |
+        range(0, w) { x |
+            I := c.gates.index_of(fn(it) => it.pos == pos) || return(false);
+            it := self.sim.get_component_by_graphical_index(I) || return(false);
+            @debug_assert_eq(it.data.len, size_of(Tc.Builtin.DotData));
+            self.dots&[y*w+x] = it.data.peek_type(Tc.Builtin.DotData);
+            pos.x += tile_step.x;
+        };
+        pos.x -= tile_step.x * w.float().cast();
+        pos.y += tile_step.y;
+    };
+    
+    true
+}
+
+fn pattern(self: *Self, x: i64, y: i64) u32 = {
+    w := self.grid_width;
+    screen_index := y/8*w + x/6;
+    colours := @const_slice(0xFF000000, 0x00FF0000, 0x0000FF00, 0xFFFFFF00);
+    @switch(self.i) {
+        @case(0) => colours[screen_index.mod(colours.len)].byte_swap();
+        @case(1) => bit_xor(x, y).shift_left(8+6).bit_or(0xab.shift_left(16)).trunc();
+        @case(2) => x.mul(256/6/w).bit_or(y.mul(256/8/w).shift_left(8)).trunc();
+        @default => 0;
+    }
+}
+
+// TODO: give nicer messages for common mistakes.
+//       ex. doing all indices within one display first instead of row by row
+fn find_error(self: *Self) ?Str = {
+    w := self.grid_width;
+    range(0, 8*w) { y |
+        range(0, 6*w) { x |
+            global_index := y*6*w + x;
+            screen_index := y/8*w + x/6;
+            lx, ly := (x.mod(6), y.mod(8));
+            local_index := ly*6+lx;
+            A := self.dots&[screen_index].active&[local_index].shift_right_logical(8);
+            // not using self.source_ram because the circuit can write to it
+            B := self.pattern(x, y).byte_swap().shift_right_logical(8);
+            if A != B {
+                return(Some = @tfmt("texture[%]=[%,%] screen[%][%, %] expected % but found %", global_index, x, y, screen_index, lx, ly, fmt_hex(B), fmt_hex(A)));
+            };
+        };
+    };
+    .None
+}
+
+#use("@/examples/circuit/compile.fr");
+
+names :: @const_slice("Dot Framebuffer", "Dot Tiling");
+level_text :: """
+The builtin DotMatrixDisplay component's pins are somewhat unnatural to control from software. 
+Most programs would prefer to display pixels directly from a frame buffer in ram. 
+In this series of levels you will use DotMatrixDisplay to mimic the builtin Screen component.
+
+Your circuit must have a ram component labeled "Framebuffer". 
+The level will initialize it with pixel data for you to display. 
+Each pixel is 4 bytes: (red, green, blue, 0) (ordered lowest -> highest address in memory). 
+The texture has 8 rows arranged sequentially, each with 6 pixels. 
+
+Your task is to copy that texture into a DotMatrixDisplay component. 
+You don't need to copy the whole thing on one tick (setting one pixel per tick is a valid solution). 
+There is more information about how to use the DotMatrixDisplay 
+in the "Component Docs" (click the button below "Level Instructions").
+You must only set the flush input on the display after you're finished copying the full texture 
+(read the docs to learn what that means). 
+
+Multiple tests will be run without resetting your circuit between them. 
+After you flush the display, the contents of the Framebuffer memory will change 
+and you should start rendering the new texture. 
+---
+
+Another limitation of the DotMatrixDisplay is its small size. 
+To draw anything interesting, you'll need to tile several of them into a larger screen. 
+
+Expand your circuit to a 2x2 grid of DotMatrixDisplay. 
+They must be tiled exactly touching each other for the test code to detect them. 
+As before, copy the texture from ram to the displays. 
+Now the rows of the texture will be twice as long and there will be twice as many of them. 
+The first row of the texture will be spread across the top two displays, etc. 
+All displays must be flushed on the same tick. 
+
+""".split("---", ast_alloc()).items();

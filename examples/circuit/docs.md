@@ -150,6 +150,12 @@ Input is stored and used as the output on the next tick. Outputs 0 on the first 
 Each bit of the input toggles one segment (7 lines of the number plus a dot). 
 Like how old clocks would show numbers. 
 
+ 0
+5 1
+ 6
+4 2
+ 3 7
+
 > The v1 SegmentDisplay has a setting to choose colour (v2 is always white) and an Enable pin (nothing is displayed when Enable=0) 
 
 ## Screen
@@ -173,7 +179,7 @@ How the data in memory is interpreted depends on the mode.
 - Ascii8; each byte is an ascii character on a 96x40 grid. foreground/background are chosen globally with the settings pins. 
 - Ascii32; each character is 4 bytes (padding, background, foreground, character) on a 96x40 grid
 - Pixel8; each byte is an 8bit colour for one pixel
-- Pixel32; each pixel is 4 bytes (padding, red, green, blue). (blue is least significant). 
+- Pixel32; each pixel is 4 bytes (red, green, blue, padding). (red is at the lowest address). 
 
 8bit colours have (3, 3, 2) bits for (red, green, blue) respectively (blue is least significant). 
 
@@ -196,10 +202,17 @@ If either EnableX=0 or EnableY=0 no changes are made.
 Otherwise, Pixels is a bit mask choosing which pixels to set to Colour (others keep their old colour). 
 The middle 6 bytes of Pixel are the mask, each bit controls one pixel. 
 There is a setting to choose between row/column major indexing of the pixels in the bit mask. 
-Colour is 4 bytes (R, G, B, padding). 
-Changes are cached until the most significant byte of Pixels is 1 (then the new state is displayed). 
+Colour is 4 bytes (R, G, B, padding) (red is the most significant byte). 
+
+Changes are cached until the most significant byte of Pixels is 1 
+(then the state is flushed and the new pixels are displayed). 
 This avoids visual tearing if your updates are spread over multiple frames. 
+The enable pins must also be 1 to trigger the flush. 
+
 Since the displays are small you will likely want to tile them to show larger images. 
+Note that the least signifigant byte of the Pixels/Colour pins is not used 
+so one wire can be shared between one of those pins and the adjacent enable pin (which only look at the lowest bit). 
+Then the two enable pins can be used to select one display from a grid by it's row/column coordinates. 
 
 ## Console (v1)
 

@@ -24,8 +24,8 @@ Self :: @struct {
 Level :: @enum(Ip, Io, Addr, Arith, If, Loop, Hello);
 
 level_spec :: @static @as(Exports) (
-// TODO: dont leak
 start = fn(sim) = {
+    @run @assert_eq(names.len(), Level.enum_count(), "bf level count");
     self := general_allocator().boxed(Self, (
         sim = sim,
         level = @as(Level) sim.static_userdata,
@@ -34,6 +34,7 @@ start = fn(sim) = {
     self.init_program(true);
     Self.raw_from_ptr(self)
 },
+end = fn(self) = general_allocator().dealloc_one(Self, Self.ptr_from_raw(self)),
 before = fn(self, values) = {
     self := Self.ptr_from_raw(self);
     @if(self.state != .Running || self.level == .Ip) return();
@@ -136,22 +137,17 @@ render = fn(self) = {
 quine = include_bytes(@source_file_name()),
 );
 
-level_specs :: ast_alloc().alloc_init(*Exports, level_text.len(), fn(i) => {
-    @run @assert(names.len() == level_text.len() && names.len() == Level.enum_count(), "bf: level count mismatch");
-    it := level_spec[];
-    it.static_userdata = i;
-    it.title = names[i];
-    it.description = level_text[i];
-    ast_alloc().boxed(Exports, it)
-});
+level_specs :: make_level_sequence(level_spec, level_text, names);
 
 init_program :: fn(self: *Self, first: bool) void = {
     root := self.sim.circuit.compiled.unwrap();
     if first {
+        if self.level != .Ip {
         it := find_io_shape(self.sim.circuit);
         self.shape = it || {
             self.state = .BadArity;
             return();
+        };
         };
     } else {
         // reset after each test
@@ -374,5 +370,5 @@ but it's the last thing needed for a technically fully functional computer.
 Your computer is finally ready to compute the password required to reset the syrup boilers. 
 The program will be loaded automatically, as before, all you have to do is run it.
 
-""".split("---", ast_alloc());
+""".split("---", ast_alloc()).items();
 Bf :: import("@/examples/bf/interpreter.fr");

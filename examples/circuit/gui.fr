@@ -38,6 +38,7 @@ State :: @rec @struct {
     adapt_tick_rate: bool;
     sim: LevelApi.Simulation;
     level: *LevelApi.Exports;
+    level_active: bool;
     levels: List(*LevelApi.Exports);
     tick: i64;
     halt_message: List(u8);
@@ -164,8 +165,7 @@ do_eval :: fn(state: *State) void = {
     
     o_n, i_n := child.arity();
     values := temp().alloc_zeroed(i64, o_n + i_n);
-    // TODO: dont require io components to count as a level. 
-    have_level := values.len != 0;
+    have_level := state.level_active;
     // lifting the division out of the loop instead of `clock := prev_timestamp + delta_time*i/count;` 
     // is fine if running slower than 1GHz which would mean simulating a tick in ~3 real cycles which is not a risk. 
     clock_step := delta_time / count;  
@@ -376,6 +376,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             self.wires = prev_wires;
         };
         
+        if state.level_active {
         // TODO: more sane way of doing positioning
         state'level'render(state.level.userdata);
         s := vec2(self.text_spacing.x, self.text_spacing.x*2);
@@ -383,6 +384,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             self.put_text(it.msg, it.pos * s, it.c);
         };
         state.sim.text&.clear();
+        };
     };
     
     if state.halt_message.len != 0 {
@@ -391,6 +393,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     @if(state.loader.progress == .Idle) if self.level_selection() { it |
         state.dirty = true;
+        state.end_level();
         state.level = it;
         have_logic = false;
         if it.solutions.len != 0 {
@@ -827,7 +830,7 @@ fn show_wire_value(self: *Draw, id: WireId, force_hover: bool) = {
             for_rev i64.cast_to_bytes(value&).slice(0, w) { c |
                 push_hex_byte(out, c, false);
             };
-            @if(true) @fmt(out, ":%", bit_width);
+            @if(false) @fmt(out, ":%", bit_width);
         };
     };
     sdtx.put(out.items());
@@ -1276,8 +1279,8 @@ fn child_probes(self: *Draw, gate: *Tc.Circuit.Gate, parent: *Tc.Circuit) void =
 // TODO: should write a texture instead of doing it with 6 vertices per pixel
 fn dot_matrix_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, _: *Component.Gate) void = {
     world, sgl := (self.world&, self.draw&);
-    buf := world.storage.subslice(self.instance_by_gate(c, i), 7*8*32/64);
-    buf := u32.reinterpret_bytes(buf.interpret_as_bytes());
+    data := world.storage.rest(self.instance_by_gate(c, i)).interpret_as_bytes().peek_type(Tc.Builtin.DotData);
+    buf := data.active&;
     
     i := 0;
     w: f32 = 0.017;
@@ -1335,6 +1338,7 @@ fn sprite_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it
     };
 };
 
+// TODO: not bounds checked so can read into next thing if config doesnt match ram size
 #use("@/examples/circuit/tc/devices.fr");
 fn screen(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Component.Gate) void = {
     sdtx, world, sgl := (self.sdtx, self.world&, self.draw&);
@@ -1640,6 +1644,8 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
             gate.label&.clear();
             gate.rotation = 0;
             gate.settings.set_zeroed();
+            gate.watched = empty();
+            gate.link_id = 0;
             
             shape := get_builtin_shape(gate.kind);
             if shape.fields.contains(fn(it) => it.name == "Width") {
@@ -2016,6 +2022,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.levels&.push(import("@/examples/circuit/levels/maze.fr").level_spec);
     state.levels&.push_all(import("@/examples/circuit/levels/bf.fr").level_specs);
     state.levels&.push_all(import("@/examples/circuit/levels/segment.fr").level_specs);
+    state.levels&.push_all(import("@/examples/circuit/levels/screen.fr").level_specs);
     state.level = state.levels[0];
     
     state.halt_message = list(a);
@@ -2049,6 +2056,11 @@ fn recenter(state: *State) void = {
     state.pos = vec2(0, 0.5);
 }
 
+fn end_level(state: *State) void = {
+    @if(!state.level_active&.take()) return();
+    state'level'end(state.level.userdata);
+}
+
 fn reset(state: *State) void = {
     state.frame_time_history&.clear();
     state.tick_count_history&.clear();
@@ -2075,6 +2087,7 @@ fn reset(state: *State) void = {
         put_text = LevelApi.impl.put_text,
     );
     // TODO: @debug_assert(!state.edit.enable, "c& wont be stable");
+    @debug_assert(!state.level_active, "end level before reset so its called with the old .sim just for sanity");
     state.sim = (
         fns = v,
         world = world,
@@ -2083,7 +2096,9 @@ fn reset(state: *State) void = {
         static_userdata = state.level.static_userdata,
         text = state.sim.text,
     );
+    // TODO: dont start the level if circuit.compiled.is_none or .error
     state.level.userdata = state'level'start(state.sim&);
+    state.level_active = state.level.title != "Sandbox";
     
     world.scratch.len = world.scratch.cap;
     world.scratch.items().set_zeroed();
@@ -2260,7 +2275,10 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                     }
                 }
                 fn U() => { state.split_graphics_and_wires = !state.split_graphics_and_wires; }
-                fn R() => state.reset();
+                fn R() => {
+                    state.end_level();
+                    state.reset();
+                }
                 fn C() => state.recenter();
                 fn LEFT_BRACKET() => if state.ticks_per_eval - tick_off > 0 {
                     state.ticks_per_eval -= tick_off;
@@ -2299,6 +2317,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 fn E() => if state.loader.progress == .Idle {
                     @if(state.tree.len == 0) return();
                     i := state.tree[0].diagram_circuit || return();
+                    state.end_level();
                     
                     if e.enable {
                         if state.tree[state.tree.len - 1].diagram_circuit { i |
@@ -2428,6 +2447,7 @@ fn check_movement(state: *State) void = if state.pan_keys_pressed != 0 && !state
 fn load_path_async(state: *State, path: Str, is_bytes: bool) void = {
     #use("@/lib/sys/fs.fr");
     
+    state.end_level();
     state.circuit = empty();
     state.world = zeroed(World);
     state.tree&.clear();
@@ -2514,6 +2534,7 @@ load_path_worker :: fn(state: *State, in: *LoaderT.I, path: Str, is_bytes: bool)
 
 fn load_circuit_index_async(state: *State, root_index: i64, tc_file_loader_device: []Tc.LoadedFile) void = {
     @debug_assert_eq(state.loader.progress, .Idle);
+    state.end_level();
     state.load_time = 0;
     state.tree&.clear();
     state.push_tree_node(diagram_circuit = (Some = root_index));
@@ -2742,18 +2763,6 @@ gate_selection_columns_v2 :: {
     @const_slice(T.Static_indexer, .Decoder_1, .Decoder_2, .Decoder_3, .Splitter_word_2, .Splitter_word_4, .Splitter_word_8, .Maker_word_2, .Maker_word_4, .Maker_word_8, .Concatenator_2, .Concatenator_4, .Concatenator_8),
     @const_slice(T.Static_indexer_config, .Static_eval, .Static_value, .Cc_input, .Cc_output, .Level_output_switched, .Level_input_switched),
     )
-};
-
-convert_number_prefixed :: fn(s: Str) Ty(i64, Str) = {
-    negative := s&.pop_prefix("-");
-    value, extra := @if_else {
-        @if(s&.pop_prefix("0x")) => convert_number_dyn(s, 16);
-        @if(s&.pop_prefix("0o")) => convert_number_dyn(s, 8);
-        @if(s&.pop_prefix("0b")) => convert_number_dyn(s, 2);
-        @else => convert_number_dyn(s, 10);
-    };
-    value *= @if(negative, -1, 1);
-    (value, extra)
 };
 
 RollingAverage :: @struct(history: RawDeque(i64), sum := 0);
