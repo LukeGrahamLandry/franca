@@ -96,37 +96,15 @@ fn hover_gate(e: *EditState, i: ?i64, c: *Circuit) void = {
         
         out := @ref u8.list(temp());
         shape := get_builtin_shape(g.kind);
+        a := e.circuit_arena;
         enumerate shape.fields { i, field |
+            continue :: local_return;
             out.clear(); get_string(t.buffers[i+I], out); text := out.items();
             
-            @if(field.data_string) { g.data&.clear(); g.data&.push_all(text, e.circuit_arena); };
-            @if(field.label_string) { g.label&.clear(); g.label&.push_all(text, e.circuit_arena); };
-
-            if field.setting { settings_index |
-                if settings_index >= g.settings.len {
-                    s := e.circuit_arena.alloc_zeroed(i64, settings_index+1);
-                    s.slice(0, g.settings.len).copy_from(g.settings);
-                    g.settings = s;
-                };
-                @if_let(Tc'Asm'constant_eval_expression(text)) fn Ok(value) => {
-                    g.settings&[settings_index] = value;
-                };
-                @if(field.allow_auto) if text == "auto" || g.settings&[settings_index] < 0 {
-                    g.settings&[settings_index] = MIN_i64;
-                };
-            };
-            
-            if field.is_link_label {
-                g.watched.set_zeroed();
-                @if(text != "") if c.gates.find(fn(it) => it.label.items() == text) { target |
-                    if target.link_id == 0 || target.link_id == -1 {
-                        target.link_id = realtime_ns();
-                    };
-                    w := e.circuit_arena.alloc_zeroed(Circuit.Watched, 1);
-                    g.watched = w;
-                    w[0].id = target.link_id;
-                };
-            };
+            old := get_field_string(e, c, g, field);
+            @if(old == text) continue();
+            e.undo&.push((SetGateField = (i = old_i, field = i, value = old.shallow_copy(a))), a);
+            set_field_string(e, c, g, field, text);
         };
     };
 
@@ -142,26 +120,65 @@ fn hover_gate(e: *EditState, i: ?i64, c: *Circuit) void = {
     enumerate shape.fields { i, field |
         e.field_names[i] = field.name;
         buf := t.buffers[i+I];
-        @if(field.label_string) buf.append_string(g.label.items());
-        @if(field.data_string) buf.append_string(g.data.items()); 
+        buf.append_string(get_field_string(e, c, g, field));
+    };
+    e.has_text_field = shape.fields.len > 0;
+}
+
+// TODO: warning if it didn't parse
+// TODO: bounds (width <= 64, endian 0/1, abs(shift) < 64). especially because bit_fields.set will debug assert
+fn set_field_string(e: *EditState, c: *Circuit, g: *Circuit.Gate, field: *Tc.Builtin.EditField, text: Str) void = {
+    @if(field.data_string) { g.data&.clear(); g.data&.push_all(text, e.circuit_arena); };
+    @if(field.label_string) { g.label&.clear(); g.label&.push_all(text, e.circuit_arena); };
+    if field.setting { settings_index |
+        if settings_index >= g.settings.len {
+            s := e.circuit_arena.alloc_zeroed(i64, settings_index+1);
+            s.slice(0, g.settings.len).copy_from(g.settings);
+            g.settings = s;
+        };
+        @if_let(Tc'Asm'constant_eval_expression(text)) fn Ok(value) => {
+            g.settings&[settings_index] = value;
+        };
+        @if(field.allow_auto) if text == "auto" || g.settings&[settings_index] < 0 {
+            g.settings&[settings_index] = MIN_i64;
+        };
+    };
+    
+    if field.is_link_label {
+        g.watched.set_zeroed();
+        @if(text != "") if c.gates.find(fn(it) => it.label.items() == text) { target |
+            if target.link_id == 0 || target.link_id == -1 {
+                target.link_id = realtime_ns();
+            };
+            w := e.circuit_arena.alloc_zeroed(Circuit.Watched, 1);
+            g.watched = w;
+            w[0].id = target.link_id;
+        };
+    };
+}
+
+fn get_field_string(e: *EditState, c: *Circuit, g: *Circuit.Gate, field: *Tc.Builtin.EditField) Str = {
+        @if(field.label_string) return(g.label.items());
         @if(g.data.len == 0 || !field.data_string) if field.setting { settings_index |
             n := @if(settings_index < g.settings.len, g.settings&[settings_index], 0);
             if field.allow_auto && n == MIN_i64 {
-                buf.append_string("auto");
+                return "auto";
             } else {
-                buf.append_string(@tfmt("%", n));
+                return @tfmt("%", n);
             };
         };
+        @if(field.data_string) return(g.data.items()); 
+        
         if field.is_link_label && g.watched.len > 0 && g.watched[0].id != 0 {
             if c.gates.find(fn(it) => it.link_id == g.watched[0].id) { target |
                 if target.label.items() == "" {
                     target.label&.push_all(@tfmt("%", g.watched[0].id), e.circuit_arena);
                 };
-                buf.append_string(target.label.items());
+                return(target.label.items());
             };
         };
-    };
-    e.has_text_field = shape.fields.len > 0;
+    
+    ""
 }
 
 fn text_box_selection(self: *Draw) bool = {
@@ -215,10 +232,12 @@ fn text_box_selection(self: *Draw) bool = {
             buf.append_string(names[i]._1);
             
             if names[i]._0 == "This Circuit" || names[i]._0 == "All Circuits" {
+                state.stash_undo();
                 out := @ref u8.list(temp());
                 i: ?i64 = @if(names[i]._0 == "All Circuits", .None, state.tree[0].diagram_circuit);
                 Save'write_save(state.circuit, state.world.tc_file_loader_device, i, out, true);
                 buf.append_string(out.items());
+                state.unstash_undo();
             };
             e.info_box_is_settings = names[i]._0 == "Settings";
             @if(e.info_box_is_settings) do_settings(state, buf, true);
@@ -227,6 +246,8 @@ fn text_box_selection(self: *Draw) bool = {
     false
 };
 
+// TODO: warning if it didn't parse (number expressions / boolean other than "true"/"false")
+// TODO: bounds (ex. ticks_per_frame is positive, bit_width <=64)
 do_settings :: fn(state: *State, buf: *Terminal.TextBuffer, read: bool) void = {
     @if(state.tree.len == 0) return();
     c := state.tree[state.tree.len - 1].diagram_circuit || return();
@@ -309,14 +330,19 @@ fn set_edit_mode(state: *State, new_edit_mode: bool) void = {
     state.end_level();
     
     if e.enable {
+        state.stash_undo();
         if state.tree[state.tree.len - 1].diagram_circuit { i |
             c := state.circuit[i]&;
             hover_gate(e, .None, c);
+            e.select_gate(.None, c);
         };
     };
     e[] = (enable = !e.enable, dont_reset = e.dont_reset);
+    if e.enable {
+        state.unstash_undo();
+        return();
+    };
     
-    @if(e.enable) return();
     // recompile when exiting edit mode. 
     // TODO: this leaks arena space forever so eventually need to dump save and reload to reset it
     state.warnings&.clear();
@@ -356,6 +382,90 @@ fn new_circuit(state: *State) void = {
     state.circuit = c;
     state.tree&.clear();
     state.tree&.push(diagram_circuit = (Some = c.len-1));
+}
+
+// these are named for the reverse of the action you perform to create one. 
+// ex. creating a gate pushes a UndoEntry.DeleteGate
+// TODO: at this point, this struct is so big i should just store it as the serialized form all the time. would be less than 160 bytes
+UndoEntry :: Tc.Circuit.UndoEntry;
+
+// TODO: visual indicator of which gate you're changing?
+fn apply_undo(state: *State, is_undo: bool) void = {
+    e := state.edit&;
+    // TODO: need to track when you change circuits
+    @if(state.tree.len == 0) return();
+    c := state.tree[state.tree.len - 1].diagram_circuit || return();
+    c := state.circuit[c]&;
+    
+    // can't be holding on to a gate index while undoing
+    e.select_gate(.None, c);
+    hover_gate(e, .None, c);
+    // TODO: same for placing_wire_start
+    
+    it := @if(is_undo, e.undo&, e.redo&);
+    u := it.pop() || return();
+    inverse := perform_action(e, c, u);
+    it := @if(is_undo, e.redo&, e.undo&);
+    it.push(inverse, e.circuit_arena);
+}
+
+// TODO: now that i always need to re-copy out of the fields, should just be immutable Str not a rawlist (would save one direction of copy)
+fn perform_action(e: *EditState, c: *Circuit, u: UndoEntry) UndoEntry = {
+    @match(u&) {
+        fn SetGateField(it) => {
+            g := c.gates[it.i]&;
+            shape := get_builtin_shape(g.kind);
+            f := shape.fields.index(it.field);
+            old := get_field_string(e, c, g, f).shallow_copy(e.circuit_arena);
+            set_field_string(e, c, g, f, it.value);
+            (SetGateField = (i = it.i, field = it.field, value = old))
+        }
+        fn SetGatePosition(it) => {
+            g := c.gates[it.i]&;
+            p, r := (g.pos, g.rotation);
+            g.pos = it.pos;
+            g.rotation = it.rotation;
+            (SetGatePosition = (i = it.i, pos = p, rotation = r))
+        }
+        fn DeleteGate(it) => {
+            g := c.gates[it.i]&;
+            gate := g[];
+            g.kind.id = trunc(component_offset(.Tc1) + GateName(.Tc1)._0.raw().zext());
+            g.pos = vec2(-10000);
+            (UndeleteGate = (i = it.i, gate = gate))
+        }
+        fn UndeleteGate(it) => {
+            c.gates[it.i] = it.gate;
+            (DeleteGate = (i = it.i))
+        }
+        fn UndeleteWire(it) => {
+            c.wires[it.i] = it.wire;
+            (DeleteWire = (i = it.i))
+        }
+        fn DeleteWire(it) => {
+            wire := c.wires[it.i];
+            c.wires[it.i].path.len = 0;
+            (UndeleteWire = (i = it.i, wire = wire))
+        }
+    }
+}
+
+fn stash_undo(state: *State) void = {
+    c, e := (state.current_diagram() || return(), state.edit&);
+    @if(!e.enable) return();
+    t := c.undo; c.undo = e.undo; e.undo = t;
+    t := c.redo; c.redo = e.redo; e.redo = t;
+}
+
+fn unstash_undo(state: *State) void = {
+    state.stash_undo();
+}
+
+fn branch_redo(e: *EditState) void = {
+    @if(!e.enable) return();
+    // TODO: save it so can do non-linear and never delete anything
+    e.redo&.clear();
+    
 }
 
 Terminal :: import("@/examples/gpu/terminal.fr");

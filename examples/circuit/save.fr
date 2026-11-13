@@ -43,7 +43,10 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
             @fmt(out, "\n");
         }
         
-        each c.gates { it |
+        each(c.gates, write_gate);
+        write_gate :: fn(it: *Tc.Circuit.Gate) void => {
+            // TODO: shouldn't be true anymore
+            //       but need to think about how im going to serialize UndoEntry if i dont keep the indices consistant
             // cant filter because programs are stored by index
             //continue :: local_return;
             //@if(it.kind.is_placeholder()) continue();
@@ -90,7 +93,8 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
             @fmt(out, "\n");
         };
         
-        each c.wires { it |
+        each(c.wires, write_wire);
+        write_wire :: fn(it: *Tc.Circuit.Wire) void => {
             continue :: local_return;
             @if(it.path.len < 2) continue();
             
@@ -108,12 +112,45 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
             @fmt(out, "\n");
         };
         each c.programs { it |
+            // TODO: once editor breaks these, need to do this sooner (before compile).
+            //       tho i might want to always autosave before compiling anyway because thats a common source of assertion failures
+            if it.gate_index >= c.gates.len || c.gates[it.gate_index].link_id != it.gate_link_id {
+                if c.gates.index_of(fn(g) => g.link_id == it.gate_link_id) { i |
+                    it.gate_index = i;
+                };
+            };
+        
             @fmt(out, " P % ", it.gate_index);
             key := @if(it.level_name == "", @tfmt("%", it.level_id), it.level_name);
             write_bytes(out, key);
             write_bytes(out, it.name);
             write_bytes(out, it.assembly || "");
             @fmt(out, "\n");
+        };
+        
+        if c.undo.len > 0 {
+            @fmt(out, " undo % ", undo_format_version);
+            size_patch_offset := out.len;
+            out.push_repeated(max_size_chars, " ".ascii());
+            @fmt(out, " % %;\n", c.undo.len, c.redo.len);
+            start_counting_size := out.len;
+            it := @slice(c.undo, c.redo);
+            for it { it |
+                each it { it |
+                    @fmt(out, " U % ", it.tag().raw());
+                    @match(it) {
+                        fn SetGateField(it) => { @fmt(out, "% % ", it.i, it.field); write_bytes(out, it.value); }
+                        fn SetGatePosition(it) => @fmt(out, "% % % %", it.i, it.pos.x, it.pos.y, it.rotation);
+                        fn UndeleteGate(it) => { @fmt(out, "%", it.i); write_gate(it.gate&); }
+                        fn UndeleteWire(it) => { @fmt(out, "%", it.i); write_wire(it.wire&); }
+                        fn DeleteGate(it) => @fmt(out, "%", it.i);
+                        fn DeleteWire(it) => @fmt(out, "%", it.i);
+                    };
+                    @fmt(out, "\n");
+                };
+            };
+            dest := out.items().subslice(size_patch_offset, max_size_chars);
+            write_int_to_buffer(dest, out.len - start_counting_size - 1);
         };
         };
     };
@@ -149,6 +186,7 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
             };
         };
     };
+    // TODO: include names for UndoEntry and EditField?
     out.push_all(HELP);
     };
     
@@ -219,6 +257,8 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
         wires := list(Tc.Circuit.Wire, wires_len, a);
         dependencies := list(Tc.CustomId, dep_count, a);
         programs := list(Tc.Circuit.Program, program_count, a);
+        undo := @ref list(Tc.Circuit.UndoEntry, a);
+        redo := @ref list(Tc.Circuit.UndoEntry, a);
         
         if pop_prefix(in&, "D ") {
             range(0, dep_count) { i |
@@ -227,9 +267,12 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
         };
         
         while => pop_prefix(in&, "G ") {
+            gates&.push(read_gate());
+        };
+        read_gate :: fn() => {
             kind_id, pos_x, pos_y, rot := (get_int(), get_int(), get_int(), get_int());
             
-            gates&.push(
+            gate: Tc.Circuit.Gate = (
                 rotation = rot.trunc(),
                 custom_id = zeroed(Tc.CustomId),
                 kind = (id = kind_id.trunc()),
@@ -237,7 +280,6 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
                 mystery_spice_minus_fifteen_for_custom_pins = vec2(0), 
                 link_id = -1,
             );
-            gate := gates[gates.len - 1]&;
             
             // TODO: don't crash if its a low number
             shape := get_builtin_shape(id = kind_id.trunc());
@@ -271,9 +313,14 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
             if in&.pop_prefix("L") {
                 gate.label = get_str().as_raw_list();
             };
+            gate
         };
         
+        
         while => pop_prefix(in&, "W ") {
+            wires&.push(read_wire());
+        };
+        read_wire :: fn(it) Tc.Circuit.Wire => {
             n := get_int();
             path := @ref Tc.Circuit.WireNode.list(n, a);
             range(0, n) { _ |
@@ -281,13 +328,14 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
                 path.push(pos = vec2(x.float().cast(), y.float().cast()));
             };
             t := pop_prefix(in&, "t");
-            wires&.push(path = path.as_raw(), teleport=t);
+            c: u8 = 0;
             if pop_prefix(in&, "c") {
-                wires[wires.len - 1].colour = get_int().trunc();
+                c = get_int().trunc();
             };
             while => in.len > 0 && in[0].is_ascii_whitespace() {
                 in = in.rest(1);
             };
+            (path = path.as_raw(), teleport=t, colour=c)
         };
         
         mnemonics := @if(pop_prefix(in&, "M "), get_str(), "");
@@ -298,6 +346,57 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
                 @if(r.len == 0, v, -1)
             };
             programs&.push(level_id = level, level_name = key, name = name, gate_index = gate, assembly = @if(assembly.len == 0, .None, (Some = assembly)));
+            @if(gate.uge(gates.len)) return(Err = "program gate index oob");
+            programs[programs.len - 1].gate_link_id = gates[gate].link_id;
+        };
+        
+        while => in.len > 0 && in[0].is_ascii_whitespace() {
+            in = in.rest(1);
+        };
+        if in&.pop_prefix("undo ") {
+            break :: local_return;
+            // versioned seperately cause i expect the format for this will be more volatile and i dont care about it as much
+            version, bytes := (get_int(), get_int()); 
+            if version != undo_format_version {
+                // TODO: if couldn't load properly, back up the file before stomping on it if re-save
+                while => !in&.pop_prefix(";\n") {
+                    in = in.rest(1);
+                };
+                in = in.rest(bytes);
+                while => in.len > 0 && in[0].is_ascii_whitespace() {
+                    in = in.rest(1);
+                };
+                break();
+            };
+            u_count, r_count := (get_int(), get_int());
+            in&.pop_prefix(";\n") || return(Err = "missing ; before undo data");
+            while => in.len > 0 && in[0].is_ascii_whitespace() {
+                in = in.rest(1);
+            };
+            undo.reserve(u_count);
+            redo.reserve(r_count);
+            dest := undo;
+            n := 0;
+            while => pop_prefix(in&, "U ") {
+                tag_ordinal := get_int();
+                @if(tag_ordinal.uge(enum_count(Tag(Tc.Circuit.UndoEntry)))) return(Err = "bad undo tag");
+                u := zeroed(Tc.Circuit.UndoEntry);
+                u&.tag_ptr()[] = @as(Tag(Tc.Circuit.UndoEntry)) tag_ordinal;
+                i := get_int();
+                @match(u&) {
+                    fn SetGateField(it) => { it[] = (i = i, field = get_int(), value = get_str()); }
+                    fn SetGatePosition(it) => { it[] = (i = i, pos = vec2(get_int().float().cast(), get_int().float().cast()), rotation = get_int().trunc()); }
+                    fn UndeleteGate(it) => { pop_prefix(in&, "G "); it[] = (i = i, gate = read_gate()); }
+                    fn UndeleteWire(it) => { pop_prefix(in&, "W "); it[] = (i = i, wire = read_wire()); }
+                    fn DeleteGate(it) => { it[] = (i = i); }
+                    fn DeleteWire(it) => { it[] = (i = i); }
+                };
+                dest.push(u);
+                n += 1;
+                if n == u_count {
+                    dest = redo;
+                };
+            };
         };
         
         circuits.push(
@@ -313,6 +412,8 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
             v2 = false,
             is_arch = is_arch,
             mnemonics = mnemonics,
+            undo = undo.as_raw(),
+            redo = redo.as_raw(),
         );
     };
     
@@ -361,4 +462,5 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
     };
 }
 
+undo_format_version :: 1;
 #use("@/examples/circuit/eval.fr");

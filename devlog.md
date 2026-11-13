@@ -1,12 +1,25 @@
 
 ## (Nov 12) circuit
 
+- store undo per circuit and persist undo in save file
+
+## (Nov 12) circuit
+
 - trying to make the controls less annoying. in edit mode, just let you edit withotu holding control and make moving more annoying. left click on buttons. 
 - remember hovered wire so can highlight the whole thing. make the wire hover lines less spam. 
 - wire colours for imported circuits
 - i like detecting the display's position so you dont need labels. did that for the probes level too. 
 - let you edit a bunch of settings as text. this might be too weird and i'll need to switch to conventional fields but we'll see. 
 - highlight suggested components for the current level so you're not just staring at a wall of text
+- truncated Less_s doesn't work in wasm. extsb,extsh are doing to 32 bits. maybe_extend_output is doing unsigned. 
+- i've never done an undo thing before. hard to decide how to store it. 
+  - my instinct is to put gate.kind/wire.path.len in UndoEntry and leave it as None/0 sentinal that everyone already ignores. 
+    annoying because i want to be able to serialize them and extra gate fields depend on the kind (and wire length is obvious problem)
+  - add a deleted flag and everyone who iterates needs to remember to check
+  - put the whole gate struct in the UndoEntry. 
+  - am i thinking about this wrong? you have to undo in order so if its stored outside, it's fine to reuse the index because you would have to have undone any later changes first. 
+    maybe just need to commit to never doing things by index, so fix []Program to use link_id. 
+- i was really overthinking that for how easy it was to get something that kinda works. 
 
 ## (Nov 11) circuit
 

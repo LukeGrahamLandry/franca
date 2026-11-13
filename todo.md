@@ -36,6 +36,8 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 
+- alas theres still a terminal bounds check. i did it twice i a row but now i can't. open_hovered_link->slice somehow
+- run tests/compiler.fr on wasm. needs aot exec which is annoying to think about :(
 - the extra math added to libc_exports in host/web is too late for LIGHT_WEB because there the imports are real. need to do startup_table_assign
 - examples/web/build.fr: if theres a compile error in an aot one, it still thinks it doesnt need to rerun if you dont change a file
 - annoying that you cant run_tests build_graphics alone because "failed to record cross_repro"
@@ -75,6 +77,14 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
   - edit wire comments/colours
   - show wire comments in the ui without needing to hover a specific wire
   - now that i have enough to compare, try to make the level code less verbose
+  - circuit list levels it should pass so you can auto-test everything when you change a cc you use a lot
+  - dont store is_arch (used for compile bidirectional differently) in circuit. 
+    store show_in_cc_menu and show_in_arch_menu and just compile differently 
+    if it is the top level thing. 
+  - dont stomp everything if accidently press L
+  - auto save 
+  - be able to undo load/rename/delete circuit?
+  - have an option to clear undos (or export circuit.txt without them)
 ```
 // TODO: bundle the source files the jit needs so binary is self contained
 // TODO: autosave & web localstorage

@@ -44,6 +44,9 @@ Circuit :: @struct {
     // this is annoying becuase mystery_spice_minus_fifteen_for_custom_pins is stored on the gate not the circuit so can be different each time but it never is? hopefully i'll understand when i need to edit custom components myself. probably about centering on the field?
     cached_pin_radius: @struct(r: f32 = -1, p := vec2(0)) = ();
     
+    undo: RawList(UndoEntry) = empty();
+    redo: RawList(UndoEntry) = empty();
+    
     Wire :: @struct {
         // only the first and last can connect to things. the others are just visual.
         path: RawList(WireNode);
@@ -79,6 +82,7 @@ Circuit :: @struct {
         level_name: Str = "";  // v2
         name: Str;
         gate_index: i64;
+        gate_link_id := -1;
         assembly: ?Str = .None;
         assembled: ?[]u8 = .None;
     };
@@ -93,6 +97,17 @@ Circuit :: @struct {
         wires: []WireId;  // [child] -> parent
         gates: []i64;     // [child] -> parent (index in Component.gates)
     };
+    
+    // annoying that this can't go in editor.fr
+    // order matters for save.fr
+    UndoEntry :: @tagged(
+        SetGateField: @struct(i: i64, field: i64, value: Str),
+        SetGatePosition: @struct(i: i64, rotation: u8, pos: Vec2),
+        UndeleteGate: @struct(i: i64, gate: Gate),
+        DeleteGate: @struct(i: i64),
+        UndeleteWire: @struct(i: i64, wire: Wire),
+        DeleteWire: @struct(i: i64),
+    );
 };
 
 CustomId :: @struct(id: i64);
@@ -276,6 +291,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
         };
     };
     @if(c.compiled.is_some()) return();
+    c.inlined = empty();  // might be recompiling after editing
     
     @if(SPAM_LOG) @fmtln(warn, "loading (%):", c.name);
     a := arena;
@@ -2292,7 +2308,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
             range(0, n.zext()) { _ |
                 key := eat(i64);
                 name := eatN(u16, u8).shallow_copy(a);
-                programs&.push(level_id = key, name = name, gate_index = gate_index);
+                programs&.push(level_id = key, name = name, gate_index = gate_index, gate_link_id = id);
             };
             
             if s1 == 0 {  // i guess it gets a default if you don't set it manually in the game?
@@ -2345,7 +2361,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
                 range(0, program_count.zext()) { _ |
                     key := eatN(u16, u8).shallow_copy(a);
                     value := eatN(u16, u8).shallow_copy(a);
-                    programs&.push(level_name = key, name = value, gate_index = gate_index);
+                    programs&.push(level_name = key, name = value, gate_index = gate_index, gate_link_id = id);
                 };
                 
                 s := @ref i64.list(settings.len+2+int(kind == 118)*2, a);
