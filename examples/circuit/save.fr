@@ -95,8 +95,9 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
         
         each(c.wires, write_wire);
         write_wire :: fn(it: *Tc.Circuit.Wire) void => {
-            continue :: local_return;
-            @if(it.path.len < 2) continue();
+            // TODO: would be nice but undo uses indices
+            //continue :: local_return;
+            //@if(it.path.len < 2) continue();
             
             @fmt(out, " W % ", it.path.len);
             each it.path { it |
@@ -128,7 +129,7 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
             @fmt(out, "\n");
         };
         
-        if c.undo.len > 0 {
+        if c.undo.len > 0 || c.redo.len > 0 {
             @fmt(out, " undo % ", undo_format_version);
             size_patch_offset := out.len;
             out.push_repeated(max_size_chars, " ".ascii());
@@ -137,16 +138,18 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
             it := @slice(c.undo, c.redo);
             for it { it |
                 each it { it |
-                    @fmt(out, " U % ", it.tag().raw());
-                    @match(it) {
+                    @fmt(out, " U % ", it.data&.tag().raw());
+                    @fmt(out, "% % ", it.parent_state_id, it.child_state_id);
+                    @match(it.data&) {
                         fn SetGateField(it) => { @fmt(out, "% % ", it.i, it.field); write_bytes(out, it.value); }
                         fn SetGatePosition(it) => @fmt(out, "% % % %", it.i, it.pos.x, it.pos.y, it.rotation);
                         fn UndeleteGate(it) => { @fmt(out, "%", it.i); write_gate(it.gate&); }
                         fn UndeleteWire(it) => { @fmt(out, "%", it.i); write_wire(it.wire&); }
                         fn DeleteGate(it) => @fmt(out, "%", it.i);
                         fn DeleteWire(it) => @fmt(out, "%", it.i);
+                        fn RedoBranchMarker(it) => @fmt(out, "%", it.count);
                     };
-                    @fmt(out, "\n");
+                    @if(!@is(it.data&.tag(), .UndeleteGate, .UndeleteWire)) @fmt(out, "\n");
                 };
             };
             dest := out.items().subslice(size_patch_offset, max_size_chars);
@@ -378,24 +381,27 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
             dest := undo;
             n := 0;
             while => pop_prefix(in&, "U ") {
-                tag_ordinal := get_int();
-                @if(tag_ordinal.uge(enum_count(Tag(Tc.Circuit.UndoEntry)))) return(Err = "bad undo tag");
+                if n == u_count {
+                    dest = redo;
+                };
                 u := zeroed(Tc.Circuit.UndoEntry);
-                u&.tag_ptr()[] = @as(Tag(Tc.Circuit.UndoEntry)) tag_ordinal;
+                tag_ordinal := get_int();
+                u.parent_state_id = get_int();
+                u.child_state_id = get_int();
+                @if(tag_ordinal.uge(enum_count(Tag(Tc.Circuit.UndoPayload)))) return(Err = "bad undo tag");
+                u.data&.tag_ptr()[] = @as(Tag(Tc.Circuit.UndoPayload)) tag_ordinal;
                 i := get_int();
-                @match(u&) {
+                @match(u.data&) {
                     fn SetGateField(it) => { it[] = (i = i, field = get_int(), value = get_str()); }
                     fn SetGatePosition(it) => { it[] = (i = i, pos = vec2(get_int().float().cast(), get_int().float().cast()), rotation = get_int().trunc()); }
                     fn UndeleteGate(it) => { pop_prefix(in&, "G "); it[] = (i = i, gate = read_gate()); }
                     fn UndeleteWire(it) => { pop_prefix(in&, "W "); it[] = (i = i, wire = read_wire()); }
                     fn DeleteGate(it) => { it[] = (i = i); }
                     fn DeleteWire(it) => { it[] = (i = i); }
+                    fn RedoBranchMarker(it) => { it[] = (count = i); };
                 };
                 dest.push(u);
                 n += 1;
-                if n == u_count {
-                    dest = redo;
-                };
             };
         };
         
@@ -462,5 +468,5 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
     };
 }
 
-undo_format_version :: 1;
+undo_format_version :: 2;
 #use("@/examples/circuit/eval.fr");

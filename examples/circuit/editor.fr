@@ -103,7 +103,7 @@ fn hover_gate(e: *EditState, i: ?i64, c: *Circuit) void = {
             
             old := get_field_string(e, c, g, field);
             @if(old == text) continue();
-            e.undo&.push((SetGateField = (i = old_i, field = i, value = old.shallow_copy(a))), a);
+            e.push_undo(SetGateField = (i = old_i, field = i, value = old.shallow_copy(a)));
             set_field_string(e, c, g, field, text);
         };
     };
@@ -195,6 +195,8 @@ fn text_box_selection(self: *Draw) bool = {
         ("All Circuits", @if(state.loader.progress == .Loading, "", "\n")),
         ("Circuit Code", @if(no_code, "", state.current_jitted_source)), 
         ("Warnings", @if(no_code, "", state.warnings.items())), 
+        ("Edit Mode", "\n"),
+        ("Undo Tree", @if(e.enable, "\n", "")),
         ("New Circuit", "\n"),
     );
     prev := e.show_info_box;
@@ -220,6 +222,16 @@ fn text_box_selection(self: *Draw) bool = {
                 e.show_info_box = .None;
                 state.set_edit_mode(true);
                 state.new_circuit();
+                return true;
+            };
+            if names[i]._0 == "Undo Tree" {
+                e.show_info_box = .None;
+                e.show_undo_tree = !e.show_undo_tree;
+                return true;
+            };
+            if names[i]._0 == "Edit Mode" {
+                e.show_info_box = .None;
+                state.set_edit_mode(!e.enable);
                 return true;
             };
             
@@ -330,12 +342,18 @@ fn set_edit_mode(state: *State, new_edit_mode: bool) void = {
     state.end_level();
     
     if e.enable {
-        state.stash_undo();
         if state.tree[state.tree.len - 1].diagram_circuit { i |
             c := state.circuit[i]&;
             hover_gate(e, .None, c);
             e.select_gate(.None, c);
         };
+        state.stash_undo();
+        
+        out := @ref u8.list(temp());
+        Save'write_save(state.circuit, state.world.tc_file_loader_device, .None, out, true);
+        make_dirs("target");
+        path := "target/circuit_autosave.txt";
+        write_entire_file_or_crash(path, out.items());
     };
     e[] = (enable = !e.enable, dont_reset = e.dont_reset);
     if e.enable {
@@ -364,6 +382,7 @@ fn set_edit_mode(state: *State, new_edit_mode: bool) void = {
 fn new_circuit(state: *State) void = {
     @if(state.loader.progress != .Idle) return();
     a := state.edit.circuit_arena;
+    state.stash_undo();
     c := a.alloc_uninit(Tc.Circuit, state.circuit.len + 1);
     c.slice(0, state.circuit.len).copy_from(state.circuit);
     c[c.len-1] = (
@@ -402,16 +421,31 @@ fn apply_undo(state: *State, is_undo: bool) void = {
     hover_gate(e, .None, c);
     // TODO: same for placing_wire_start
     
-    it := @if(is_undo, e.undo&, e.redo&);
-    u := it.pop() || return();
+    a := e.circuit_arena;
+    src, dest := (@if(is_undo, e.undo&, e.redo&), @if(is_undo, e.redo&, e.undo&));
+    u := src.pop() || return();
+    dowhile {
+        @if_let(u.data) fn RedoBranchMarker(it) => {
+            dest.push_all(src.items().rest(src.len - it.count), a);
+            src.len -= it.count;
+            dest.push(e.redo_marker(it.count), a);
+            u = src.pop() || return();
+        };
+        u.data&.is(.RedoBranchMarker)
+    };
     inverse := perform_action(e, c, u);
-    it := @if(is_undo, e.redo&, e.undo&);
-    it.push(inverse, e.circuit_arena);
+    dest.push(inverse, a);
+}
+
+redo_marker :: fn(e: *EditState, count: i64) Circuit.UndoEntry = (data = (RedoBranchMarker = (count = count)), child_state_id = -1, parent_state_id = e.current_undo_state_id);
+
+fn perform_new_action(e: *EditState, c: *Circuit, u: Circuit.UndoPayload) UndoEntry = {
+    perform_action(e, c, (data = u, parent_state_id = e.current_undo_state_id, child_state_id = atomic_inc(i64, e.next_undo_state_id&)))
 }
 
 // TODO: now that i always need to re-copy out of the fields, should just be immutable Str not a rawlist (would save one direction of copy)
 fn perform_action(e: *EditState, c: *Circuit, u: UndoEntry) UndoEntry = {
-    @match(u&) {
+    inverse: Circuit.UndoPayload = @match(u.data&) {
         fn SetGateField(it) => {
             g := c.gates[it.i]&;
             shape := get_builtin_shape(g.kind);
@@ -447,7 +481,18 @@ fn perform_action(e: *EditState, c: *Circuit, u: UndoEntry) UndoEntry = {
             c.wires[it.i].path.len = 0;
             (UndeleteWire = (i = it.i, wire = wire))
         }
-    }
+        fn RedoBranchMarker(it) => unreachable();
+    };
+    
+    prev_id := e.current_undo_state_id;
+    e.current_undo_state_id = u.child_state_id;
+    (data = inverse, child_state_id = prev_id, parent_state_id = u.child_state_id)
+}
+
+fn push_undo(e: *EditState, data: Circuit.UndoPayload) void = {
+    new := atomic_inc(i64, e.next_undo_state_id&);
+    e.undo&.push((data = data, child_state_id = e.current_undo_state_id, parent_state_id = new), e.circuit_arena);
+    e.current_undo_state_id = new;
 }
 
 fn stash_undo(state: *State) void = {
@@ -459,13 +504,35 @@ fn stash_undo(state: *State) void = {
 
 fn unstash_undo(state: *State) void = {
     state.stash_undo();
+    
+    // TODO: store these in the circuit data instead of doing this shitty guess every time
+    e := state.edit&;
+    id := 0;
+    each e.undo& { it |
+        id = id.max(it.parent_state_id).max(it.child_state_id);
+    };
+    each e.redo& { it |
+        id = id.max(it.parent_state_id).max(it.child_state_id);
+    };
+    e.next_undo_state_id = id + 1;
+    if e.undo.len > 0 {
+        id := e.undo[e.undo.len - 1].parent_state_id;
+        if id != -1 {
+            e.current_undo_state_id = id;
+        };
+    } else {
+        e.current_undo_state_id = 0;
+    };
 }
 
 fn branch_redo(e: *EditState) void = {
     @if(!e.enable) return();
-    // TODO: save it so can do non-linear and never delete anything
+    a := e.circuit_arena;
+    e.undo&.push_all(e.redo.items(), a);
+    if e.redo.len > 0 {
+        e.undo&.push(e.redo_marker(e.redo.len), a);
+    };
     e.redo&.clear();
-    
 }
 
 Terminal :: import("@/examples/gpu/terminal.fr");

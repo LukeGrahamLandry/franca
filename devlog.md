@@ -1,7 +1,14 @@
 
-## (Nov 12) circuit
+## (Nov 13) circuit
 
 - store undo per circuit and persist undo in save file
+- i want a tree. when you edit after undoing, move the redos on to the undo stack with a header so you can skip them. 
+  trying to draw the tree to let you access the those hidden branches. 
+  hard to think about how the branches need to be fixed when you skip to a different one. not helped by the undo->redo inflection point being confusing. 
+  i cant do it i cant do it i cant do it. 
+  hopefully trying to name the states so i can see whats going on will help. 
+  maybe the insane thing is that RedoBranchMarker is nither a node or a transition so like how does that make any sense as a representation. 
+  why am i trying so hard pretend its not a graph. 
 
 ## (Nov 12) circuit
 
