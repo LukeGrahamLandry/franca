@@ -206,7 +206,11 @@ fn text_box_selection(self: *Draw) bool = {
     range(0, names.len) { i |
         pos := vec2(-20, (7 + i.float().cast()));
         if names[i]._1 != "" {
-            self.do_option(pos, names[i]._0, e.show_info_box.is_some() && e.show_info_box.Some == i, i, e.show_info_box&);
+            active := false 
+            || (e.show_undo_tree && names[i]._0 == "Undo Tree")
+            || (e.enable && names[i]._0 == "Edit Mode")
+            || (e.show_info_box.is_some() && e.show_info_box.Some == i);
+            self.do_option(pos, names[i]._0, active, i, e.show_info_box&);
         };
     };
     if ((prev || -1) != (e.show_info_box || -1)) {
@@ -342,7 +346,7 @@ fn set_edit_mode(state: *State, new_edit_mode: bool) void = {
     state.end_level();
     
     if e.enable {
-        if state.tree[state.tree.len - 1].diagram_circuit { i |
+        if state.current_diagram() { c |
             c := state.circuit[i]&;
             hover_gate(e, .None, c);
             e.select_gate(.None, c);
@@ -398,49 +402,73 @@ fn new_circuit(state: *State) void = {
         default_tick_rate = 1,
         is_arch = true,
     );
+    c[c.len-1].undo&.push((id = 0), a);
     state.circuit = c;
     state.tree&.clear();
     state.tree&.push(diagram_circuit = (Some = c.len-1));
+    state.unstash_undo();
 }
 
-// these are named for the reverse of the action you perform to create one. 
-// ex. creating a gate pushes a UndoEntry.DeleteGate
-// TODO: at this point, this struct is so big i should just store it as the serialized form all the time. would be less than 160 bytes
 UndoEntry :: Tc.Circuit.UndoEntry;
 
 // TODO: visual indicator of which gate you're changing?
 fn apply_undo(state: *State, is_undo: bool) void = {
     e := state.edit&;
-    // TODO: need to track when you change circuits
-    @if(state.tree.len == 0) return();
-    c := state.tree[state.tree.len - 1].diagram_circuit || return();
-    c := state.circuit[c]&;
+    c := state.current_diagram() || return();
     
     // can't be holding on to a gate index while undoing
     e.select_gate(.None, c);
     hover_gate(e, .None, c);
     // TODO: same for placing_wire_start
-    
-    a := e.circuit_arena;
-    src, dest := (@if(is_undo, e.undo&, e.redo&), @if(is_undo, e.redo&, e.undo&));
-    u := src.pop() || return();
-    dowhile {
-        @if_let(u.data) fn RedoBranchMarker(it) => {
-            dest.push_all(src.items().rest(src.len - it.count), a);
-            src.len -= it.count;
-            dest.push(e.redo_marker(it.count), a);
-            u = src.pop() || return();
-        };
-        u.data&.is(.RedoBranchMarker)
-    };
-    inverse := perform_action(e, c, u);
-    dest.push(inverse, a);
+    // TODO: do that when you click in the tree ui too
+
+    u := e.undo[e.current_undo_state_id].transitions.find(fn(it) => it.action.is_undo == is_undo) || return();
+    inverse := perform_action(e, c, u.action);
+    e.push_this_inverse(inverse);
 }
 
-redo_marker :: fn(e: *EditState, count: i64) Circuit.UndoEntry = (data = (RedoBranchMarker = (count = count)), child_state_id = -1, parent_state_id = e.current_undo_state_id);
+fn make_node(e: *EditState, data: Circuit.UndoPayload, is_undo: bool) i64 = {
+    new := atomic_inc(i64, e.next_undo_state_id&);
+    e.undo&.push((id = new), e.circuit_arena);
+    e.undo[new].transitions&.push((
+        target_id = e.current_undo_state_id, 
+        action = (data = data, child_state_id = e.current_undo_state_id, parent_state_id = new),
+    ), e.circuit_arena);
+    new
+}
+
+fn push_undo(e: *EditState, data: Circuit.UndoPayload) void = {
+    new := atomic_inc(i64, e.next_undo_state_id&);
+    e.undo&.push((id = new), e.circuit_arena);
+    e.undo[new].transitions&.push((
+        target_id = e.current_undo_state_id, 
+        action = (data = data, child_state_id = e.current_undo_state_id, parent_state_id = new, is_undo = true),
+    ), e.circuit_arena);
+    e.current_undo_state_id = new;
+}
 
 fn perform_new_action(e: *EditState, c: *Circuit, u: Circuit.UndoPayload) UndoEntry = {
-    perform_action(e, c, (data = u, parent_state_id = e.current_undo_state_id, child_state_id = atomic_inc(i64, e.next_undo_state_id&)))
+    new := atomic_inc(i64, e.next_undo_state_id&);
+    e.undo&.push((id = new), e.circuit_arena);
+    it: Circuit.UndoEntry = (data = u, parent_state_id = e.current_undo_state_id, child_state_id = new, is_undo = false);
+    e.undo[e.current_undo_state_id].transitions&.push((
+        target_id = new, 
+        action = it,
+    ), e.circuit_arena);
+    perform_action(e, c, it)
+}
+
+fn push_this_inverse(e: *EditState, inverse: Circuit.UndoEntry) void = {
+    graph := e.undo&;
+    if graph[inverse.parent_state_id].transitions.index_of(fn(it) => it.target_id == inverse.child_state_id).is_none() {
+        graph[inverse.parent_state_id].transitions&.push((target_id = inverse.child_state_id, action = inverse), e.circuit_arena);
+        t := graph[inverse.child_state_id].transitions&;
+        if t.index_of(fn(it) => it.target_id == inverse.parent_state_id) { ti |
+            t.ordered_remove(ti);  // no cycles
+        }
+    } else {
+        @println("this should be unreachable. already have % -> %", inverse.parent_state_id, inverse.child_state_id);
+    }
 }
 
 // TODO: now that i always need to re-copy out of the fields, should just be immutable Str not a rawlist (would save one direction of copy)
@@ -481,58 +509,27 @@ fn perform_action(e: *EditState, c: *Circuit, u: UndoEntry) UndoEntry = {
             c.wires[it.i].path.len = 0;
             (UndeleteWire = (i = it.i, wire = wire))
         }
-        fn RedoBranchMarker(it) => unreachable();
+        fn RedoBranchMarker() => unreachable();
     };
     
-    prev_id := e.current_undo_state_id;
     e.current_undo_state_id = u.child_state_id;
-    (data = inverse, child_state_id = prev_id, parent_state_id = u.child_state_id)
-}
-
-fn push_undo(e: *EditState, data: Circuit.UndoPayload) void = {
-    new := atomic_inc(i64, e.next_undo_state_id&);
-    e.undo&.push((data = data, child_state_id = e.current_undo_state_id, parent_state_id = new), e.circuit_arena);
-    e.current_undo_state_id = new;
+    (data = inverse, child_state_id = u.parent_state_id, parent_state_id = u.child_state_id, is_undo = !u.is_undo)
 }
 
 fn stash_undo(state: *State) void = {
     c, e := (state.current_diagram() || return(), state.edit&);
     @if(!e.enable) return();
     t := c.undo; c.undo = e.undo; e.undo = t;
-    t := c.redo; c.redo = e.redo; e.redo = t;
+    t := c.next_undo_state_id; c.next_undo_state_id = e.next_undo_state_id; e.next_undo_state_id = t;
+    t := c.current_undo_state_id; c.current_undo_state_id = e.current_undo_state_id; e.current_undo_state_id = t;
 }
 
 fn unstash_undo(state: *State) void = {
     state.stash_undo();
-    
-    // TODO: store these in the circuit data instead of doing this shitty guess every time
-    e := state.edit&;
-    id := 0;
-    each e.undo& { it |
-        id = id.max(it.parent_state_id).max(it.child_state_id);
-    };
-    each e.redo& { it |
-        id = id.max(it.parent_state_id).max(it.child_state_id);
-    };
-    e.next_undo_state_id = id + 1;
-    if e.undo.len > 0 {
-        id := e.undo[e.undo.len - 1].parent_state_id;
-        if id != -1 {
-            e.current_undo_state_id = id;
-        };
-    } else {
-        e.current_undo_state_id = 0;
-    };
 }
 
 fn branch_redo(e: *EditState) void = {
-    @if(!e.enable) return();
-    a := e.circuit_arena;
-    e.undo&.push_all(e.redo.items(), a);
-    if e.redo.len > 0 {
-        e.undo&.push(e.redo_marker(e.redo.len), a);
-    };
-    e.redo&.clear();
+    // TODO
 }
 
 Terminal :: import("@/examples/gpu/terminal.fr");

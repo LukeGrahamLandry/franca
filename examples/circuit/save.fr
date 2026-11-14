@@ -129,17 +129,23 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
             @fmt(out, "\n");
         };
         
-        if c.undo.len > 0 || c.redo.len > 0 {
+        if true {
             @fmt(out, " undo % ", undo_format_version);
             size_patch_offset := out.len;
             out.push_repeated(max_size_chars, " ".ascii());
-            @fmt(out, " % %;\n", c.undo.len, c.redo.len);
+            @fmt(out, " 0 0 % %;\n", c.current_undo_state_id, c.next_undo_state_id);
             start_counting_size := out.len;
-            it := @slice(c.undo, c.redo);
-            for it { it |
-                each it { it |
+            // TODO: don't have undoing change the whole order of the save data
+            work := @ref list(*Tc.Circuit.UndoNode, temp());
+            work.push(c.undo[c.current_undo_state_id]&);
+            while => work.pop() { node |
+                each node.transitions { it |
+                    work.push(c.undo[it.target_id]&);
+                    it := it.action&;
+                    // :TransitionString
                     @fmt(out, " U % ", it.data&.tag().raw());
                     @fmt(out, "% % ", it.parent_state_id, it.child_state_id);
+                    @if(!it.is_undo) @fmt(out, "r ");
                     @match(it.data&) {
                         fn SetGateField(it) => { @fmt(out, "% % ", it.i, it.field); write_bytes(out, it.value); }
                         fn SetGatePosition(it) => @fmt(out, "% % % %", it.i, it.pos.x, it.pos.y, it.rotation);
@@ -147,7 +153,7 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
                         fn UndeleteWire(it) => { @fmt(out, "%", it.i); write_wire(it.wire&); }
                         fn DeleteGate(it) => @fmt(out, "%", it.i);
                         fn DeleteWire(it) => @fmt(out, "%", it.i);
-                        fn RedoBranchMarker(it) => @fmt(out, "%", it.count);
+                        fn RedoBranchMarker() => ();  // TODO: remove
                     };
                     @if(!@is(it.data&.tag(), .UndeleteGate, .UndeleteWire)) @fmt(out, "\n");
                 };
@@ -260,8 +266,7 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
         wires := list(Tc.Circuit.Wire, wires_len, a);
         dependencies := list(Tc.CustomId, dep_count, a);
         programs := list(Tc.Circuit.Program, program_count, a);
-        undo := @ref list(Tc.Circuit.UndoEntry, a);
-        redo := @ref list(Tc.Circuit.UndoEntry, a);
+        undo := @ref list(Tc.Circuit.UndoNode, a);
         
         if pop_prefix(in&, "D ") {
             range(0, dep_count) { i |
@@ -356,6 +361,7 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
         while => in.len > 0 && in[0].is_ascii_whitespace() {
             in = in.rest(1);
         };
+        current_id, next_id, have_undo := (0, 1, false);
         if in&.pop_prefix("undo ") {
             break :: local_return;
             // versioned seperately cause i expect the format for this will be more volatile and i dont care about it as much
@@ -371,25 +377,25 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
                 };
                 break();
             };
-            u_count, r_count := (get_int(), get_int());
+            have_undo = true;
+            _0, _1 := (get_int(), get_int());
+            current_id = get_int();
+            next_id = get_int();
+            
             in&.pop_prefix(";\n") || return(Err = "missing ; before undo data");
             while => in.len > 0 && in[0].is_ascii_whitespace() {
                 in = in.rest(1);
             };
-            undo.reserve(u_count);
-            redo.reserve(r_count);
-            dest := undo;
-            n := 0;
+            undo.push_repeated(next_id, zeroed(Tc.Circuit.UndoNode));
             while => pop_prefix(in&, "U ") {
-                if n == u_count {
-                    dest = redo;
-                };
+                continue :: local_return;
                 u := zeroed(Tc.Circuit.UndoEntry);
                 tag_ordinal := get_int();
                 u.parent_state_id = get_int();
                 u.child_state_id = get_int();
                 @if(tag_ordinal.uge(enum_count(Tag(Tc.Circuit.UndoPayload)))) return(Err = "bad undo tag");
                 u.data&.tag_ptr()[] = @as(Tag(Tc.Circuit.UndoPayload)) tag_ordinal;
+                u.is_undo = !pop_prefix(in&, "r ");
                 i := get_int();
                 @match(u.data&) {
                     fn SetGateField(it) => { it[] = (i = i, field = get_int(), value = get_str()); }
@@ -398,11 +404,16 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
                     fn UndeleteWire(it) => { pop_prefix(in&, "W "); it[] = (i = i, wire = read_wire()); }
                     fn DeleteGate(it) => { it[] = (i = i); }
                     fn DeleteWire(it) => { it[] = (i = i); }
-                    fn RedoBranchMarker(it) => { it[] = (count = i); };
+                    fn RedoBranchMarker() => continue();
                 };
-                dest.push(u);
-                n += 1;
+                @if(u.parent_state_id == -1 || u.child_state_id == -1) continue();
+                src := undo[u.parent_state_id]&;
+                src.id = u.parent_state_id;
+                src.transitions&.push((target_id = u.child_state_id, action = u), a);
             };
+        };
+        if !have_undo {
+            undo.push(id = current_id);
         };
         
         circuits.push(
@@ -419,7 +430,8 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
             is_arch = is_arch,
             mnemonics = mnemonics,
             undo = undo.as_raw(),
-            redo = redo.as_raw(),
+            current_undo_state_id = current_id,
+            next_undo_state_id = next_id,
         );
     };
     
@@ -468,5 +480,5 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
     };
 }
 
-undo_format_version :: 2;
+undo_format_version :: 4;
 #use("@/examples/circuit/eval.fr");

@@ -438,220 +438,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         self.draw_gate_hover_line(circuit);
         self.update_edit(circuit, state.circuit);
     };
-    
-    e := state.edit&;
-    if state.tree.len > 0 && e.enable && e.show_undo_tree {
-        saved := (state.pos, state.scale);
-        self.diagram_pos += self.text_spacing * vec2(-10, 0);
-        pos := vec2(0);
-        current := e.undo.len - 1;
-        original_undo_count := e.undo.len;
-        state.edit&.branch_redo();
-        i := e.undo.len - 1;
-        lines := {  // time to do some sketchy shit do da do da
-            state.stash_undo();
-            out := u8.list(temp());
-            Save'write_save(state.circuit, state.world.tc_file_loader_device, state.tree[state.tree.len - 1].diagram_circuit, out&, false);
-            state.unstash_undo();
-            out := out.items();
-            while => out.len > 0 && !out&.pop_prefix("undo") {
-                out = out.rest(1);
-            };
-            out := out.split("\n", temp());
-            out.len -= 2;
-            out
-        };
-        W := (self.wire_node_width);
-        
-        // TODO: doing this every frame is insane. if this is the representation i want just use it instead of being array obsessed. nobody cares. 
-        Graph :: @struct {
-            id: i64;
-            transitions: RawList(Transition);
-            current: bool;
-            seen: bool;
-            pos: Vec2;
-            Transition :: @struct(id: i64, action: *Tc.Circuit.UndoEntry, text: Str, is_undo: bool);
-        };
-        graph := temp().alloc_zeroed(Graph, e.next_undo_state_id);
-        enumerate e.undo& { i, it |
-            if it.child_state_id != -1 && it.parent_state_id != -1 {
-                text := lines[i+1];
-                graph[it.parent_state_id].transitions&.push((
-                    id = it.child_state_id,
-                    action = it, 
-                    text = text,
-                    is_undo = i < original_undo_count,
-                ), temp());
-                graph[it.parent_state_id].id = it.parent_state_id;
-                graph[it.child_state_id].id = it.child_state_id;
-            };
-        };
-        graph[e.current_undo_state_id].id = e.current_undo_state_id;
-        graph[e.current_undo_state_id].current = true;
-        graph[e.current_undo_state_id].seen = true;
-        
-        
-        StackEntry :: @struct(transition_index: i64, node: *Graph);
-        stack := @ref StackEntry.list(temp());
-        stack.push(transition_index = 0, node = graph[e.current_undo_state_id]&);
-        
-        x_shift: f32 = 0;
-        while => stack.len > 0 {
-            ti := stack[stack.len - 1].transition_index;
-            node := stack[stack.len - 1].node;
-            if ti == 0 {
-                pos := node.pos;
-                b := self.tc_to_world_pos(pos);
-                sgl.color = pack_rgba(100, 50 + 150*int(node.current), 50, 255);
-                if self.hovering_node(b) {
-                    sdtx.pos = self.world_to_text_pos(b);
-                    sdtx.put(@tfmt("id=%", node.id));
-                    sgl.color = pack_rgba(200, 200, 200, 255);
-                };
-                sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
-            };
-            
-            if ti < node.transitions.len {
-                if ti > 0 {
-                    x_shift -= 2;
-                };
-                stack[stack.len - 1].transition_index += 1;
-                ci := node.transitions[ti].id;
-                child := graph[ci]&;
-                if !child.seen {
-                    child.seen = true;
-                    child.pos = vec2(x_shift, node.pos.y + 2);
-                    stack.push(transition_index = 0, node = child);
-                };
-            } else {
-                each node.transitions { it |
-                    sgl.color = pack_rgba(100, 50, 50 + 50*int(!it.is_undo), 255);
-                    b := self.tc_to_world_pos(node.pos);
-                    a := self.tc_to_world_pos(graph[it.id].pos);
-                    
-                    line_pos := self.tc_to_world_pos((node.pos + graph[it.id].pos) / 2);
-                    if self.hovering_node(line_pos) {
-                        sdtx.pos = self.world_to_text_pos(line_pos);
-                        sdtx.put(it.text);
-                        sgl.color = pack_rgba(200, 200, 200, 255);
-                    };
-                    
-                    sgl.line(a, b, W/2.5);
-                };
-                stack.pop();
-            };
-        };
-        
-        
-        pos := vec2(x_shift-2, 0);
-        last := pos - vec2(0, 2);
-        branch_stack := @ref Ty(i64, Vec2).list(temp());
-        /*
-        goto: ?i64 = .None;
-        sdtx.color = pack_rgba(255, 255, 255, 255);
-        sdtx.pos = self.world_to_text_pos(self.tc_to_world_pos(vec2(0, -4)));
-        sdtx.put(@tfmt("id=%", e.current_undo_state_id));
-        
-        if i == current {
-            sgl.color = pack_rgba(100, 200, 50, 255);
-            b := self.tc_to_world_pos(last);
-            sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
-        };
-        
-        while => i >= 0 {
-            color := pack_rgba(100, 50, 50 + 50*int(i > current), 255);
-            sgl.color = color;
-            it := e.undo[i]&;
-            b := self.tc_to_world_pos(pos);
-            a := self.tc_to_world_pos(last);
-            if current != e.undo.len - 1 && i == e.undo.len - 1{
-                sgl.color = pack_rgba(100, 200, 50, 255);
-            };
-            if self.hovering_node(b) {
-                sdtx.pos = self.world_to_text_pos(b);
-                id := @if(i == current, e.undo[i-1].parent_state_id, it.child_state_id);
-                sdtx.put(@tfmt("[%] id=% parent=% child=%", i, id, it.parent_state_id, it.child_state_id));
-                sgl.color = pack_rgba(200, 200, 200, 255);
-                if !it.data&.is(.RedoBranchMarker) && state.either_clicked&.take() {
-                    goto = (Some = i);
-                };
-            };
-            sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
-            sgl.color = color;
-            
-            line_pos := self.tc_to_world_pos((pos + last) / 2);
-            if self.hovering_node(line_pos) {
-                sdtx.pos = self.world_to_text_pos(line_pos);
-                sdtx.put(@tfmt("[%] % -> %; %; %", i, it.parent_state_id, it.child_state_id, it.data&.tag(), lines[lines.len - (e.undo.len - i)]));
-                sgl.color = pack_rgba(200, 200, 200, 255);
-            };
-            sgl.line(a, b, W/2.5);
-            sgl.color = color;
-            
-            
-            last = pos;
-            
-            @if_let(it.data&) fn RedoBranchMarker(it) => {
-                push(branch_stack, (i - it.count, pos));
-                pos.x -= 2;
-            };
-            sgl.color = color;
-            if branch_stack.len > 0 && branch_stack[branch_stack.len - 1]._0 == i {
-                _, old_pos := branch_stack.pop().unwrap();
-                if true {                    
-                    pos.y = old_pos.y - 2;
-                    pos.x -= 2;
-                    last = old_pos;
-                } else {
-                    a := self.tc_to_world_pos(old_pos);
-                    b := self.tc_to_world_pos(pos + vec2(2, 2));
-                    sgl.line(a, b, W/2.5);
-                    pos.x += 2;
-                };
-            };
-            pos.y += 2;
-            i -= 1;
-        };
-        */
-        
-        if e.undo.len > 0 && current != e.undo.len - 1 {
-            marker := e.undo&.pop().unwrap();
-            it := marker.data.RedoBranchMarker;
-            src, dest := (e.undo&, e.redo&);
-            a := e.circuit_arena;
-            dest.push_all(src.items().rest(src.len - it.count), a);
-            src.len -= it.count;
-        };
-        
-        @if(false)
-        if goto { goto |
-            state.dirty = true;
-            a := e.circuit_arena;
-            if goto > current {
-                goto := (goto - current) - 1;
-                while => e.redo.len > goto {
-                    @if_let(e.redo[e.redo.len - 1].data) fn RedoBranchMarker(it) => {
-                        if e.redo.len - it.count < goto {
-                            e.redo&.pop();
-                        };
-                    }
-                    state.apply_undo(false);
-                };
-            } else {
-                start := e.undo.len;
-                while => e.undo.len > goto {
-                    @if_let(e.undo[e.undo.len - 1].data) fn RedoBranchMarker(it) => {
-                        if e.undo.len - it.count < goto {
-                            e.undo&.pop();
-                            // TODO
-                            e.redo&.push(e.redo_marker(start - e.undo.len), a);
-                        };
-                    }
-                    state.apply_undo(true);
-                };
-            };
-        };
-    };
+    self.draw_undo_tree();
     
     positions := self.emphasized_wire_positions;
     @if(positions.len > 0)
@@ -1370,6 +1157,132 @@ fn highlight_inlined(self: *Draw, inline_record: u32, c: *Component) void = {
     };
 }
 
+fn draw_undo_tree(self: *Draw) void = {
+    state, e, sgl, sdtx := (self.state, self.edit&, self.draw&, self.sdtx);
+    if !(state.tree.len > 0 && e.enable && e.show_undo_tree && state.loader.progress == .Idle) {
+        return();
+    };
+    c := state.current_diagram() || return();
+    self.diagram_pos += self.text_spacing * vec2(-10, 0);
+    W := (self.wire_node_width);
+    
+    GraphicsUndoNode :: @struct(pos: Vec2, current: bool, seen: bool);
+    graph := temp().alloc_zeroed(GraphicsUndoNode, e.next_undo_state_id);
+    graph[e.current_undo_state_id].current = true;
+    graph[e.current_undo_state_id].seen = true;
+    
+    goto: ?i64 = .None;
+    
+    StackEntry :: @struct(transition_index: i64, id: i64);
+    stack := @ref StackEntry.list(temp());
+    stack.push(transition_index = 0, id = e.current_undo_state_id);
+    
+    x_shift: f32 = 0;
+    while => stack.len > 0 {
+        ti := stack[stack.len - 1].transition_index;
+        id := stack[stack.len - 1].id;
+        if ti == 0 {
+            pos := graph[id].pos;
+            b := self.tc_to_world_pos(pos);
+            sgl.color = pack_rgba(100, 50 + 150*int(graph[id].current), 50, 255);
+            if self.hovering_node(b) {
+                sdtx.pos = self.world_to_text_pos(b);
+                sdtx.put(@tfmt("id=%", id));
+                sgl.color = pack_rgba(200, 200, 200, 255);
+                if state.either_clicked&.take() {
+                    goto = (Some = id);
+                }
+            };
+            sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
+        };
+        
+        if ti < e.undo[id].transitions.len {
+            if ti > 0 {
+                x_shift -= 2;
+            };
+            stack[stack.len - 1].transition_index += 1;
+            ci := e.undo[id].transitions[ti].target_id;
+            child := graph[ci]&;
+            if !child.seen {
+                child.seen = true;
+                child.pos = vec2(x_shift, graph[id].pos.y + 2);
+                stack.push(transition_index = 0, id = ci);
+            };
+        } else {
+            each e.undo[id].transitions { it |
+                sgl.color = pack_rgba(100, 50, 50 + 50*int(!it.action.is_undo), 255);
+                b := self.tc_to_world_pos(graph[id].pos);
+                a := self.tc_to_world_pos(graph[it.target_id].pos);
+                
+                line_pos := self.tc_to_world_pos((graph[id].pos + graph[it.target_id].pos) / 2);
+                if self.hovering_node(line_pos) {
+                    sdtx.pos = self.world_to_text_pos(line_pos);
+                    s := slowly_display_transition(state, it.action) || "";
+                    sdtx.put(@tfmt("  % -> %; %; ", id, it.target_id, it.action.data&.tag()));
+                    sdtx.put(s);
+                    sgl.color = pack_rgba(200, 200, 200, 255);
+                };
+                
+                sgl.line(a, b, W/2.5);
+            };
+            stack.pop();
+        };
+    };
+    
+    if goto { goal |
+        // TODO: detect cycles even tho there shouldn't be any because i don't deduplicate states
+        // TODO: this will stack overflow really fast so make it explicit
+        path := @ref i64.list(temp());
+        current := e.current_undo_state_id&;
+        found_path := find_path(e.undo.items(), current[], goal, path);
+        find_path :: fn(graph: []Tc.Circuit.UndoNode, current: i64, goal: i64, path: *List(i64)) bool = {
+            @if(current == goal) return(true);
+            
+            enumerate graph[current].transitions { i, it |
+                if find_path(graph, it.target_id, goal, path) {
+                    path.push(i);
+                    return true;
+                };
+            };
+            false
+        };
+        if !found_path {
+            @fmtln(state.warnings&, "failed to find path to target undo state. this should be unreachable");
+            return();
+        };
+        // TODO: do select_gate/hover_gate None first
+        graph := e.undo;
+        for_rev path { ti |
+            src := current[];
+            t := graph[current[]].transitions[ti]&;
+            // TODO: dont reallocate field string for this
+            inverse := perform_action(e, c, t.action);
+            current[] = t.target_id;
+            e.push_this_inverse(inverse);
+        };
+    };
+    
+    slowly_display_transition :: fn(state: *State, it: Tc.Circuit.UndoEntry) ?Str = {  // time to do some sketchy shit do da do da
+        state.stash_undo();
+        out := u8.list(temp());
+        Save'write_save(state.circuit, state.world.tc_file_loader_device, state.tree[state.tree.len - 1].diagram_circuit, out&, false);
+        state.unstash_undo();
+        out := out.items();
+        while => out.len > 0 && !out&.pop_prefix("undo") {
+            out = out.rest(1);
+        };
+        out := out.split("\n", temp());
+        out.len -= 2;
+        
+        // :TransitionString
+        prefix := @tfmt(" U % % % ", it.data&.tag().raw(), it.parent_state_id, it.child_state_id);
+        if out.find(fn(it) => it[].starts_with(prefix)) { it |
+            return(Some = it[]);
+        };
+        .None
+    };
+};
+
 fn console(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Component.Gate) void = {
     sdtx, world, sgl := (self.sdtx, self.world&, self.draw&);
     
@@ -1755,6 +1668,7 @@ fn text_to_world_pos(self: *Draw, pos: Vec2) Vec2 =
 EditState :: @struct {
     enable: bool = false;
     selected_gate: ?i64 = .None;
+    original_gate_position: ?get_variant_type(Tc.Circuit.UndoPayload, .SetGatePosition) = .None;
     placing_wire_start: ?Ty(i64, i64) = .None;   // (wire index, path index)
     action: @enum(None, NewGate, Rotate, Delete) = .None;
     placing_type := zeroed(ComponentId); 
@@ -1768,10 +1682,7 @@ EditState :: @struct {
     circuit_arena: Alloc;
     default_word_width := 8;
     text_box: Terminal.State;
-    undo: RawList(UndoEntry) = empty();
-    // TODO: do a tree situation instead. 
-    //       i want to be able to undo, make some changes, and then still redo back to how i was originally if the changes dont work out
-    redo: RawList(UndoEntry) = empty();
+    undo: RawList(Tc.Circuit.UndoNode) = empty();
     show_undo_tree := false;
     next_undo_state_id := 1;
     current_undo_state_id := 0;
@@ -1905,7 +1816,7 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
             if e.selected_gate&.take() { i |
                 e.branch_redo();
                 inverse := perform_new_action(e, c, (DeleteGate = (i = i)));
-                e.undo&.push(inverse, a);
+                e.push_this_inverse(inverse);
             } else {
                 _ := e.placing_wire_start&.take();
                 pos := self.world_to_tc_pos(self.mouse_world_pos);
@@ -1914,7 +1825,7 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
                         if p.pos == pos {
                             e.branch_redo();
                             inverse := perform_new_action(e, c, (DeleteWire = (i = i)));
-                            e.undo&.push(inverse, a);
+                            e.push_this_inverse(inverse);
                         };
                     };
                 };
@@ -2029,17 +1940,18 @@ fn select_gate(e: *EditState, i: ?i64, c: *Tc.Circuit) void = {
     if e.selected_gate { old_i |
         if ((i || -1) != old_i) {
             g := c.gates[old_i]&;
-            @if(e.undo.len > 0) @if_let(e.undo[e.undo.len - 1].data&) fn SetGatePosition(it) => if it.pos == g.pos && it.rotation == g.rotation {
-                e.undo&.pop();
+            if e.original_gate_position&.take() { it |
+                if it.i == old_i && it.pos == g.pos && it.rotation == g.rotation {
+                    e.branch_redo();
+                    e.push_undo(SetGatePosition = it);
+                };
             };
         };
     };
     if i { i |
         g := c.gates[i]&;
-        // TODO: can i un-branch_redo if this ends up getting popped?
-        e.branch_redo();
         // TODO: dont do this for the position off the board when the thing is first spawned
-        e.push_undo(SetGatePosition = (i = i, pos = g.pos, rotation = g.rotation));
+        e.original_gate_position = (Some = (i = i, pos = g.pos, rotation = g.rotation));
     };
     
     e.selected_gate = i;
