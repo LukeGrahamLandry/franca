@@ -129,33 +129,44 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
             @fmt(out, "\n");
         };
         
-        if true {
+        if c.undo.len > 1 {
+            prev_time := 0;
             @fmt(out, " undo % ", undo_format_version);
             size_patch_offset := out.len;
             out.push_repeated(max_size_chars, " ".ascii());
             @fmt(out, " 0 0 % %;\n", c.current_undo_state_id, c.next_undo_state_id);
             start_counting_size := out.len;
-            // TODO: don't have undoing change the whole order of the save data
-            work := @ref list(*Tc.Circuit.UndoNode, temp());
-            work.push(c.undo[c.current_undo_state_id]&);
-            while => work.pop() { node |
-                each node.transitions { it |
-                    work.push(c.undo[it.target_id]&);
+            node_wrote_time: DynamicBitSet = empty(temp());
+            node_wrote_time&.reserve(c.undo.len);
+            enumerate c.undo { parent_state_id, node |
+                enumerate node.transitions { t_index, it |
                     it := it.action&;
                     // :TransitionString
                     @fmt(out, " U % ", it.data&.tag().raw());
-                    @fmt(out, "% % ", it.parent_state_id, it.child_state_id);
-                    @if(!it.is_undo) @fmt(out, "r ");
+                    @fmt(out, "% % ", parent_state_id, it.child_state_id);
                     @match(it.data&) {
                         fn SetGateField(it) => { @fmt(out, "% % ", it.i, it.field); write_bytes(out, it.value); }
-                        fn SetGatePosition(it) => @fmt(out, "% % % %", it.i, it.pos.x, it.pos.y, it.rotation);
+                        fn SetGatePosition(it) => @fmt(out, "% % % % ", it.i, it.pos.x, it.pos.y, it.rotation);
                         fn UndeleteGate(it) => { @fmt(out, "%", it.i); write_gate(it.gate&); }
                         fn UndeleteWire(it) => { @fmt(out, "%", it.i); write_wire(it.wire&); }
-                        fn DeleteGate(it) => @fmt(out, "%", it.i);
-                        fn DeleteWire(it) => @fmt(out, "%", it.i);
-                        fn RedoBranchMarker() => ();  // TODO: remove
+                        fn DeleteGate(it) => @fmt(out, "% ", it.i);
+                        fn DeleteWire(it) => @fmt(out, "% ", it.i);
                     };
-                    @if(!@is(it.data&.tag(), .UndeleteGate, .UndeleteWire)) @fmt(out, "\n");
+                    @if(@is(it.data&.tag(), .UndeleteGate, .UndeleteWire)) { out.len -= 1; };
+                    
+                    @if(node.do&[0] == t_index.intcast()) @fmt(out, "r");
+                    @if(node.do&[1] == t_index.intcast()) @fmt(out, "u");
+                    if t_index == 0 && node.time != 0 && !node_wrote_time&.get_set(parent_state_id) {
+                        @fmt(out, "T% ", node.time - prev_time);
+                        prev_time = node.time;
+                    };
+                    dest := c.undo[it.child_state_id]&;
+                    if dest.transitions.len == 0 && !node_wrote_time&.get_set(it.child_state_id) {
+                        // can't be `t`, conflicts with wire teleport
+                        @fmt(out, "Y% ", dest.time - prev_time);
+                        prev_time = dest.time;
+                    };
+                    @fmt(out, "\n");
                 };
             };
             dest := out.items().subslice(size_patch_offset, max_size_chars);
@@ -251,7 +262,7 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
             @case("BUILTIN") => { in = ""; };
             @default => return(Err = "unknown chunk type");
         };
-        @if(in != "") return(Err = "junk on the end");
+        @if(in != "") return(Err = @tfmt("junk on the end: %", in));
         in = left_over;
     };
     return(Ok = (circuits.items(), files.items()));
@@ -386,16 +397,18 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
             while => in.len > 0 && in[0].is_ascii_whitespace() {
                 in = in.rest(1);
             };
-            undo.push_repeated(next_id, zeroed(Tc.Circuit.UndoNode));
+            undo.push_repeated(next_id, (time = 0));
+            
+            prev_time := 0;
             while => pop_prefix(in&, "U ") {
                 continue :: local_return;
                 u := zeroed(Tc.Circuit.UndoEntry);
                 tag_ordinal := get_int();
-                u.parent_state_id = get_int();
+                parent_state_id := get_int();
                 u.child_state_id = get_int();
                 @if(tag_ordinal.uge(enum_count(Tag(Tc.Circuit.UndoPayload)))) return(Err = "bad undo tag");
                 u.data&.tag_ptr()[] = @as(Tag(Tc.Circuit.UndoPayload)) tag_ordinal;
-                u.is_undo = !pop_prefix(in&, "r ");
+                src := undo[parent_state_id]&;
                 i := get_int();
                 @match(u.data&) {
                     fn SetGateField(it) => { it[] = (i = i, field = get_int(), value = get_str()); }
@@ -404,16 +417,34 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
                     fn UndeleteWire(it) => { pop_prefix(in&, "W "); it[] = (i = i, wire = read_wire()); }
                     fn DeleteGate(it) => { it[] = (i = i); }
                     fn DeleteWire(it) => { it[] = (i = i); }
-                    fn RedoBranchMarker() => continue();
                 };
-                @if(u.parent_state_id == -1 || u.child_state_id == -1) continue();
-                src := undo[u.parent_state_id]&;
-                src.id = u.parent_state_id;
-                src.transitions&.push((target_id = u.child_state_id, action = u), a);
+                @if(parent_state_id == -1 || u.child_state_id == -1) continue();
+                
+                if pop_prefix(in&, "r") {
+                    src.do&[0] = src.transitions.len.intcast();
+                };
+                if pop_prefix(in&, "u") {
+                    src.do&[1] = src.transitions.len.intcast();
+                };
+                while => in.len > 0 && in[0].is_ascii_whitespace() {
+                    in = in.rest(1);
+                };
+                if in&.pop_prefix("T") {
+                    time := get_int() + prev_time;
+                    src.time = time;
+                    prev_time = time;
+                };
+                if in&.pop_prefix("Y") {
+                    time := get_int() + prev_time;
+                    undo[u.child_state_id].time = time;
+                    prev_time = time;
+                };
+                
+                src.transitions&.push((action = u), a);
             };
         };
         if !have_undo {
-            undo.push(id = current_id);
+            undo.push(transitions = empty(), time = realtime_ns() / NS_PER_S);
         };
         
         circuits.push(
@@ -480,5 +511,5 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
     };
 }
 
-undo_format_version :: 4;
+undo_format_version :: 5;
 #use("@/examples/circuit/eval.fr");

@@ -1157,6 +1157,7 @@ fn highlight_inlined(self: *Draw, inline_record: u32, c: *Component) void = {
     };
 }
 
+// TODO: pre-clip the whole thing if it can't be in the view port
 fn draw_undo_tree(self: *Draw) void = {
     state, e, sgl, sdtx := (self.state, self.edit&, self.draw&, self.sdtx);
     if !(state.tree.len > 0 && e.enable && e.show_undo_tree && state.loader.progress == .Idle) {
@@ -1181,6 +1182,7 @@ fn draw_undo_tree(self: *Draw) void = {
     while => stack.len > 0 {
         ti := stack[stack.len - 1].transition_index;
         id := stack[stack.len - 1].id;
+        node := e.undo[id]&;
         if ti == 0 {
             pos := graph[id].pos;
             b := self.tc_to_world_pos(pos);
@@ -1188,6 +1190,18 @@ fn draw_undo_tree(self: *Draw) void = {
             if self.hovering_node(b) {
                 sdtx.pos = self.world_to_text_pos(b);
                 sdtx.put(@tfmt("id=%", id));
+                if node.time != 0 {
+                    now := realtime_ns() / NS_PER_S;
+                    s0 := now - node.time;
+                    m0, s1 := s0.div_mod(60);
+                    h0, m1 := m0.div_mod(60);
+                    d0, h1 := h0.div_mod(24);
+                    sdtx.put(@tfmt(" %d%h%m%s ago", d0, h1, m1, s1));
+                };
+                range(0, 2) { i |
+                    @if(node.do&[i] != -1 && node.do&[i].intcast() >= node.transitions.len) sdtx.put(@tfmt(" invalid_do[%](%)", i, node.do&[i]));
+                };
+                
                 sgl.color = pack_rgba(200, 200, 200, 255);
                 if state.either_clicked&.take() {
                     goto = (Some = id);
@@ -1196,12 +1210,12 @@ fn draw_undo_tree(self: *Draw) void = {
             sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
         };
         
-        if ti < e.undo[id].transitions.len {
+        if ti < node.transitions.len {
             if ti > 0 {
                 x_shift -= 2;
             };
             stack[stack.len - 1].transition_index += 1;
-            ci := e.undo[id].transitions[ti].target_id;
+            ci := node.transitions[ti].action.child_state_id;
             child := graph[ci]&;
             if !child.seen {
                 child.seen = true;
@@ -1209,16 +1223,16 @@ fn draw_undo_tree(self: *Draw) void = {
                 stack.push(transition_index = 0, id = ci);
             };
         } else {
-            each e.undo[id].transitions { it |
-                sgl.color = pack_rgba(100, 50, 50 + 50*int(!it.action.is_undo), 255);
+            enumerate node.transitions { ti, it |
+                sgl.color = pack_rgba(100*int(ti == node.do&[0].intcast() || ti == node.do&[1].intcast()), 50 + 50*int(ti == node.do&[0].intcast()), 50 + 50*int(ti == node.do&[1].intcast()), 255);
                 b := self.tc_to_world_pos(graph[id].pos);
-                a := self.tc_to_world_pos(graph[it.target_id].pos);
+                a := self.tc_to_world_pos(graph[it.action.child_state_id].pos);
                 
-                line_pos := self.tc_to_world_pos((graph[id].pos + graph[it.target_id].pos) / 2);
+                line_pos := self.tc_to_world_pos((graph[id].pos + graph[it.action.child_state_id].pos) / 2);
                 if self.hovering_node(line_pos) {
                     sdtx.pos = self.world_to_text_pos(line_pos);
-                    s := slowly_display_transition(state, it.action) || "";
-                    sdtx.put(@tfmt("  % -> %; %; ", id, it.target_id, it.action.data&.tag()));
+                    s := slowly_display_transition(state, it.action, id) || "";
+                    sdtx.put(@tfmt("  % -> %; %; ", id, it.action.child_state_id, it.action.data&.tag()));
                     sdtx.put(s);
                     sgl.color = pack_rgba(200, 200, 200, 255);
                 };
@@ -1229,40 +1243,39 @@ fn draw_undo_tree(self: *Draw) void = {
         };
     };
     
+    // TODO: dont leave redo dust in the tree
     if goto { goal |
+        state.ensure_holding_nothing();  // can add nodes so needs to be before path finding. 
+        
         // TODO: detect cycles even tho there shouldn't be any because i don't deduplicate states
-        // TODO: this will stack overflow really fast so make it explicit
-        path := @ref i64.list(temp());
+        path := @ref list(@struct(node: i64, edge := 0), temp());
         current := e.current_undo_state_id&;
-        found_path := find_path(e.undo.items(), current[], goal, path);
-        find_path :: fn(graph: []Tc.Circuit.UndoNode, current: i64, goal: i64, path: *List(i64)) bool = {
-            @if(current == goal) return(true);
-            
-            enumerate graph[current].transitions { i, it |
-                if find_path(graph, it.target_id, goal, path) {
-                    path.push(i);
-                    return true;
-                };
+        path.push(node = current[]);
+        while => path.len > 0 && path[path.len - 1].node != goal {
+            it := path[path.len - 1]&;
+            if it.edge < e.undo[it.node].transitions.len {
+                t := e.undo[it.node].transitions[it.edge];
+                it.edge += 1;
+                path.push(node = t.action.child_state_id);
+            } else {
+                path.pop();
             };
-            false
         };
-        if !found_path {
+        
+        if path.len == 0 {
             @fmtln(state.warnings&, "failed to find path to target undo state. this should be unreachable");
             return();
         };
-        // TODO: do select_gate/hover_gate None first
         graph := e.undo;
-        for_rev path { ti |
-            src := current[];
-            t := graph[current[]].transitions[ti]&;
-            // TODO: dont reallocate field string for this
-            inverse := perform_action(e, c, t.action);
-            current[] = t.target_id;
-            e.push_this_inverse(inverse);
+        _ := path.pop();
+        for path { it |
+            @debug_assert_eq(it.node, current[]);
+            apply_transition(state, it.edge - 1);
         };
+        state.dirty = true;
     };
     
-    slowly_display_transition :: fn(state: *State, it: Tc.Circuit.UndoEntry) ?Str = {  // time to do some sketchy shit do da do da
+    slowly_display_transition :: fn(state: *State, it: Tc.Circuit.UndoEntry, parent_state_id: i64) ?Str = {  // time to do some sketchy shit do da do da
         state.stash_undo();
         out := u8.list(temp());
         Save'write_save(state.circuit, state.world.tc_file_loader_device, state.tree[state.tree.len - 1].diagram_circuit, out&, false);
@@ -1272,10 +1285,9 @@ fn draw_undo_tree(self: *Draw) void = {
             out = out.rest(1);
         };
         out := out.split("\n", temp());
-        out.len -= 2;
         
         // :TransitionString
-        prefix := @tfmt(" U % % % ", it.data&.tag().raw(), it.parent_state_id, it.child_state_id);
+        prefix := @tfmt(" U % % % ", it.data&.tag().raw(), parent_state_id, it.child_state_id);
         if out.find(fn(it) => it[].starts_with(prefix)) { it |
             return(Some = it[]);
         };
@@ -1814,18 +1826,14 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
             state.clicked = false;
             a := e.circuit_arena;
             if e.selected_gate&.take() { i |
-                e.branch_redo();
-                inverse := perform_new_action(e, c, (DeleteGate = (i = i)));
-                e.push_this_inverse(inverse);
+                perform_new_action(e, c, (DeleteGate = (i = i)));
             } else {
                 _ := e.placing_wire_start&.take();
                 pos := self.world_to_tc_pos(self.mouse_world_pos);
                 enumerate c.wires { i, it |
                     each it.path { p |
                         if p.pos == pos {
-                            e.branch_redo();
-                            inverse := perform_new_action(e, c, (DeleteWire = (i = i)));
-                            e.push_this_inverse(inverse);
+                            perform_new_action(e, c, (DeleteWire = (i = i)));
                         };
                     };
                 };
@@ -2506,14 +2514,14 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                             shift := event.modifiers.get(.shift) == 1;
                             i: ?i64 = @if(shift, (Some = i), .None);
                             Save'write_save(state.circuit, state.world.tc_file_loader_device, i, out, true);
-                            make_dirs("target");
+                            _ := make_dirs("target");
                             path := "target/circuit.txt";
                             if shift {
                                 // hmm i fear initWithBytes in ns_str isn't going to work if its not valid utf8
                                 // sapp.set_clipboard_string(out.items());
                                 path = "target/circuit2.txt";
                             };
-                            write_entire_file_or_crash(path, out.items());
+                            _ := write_entire_file(path, out.items());
                             println(path);
                             state.unstash_undo();
                         };
@@ -2682,11 +2690,14 @@ load_path_worker :: fn(state: *State, in: *LoaderT.I, path: Str, is_bytes: bool)
     };
     
     @if(is_bytes)
-    @if_let(Save'read_save(bytes, a)) fn Ok(c, files) => {
+    @match(Save'read_save(bytes, a)) {
+    fn Ok(c, files) => {
         state.warnings&.clear();
         circuits = c;
         root_index = c.index_of(fn(it) => it.is_arch) || 0;
         tc_file_loader_device = files;
+    };
+        fn Err(msg) => @fmtln(state.warnings&, "%", msg);
     };
     
     //@eprintln("found % circuit diagrams in %ms; %mb;", circuits.len, timestamp() - start, state.circuit_arena&.current_used_size()/1024/1024);
@@ -2704,6 +2715,7 @@ load_path_worker :: fn(state: *State, in: *LoaderT.I, path: Str, is_bytes: bool)
 
 fn load_circuit_index_async(state: *State, root_index: i64, tc_file_loader_device: []Tc.LoadedFile) void = {
     @debug_assert_eq(state.loader.progress, .Idle);
+    state.ensure_holding_nothing();
     state.end_level();
     state.stash_undo();
     state.load_time = 0;

@@ -1,4 +1,14 @@
 
+## (Nov 14) circuit
+
+- store as a graph instad of an array
+- click a node to do to it
+- store fewer redundant indices
+- store the time that the node was first made in the undo tree. 
+  - makes me sad to be outputting bytes that aren't reproducible but its pretty confusing garbage without times, oh well. 
+  - i serialize edge not nodes so its awkward. losing it for any without outgoing edges isn't good enough. all the ends that can be far away have the most interesting times. 
+- each node remember which transition undo/redo mean i guess. 
+
 ## (Nov 13) circuit
 
 - store undo per circuit and persist undo in save file
@@ -9,6 +19,7 @@
   hopefully trying to name the states so i can see whats going on will help. 
   maybe the insane thing is that RedoBranchMarker is nither a node or a transition so like how does that make any sense as a representation. 
   why am i trying so hard pretend its not a graph. 
+- convert to graph and render that instead
 
 ## (Nov 12) circuit
 

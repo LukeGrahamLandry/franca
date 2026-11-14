@@ -85,6 +85,7 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
   - auto save 
   - be able to undo load/rename/delete circuit?
   - have an option to clear undos (or export circuit.txt without them)
+  - dont load the undo graph until select circuit
 ```
 // TODO: bundle the source files the jit needs so binary is self contained
 // TODO: autosave & web localstorage
