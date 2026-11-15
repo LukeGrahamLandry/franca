@@ -126,6 +126,10 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
             write_bytes(out, key);
             write_bytes(out, it.name);
             write_bytes(out, it.assembly || "");
+            @if(!it.can_reassemble) if it.assembled { asm |
+                @fmt(out, "A");
+                write_bytes(out, asm);
+            };
             @fmt(out, "\n");
         };
         
@@ -149,8 +153,12 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
                         fn SetGatePosition(it) => @fmt(out, "% % % % ", it.i, it.pos.x, it.pos.y, it.rotation);
                         fn UndeleteGate(it) => { @fmt(out, "%", it.i); write_gate(it.gate&); }
                         fn UndeleteWire(it) => { @fmt(out, "%", it.i); write_wire(it.wire&); }
-                        fn DeleteGate(it) => @fmt(out, "% ", it.i);
+                        fn DeleteGate(it) => {
+                            @fmt(out, "% ", it.i);
+                            @if(it.inverse_is_copy_of != -1) @fmt(out, "c% ", it.inverse_is_copy_of);
+                        }
                         fn DeleteWire(it) => @fmt(out, "% ", it.i);
+                        fn CopyGate(it) => @fmt(out, "% % ", it.i, it.dest);
                     };
                     @if(@is(it.data&.tag(), .UndeleteGate, .UndeleteWire)) { out.len -= 1; };
                     
@@ -222,7 +230,13 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
     };
     
     write_bytes :: fn(out: *List(u8), data: []u8) void = {
-        @fmt(out, "#%\"", data.len);
+        encoded := false;  // TODO: if need to put in web localstorage and it's not utf8
+        if encoded {
+            out := @ref u8.list(temp());
+            B64'encode(out, data);
+            data = out.items();
+        };
+        @fmt(out, "#%%\"", @if(encoded, "=", ""), data.len);
         out.push_all(data);
         @fmt(out, "\" ");
     };
@@ -278,6 +292,7 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
         dependencies := list(Tc.CustomId, dep_count, a);
         programs := list(Tc.Circuit.Program, program_count, a);
         undo := @ref list(Tc.Circuit.UndoNode, a);
+        is_level_map := false;
         
         if pop_prefix(in&, "D ") {
             range(0, dep_count) { i |
@@ -302,6 +317,7 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
             
             // TODO: don't crash if its a low number
             shape := get_builtin_shape(id = kind_id.trunc());
+            @if(shape.name == "Level_gate") { is_level_map = true; };
             
             n := get_int();
             @if(!n.ult(100)) return(Err = "bad settings len");
@@ -335,7 +351,6 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
             gate
         };
         
-        
         while => pop_prefix(in&, "W ") {
             wires&.push(read_wire());
         };
@@ -364,9 +379,14 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
                 v, r := convert_number(key, 10, dec_digit);
                 @if(r.len == 0, v, -1)
             };
-            programs&.push(level_id = level, level_name = key, name = name, gate_index = gate, assembly = @if(assembly.len == 0, .None, (Some = assembly)));
+            can_reassemble := !pop_prefix(in&, "A");
+            programs&.push(level_id = level, level_name = key, name = name, gate_index = gate, assembly = @if(assembly.len == 0, .None, (Some = assembly)), can_reassemble = can_reassemble);
+            p := programs[programs.len - 1]&;
+            if !can_reassemble {
+                p.assembled = (Some = get_str());
+            };
             @if(gate.uge(gates.len)) return(Err = "program gate index oob");
-            programs[programs.len - 1].gate_link_id = gates[gate].link_id;
+            p.gate_link_id = gates[gate].link_id;
         };
         
         while => in.len > 0 && in[0].is_ascii_whitespace() {
@@ -415,8 +435,14 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
                     fn SetGatePosition(it) => { it[] = (i = i, pos = vec2(get_int().float().cast(), get_int().float().cast()), rotation = get_int().trunc()); }
                     fn UndeleteGate(it) => { pop_prefix(in&, "G "); it[] = (i = i, gate = read_gate()); }
                     fn UndeleteWire(it) => { pop_prefix(in&, "W "); it[] = (i = i, wire = read_wire()); }
-                    fn DeleteGate(it) => { it[] = (i = i); }
+                    fn DeleteGate(it) => { 
+                        it[] = (i = i);
+                        if in&.pop_prefix("c") {
+                            it.inverse_is_copy_of = get_int();
+                        };
+                    }
                     fn DeleteWire(it) => { it[] = (i = i); }
+                    fn CopyGate(it) => { it[] = (i = i, dest = get_int()); }
                 };
                 @if(parent_state_id == -1 || u.child_state_id == -1) continue();
                 
@@ -463,6 +489,7 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
             undo = undo.as_raw(),
             current_undo_state_id = current_id,
             next_undo_state_id = next_id,
+            is_level_map = is_level_map,
         );
     };
     
@@ -499,11 +526,17 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
     };
     get_str :: fn() => {
         @if(!in&.pop_prefix("#")) return(Err = "expected string");
+        encoded := in&.pop_prefix("=");
         length := get_int();
         @if(in.len < length + 2) return(Err = "bad string length");
         @if(in[0] != "\"".ascii() || in[1+length] != "\"".ascii()) return(Err = "missing string quotes");
         s := in.subslice(1, length);
         in = in.rest(length + 2);
+        if encoded {
+            out := @ref u8.list(a);
+            B64'base64_decode(out, s);
+            s = out.items();
+        };
         while => in.len > 0 && in[0].is_ascii_whitespace() {
             in = in.rest(1);
         };
@@ -512,4 +545,57 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
 }
 
 undo_format_version :: 5;
+progress_format_version :: 123;
 #use("@/examples/circuit/eval.fr");
+B64 :: import("@/lib/encoding/base64.fr");
+
+LevelEntry :: @struct {
+    level: *import("@/examples/circuit/level_api.fr").Exports;
+    completed := false;
+    default_circuit: ?Tc.CustomId = .None;
+};
+
+write_progress :: fn(out: *List(u8), levels: []LevelEntry) void = {
+    start := out.len;
+    out.reserve_type(Array(i64, 3))[] = (0, 0, 0);
+    level_count := 0;
+    each levels { it |
+        if it.completed || it.default_circuit.is_some() {
+            level_count += 1;
+            out.reserve_type(i64)[] = it.level.title.len;
+            out.push_all(it.level.title);
+            out.reserve_type(bool)[] = it.completed;
+            out.reserve_type(Tc.CustomId)[] = it.default_circuit || (id = 0);
+        };
+    };
+    out.items().rest(start).peek_type(Array(i64, 3))[] = (
+        progress_format_version,
+        out.len - start,
+        level_count,
+    );
+};
+
+read_progress :: fn(in: []u8, levels: *List(LevelEntry)) Result(void, Str) = {
+    @if(in.len < 24) return(Err = "too small");
+    header := in&.pop_type(Array(i64, 3));
+    magic, bytes, level_count := (header[0], header[1], header[2]);
+    @if(magic != progress_format_version) return(Err = "bad magic");
+    @if(in.len < bytes - 24) return(Err = "too small");
+    in = in.slice(0, bytes - 24);
+    range(0, level_count) { _ |
+        @if(in.len < 8) return(Err = "too small");
+        n := in&.pop_type(i64)[];
+        @if(in.len < n+1+8) return(Err = "too small");
+        name := in&.pop_slice(u8, n);
+        completed := in&.pop_type(bool)[];
+        id := in&.pop_type(i64)[];
+        if levels.find(fn(it) => it.level.title == name) { it |
+            it.completed = completed;
+            if id != 0 {
+                it.default_circuit = (Some = (id = id));
+            };
+        };
+        // TODO: don't stomp when save if dont know the level
+    };
+    .Ok
+};

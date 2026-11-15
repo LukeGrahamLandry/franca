@@ -185,19 +185,21 @@ fn text_box_selection(self: *Draw) bool = {
     state := self.state;
     e, sapp := (state.edit&, state.sapp);
     no_code := e.enable || state.loader.progress != .Idle;
+    idle := state.loader.progress == .Idle;
     // note: the "\n" ones are computed later
     names := @slice(
         ("Component Docs", include_bytes("examples/circuit/docs.md")),
         ("Level Instructions", state.level.description), 
         ("Level Code", state.level.quine), 
-        ("Settings", @if(state.loader.progress == .Idle, "\n", "")), 
+        ("Settings", @if(idle, "\n", "")), 
         ("This Circuit", @if(state.loader.progress == .Loading, "", "\n")),
         ("All Circuits", @if(state.loader.progress == .Loading, "", "\n")),
         ("Circuit Code", @if(no_code, "", state.current_jitted_source)), 
         ("Warnings", @if(no_code, "", state.warnings.items())), 
         ("Edit Mode", "\n"),
         ("Undo Tree", @if(e.enable, "\n", "")),
-        ("New Circuit", "\n"),
+        ("Level Map", @if(idle && !e.enable, "\n", "")),
+        ("New Circuit", @if(idle, "\n", "")),
     );
     prev := e.show_info_box;
     if state.clicked || state.either_clicked {
@@ -238,6 +240,18 @@ fn text_box_selection(self: *Draw) bool = {
                 state.set_edit_mode(!e.enable);
                 return true;
             };
+            if names[i]._0 == "Level Map" {
+                e.show_info_box = .None;
+                // TODO: track which circuit you clicked a level gate in to get here so can have multiple and go back to the right one
+                if state.circuit.index_of(fn(it) => it.is_level_map) { i |
+                    // TODO: but this does load async to recompile: state.set_edit_mode(false);
+                    state.end_level();
+                    state.level_index = 0;
+                    state.level = state.levels[0].level;
+                    load_circuit_index_async(state, i, state.world.tc_file_loader_device);
+                };
+                return true;
+            };
             
             e.active_buffer_index = (Some = 0);
             t.lock_to_bottom = false;
@@ -249,10 +263,9 @@ fn text_box_selection(self: *Draw) bool = {
             
             if names[i]._0 == "This Circuit" || names[i]._0 == "All Circuits" {
                 state.stash_undo();
-                out := @ref u8.list(temp());
                 i: ?i64 = @if(names[i]._0 == "All Circuits", .None, state.tree[0].diagram_circuit);
-                Save'write_save(state.circuit, state.world.tc_file_loader_device, i, out, true);
-                buf.append_string(out.items());
+                out := state.write_save(i, true);
+                buf.append_string(out);
                 state.unstash_undo();
             };
             e.info_box_is_settings = names[i]._0 == "Settings";
@@ -279,6 +292,7 @@ do_settings :: fn(state: *State, buf: *Terminal.TextBuffer, read: bool) void = {
         walk_state_settings_fields state { name, p |
             @fmt(out, "%=%\n", name, p[]);
         };
+        @fmt(out, "\n\n# debug info\n# circuit_arena(used=%kb, allocated=%kb)\n", state.circuit_arena&.current_used_size()/1024, state.circuit_arena&.current_allocated_size()/1024);
         buf.append_string(out.items());
     } else {
         state.dirty = true;
@@ -333,6 +347,7 @@ do_settings :: fn(state: *State, buf: *Terminal.TextBuffer, read: bool) void = {
         X("adapt_tick_rate", s.adapt_tick_rate&);
         X("new_component_default_bit_width", s.edit.default_word_width&);
         X("show_suggested_components", s.show_suggested_components&);
+        X("arena_gc_threshold_kb", s.edit.arena_gc_threshold_kb&);
         // TODO: selected level/circuit/edit_mode but they need to do something on change
     };
 };
@@ -348,12 +363,10 @@ fn set_edit_mode(state: *State, new_edit_mode: bool) void = {
     if e.enable {
         state.ensure_holding_nothing();
         state.stash_undo();
-        
-        out := @ref u8.list(temp());
-        Save'write_save(state.circuit, state.world.tc_file_loader_device, .None, out, true);
+        out := state.write_save(.None, true);
         _ := make_dirs("target");
         path := "target/circuit_autosave.txt";
-        _ := write_entire_file(path, out.items());
+        _ := write_entire_file(path, out);
     };
     e[] = (enable = !e.enable, dont_reset = e.dont_reset);
     if e.enable {
@@ -362,7 +375,16 @@ fn set_edit_mode(state: *State, new_edit_mode: bool) void = {
     };
     
     // recompile when exiting edit mode. 
-    // TODO: this leaks arena space forever so eventually need to dump save and reload to reset it
+    // can only simulate at top level for now anyway so going back to tree[0] is fine
+    // TODO: resetting ticks_per_eval when you toggle edit mode is annoying (in worker_get_output)
+
+    // compile_circuit leaks arena space forever so eventually need to dump save and reload to reset it
+    if state.circuit_arena&.current_used_size()/1024 >= e.arena_gc_threshold_kb {
+        out := state.write_save(.None, false);
+        load_path_async(state, out, true, (Some = i));
+        return();
+    };
+    
     state.warnings&.clear();
     // forget that loaded it before
     each state.circuit { c |
@@ -375,7 +397,6 @@ fn set_edit_mode(state: *State, new_edit_mode: bool) void = {
             };
         }
     };
-    
     load_circuit_index_async(state, i, state.world.tc_file_loader_device);
 }
 
@@ -403,6 +424,10 @@ fn new_circuit(state: *State) void = {
     state.tree&.clear();
     state.tree&.push(diagram_circuit = (Some = c.len-1));
     state.unstash_undo();
+    default := state.levels[state.level_index].default_circuit&;
+    if default.is_none() {
+        default[] = (Some = c[c.len-1].id);
+    };
 }
 
 UndoEntry :: Tc.Circuit.UndoEntry;
@@ -411,7 +436,7 @@ fn ensure_holding_nothing(state: *State) void = {
     e := state.edit&;
     @if(!e.enable) return();
     c := state.current_diagram() || return();
-    e.select_gate(.None, c);
+    e.select_gate(.None, c, false);
     hover_gate(e, .None, c);
     // TODO: same for placing_wire_start
 }
@@ -467,7 +492,6 @@ fn push_undo(e: *EditState, data: Circuit.UndoPayload) void = {
 }
 
 fn perform_new_action(e: *EditState, c: *Circuit, u: Circuit.UndoPayload) void = {
-    e.branch_redo();
     new := atomic_inc(i64, e.next_undo_state_id&);
     e.undo&.push((transitions = empty(), time = realtime_ns() / NS_PER_S), e.circuit_arena);
     it: Circuit.UndoEntry = (data = u, child_state_id = new);
@@ -504,12 +528,25 @@ fn perform_action_inner(e: *EditState, c: *Circuit, u: Circuit.UndoPayload) Circ
             g.rotation = it.rotation;
             (SetGatePosition = (i = it.i, pos = p, rotation = r))
         }
+        fn CopyGate(it) => {
+            g := c.gates[it.i];
+            a := e.circuit_arena;
+            g.watched = g.watched.shallow_copy(a);
+            g.data = g.data.items().shallow_copy(a).as_raw_list();
+            g.label = g.label.items().shallow_copy(a).as_raw_list();
+            g.settings = g.settings.shallow_copy(a);
+            c.gates[it.dest] = g;
+            // TODO: copy entries in .programs
+            (DeleteGate = (i = it.dest, inverse_is_copy_of = it.i))
+        }
         fn DeleteGate(it) => {
             g := c.gates[it.i]&;
             gate := g[];
             g.kind.id = trunc(component_offset(.Tc1) + GateName(.Tc1)._0.raw().zext());
             g.pos = vec2(-10000);
-            (UndeleteGate = (i = it.i, gate = gate))
+            @if(it.inverse_is_copy_of != -1, 
+                (CopyGate = (i = it.inverse_is_copy_of, dest = it.i)), 
+                (UndeleteGate = (i = it.i, gate = gate)))
         }
         fn UndeleteGate(it) => {
             c.gates[it.i] = it.gate;
@@ -539,8 +576,18 @@ fn unstash_undo(state: *State) void = {
     state.stash_undo();
 }
 
-fn branch_redo(e: *EditState) void = {
-    // TODO
+fn write_save(state: *State, i: ?i64, spec: bool) []u8 = {
+    out := @ref u8.list(temp());
+    Save'write_save(state.circuit, state.world.tc_file_loader_device, i, out, spec);
+    out.items()
+}
+
+progress_save_path :: "target/circuitprogress.data";
+fn save_progress(state: *State) void = {
+    _ := make_dirs("target");
+    out := @ref u8.list(temp());
+    Save'write_progress(out, state.levels.items());
+    _ := write_entire_file(progress_save_path, out.items());
 }
 
 Terminal :: import("@/examples/gpu/terminal.fr");

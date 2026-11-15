@@ -132,7 +132,7 @@ templates :: collect_templates(impl, .Tc1, pin_layouts) { it, k |
 templates2 :: collect_templates(impl2, .Tc2, pin_layouts2) { it, k |
     it.bit_width = get_width_data2(it);
     it.has_param = it.has_param || @is(k, .Static_indexer, .Segment_display, .Load_port, .Store_port, .Ram_v2, .Keyboard_v2, .Static_indexer_config);
-    if @is(k, .Register_word, .Register_bit, .Delay_line_word, .Delay_line_bit, .Counter, .Static_eval, .Delay_line_word_config) {
+    if @is(k, .Register_word, .Register_bit, .Delay_line_word, .Delay_line_bit, .Counter, .Static_eval, .Delay_line_word_config, .Level_gate) {
         it.inputs_for_pure_eval = empty();
     };
     if k == .Static_indexer_config {
@@ -315,6 +315,7 @@ ScreenData :: @struct {
 // `flush_timestamp` lets the level test check if it was flushed this tick (because world.timestamp_ns is cached). 
 // bit sad to waste memory just for that but its only ~2%. 
 DotData :: @struct(active: Array(u32, 6*8), scratch: Array(u32, 6*8), flush_timestamp: i64);
+LevelGateData :: @struct(level_index: i32, input: bool, output: bool);
 
 // these are in order by their ComponentKind value in the circuit.data format. 
 impl :: @struct {
@@ -1055,7 +1056,16 @@ Ctz :: math_param(1, 1) { o, i, p |
     o[0] = i[0].leading_zeros().min(p);
 };
 Cc_level_output :: todo();
-Level_gate :: todo();
+Level_gate :: device(1, 1, 
+    fn(_) => size_of(LevelGateData)*8,
+    fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 1), instance: i64, doing_pre_read: bool) void = {
+        data := world.storage.rest(instance).interpret_as_bytes().peek_type(LevelGateData);
+        o[0] = int(data.output);
+        if !doing_pre_read {
+            data.input = i[0] != 0;
+        };
+    },
+);
 Level_input_1_pin :: todo();
 Level_input_word :: todo();
 Level_input_switched :: impl.LevelInputArch;
@@ -1547,7 +1557,7 @@ get_width_data2 :: fn(it: *Template) []u8 = {
     a := ast_alloc();
     pin_count := it.in_arity + it.out_arity;
     k := import("@/examples/circuit/tc/load.fr")'gate_name(it.kind, .Tc2);
-    if it.name.ends_with("_bit") || @is(k, .Off_v2, .On_v2, .Full_adder, .Halt_v2, .Push_button) {
+    if it.name.ends_with("_bit") || @is(k, .Off_v2, .On_v2, .Full_adder, .Halt_v2, .Push_button, .Level_gate) {
         return a.alloc_init(u8, pin_count, fn(_) => 1);
     };
     x: []u8 = @match(k) {

@@ -28,6 +28,7 @@ Circuit :: @struct {
     has_arch_pins := false;
     v2: bool;
     is_arch := false;
+    is_level_map := false;
     has_probes := false;
     default_tick_rate: i64;
     
@@ -86,6 +87,7 @@ Circuit :: @struct {
         gate_link_id := -1;
         assembly: ?Str = .None;
         assembled: ?[]u8 = .None;
+        can_reassemble: bool;
     };
     
     SwitchablePin :: @struct {
@@ -109,9 +111,10 @@ Circuit :: @struct {
         SetGateField: @struct(i: i64, field: i64, value: Str),
         SetGatePosition: @struct(i: i64, rotation: u8, pos: Vec2),
         UndeleteGate: @struct(i: i64, gate: Gate),
-        DeleteGate: @struct(i: i64),
+        DeleteGate: @struct(i: i64, inverse_is_copy_of := -1),
         UndeleteWire: @struct(i: i64, wire: Wire),
         DeleteWire: @struct(i: i64),
+        CopyGate: @struct(i: i64, dest: i64),
     );
     UndoNode :: @struct {
         transitions: RawList(Transition) = empty();
@@ -955,6 +958,7 @@ schedule_gates :: fn(c: *Circuit, gates: List(Component.Gate), wire_count: i64, 
         };
     };
     
+    // collect roots
     switch_gates := i64.list(temp());
     stack := @ref i64.list(temp());
     enumerate gates { i, it |
@@ -1962,7 +1966,9 @@ fn get_bit_width(shape: *Tc.Builtin.Template, param: i64) []u8 = {
 
 // #alias(tc'init)
 // this only does the ones with explicit starting values. caller must world.storage.set_zeroed() first for the rest. 
-set_initial_data :: fn(world: *World, circuits: []Tc.Circuit, root: ComponentId, instance: i64) void = {
+set_initial_data :: fn(world: *World, circuits: []Tc.Circuit, root: ComponentId, instance: i64) void = 
+    set_initial_data_verbose(world, circuits, root, instance, @ref u8.list(temp()));
+set_initial_data_verbose :: fn(world: *World, circuits: []Tc.Circuit, root: ComponentId, instance: i64, warn: *List(u8)) void = {
     c := world[root]&;
     world.tc_halt_device = -1;
     @if(c.storage_count == 0 || c.gates.len == 0) return();
@@ -1978,7 +1984,7 @@ set_initial_data :: fn(world: *World, circuits: []Tc.Circuit, root: ComponentId,
         instance := instance + c.instance_offset_by_gate[gate_i];
         
         @if(group(gate.kind) == .Loaded)
-        set_initial_data(world, circuits, gate.kind, instance);  // might be a rom inside a custom component
+        set_initial_data_verbose(world, circuits, gate.kind, instance, warn);  // might be a rom inside a custom component
         
         if group(gate.kind) == .Tc2 && name(gate.kind, .Tc2) == .Ram_v2 {
             p := gate.get_param(.Ram_v2)[];
@@ -1995,7 +2001,7 @@ set_initial_data :: fn(world: *World, circuits: []Tc.Circuit, root: ComponentId,
                     n := min(dest.len, asm.len);
                     dest.slice(0, n).copy_from(asm.slice(0, n));
                 } else {
-                    @println("TODO: missing program assembly for gate[%]", gate_i);
+                    @fmtln(warn, "TODO: missing program assembly for gate[%] in %", gate_i, circuit.name);
                 };
             };
             
@@ -2031,7 +2037,7 @@ set_initial_data :: fn(world: *World, circuits: []Tc.Circuit, root: ComponentId,
             fn Rom() => c_gate.data.items();
             fn Program() => {
                 asm := circuit.programs.find(fn(it) => it.level_id == Tc.Circuit.Program.SANDBOX_LEVEL_ID && it.assembled.is_some() && it.gate_index == c_gate_i) 
-                    || continue(@println("TODO: missing program assembly for gate[%]", gate_i));
+                    || continue(@fmtln(warn, "TODO: missing program assembly for gate[%] in %", gate_i, circuit.name));
                 asm.assembled.unwrap()
             };
             fn Console() => {
@@ -2322,7 +2328,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
             range(0, n.zext()) { _ |
                 key := eat(i64);
                 name := eatN(u16, u8).shallow_copy(a);
-                programs&.push(level_id = key, name = name, gate_index = gate_index, gate_link_id = id);
+                programs&.push(level_id = key, name = name, gate_index = gate_index, gate_link_id = id, can_reassemble = true);
             };
             
             if s1 == 0 {  // i guess it gets a default if you don't set it manually in the game?
@@ -2375,7 +2381,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
                 range(0, program_count.zext()) { _ |
                     key := eatN(u16, u8).shallow_copy(a);
                     value := eatN(u16, u8).shallow_copy(a);
-                    programs&.push(level_name = key, name = value, gate_index = gate_index, gate_link_id = id);
+                    programs&.push(level_name = key, name = value, gate_index = gate_index, gate_link_id = id, can_reassemble = false);
                 };
                 
                 s := @ref i64.list(settings.len+2+int(kind == 118)*2, a);
@@ -2502,6 +2508,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
         name = name,
         programs = programs.items(),
         default_tick_rate = tick_rate,
+        undo = a.alloc_init(Circuit.UndoNode, 1, fn(_) => (time = realtime_ns() / NS_PER_S)).as_raw_list(),
         v2 = v2,
     ))
 }

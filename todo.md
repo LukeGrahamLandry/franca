@@ -86,13 +86,16 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
   - be able to undo load/rename/delete circuit?
   - have an option to clear undos (or export circuit.txt without them)
   - dont load the undo graph until select circuit
+  - i think !FEAT_COMPILE doesnt work on life32x32
+  - use interpreter while compiling the franca (so when the logical component is done but before have fast_eval)
 ```
 // TODO: bundle the source files the jit needs so binary is self contained
 // TODO: autosave & web localstorage
+//       - (rn i do save when leaving editor but to a different file that i dont load by default)
 // TODO: be able to paste to add one circuit without stomping everything. choose (replace all, replace one, add new). same for dragndrop and cli. 
 // TODO: allow enter custom component while in edit mode / make new custom components
 // - need to have some sort of feedback if you try to change the pin layout in a way that makes a usage site broken
-// TODO: copy paste a gate (or area)
+// TODO: copy paste an area
 // TODO: route better 
 // - keep track of length/direction (dont forget to reconstruct in read_save) and use that to simplify split_for_node
 // - route around gates/pins/nodes so you have to click explicitly if you want it to connect
@@ -100,8 +103,6 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
 // TODO: be able to delete a redundant node and have the wires reconnect into a bigger one
 //       (inverse of split_for_node)
 // TODO: key to summon the add gate menu to your current place?
-// TODO: undo. especially because its easy to accidently delete a gate. 
-//       maybe NewGate should never reuse placeholders so deleted ones keep their data and undo can just mark it active again. 
 // TODO: visual feedback when trying to place a gate in a bad place 
 ```
 

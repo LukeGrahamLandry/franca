@@ -39,9 +39,11 @@ State :: @rec @struct {
     adapt_tick_rate: bool;
     sim: LevelApi.Simulation;
     level: *LevelApi.Exports;
+    level_index: i64;
     level_active: bool;
+    win: bool;
     level_suggested: StaticBitSet(builtin_components.len());
-    levels: List(*LevelApi.Exports);
+    levels: List(Save.LevelEntry);
     tick: i64;
     halt_message: List(u8);
     show_wire_ref_lines: bool;
@@ -105,9 +107,17 @@ CircuitNode :: @struct {
 LevelApi :: import("@/examples/circuit/level_api.fr");
 
 main_use_output :: fn(state: *State, in: LoaderT.I, out: Result(void, void)) void = {
-    if state.tree.len > 0 && state.tree[0].diagram_circuit.is_some() {
-        c := state.circuit[state.tree[0].diagram_circuit.Some]&; 
+    if state.current_diagram() { c |
+        @debug_assert_eq(state.tree.len, 1);
         state.tree[0].component = c.compiled;
+        if !c.is_level_map {
+            default := state.levels[state.level_index].default_circuit&;
+            changed := default.is_none() || default.Some.id != c.id.id;
+            default[] = (Some = c.id);
+            @if(changed) state.save_progress();
+        } else {
+            state.want_eval = true;  // tick once to update the colours
+        };
     };
     state.reset();
     state.find_keyboard();
@@ -124,6 +134,7 @@ main_use_output :: fn(state: *State, in: LoaderT.I, out: Result(void, void)) voi
     
     state.load_atlas_part2(state.sg);
     state.load_time = timestamp() - state.loader.start_time;
+    
 }
 
 do_eval :: fn(state: *State) void = {
@@ -145,7 +156,7 @@ do_eval :: fn(state: *State) void = {
     if state.eval_last_frame {
         state.frame_time_history&.push(delta_time / 1000);
         
-        if state.adapt_tick_rate && state.frame_time_history.history&.len() > 16 {
+        if state.adapt_tick_rate && state.frame_time_history.history&.len() > 1 {
             ave_frame_time := state.frame_time_history&.get();
             if ave_frame_time < 17_000 {
                 prev_frame_time := state.frame_time_history.history&[state.frame_time_history.history&.len() - 1];
@@ -154,7 +165,7 @@ do_eval :: fn(state: *State) void = {
                     ns_per_tick := prev_frame_time * 1000 / prev_tick_count;
                     state.ticks_per_eval = max(16_900_000 / ns_per_tick, 1);
                 } else {
-                    recalibrate = 2;
+                    recalibrate = 2 + int(state.ticks_per_eval == 1);
                 };
             } else {
                 ave_tick_count := state.tick_count_history&.get();
@@ -195,8 +206,8 @@ do_eval :: fn(state: *State) void = {
         if have_level {
             win := state'level'after(state.level.userdata, values);
             if win {
-                @fmt(state.halt_message&, "solved in % ticks", state.tick);
                 state.auto_eval = false;
+                state.win = true;
                 return();
             }
         };
@@ -261,6 +272,13 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     if eval_this_frame {
         do_eval(state);
+        if state.win {
+            @fmt(state.halt_message&, "solved in % ticks", state.tick);
+            completed := state.levels[state.level_index].completed&;
+            changed := !completed[];
+            completed[] = true;
+            @if(changed) state.save_progress();
+        };
     };
     state.eval_last_frame = eval_this_frame;
     
@@ -397,18 +415,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         self.put_text(state.halt_message.items(), self.text_spacing * vec2(0, 4), pack_rgba(50, 200, 150, 255));
     };
     
-    @if(state.loader.progress == .Idle) if self.level_selection() { it |
-        state.dirty = true;
-        state.end_level();
-        state.level = it;
-        have_logic = false;
-        if it.solutions.len != 0 {
-            // TODO: dont just delete your circuits. etc.
-            state.load_path_async(it.solutions, true);
-        } else {
-            state.reset();
-        };
-    };
+    self.level_selection();
     
     if state.screen.to_drop&.take() { img |
         sg.destroy(img);
@@ -494,6 +501,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                     state.world.storage[self.instance_by_gate(c, i)] = int(on);
                 };
                 fn Probe_wire_bit() => self.probe_bit(gate.pos, c, i);
+                fn Level_gate() => self.level_gate(gate.pos, c, i);
                 @default => ();
             };
             };
@@ -509,6 +517,37 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     // without this you get a flicker and occasionally a bounds check assertion! for hopefully intuitive reasons. dear rust would like to have a word im sure.
     if self.open_gate&.take() { a, b, c |  // wait until done rendering components to change the tree. 
         state.open_gate(a, b, c);
+    };
+    
+    // TODO: option to disable the compiler per circuit. no point compiling the level map that will only ever run one tick at a time.
+    @if(state.loader.progress == .Idle) if self.open_level { i |
+        it := state.levels[i].level;
+        state.dirty = true;
+        state.end_level();
+        state.level_index = i;
+        state.level = it;
+        // TODO: if last_circuit_id, open that one
+        if it.solutions.len != 0 {
+            // TODO: dont just delete your circuits. etc.
+            state.load_path_async(it.solutions, true);
+        } else {
+            new := false;
+            if state.levels[i].default_circuit { c |
+                if state.circuit.index_of(fn(it) => it.id == c) { c |
+                    new = true;
+                    load_circuit_index_async(state, c, state.world.tc_file_loader_device);
+                };
+            };
+            @if(!new) if state.current_diagram() { c |
+                if c.is_level_map {
+                    new = true;
+                    state.new_circuit();
+                };
+            };
+            if !new {
+                state.reset();
+            };
+        };
     };
     
     sgl.end();
@@ -546,6 +585,7 @@ Draw :: @struct {
     hover_logical_code: ?i64 = .None;
     base_instance := 0;
     open_gate: ?Ty(?i64, ?i64, bool) = .None;
+    open_level: ?i64 = .None;
     set_hover_wire := false;
 };
 
@@ -578,18 +618,18 @@ fn arch_selection(self: *Draw) ?i64 = {
     new
 }
 
-fn level_selection(self: *Draw) ?*LevelApi.Exports = {
+// TODO: remove this in favor of the level map
+fn level_selection(self: *Draw) void = {
     state := self.state;
     arch_list_count: f32 = 0;
-    new: ?*LevelApi.Exports = .None;
-    for state.levels { it |
-        ::ptr_utils(@type it[]);
-        selected := identical(it, state.level);
+    new: ?i64 = .None;
+    enumerate state.levels { i, it |
+        selected := i == state.level_index;
         pos := vec2(50, (7 + arch_list_count));
-        self.do_option(pos, it.title, selected, it, new&);
+        self.do_option(pos, it.level.title, selected, i, new&);
         arch_list_count += 1;
     };
-    new
+    self.open_level = new;
 }
 
 fn walk_component_tree(self: *Draw, c: **Component) Ty(i64, i64, i64, *Component) = {
@@ -967,7 +1007,7 @@ fn draw_gate_squares(self: *Draw, circuit: *Tc.Circuit) void = {
             if state.clicked {
                 if e.enable {
                     if e.no_selection() {
-                        e.select_gate((Some = g_gate_index), circuit);
+                        e.select_gate((Some = g_gate_index), circuit, false);
                         state.clicked = false;
                     };
                 } else {
@@ -1164,7 +1204,6 @@ fn draw_undo_tree(self: *Draw) void = {
         return();
     };
     c := state.current_diagram() || return();
-    self.diagram_pos += self.text_spacing * vec2(-10, 0);
     W := (self.wire_node_width);
     
     GraphicsUndoNode :: @struct(pos: Vec2, current: bool, seen: bool);
@@ -1178,7 +1217,9 @@ fn draw_undo_tree(self: *Draw) void = {
     stack := @ref StackEntry.list(temp());
     stack.push(transition_index = 0, id = e.current_undo_state_id);
     
-    x_shift: f32 = 0;
+    base_pos := c.min + vec2(-5, 0);
+    graph[e.current_undo_state_id].pos = base_pos;
+    x_shift: f32 = base_pos.x;
     while => stack.len > 0 {
         ti := stack[stack.len - 1].transition_index;
         id := stack[stack.len - 1].id;
@@ -1277,10 +1318,8 @@ fn draw_undo_tree(self: *Draw) void = {
     
     slowly_display_transition :: fn(state: *State, it: Tc.Circuit.UndoEntry, parent_state_id: i64) ?Str = {  // time to do some sketchy shit do da do da
         state.stash_undo();
-        out := u8.list(temp());
-        Save'write_save(state.circuit, state.world.tc_file_loader_device, state.tree[state.tree.len - 1].diagram_circuit, out&, false);
+        out := state.write_save(state.tree[state.tree.len - 1].diagram_circuit, false);
         state.unstash_undo();
-        out := out.items();
         while => out.len > 0 && !out&.pop_prefix("undo") {
             out = out.rest(1);
         };
@@ -1399,6 +1438,21 @@ fn probe_bit(self: *Draw, pos: Vec2, instance: i64) void = {
     b := self.tc_to_world_pos(pos);
     sgl.color = pack_rgba(255 * int(!value), 255 * int(value), 0, 255);
     sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
+}
+
+fn level_gate(self: *Draw, pos: Vec2, c: *Component, i: i64) void = {
+    instance := self.instance_by_gate(c, i);
+    state, sgl, W := (self.state, self.draw&, self.wire_node_width * 0.8);
+    data := state.world.storage.rest(instance).interpret_as_bytes().peek_type(Tc.Builtin.LevelGateData);
+    b := self.tc_to_world_pos(pos);
+    sgl.color = pack_rgba(255 * int(!data.output), 255 * int(data.input), 255 * int(data.level_index == -1), 255);
+    sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
+    on := state.left_mouse_down && self.hovering_node(self.tc_to_world_pos(pos));
+    if on && data.level_index != -1 {
+        if data.input || self.show_wire_ref_lines {
+            self.open_level = (Some = data.level_index.intcast());
+        };
+    };
 }
 
 // TODO: collect the list of probes like i do for pins :SLOW
@@ -1636,9 +1690,6 @@ display_name :: fn(info: *Builtin.Template, it: *Tc.Circuit.Gate, circuit: []Tc.
     if circuit.find(fn(check) => check.id == it.custom_id) { it |
         name = @tfmt("Custom (%)", it.name);
     };
-    if it.kind.group() == .Tc2 && it.kind.Tc'gate_name(.Tc2) == .Level_gate {
-        name = @tfmt("% (%)", name, it.label.items());
-    };
     name
 }
 
@@ -1682,7 +1733,7 @@ EditState :: @struct {
     selected_gate: ?i64 = .None;
     original_gate_position: ?get_variant_type(Tc.Circuit.UndoPayload, .SetGatePosition) = .None;
     placing_wire_start: ?Ty(i64, i64) = .None;   // (wire index, path index)
-    action: @enum(None, NewGate, Rotate, Delete) = .None;
+    action: @enum(None, NewGate, Rotate, Delete, Copy) = .None;
     placing_type := zeroed(ComponentId); 
     
     hovered_gate: ?i64 = .None;  // the one currently being edited by the text boxes. 
@@ -1698,6 +1749,7 @@ EditState :: @struct {
     show_undo_tree := false;
     next_undo_state_id := 1;
     current_undo_state_id := 0;
+    arena_gc_threshold_kb := 512*1024;
     } #use;
     active_buffer_index: ?i64 = .None;
     field_names: []Str = empty();
@@ -1732,7 +1784,7 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
                 split_for_node(c.wires&, pos, a);
             };
             
-            e.select_gate(.None, c);
+            e.select_gate(.None, c, false);
             state.dirty = true;
         };
     };
@@ -1767,7 +1819,6 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
                 e.placing_wire_start = .None;
                 break();
             };
-            e.branch_redo();
             e.push_undo(DeleteWire = (i = wire_i));
             
                 e.placing_wire_start = .None;
@@ -1787,7 +1838,6 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
                 c.gates&.push(zeroed(Tc.Circuit.Gate), a);
                 c.gates.len - 1
             };
-            e.branch_redo();
             e.push_undo(DeleteGate = (i = gate_i));
             gate := c.gates[gate_i]&;
             ;{  // can't reuse pointed at stuff because its shallow copied in UndoEntry for now
@@ -1816,7 +1866,7 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
                     };
                 };
             };
-            e.select_gate((Some = gate_i), c);
+            e.select_gate((Some = gate_i), c, true);
         }
         fn Rotate() => if e.selected_gate { gate_i |
             gate := c.gates[gate_i]&;
@@ -1837,6 +1887,19 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
                         };
                     };
                 };
+            };
+        }
+        fn Copy() => {
+            a := e.circuit_arena;
+            if e.selected_gate { gate_i |
+                e.select_gate(.None, c, false);
+                dest_i := c.gates&.index_of(fn(it) => it.kind.is_placeholder()) || {
+                    c.gates&.push(zeroed(Tc.Circuit.Gate), a);
+                    c.gates.len - 1
+                };
+                perform_new_action(e, c, (CopyGate = (i = gate_i, dest = dest_i)));
+                // TODO: you want this to be `true` so undoing once doesn't setposition back to overlap the original gate but then the copy also needs to include the first destination you put it at
+                e.select_gate((Some = dest_i), c, false);
             };
         }
         fn None() => ();
@@ -1944,21 +2007,19 @@ fn is_end(it: *Tc.Circuit.Wire, pos: Vec2) bool =
 
 fn no_selection(e: *EditState) bool = e.placing_wire_start.is_none() && e.selected_gate.is_none();
 
-fn select_gate(e: *EditState, i: ?i64, c: *Tc.Circuit) void = {
+fn select_gate(e: *EditState, i: ?i64, c: *Tc.Circuit, spawn: bool) void = {
     if e.selected_gate { old_i |
         if ((i || -1) != old_i) {
             g := c.gates[old_i]&;
             if e.original_gate_position&.take() { it |
-                if it.i == old_i && it.pos == g.pos && it.rotation == g.rotation {
-                    e.branch_redo();
+                @if(it.i == old_i) if !(it.pos == g.pos) || it.rotation != g.rotation {
                     e.push_undo(SetGatePosition = it);
                 };
             };
         };
     };
-    if i { i |
+    @if(!spawn) if i { i |
         g := c.gates[i]&;
-        // TODO: dont do this for the position off the board when the thing is first spawned
         e.original_gate_position = (Some = (i = i, pos = g.pos, rotation = g.rotation));
     };
     
@@ -2204,13 +2265,23 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     )));
     
     state.sim.text = list(general_allocator());
-    state.levels = list(a);
-    state.levels&.push(@static { x: LevelApi.Exports = (title = "Sandbox"); x });
-    //state.levels&.push(import("@/examples/circuit/levels/maze.fr").level_spec);  // only listing my own levels. just keeping this one for tests. (tc has a maze)
-    state.levels&.push_all(import("@/examples/circuit/levels/bf.fr").level_specs);
-    state.levels&.push_all(import("@/examples/circuit/levels/segment.fr").level_specs);
-    state.levels&.push_all(import("@/examples/circuit/levels/screen.fr").level_specs);
-    state.level = state.levels[0];
+    builtin_levels :: {
+        out := @ref list(*LevelApi.Exports, ast_alloc());
+        out.push(@static { x: LevelApi.Exports = (title = "Sandbox"); x });
+        //out.push(import("@/examples/circuit/levels/maze.fr").level_spec);  // only listing my own levels. just keeping this one for tests. (tc has a maze)
+        out.push_all(import("@/examples/circuit/levels/bf.fr").level_specs);
+        out.push_all(import("@/examples/circuit/levels/segment.fr").level_specs);
+        out.push_all(import("@/examples/circuit/levels/screen.fr").level_specs);
+        out.items()
+    };
+    state.levels = list(builtin_levels.len(), a);
+    for builtin_levels { it |
+        state.levels&.push(level = it);
+    };
+    state.level = state.levels[state.level_index].level;
+    if read_entire_file(temp(), progress_save_path) { in |
+        _ := Save'read_progress(in, state.levels&);
+    };
     
     state.halt_message = list(a);
     state.key_buffer = init(a, 64);
@@ -2243,6 +2314,7 @@ fn recenter(state: *State) void = {
 }
 
 fn end_level(state: *State) void = {
+    state.win = false;
     @if(!state.level_active&.take()) return();
     state'level'end(state.level.userdata);
 }
@@ -2267,7 +2339,20 @@ fn reset(state: *State) void = {
 
     i := state.tree[0].diagram_circuit || return();
     c := state.circuit[i]&;
-    Tc'set_initial_data(world, state.circuit, root, 0);
+    Tc'set_initial_data_verbose(world, state.circuit, root, 0, state.warnings&);
+    
+    each c.gates { g |
+        if group(g.kind) == .Tc2 && Tc'gate_name(g.kind, .Tc2) == .Level_gate && g.logical_gate_index != -1 {
+            instance := state.world&[root].instance_offset_by_gate[g.logical_gate_index];
+            data := state.world.storage.rest(instance).interpret_as_bytes().peek_type(Tc.Builtin.LevelGateData);
+            if state.levels.index_of(fn(it) => it.level.title == g.label.items()) { level_index |
+                data.output = state.levels[level_index].completed;
+                data.level_index = level_index.intcast();
+            } else {
+                data.level_index = -1;
+            };
+        };
+    };
     
     v := @static @as(LevelApi.Imports) (
         put_text = LevelApi.impl.put_text,
@@ -2285,6 +2370,7 @@ fn reset(state: *State) void = {
     state.level.userdata = state'level'start(state.sim&);
     state.level_active = state.level.title != "Sandbox";
     
+    // TODO: make sure to do this when switching level (even if in edit mode)
     // :SLOW
     state.level_suggested&.clear();
     suggested := state'level'suggested_components(state.level.userdata);
@@ -2489,7 +2575,13 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                     state.end_level();
                     state.reset();
                 }
-                fn C() => @if(event.modifiers.get(.super) == 0) state.recenter();
+                fn C() => if event.modifiers.get(.super) == 0 {
+                    state.recenter();
+                } else {
+                    if e.enable {
+                        e.action = .Copy;
+                    };
+                };
                 fn LEFT_BRACKET() => if state.ticks_per_eval - tick_off > 0 {
                     state.ticks_per_eval -= tick_off;
                 }
@@ -2510,10 +2602,9 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                     if state.tree.len > 0 {
                         if state.tree[0].diagram_circuit { i |
                             state.stash_undo();
-                            out := @ref u8.list(temp());
                             shift := event.modifiers.get(.shift) == 1;
                             i: ?i64 = @if(shift, (Some = i), .None);
-                            Save'write_save(state.circuit, state.world.tc_file_loader_device, i, out, true);
+                            out := state.write_save(i, true);
                             _ := make_dirs("target");
                             path := "target/circuit.txt";
                             if shift {
@@ -2521,7 +2612,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                                 // sapp.set_clipboard_string(out.items());
                                 path = "target/circuit2.txt";
                             };
-                            _ := write_entire_file(path, out.items());
+                            _ := write_entire_file(path, out);
                             println(path);
                             state.unstash_undo();
                         };
@@ -2550,7 +2641,7 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             if event.mouse_button == .LEFT {
                 state.left_mouse_down = true;
             };
-            state.either_clicked = @is(event.mouse_button, .LEFT, .RIGHT);
+            state.either_clicked = event.modifiers.get(.control) == 0 && @is(event.mouse_button, .LEFT, .RIGHT);
             
             if e.enable && event.mouse_button == .RIGHT && e.no_selection() && event.modifiers.get(.control) == 0 {
                 e.action = .Delete;
@@ -2616,7 +2707,10 @@ fn check_movement(state: *State) void = if state.pan_keys_pressed != 0 && !state
     };
 };
 
-fn load_path_async(state: *State, path: Str, is_bytes: bool) void = {
+// TODO: maybe requested_root_index should just be in circuit.txt
+fn load_path_async(state: *State, path: Str, is_bytes: bool) void = 
+    load_path_async(state, path, is_bytes, .None);
+fn load_path_async(state: *State, path: Str, is_bytes: bool, requested_root_index: ?i64) void = {
     #use("@/lib/sys/fs.fr");
     
     state.end_level();
@@ -2630,14 +2724,16 @@ fn load_path_async(state: *State, path: Str, is_bytes: bool) void = {
     state.current_jitted_source = "";
     state.atlas.enable = false;
     a := state.circuit_arena&.borrow();
+    state.edit.undo = empty();
+    state.edit.field_names = empty();
     path := path.shallow_copy(a);
     state.warnings = list(a);
-    state.loader&.start_async(Path = (path = path, is_bytes = is_bytes));
+    state.loader&.start_async(Path = (path = path, is_bytes = is_bytes, requested_root_index = requested_root_index));
 }
 
 LoadSource :: @tagged(
-    Path: @struct(path: Str, is_bytes: bool),
-    Index: @struct(root_index: i64, tc_file_loader_device: []Tc.LoadedFile),
+    Path: @struct(path: Str, is_bytes: bool, requested_root_index: ?i64),
+    Index: @struct(root_index: i64, tc_file_loader_device: []Tc.LoadedFile, just_reset_arena: bool),
 );
 LoaderT :: import("@/examples/jit_loader.fr")'Loader(
     *State, LoadSource, void, void,
@@ -2659,13 +2755,13 @@ worker_get_source :: fn(state: *State, in: *LoaderT.I) Result(Str, void) = {
                 };
                 path = @tfmt(template, root, path);
             };
-            load_path_worker(state, in, path, it.is_bytes)
+            load_path_worker(state, in, path, it.is_bytes, it.requested_root_index)
         }
-        fn Index(it) => load_circuit_index_worker(state, it.root_index, it.tc_file_loader_device);
+        fn Index(it) => load_circuit_index_worker(state, it.root_index, it.tc_file_loader_device, it.just_reset_arena);
     }
 }
 
-load_path_worker :: fn(state: *State, in: *LoaderT.I, path: Str, is_bytes: bool) Result(Str, void) = {
+load_path_worker :: fn(state: *State, in: *LoaderT.I, path: Str, is_bytes: bool, requested_root_index: ?i64) Result(Str, void) = {
     start := timestamp();
     a := state.circuit_arena&.borrow();
     
@@ -2700,6 +2796,12 @@ load_path_worker :: fn(state: *State, in: *LoaderT.I, path: Str, is_bytes: bool)
         fn Err(msg) => @fmtln(state.warnings&, "%", msg);
     };
     
+    if requested_root_index { i |
+        if i.ult(circuits.len) {
+            root_index = i;
+        };
+    };
+    
     //@eprintln("found % circuit diagrams in %ms; %mb;", circuits.len, timestamp() - start, state.circuit_arena&.current_used_size()/1024/1024);
     state.circuit = circuits;
     if circuits.len == 0 || root_index == -1 {
@@ -2709,7 +2811,7 @@ load_path_worker :: fn(state: *State, in: *LoaderT.I, path: Str, is_bytes: bool)
     };
     state.push_tree_node(diagram_circuit = (Some = root_index));
     // TODO: dont bother recompiling yet if in edit mode
-    in[] = (Index = (root_index = root_index, tc_file_loader_device = tc_file_loader_device));
+    in[] = (Index = (root_index = root_index, tc_file_loader_device = tc_file_loader_device, just_reset_arena = true));
     worker_get_source(state, in)
 }
 
@@ -2721,12 +2823,12 @@ fn load_circuit_index_async(state: *State, root_index: i64, tc_file_loader_devic
     state.load_time = 0;
     state.tree&.clear();
     state.push_tree_node(diagram_circuit = (Some = root_index));
-    state.loader&.start_async(Index = (root_index = root_index, tc_file_loader_device = tc_file_loader_device));
+    state.loader&.start_async(Index = (root_index = root_index, tc_file_loader_device = tc_file_loader_device, just_reset_arena = false));
 }
 
 // should fine for the ui to show the diagram on the other thread while this compiles. 
 // there needs to not use the logical part while progress==.Loading and here needs to not push to state.tree. 
-fn load_circuit_index_worker(state: *State, root_index: i64, tc_file_loader_device: []Tc.LoadedFile) Result(Str, void) = {
+fn load_circuit_index_worker(state: *State, root_index: i64, tc_file_loader_device: []Tc.LoadedFile, just_reset_arena: bool) Result(Str, void) = {
     circuits := state.circuit;
     each circuits { c | 
         c.compiled = .None;
@@ -2746,6 +2848,11 @@ fn load_circuit_index_worker(state: *State, root_index: i64, tc_file_loader_devi
     };
     state.world.components = components.items();
     state.current_jitted_source = src;
+    if just_reset_arena {
+        e := state.edit&;
+        // fix it if you made the setting too small
+        e.arena_gc_threshold_kb = max(e.arena_gc_threshold_kb, 2*state.circuit_arena&.current_used_size()/1024);
+    };
     
     if components[components.len - 1].error {
         // might have generated something that will fail to compile. 
@@ -2871,6 +2978,7 @@ main :: fn() void = Easy'start(State);
 ENABLE_TRACY :: Foreign.ENV.FRANCA_TRACY.get_environment_variable().is_some();  // ugh
 #use("@/lib/sys/threads.fr");
 Futex :: import("@/lib/sys/sync/futex.fr");
+#use("@/lib/collections/bit_set.fr");
 
 key_order :: @const_slice(Sapp.Keycode.GRAVE_ACCENT, ._1, ._2, ._3, ._4, ._5, ._6, ._7, ._8, ._9, ._0, .MINUS, .EQUAL, .BACKSPACE, 
     .TAB, .Q, .W, .E, .R, .T, .Y, .U, .I, .O, .P, .LEFT_BRACKET, .RIGHT_BRACKET, .BACKSLASH,
@@ -2942,7 +3050,7 @@ gate_selection_columns_v2 :: {
     @const_slice(T.Not_bit, .Or_bit, .And_bit, .Nand_bit, .Xor_bit, .Nor_bit, .Xnor_bit, .Switch_bit, .Delay_line_bit, .Register_bit, .Probe_wire_bit, .Full_adder, .Or_3_bit, .And_3_bit, .On_v2, .Off_v2),
     @const_slice(T.Not_word, .Or_word, .And_word, .Nand_word, .Xor_word, .Nor_word, .Xnor_word, .Switch_word, .Delay_line_word, .Register_word, .Probe_wire_word, .Counter, .Constant, .Mux),
     @const_slice(T.Equal, .Less_u, .Less_s, .Add, .Inc, .Neg, .Mul, .Div, .Mod, .Lsl, .Lsr, .Rol, .Ror, .Asr),
-    @const_slice(T.Ram_v2, .Load_port, .Store_port, .Time, .Screen, .Halt_v2, .Keyboard_v2, .Segment_display, .Push_button), 
+    @const_slice(T.Ram_v2, .Load_port, .Store_port, .Time, .Screen, .Halt_v2, .Keyboard_v2, .Segment_display, .Push_button, .Level_gate), 
     @const_slice(T.Static_indexer, .Decoder_1, .Decoder_2, .Decoder_3, .Splitter_word_2, .Splitter_word_4, .Splitter_word_8, .Maker_word_2, .Maker_word_4, .Maker_word_8, .Concatenator_2, .Concatenator_4, .Concatenator_8),
     @const_slice(T.Static_indexer_config, .Static_eval, .Static_value, .Cc_input, .Cc_output, .Level_output_switched, .Level_input_switched),
     )

@@ -8,6 +8,9 @@
   - makes me sad to be outputting bytes that aren't reproducible but its pretty confusing garbage without times, oh well. 
   - i serialize edge not nodes so its awkward. losing it for any without outgoing edges isn't good enough. all the ends that can be far away have the most interesting times. 
 - each node remember which transition undo/redo mean i guess. 
+- lol i was doing all that experimenting with placing gates cause that seemed hardest but i didn't flip the condition when chaning moving gates from pop to push. clearly need actual tests for the undo stuff.
+- reset the arena eventually
+- started making a level map but its too annoying to get the gate from the side every time so did copy gate.
 
 ## (Nov 13) circuit
 
