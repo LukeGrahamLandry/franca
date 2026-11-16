@@ -10,7 +10,6 @@ space: toggle auto eval.
 r: restart program. 
 c: reset scale/pos.
 [/]: slower/faster eval (shift:50, cmd:1000). 
-p: toggle adaptive tick rate
 k+shift+cmd: toggle keyboard device capture.
 u: toggle render graphics devices over circuit
 l: fetch schematic archive.
@@ -36,7 +35,12 @@ State :: @rec @struct {
     want_eval: bool;
     auto_eval: bool;
     ticks_per_eval: i64;
-    adapt_tick_rate: bool;
+    max_ticks_per_eval: i64;
+    old_max_ticks_per_eval: i64;
+    first_interpreted_frame: bool;
+    first_jitted_frame: bool;
+    last_frame_was_recalibrate: bool;
+    tree_ready: bool;
     sim: LevelApi.Simulation;
     level: *LevelApi.Exports;
     level_index: i64;
@@ -59,7 +63,10 @@ State :: @rec @struct {
     circuit_index: i64;
     circuit_arena: Arena.Allocator;
     current_jitted_source: Str;
+    source_unchanged: bool;
+    loader_thread_ready_for_interp: bool;
     load_time: i64;
+    compile_time: i64;
     warnings: List(u8);
     loader: LoaderT;
     download_schematic_archive_before_trying_to_load: bool;
@@ -106,9 +113,26 @@ CircuitNode :: @struct {
 
 LevelApi :: import("@/examples/circuit/level_api.fr");
 
-main_use_output :: fn(state: *State, in: LoaderT.I, out: Result(void, void)) void = {
+main_use_output :: fn(state: *State, in: LoaderT.I, out: Result(rawptr, void)) void = {
+    state.dirty = true;
+    @if_let(out) fn Ok(callee) => {
+        // doing this on the main thread so fast_eval&signeture fields can't tear
+        fill_fast_eval(state.world.components, callee);
+        state.compile_time = timestamp() - state.loader.start_time;
+        state.first_jitted_frame = true;
+        state.first_interpreted_frame = false;
+    };
+    // else: 
+    // recompiled for exiting edit mode but current_jitted_source didn't change so didnt call worker_get_output
+    // barely helps because wire ids change if you did anything at all but doesn't hurt
+    // OR: failed to make new code and won't run because component.error
+}
+
+main_prepare_interp :: fn(state: *State) void = {
+    state.first_jitted_frame = false;
+    state.first_interpreted_frame = true;
     if state.current_diagram() { c |
-        @debug_assert_eq(state.tree.len, 1);
+        @debug_assert_eq(state.tree.len, 1, "// TODO: its possible to enter a gate while it's loading");
         state.tree[0].component = c.compiled;
         if !c.is_level_map {
             default := state.levels[state.level_index].default_circuit&;
@@ -125,16 +149,10 @@ main_use_output :: fn(state: *State, in: LoaderT.I, out: Result(void, void)) voi
     if state.warnings.len != 0 {
         state.auto_eval = false;
     };
-    
-    if out&.is(.Err) {
-        // recompiled for exiting edit mode but current_jitted_source didn't change so didnt call worker_get_output
-        // barely helps because wire ids change if you did anything at all but doesn't hurt
-        return();
-    };
+    @if(state.source_unchanged&.take()) return();
     
     state.load_atlas_part2(state.sg);
     state.load_time = timestamp() - state.loader.start_time;
-    
 }
 
 do_eval :: fn(state: *State) void = {
@@ -149,14 +167,15 @@ do_eval :: fn(state: *State) void = {
     state.prev_timestamp_ns = this_timestamp;
     delta_time := this_timestamp - prev_timestamp;
     recalibrate := 1;
-    
-    if state.adapt_tick_rate {
-        state.ticks_per_eval = min(state.ticks_per_eval, 1666666);
-    };
     if state.eval_last_frame {
         state.frame_time_history&.push(delta_time / 1000);
         
-        if state.adapt_tick_rate && state.frame_time_history.history&.len() > 1 {
+        if state.frame_time_history.history&.len() > 32 {
+            break :: local_return;
+            if state.ticks_per_eval == state.max_ticks_per_eval && delta_time < 18_000_000 {
+                break();
+            };
+            
             ave_frame_time := state.frame_time_history&.get();
             if ave_frame_time < 17_000 {
                 prev_frame_time := state.frame_time_history.history&[state.frame_time_history.history&.len() - 1];
@@ -164,21 +183,31 @@ do_eval :: fn(state: *State) void = {
                     prev_tick_count := state.tick_count_history.history&[state.tick_count_history.history&.len() - 1];
                     ns_per_tick := prev_frame_time * 1000 / prev_tick_count;
                     state.ticks_per_eval = max(16_900_000 / ns_per_tick, 1);
+                    state.last_frame_was_recalibrate = false;
                 } else {
-                    recalibrate = 2 + int(state.ticks_per_eval == 1);
+                    if state.last_frame_was_recalibrate&.take() {
+                        // didn't manage to slow the frame down
+                        state.ticks_per_eval *= 2;
+                    };
+                    if state.ticks_per_eval < state.max_ticks_per_eval {
+                        recalibrate = 2;
+                        state.last_frame_was_recalibrate = true;
+                    };
                 };
             } else {
                 ave_tick_count := state.tick_count_history&.get();
                 ns_per_tick := ave_frame_time * 1000 / ave_tick_count;
                 state.ticks_per_eval = max(16_900_000 / ns_per_tick, 1);
+                state.last_frame_was_recalibrate = false;
             };
         };
     } else {
         delta_time = min(delta_time, 16 * NS_PER_MS);
         prev_timestamp = this_timestamp - delta_time;
     };
+    state.ticks_per_eval = min(state.ticks_per_eval, state.max_ticks_per_eval);
     
-    count := @if(state.auto_eval, state.ticks_per_eval * recalibrate, 1);
+    count := @if(state.auto_eval && !state.first_interpreted_frame, state.ticks_per_eval * recalibrate, 1);
     state.tick_count_history&.push(count);
     
     o_n, i_n := child.arity();
@@ -225,6 +254,15 @@ do_eval :: fn(state: *State) void = {
     if !have_level {
         state.tick += count;
     };
+    
+    // jit is much faster than interp so times between them are meaningless. 
+    if state.first_interpreted_frame&.take() || state.first_jitted_frame&.take() || state.max_ticks_per_eval != state.old_max_ticks_per_eval {
+        state.old_max_ticks_per_eval = state.max_ticks_per_eval;
+        state.frame_time_history&.clear();
+        state.tick_count_history&.clear();
+        dt := realtime_ns() - this_timestamp;
+        state.ticks_per_eval = (16*NS_PER_MS*count/dt).min(state.max_ticks_per_eval).max(1);
+    };
 };
 
 do_halt :: fn(state: *State) void = {
@@ -248,8 +286,11 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sdtx := state.text.default_context&;
     sgl := state.draw&;
     
-    state.loader&.check();
-    if state.loader.progress != .Idle {
+    if state.loader_thread_ready_for_interp&.take() {
+        main_prepare_interp(state);
+    };
+    progress := state.loader&.check();
+    if progress == .Loading {
         in := state.loader.in.unwrap();
         name := @match(in) {  // TODO: this is a race. can tear
             fn Path(it) => it.path;
@@ -257,19 +298,25 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         };
         t := timestamp() - state.loader.start_time;
         state.dirty = true;
-        msg := @tfmt("compiling %\nit's been % ms\nif you can read all this it's too slow!", name, t);
+        msg := @tfmt("loading %\nit's been % ms\nif you can read all this it's too slow!", name, t);
         // dont flicker for a frame when exiting exit mode without changes
-        if t > 200 { 
+        if t > 50 { 
             show_alert(msg, sdtx, sapp);
-        };
-        if t < 120 {
+        } else {
             sapp.webgpu.noframe = true;
             return();
         };
     };
+    if progress != .Idle {
+        // do all the frames so can turn off the "interpreted" label as soon as it's ready
+        state.dirty = true;
+    }
     
     world := state.world&;
-    have_logic := state.loader.progress == .Idle && state.tree.len > 0 && state.tree[0].component.is_some() 
+    // for debugging circuits i can't load correctly, can still have_logic=true 
+    // when Component.error=true. that's disallowed from running seperately. 
+    have_logic := progress != .Loading 
+        && state.tree.len > 0 && state.tree[0].component.is_some() 
         && state.world.components.len > 0
         // TODO: but want to allow if you just only placed io gates
         //       .. i can't even put this in ComponentTests because tc doesn't let you have a cc with no area. 
@@ -323,10 +370,12 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             @fmt(out, "edit mode (press e to exit); left drag to move/place. space to rotate. right click to delete. middle drag to pan. double click gate to configure.");
         } else {
             frame_time := state.frame_time_history&.get();
-            @fmt(out, "(paused=%, tick_rate=%, tick=%, keyboard=%, frame_time=%ms, adapt_tick_rate=%) ", 
-                !state.auto_eval, state.ticks_per_eval, state.tick, state.keyboard_device_focused, frame_time/1000, state.adapt_tick_rate);
+            @fmt(out, "(paused=%, tick_rate=%, max_tick_rate: %, tick=%, keyboard=%, frame_time=%ms) ", 
+                !state.auto_eval, state.ticks_per_eval, state.max_ticks_per_eval, state.tick, state.keyboard_device_focused, frame_time/1000);
+            @if(progress == .Loading) @fmt(out, "loading...%ms ", timestamp() - state.loader.start_time);
             @if(state.load_time != 0) @fmt(out, "load_time=%ms ", state.load_time);
-            
+            @if(progress == .Compiling)  @fmt(out, "compiling....%ms ", timestamp() - state.loader.start_time);
+            @if(state.compile_time != 0) @fmt(out, "compile_time=%ms ", state.compile_time);
             if state.auto_eval && frame_time != 0 {
                 hz0 := state.tick_count_history&.get() * US_PER_S / frame_time;
                 format_hz(out, hz0);
@@ -335,6 +384,9 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     if !state.edit.enable {
     self.put_text(HELP, self.text_spacing * vec2(-90, 12), pack_rgba(0, 0, 0, 255));
+        if !have_logic && progress == .Idle {
+            self.put_text("LOAD ERROR", self.text_spacing * vec2(0, 2), pack_rgba(255, 0, 0, 255));
+        };
     } else {
         self.gate_selection();
     };
@@ -348,6 +400,9 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         root_component := state.tree[0].component.unwrap();
         c := world[root_component]&;
         @if(c.error) self.put_text("COMPILE ERROR", self.text_spacing * vec2(0, 2), pack_rgba(255, 0, 0, 255));
+        if progress == .Compiling && state.tick > 0 {
+            self.put_text("INTERPRETED", self.text_spacing * vec2(0, 2), pack_rgba(255, 0, 0, 255));
+        };
         instance, parent_wire_offset, wire_offset, logical_c := self.walk_component_tree(c&);
         self.base_instance = instance;
         // when `c` is inlined, `logical_c` is the first real parent (inline_parent_diagram). 
@@ -2071,6 +2126,7 @@ fn gate_selection(self: *Draw) void = {
     };
 }
 
+// TODO: this needs to not look at circuit.inlined while .Loading. 
 fn open_gate(state: *State, logical_gate_index: ?i64, diagram_gate_index: ?i64, is_io: bool) void = {
     new_diagram_circuit: ?i64 = .None;
     new_component: ?ComponentId = .None;
@@ -2222,6 +2278,11 @@ fn push_tree_node(state: *State, it: CircuitNode) void = {
 
 // TODO: call this more
 fn current_diagram(state: *State) ?*Tc.Circuit = {
+    // TODO: tree_ready is a tad sketchy. load_path_worker pushes to the list and then sets the flag 
+    //       as though that means the changes will be observed in that order. 
+    //       the goal is that i can show the diagram as soon as the graphical part is loaded, don't need to wait to compile the logic. 
+    @if(!state.tree_ready) return(.None);
+
     @if(state.tree.len == 0) return(.None);
     c := state.tree[state.tree.len - 1].diagram_circuit || return(.None);
     (Some = state.circuit[c]&)
@@ -2291,7 +2352,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.key_buffer = init(a, 64);
     state.frame_time_history.history = init(a, 64);
     state.tick_count_history.history = init(a, 64);
-    state.tree = list(a);
+    state.tree = list(1, a);
     state.dirty = true;
     state.ticks_per_eval = 1;
     state.recenter();
@@ -2593,14 +2654,11 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                         e.action = .Copy;
                     };
                 };
-                fn LEFT_BRACKET() => if state.ticks_per_eval - tick_off > 0 {
-                    state.ticks_per_eval -= tick_off;
+                fn LEFT_BRACKET() => {
+                    state.max_ticks_per_eval = clamp(state.max_ticks_per_eval - tick_off, 1, 100_000_000);
                 }
-                fn RIGHT_BRACKET() => if state.ticks_per_eval + tick_off < 1_000_000 {
-                    state.ticks_per_eval += tick_off;
-                }
-                fn P() => {
-                    state.adapt_tick_rate = !state.adapt_tick_rate;
+                fn RIGHT_BRACKET() => {
+                    state.max_ticks_per_eval = clamp(state.max_ticks_per_eval + tick_off, 1, 100_000_000);
                 }
                 fn LEFT_SHIFT() => { state.show_wire_ref_lines = true; }
                 fn L() => if !e.enable {
@@ -2728,7 +2786,7 @@ fn load_path_async(state: *State, path: Str, is_bytes: bool, requested_root_inde
     state.stash_undo();
     
     state.circuit = empty();
-    state.world = zeroed(World);
+    state.tree_ready = false;
     state.tree&.clear();
     state.circuit_arena&.reset_retaining_capacity();
     state.edit.enable = false;
@@ -2747,7 +2805,7 @@ LoadSource :: @tagged(
     Index: @struct(root_index: i64, tc_file_loader_device: []Tc.LoadedFile, just_reset_arena: bool),
 );
 LoaderT :: import("@/examples/jit_loader.fr")'Loader(
-    *State, LoadSource, void, void,
+    *State, LoadSource, rawptr, void,
     worker_get_source, worker_get_output, main_use_output,
     "dispatch",
 );
@@ -2821,6 +2879,7 @@ load_path_worker :: fn(state: *State, in: *LoaderT.I, path: Str, is_bytes: bool,
         return(.Err);
     };
     state.push_tree_node(diagram_circuit = (Some = root_index));
+    state.tree_ready = true;
     // TODO: dont bother recompiling yet if in edit mode
     in[] = (Index = (root_index = root_index, tc_file_loader_device = tc_file_loader_device, just_reset_arena = true));
     worker_get_source(state, in)
@@ -2832,7 +2891,9 @@ fn load_circuit_index_async(state: *State, root_index: i64, tc_file_loader_devic
     state.end_level();
     state.stash_undo();
     state.load_time = 0;
+    state.compile_time = 0;
     state.tree&.clear();
+    forget_already_compiled(state.circuit);
     state.push_tree_node(diagram_circuit = (Some = root_index));
     state.loader&.start_async(Index = (root_index = root_index, tc_file_loader_device = tc_file_loader_device, just_reset_arena = false));
 }
@@ -2841,9 +2902,7 @@ fn load_circuit_index_async(state: *State, root_index: i64, tc_file_loader_devic
 // there needs to not use the logical part while progress==.Loading and here needs to not push to state.tree. 
 fn load_circuit_index_worker(state: *State, root_index: i64, tc_file_loader_device: []Tc.LoadedFile, just_reset_arena: bool) Result(Str, void) = {
     circuits := state.circuit;
-    each circuits { c | 
-        c.compiled = .None;
-    };
+    state.tick = 0;
     
     // TODO: bring back FEAT_RT_COMPILE which doesn't compile the franca compiler. 
     
@@ -2855,9 +2914,10 @@ fn load_circuit_index_worker(state: *State, root_index: i64, tc_file_loader_devi
     first_index_that_needs_fast_eval := builtin_components.len();
     src := compile_gates_source(components.items(), a, first_index_that_needs_fast_eval, state.warnings&);
     if state.current_jitted_source != "" && state.current_jitted_source == src {
+        state.source_unchanged = true;
+        state.loader_thread_ready_for_interp = true;
         return(.Err);
     };
-    state.world.components = components.items();
     state.current_jitted_source = src;
     if just_reset_arena {
         e := state.edit&;
@@ -2865,33 +2925,33 @@ fn load_circuit_index_worker(state: *State, root_index: i64, tc_file_loader_devi
         e.arena_gc_threshold_kb = max(e.arena_gc_threshold_kb, 2*state.circuit_arena&.current_used_size()/1024);
     };
     
+    // Component.compile_order is now ready to be interpreted on the other thread 
+    // until the jit is ready. forget the old fast_eval so don't get confused. 
+    worker_prepare_interp(state, components.items(), root_index, tc_file_loader_device);
+    
     if components[components.len - 1].error {
         // might have generated something that will fail to compile. 
-        // but dont want to return .Err because still want to update world in worker_get_output so can see the attempted code
+        // still want to update world to show the new component code view for debugging. 
         src = "{ dispatch :: zeroed([]rawptr); };";
         state.current_jitted_source = "";
+        return(.Err);
     };
+    
+    state.loader_thread_ready_for_interp = true;
     (Ok = src)
 }
+
+worker_get_output :: fn(state: *State, in: *LoaderT.I, callee: rawptr) Result(rawptr, void) = (Ok = callee);
+
+worker_prepare_interp :: fn(state: *State, components: []Component, root_index: i64, tc_file_loader_device: []Tc.LoadedFile) void = {
+    circuits := state.circuit;
+    world := state.world&; 
+    init(world, general_allocator(), true, components);
+    world.tc_file_loader_device = tc_file_loader_device;
     
-worker_get_output :: fn(state: *State, in: *LoaderT.I, callee: rawptr) Result(void, void) = {
-    components := state.world.components;
-    fill_fast_eval(components, callee);
-    
-    circuits := state.circuit; 
-    fr, _ := state.loader.fr.it.unwrap(); 
-    a := fr.get_alloc();
-    init(state.world&, a, true, components);
-    state.world.tc_file_loader_device = in.Index.tc_file_loader_device;
-   
-    c := circuits[in.Index.root_index]&; 
+    c := circuits[root_index]&; 
     state.load_atlas_part1(c);
-    state.ticks_per_eval = max(c.default_tick_rate / 60, 1);
-    if c.default_tick_rate >= 1_000_000_000 {
-        state.adapt_tick_rate = true;
-    };
-    
-    .Ok
+    state.max_ticks_per_eval = max(c.default_tick_rate / 60, 1);
 }
 
 // TODO: if there were to be a sandbox escape in this program it would probably be by passing untrusted bytes to stb_image.
@@ -2976,6 +3036,7 @@ fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.draw&.destroy(sg, a);
     state.circuit_arena&.deinit();
     a.dealloc(u32, state.screen.atlas.buf);
+    drop(state.world&, a);
 }
 
 // TODO: this doesn't work in the web demo ?? :compiler

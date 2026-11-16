@@ -292,7 +292,15 @@ do_settings :: fn(state: *State, buf: *Terminal.TextBuffer, read: bool) void = {
         walk_state_settings_fields state { name, p |
             @fmt(out, "%=%\n", name, p[]);
         };
-        @fmt(out, "\n\n# debug info\n# circuit_arena(used=%kb, allocated=%kb)\n", state.circuit_arena&.current_used_size()/1024, state.circuit_arena&.current_allocated_size()/1024);
+        @fmt(out, "\n\n# debug info\n");
+        @fmt(out, "# adapted_ticks_per_frame=%\n", state.ticks_per_eval);
+        @fmt(out, "# arenas: circuit(used=%kb, allocated=%kb) simulation(allocated=%kb) ", state.circuit_arena&.current_used_size()/1024, state.circuit_arena&.current_allocated_size()/1024, state.world.buf.cap*8/1024);
+        if state.loader.fr.it { fr, m |
+            arena := fr.data.cast()[][].ast_alloc;
+            @fmt(out, "compile(used=%kb, allocated=%kb) jit(allocated=%kb+%kb) ", arena.current_used_size()/1024, arena.current_allocated_size()/1024, m.segment_allocation.len/1024, m.forever_storage&.current_allocated_size()/1024);
+        };
+        @fmt(out, "\n");
+
         buf.append_string(out.items());
     } else {
         state.dirty = true;
@@ -343,11 +351,10 @@ do_settings :: fn(state: *State, buf: *Terminal.TextBuffer, read: bool) void = {
     };
     
     walk_state_settings_fields :: fn(s: *State, $X: FuncId #duplicated) void = {
-        X("ticks_per_frame", s.ticks_per_eval&);
-        X("adapt_tick_rate", s.adapt_tick_rate&);
+        X("max_ticks_per_frame", s.max_ticks_per_eval&);
         X("new_component_default_bit_width", s.edit.default_word_width&);
         X("show_suggested_components", s.show_suggested_components&);
-        X("arena_gc_threshold_kb", s.edit.arena_gc_threshold_kb&);
+        X("circuit_arena_gc_threshold_kb", s.edit.arena_gc_threshold_kb&);
         // TODO: selected level/circuit/edit_mode but they need to do something on change
     };
 };
@@ -376,7 +383,7 @@ fn set_edit_mode(state: *State, new_edit_mode: bool) void = {
     
     // recompile when exiting edit mode. 
     // can only simulate at top level for now anyway so going back to tree[0] is fine
-    // TODO: resetting ticks_per_eval when you toggle edit mode is annoying (in worker_get_output)
+    // TODO: resetting max_ticks_per_eval when you toggle edit mode is annoying (in worker_prepare_interp)
 
     // compile_circuit leaks arena space forever so eventually need to dump save and reload to reset it
     if state.circuit_arena&.current_used_size()/1024 >= e.arena_gc_threshold_kb {
@@ -386,18 +393,23 @@ fn set_edit_mode(state: *State, new_edit_mode: bool) void = {
     };
     
     state.warnings&.clear();
-    // forget that loaded it before
-    each state.circuit { c |
+    load_circuit_index_async(state, i, state.world.tc_file_loader_device);
+}
+
+fn forget_already_compiled(circuits: []Tc.Circuit) void = {
+    each circuits { c | 
         if c.compiled.is_some() {
             each c.gates { it |
                 it.logical_gate_index = -1;
+                it.inline_record = 0xFFFFFFFF;
             };
             each c.wires { it |
                 it.logical.id = 0xFFFFFFFF;
             };
-        }
+        };
+        c.compiled = .None;
+        c.inlined&.clear();
     };
-    load_circuit_index_async(state, i, state.world.tc_file_loader_device);
 }
 
 fn new_circuit(state: *State) void = {

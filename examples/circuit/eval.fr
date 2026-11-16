@@ -10,20 +10,23 @@ fn init(world: *World, a: Alloc, save_wire_values: bool, components: []Component
         (ws, wd, s)
     };
     wires := @if(save_wire_values, wire_sum, wire_depth);
+    
+    buf := world.buf;  // note: `world` has to be valid or zeroed. can't be uninit
+    buf&.reserve_total(wires + storage_count, a);
     world[] = (
         components = components,
-        scratch = from_capacity(a.alloc_uninit(WireValue, wires)),
+        scratch = buf.maybe_uninit().subslice(storage_count, wires).from_capacity(),
         instance = 0,
-        storage = a.alloc_zeroed(WireValue, storage_count),
+        storage = buf.maybe_uninit().subslice(0, storage_count),
         doing_pre_read = false,
         save_wire_values = save_wire_values,
         tc_file_loader_device = empty(),
+        buf = buf,
     );
 }
 
 fn drop(world: *World, a: Alloc) void = {
-    world.scratch&.drop(a);
-    a.dealloc(WireValue, world.storage);
+    world.buf&.drop(a);
     world[] = zeroed(World);
 }
 
@@ -31,12 +34,12 @@ WireValue :: i64;
 
 World :: @struct {
     components: []Component;
-    scratch: RawList(WireValue);
+    scratch: RawList(WireValue);  // 'buf
     // each instance of a delay component needs a unique bit of storage. including when 
     // nested inside other components. so reset this index for each top level eval call 
     // and evaluation it never short circuits, an instance will always get the same slot. 
     instance: i64;
-    storage: []WireValue;
+    storage: []WireValue;  // 'buf
     // i evaluate the gates in order but output of a memory can be used before def. 
     // so do a prepass where just read from storage into wire. 
     doing_pre_read: bool;
@@ -46,6 +49,7 @@ World :: @struct {
     tc_file_loader_device: []Tc.LoadedFile;
     tc_halt_device := -1;  // Tc.Builtin.Settings.Halt (circ/gate into graphical circuit to get data field for message)
     timestamp_ns: ?i64 = .None;
+    buf: RawList(i64);
 };
 
 fn eval(world: *World, parent: []WireValue, it: *Component.Gate) void = {
@@ -95,11 +99,9 @@ fn eval(world: *World, parent: []WireValue, it: *Component.Gate) void = {
         };
     };
     
-    if it.post_read == -1 {
     @debug_assert_eq(outputs.len, it.outputs.len, "eval output arity %", c.name);
     range(0, outputs.len) { i |
         parent[it.outputs[i].id.zext()] = wires[outputs[i].id.zext()];
-    };
     };
     
     // pre_read_depth: when a preread calls one without stroage it sets doing_pre_read to false but still want to unscratch those until called again for.

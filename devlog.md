@@ -1,4 +1,20 @@
 
+## (Nov 16)
+
+- in interpreter, only setting output when it.post_read==-1 is wrong when !FEAT_COMPILE (otherwise even the interpreted pass bails to eval_compiled for pre_read)
+- use the interpreter on the main thread while waiting for the franca to be compiled. 
+  - most of the time it really doesn't matter cause it's ~150ms, but this way  
+    the pathological builds are totally playable without me needing to spend a bunch of time on the compiler right now. 
+  - since the interpreter is so slow, a tick rate set based on jitted speed will be wrong 
+    so when it tries to interpret all the ticks on the first frame it will take a long time, 
+    even if the jit is ready almost immediately. ex life symphony jits in 180ms 
+    but if it's unpaused, interpreting 833k ticks on the first frame takes 4000ms and it wont recheck if the compile is ready. 
+    speaking of which, i shouldn't let you ask for a tick rate that i can't keep up with anyway. 
+    even adapt_tick_rate is trusting the rate you set as the estimate to use for the first frame. 
+    first frame always being 1 tick and is always gonna be a more sane estimate even if its not enough ticks to be super accurite. 
+    i made it so overcomplicated in my quest to make it not constantly readjust. 
+    is it worth how hard it is to recalibrate upwards when the loop is clamped to 60fps just to avoid an extra get time call at the end of the frame?
+
 ## (Nov 15)
 
 - level_gate that outputs bit based on completion, save progress
