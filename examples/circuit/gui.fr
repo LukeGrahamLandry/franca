@@ -256,17 +256,24 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             fn Index(it) => state.circuit[it.root_index].name;
         };
         t := timestamp() - state.loader.start_time;
+        state.dirty = true;
         msg := @tfmt("compiling %\nit's been % ms\nif you can read all this it's too slow!", name, t);
-        if t > 50 {  // dont flicker for a frame when exiting exit mode without changes
+        // dont flicker for a frame when exiting exit mode without changes
+        if t > 200 { 
             show_alert(msg, sdtx, sapp);
         };
-        state.dirty = true;
+        if t < 120 {
+            sapp.webgpu.noframe = true;
+            return();
+        };
     };
     
     world := state.world&;
     have_logic := state.loader.progress == .Idle && state.tree.len > 0 && state.tree[0].component.is_some() 
         && state.world.components.len > 0
-        && world[state.tree[0].component.Some].gates.len > 2  // HACK for load unimplemented
+        // TODO: but want to allow if you just only placed io gates
+        //       .. i can't even put this in ComponentTests because tc doesn't let you have a cc with no area. 
+        // && world[state.tree[0].component.Some].gates.len > 2  // HACK for load unimplemented
         && !state.edit.enable;
     eval_this_frame := have_logic && (state.want_eval || state.auto_eval);
     
@@ -335,16 +342,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     if self.text_box_selection() {
         have_logic = false;
     };
-        
-    if self.arch_selection() { i |
-        @if(state.loader.progress == .Idle) if !state.edit.enable || state.edit&.no_selection() {
-        state.clicked = false;
-        state.dirty = true;
-        have_logic = false;
-        state.warnings&.clear();
-        load_circuit_index_async(state, i, state.world.tc_file_loader_device);
-        };
-    };
+    open_arch := self.arch_selection();
     
     if have_logic {
         root_component := state.tree[0].component.unwrap();
@@ -435,17 +433,15 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sgl.translate(state.pos.x, state.pos.y, 0.0);
     sgl.scale(state.scale * screen_scale.x, state.scale * screen_scale.y, 1.0);
     
-    @if(state.tree.len > 0)
-    if state.tree[state.tree.len - 1].diagram_circuit { circuit_i |
-        circuit := state.circuit[circuit_i]&;
+    if state.current_diagram() { circuit |
         self.draw_circuit_background(circuit);
         self.draw_gate_squares(circuit);
         self.draw_wires(circuit);
         self.draw_pin_lines(circuit);
         self.draw_gate_hover_line(circuit);
         self.update_edit(circuit, state.circuit);
+        self.draw_undo_tree();
     };
-    self.draw_undo_tree();
     
     positions := self.emphasized_wire_positions;
     @if(positions.len > 0)
@@ -517,6 +513,12 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     // without this you get a flicker and occasionally a bounds check assertion! for hopefully intuitive reasons. dear rust would like to have a word im sure.
     if self.open_gate&.take() { a, b, c |  // wait until done rendering components to change the tree. 
         state.open_gate(a, b, c);
+    };
+    
+    @if(state.loader.progress == .Idle) if open_arch { i |
+        state.dirty = true;
+        state.warnings&.clear();
+        load_circuit_index_async(state, i, state.world.tc_file_loader_device);
     };
     
     // TODO: option to disable the compiler per circuit. no point compiling the level map that will only ever run one tick at a time.
@@ -594,12 +596,13 @@ fn do_option(self: *Draw, pos: Vec2, name: Str, selected: bool, value: ~T, new: 
     sdtx.pos = self.world_to_text_pos(self.text_spacing * pos);
     p := self.world_to_text_pos(self.mouse_world_pos);
     hover := p.x > sdtx.pos.x && p.x < sdtx.pos.x + name.len.float().cast() && p.y > sdtx.pos.y && p.y < sdtx.pos.y + 1;
-    sdtx.color = pack_rgba(200, 200*int(!selected), 200*int(!hover), 255);
-    sdtx.put(name);
     if hover && state.either_clicked&.take() {
         state.clicked = false;
         new[] = (Some = value);
+        selected = true;
     };
+    sdtx.color = pack_rgba(200, 200*int(!selected), 200*int(!hover), 255);
+    sdtx.put(name);
 }
 
 fn arch_selection(self: *Draw) ?i64 = {
@@ -2032,7 +2035,7 @@ fn gate_selection(self: *Draw) void = {
     new: ?ComponentId = .None;
     enumerate gate_selection_columns { column_i, column |
         enumerate column { row_i, i |
-            do_button(column_i, row_i + 20, t[i[]].name, t[i[]].kind);
+            do_button(column_i, row_i + 24, t[i[]].name, t[i[]].kind);
         };
     };
     
@@ -2272,6 +2275,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         out.push_all(import("@/examples/circuit/levels/bf.fr").level_specs);
         out.push_all(import("@/examples/circuit/levels/segment.fr").level_specs);
         out.push_all(import("@/examples/circuit/levels/screen.fr").level_specs);
+        out.push_all(import("@/examples/circuit/levels/tutorial.fr").level_specs);
         out.items()
     };
     state.levels = list(builtin_levels.len(), a);
@@ -2328,7 +2332,7 @@ fn reset(state: *State) void = {
     state.halted_without_wire_values = true;  // dont show zeroes before first tick
     
     world := state.world&;
-    world.storage.set_zeroed();  // importantly resets ip,registers=0
+    world.storage.set_zeroed();
     
     world.scratch.len = world.scratch.cap;
     world.scratch.items().set_zeroed();
@@ -2369,20 +2373,27 @@ fn reset(state: *State) void = {
     if !state.world&[root].error {
     state.level.userdata = state'level'start(state.sim&);
     state.level_active = state.level.title != "Sandbox";
+    state.update_suggested_components();
+    };
     
-    // TODO: make sure to do this when switching level (even if in edit mode)
-    // :SLOW
+    world.scratch.len = world.scratch.cap;
+    world.scratch.items().set_zeroed();
+}
+
+// TODO: this doesn't happen for new_circuit, because suggested_components wants 
+//       to have an init-ed level for when its a multipart one that switches on .static_data, 
+//       but if new_circuit is called in edit mode, you can't init the level, 
+//       and if it's not in edit mode (because level map doesnt put you in edit mode rn), it hasn't compiled so can't init the level. 
+fn update_suggested_components(state: *State) void = {
     state.level_suggested&.clear();
+    @if(!state.level_active) return();
+    // :SLOW
     suggested := state'level'suggested_components(state.level.userdata);
     for suggested { name |
         if builtin_components.index_of(fn(it) => it.name == name) { i |
             state.level_suggested&.set(i);
         };
     };
-    };
-    
-    world.scratch.len = world.scratch.cap;
-    world.scratch.items().set_zeroed();
 }
 
 fn service_keyboard_device(state: *State) void #inline = {
@@ -2790,7 +2801,7 @@ load_path_worker :: fn(state: *State, in: *LoaderT.I, path: Str, is_bytes: bool,
     fn Ok(c, files) => {
         state.warnings&.clear();
         circuits = c;
-        root_index = c.index_of(fn(it) => it.is_arch) || 0;
+        root_index = c.index_of(fn(it) => it.is_level_map) || (c.index_of(fn(it) => it.is_arch) || 0);
         tc_file_loader_device = files;
     };
         fn Err(msg) => @fmtln(state.warnings&, "%", msg);
@@ -3047,7 +3058,7 @@ gate_selection_columns :: {
 gate_selection_columns_v2 :: {
     T :: Tc'GateName(.Tc2);
     @const_slice(
-    @const_slice(T.Not_bit, .Or_bit, .And_bit, .Nand_bit, .Xor_bit, .Nor_bit, .Xnor_bit, .Switch_bit, .Delay_line_bit, .Register_bit, .Probe_wire_bit, .Full_adder, .Or_3_bit, .And_3_bit, .On_v2, .Off_v2),
+    @const_slice(T.Not_bit, .Or_bit, .And_bit, .Nand_bit, .Xor_bit, .Nor_bit, .Xnor_bit, .Switch_bit, .Delay_line_bit, .Register_bit, .Probe_wire_bit, .Full_adder, .Or_3_bit, .And_3_bit, .On_v2, .Off_v2, .Splitter_bit_2, .Splitter_bit_4, .Splitter_bit_8, .Maker_bit_2, .Maker_bit_4, .Maker_bit_8),
     @const_slice(T.Not_word, .Or_word, .And_word, .Nand_word, .Xor_word, .Nor_word, .Xnor_word, .Switch_word, .Delay_line_word, .Register_word, .Probe_wire_word, .Counter, .Constant, .Mux),
     @const_slice(T.Equal, .Less_u, .Less_s, .Add, .Inc, .Neg, .Mul, .Div, .Mod, .Lsl, .Lsr, .Rol, .Ror, .Asr),
     @const_slice(T.Ram_v2, .Load_port, .Store_port, .Time, .Screen, .Halt_v2, .Keyboard_v2, .Segment_display, .Push_button, .Level_gate), 

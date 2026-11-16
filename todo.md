@@ -86,8 +86,8 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
   - be able to undo load/rename/delete circuit?
   - have an option to clear undos (or export circuit.txt without them)
   - dont load the undo graph until select circuit
-  - i think !FEAT_COMPILE doesnt work on life32x32
   - use interpreter while compiling the franca (so when the logical component is done but before have fast_eval)
+  - the level map needs to be stored seperately from your own circuits. open level map on start.
 ```
 // TODO: bundle the source files the jit needs so binary is self contained
 // TODO: autosave & web localstorage

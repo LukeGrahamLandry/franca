@@ -1,4 +1,11 @@
 
+## (Nov 15)
+
+- level_gate that outputs bit based on completion, save progress
+- making some tutorial levels. feels bad if my thing only works as extra levels for tc, should at leat try to explain the mechanics a bit
+- obsessing about how long to wait to compile before showing you updates.
+  looks bad if it flickers when it would have been fast but feels bad if it doesn't respond
+
 ## (Nov 14) circuit
 
 - store as a graph instad of an array

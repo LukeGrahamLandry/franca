@@ -1,0 +1,190 @@
+
+#use("@/examples/circuit/level_api.fr");
+Self :: @struct {
+    sim: *Simulation;
+    i := 0;
+    state: (@enum(Running, Win, Fail, BadArity)) = .Running;
+    test_count: i64;
+    level: Level;
+    prev_output := 0;
+};
+Level :: @enum(Identity, Flip, Packed, Inspect, Sum, Count);
+
+level_specs :: make_level_sequence(level_spec, level_text, names);
+level_spec :: @static @as(Exports) (
+start = fn(sim) = {
+    level := @as(Level) sim.static_userdata;
+    self := general_allocator().boxed(Self, (
+        sim = sim,
+        level = level,
+        test_count = @if(@is(level, .Packed, .Count), 256, @if(level == .Sum, 16, 2)),
+    ));
+    
+    o, i := self.sim.circuit.arity;
+    if o != 1 || i != int(self.level != .Count) {
+        self.state = .BadArity;
+    };
+    
+    Self.raw_from_ptr(self)
+},
+end = fn(self) = general_allocator().dealloc_one(Self, Self.ptr_from_raw(self)),
+before = fn(self, values) = {
+    self := Self.ptr_from_raw(self);
+    @if(self.state != .Running || self.level == .Count) return();
+    _, in := self.get_values();
+    values[1] = in;
+},
+after = fn(self, values) = {
+    self := Self.ptr_from_raw(self);
+    @if(self.state != .Running) return(self.state == .Win);
+    
+    out, _ := self.get_values();
+    self.prev_output = values[0];
+    if self.prev_output != out {
+        if self.i != 0 || !@is(self.level, .Inspect) {
+            self.state = .Fail;
+            return false;
+        };
+    };
+    self.i += 1;
+    if self.i == self.test_count {
+        self.state = .Win;
+        return true;
+    };
+    
+    false
+},
+render = fn(self) = {
+    self := Self.ptr_from_raw(self);
+    msg := @match(self.state) {
+        fn Running() => @tfmt("test %/%", self.i, self.test_count);
+        fn Fail() => {
+            out, in := self.get_values();
+            @match(self.level) {
+                fn Inspect() => @tfmt("failed test %/%; (your_output=%)", 
+                    self.i, self.test_count, self.prev_output);
+                fn Count() => @tfmt("failed test %/%; (expected_output=%, your_output=%)", 
+                    self.i, self.test_count, out, self.prev_output);
+                @default => @tfmt("failed test %/%; (input=%, expected_output=%, your_output=%)", 
+                    self.i, self.test_count, in, out, self.prev_output);
+            }
+        }
+        fn Win() => "passed all tests";
+        fn BadArity() => @tfmt("must have % Cc_input and % Cc_output", int(self.level != .Count), 1);
+    };
+    self.sim.put_text(vec2(-200, 20), pack_rgba(50, 200, 150, 255), msg);
+},
+quine = include_bytes(@source_file_name()),
+suggested_components = fn(self) = {
+    self := Self.ptr_from_raw(self);
+    c := @ref Str.list(temp());
+    c.push("Cc_output");
+    @if(self.level != .Count) c.push("Cc_input");
+    @if(self.level == .Flip) c.push("Not_bit");
+    @if(self.level == .Packed) c.push_all(@slice("Splitter_bit_8", "Maker_bit_8"));
+    @if(@is(self.level, .Inspect, .Count)) c.push("Constant");
+    @if(@is(self.level, .Sum, .Count)) c.push_all(@slice("Delay_line_word", "Add"));
+    c.items()
+},
+);
+
+fn get_values(self: *Self) Ty(i64, i64) = {
+    @match(self.level) {
+        fn Identity() => (self.i, self.i);
+        fn Flip() => (self.i.bit_xor(1), self.i);
+        fn Packed() => (self.i.bit_and(0b01111110).bit_or(self.i.bit_and(1).shift_left(7)).bit_or(self.i.shift_right_logical(7)), self.i);
+        fn Inspect() => (42, @if(self.i == 0, 42, 0));
+        fn Sum() => ((self.i)*(self.i-1)/2, self.i);
+        fn Count() => (self.i, 0);
+    }
+}
+
+names :: @const_slice("Identity", "Flip", "Packed Wires", "Inspecting Values", "Slow Wires", "Counting Time");
+level_text :: """
+
+The E key toggles between Edit Mode and Run Mode. 
+
+In Edit Mode, there's a list of component names on the right of the circuit grid. 
+Use scroll to zoom and WASD to pan if you can't see it. 
+Click and drag to place a new component (also called a gate). 
+Suggested components for the current level are highlighted in purple. 
+In this case, you need one Cc_input and one Cc_output. 
+
+The (ends of the) lines coming out of a component are input/output pins. 
+Green pins are inputs and blue pins are outputs. 
+Pins cannot be directly touching. Instead, wires are used to transfer values between pins.
+Left click and drag to place a wire. 
+If you make a mistake, right click (a gate or wire) to delete it. 
+
+Use a wire to connect the Cc_input's output pin to the Cc_output's input pin. 
+Then press E to enter Run Mode. 
+
+In Run Mode, you can press ENTER to run one tick of the simulation 
+or SPACE to run continuously until you pass all the level's tests. 
+
+This level has two tests. It will input 0 and then 1 into your circuit 
+and you pass if your circuit always outputs the same value as the input. 
+When you've passed all the tests, return to the Level Map and the next level will be unlocked. 
+---
+
+Again, create a circuit with one Cc_input and one Cc_output. 
+This time your circuit must output the opposite of the input value. 
+You will need another component between the input and the output to transform the value.
+---
+
+So far the values in wires have only been a single bit (0 or 1). 
+This simulator also supports wires with a larger bit width (up to 64). 
+Wider wires are logically equivalent to placing many single bit wires, 
+but they make your circuit less tedious to construct (and more efficient to simulate). 
+
+Swap the bits on either side of the input (leave the middle 6 bits the same).  
+You can do this by Splitting the value into 8 single bit values 
+and then Making a new 8 bit value with the wires reordered.
+
+Note that the middle part of different wires can overlap without interfearing. 
+Values are only shared on the nodes at the ends where you clicked. 
+Similarly, only the ends of pin lines interact with wires.
+
+This level has more tests (256 of them; one for every possible 8 bit input). 
+When the simulator is unpaused (press SPACE) the tick speed can be changed by 
+pressing the [ and ] keys to make it slower and faster respectively. 
+---
+
+This level will input a secret value on the first tick and you must output it on the second tick. 
+Your output on the first tick doesn't matter. 
+The secret value is always the same so you can hard code it in your circuit, 
+but first you need to figure out what it is. 
+
+Some components have fields you can configure to change their behaviour. 
+For example, Constant outputs a value of your choice (based on the expression in the "Value" field). 
+Double click a component to edit its fields. 
+
+While your circuit is running, you can see the values in the wires, 
+either by hovering a wire node in the diagram or looking at the code view to the right. 
+The values shown there are in hex (base 16; with digits 0123456789abcdef). 
+To configure a constant with a hex value, prefix it with 0x. 
+For example, the decimal value 59 (which means 5*10 + 9*1) 
+would be displayed as 3b (which means 3*16 + 11*1)
+and written as 0x3b in the Constant component. 
+---
+
+Wires transmit values instantly and one simulation tick evaluates every gate in the circuit. 
+However, some components have internal storage that persists between ticks. 
+The Delay_line_word stores its input and outputs it on the next tick. 
+It's like a wire but slower. 
+
+Components (like the Delay_line_word) whose (outputs on a given tick) don't 
+depend on (its inputs on the same tick) are allowed to participate 
+in dependency cycles. You can connect a Delay_line's output directly 
+to its input and preserve a value forever in an infinite loop. 
+Of course you can also modify the value with other gates before storing it again. 
+The Delay_line_word outputs 0 on the first tick of the simulation.
+
+Create a circuit that outputs the sum of all inputs recieved on previous ticks 
+(not including the current input until next tick). 
+---
+
+Even circuits without any explicit inputs can have interesting behaviour. 
+Create a circuit that outputs the number of ticks the simulation has been running. 
+
+""".split("---", ast_alloc()).items();
