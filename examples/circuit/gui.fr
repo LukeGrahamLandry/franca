@@ -168,6 +168,7 @@ do_eval :: fn(state: *State) void = {
     state.want_eval = false;
     prev_timestamp := state.prev_timestamp_ns;
     this_timestamp := realtime_ns();
+    website_date_resolution_is_ass := @if(query_current_arch() == .wasm32, timestamp_s(), 0);
     state.prev_timestamp_ns = this_timestamp;
     delta_time := this_timestamp - prev_timestamp;
     recalibrate := 1;
@@ -265,6 +266,11 @@ do_eval :: fn(state: *State) void = {
         state.frame_time_history&.clear();
         state.tick_count_history&.clear();
         dt := realtime_ns() - this_timestamp;
+        if dt == 0 && query_current_arch() == .wasm32 {
+            // i use Date.now() for realtime on web which is only millisecond resolution (and div by 0 traps on wasm). 
+            // the `delta_time` above is across frames so will be ~16ms and doesn't matter but this one is only for running a tick. 
+            dt = max(int((timestamp_s() - website_date_resolution_is_ass) * (NS_PER_S/1000).float()) * 1000, 1);
+        };
         state.ticks_per_eval = (16*NS_PER_MS*count/dt).min(state.max_ticks_per_eval).max(1);
     };
 };
@@ -2985,6 +2991,8 @@ fn load_circuit_index_worker(state: *State, root_index: i64, tc_file_loader_devi
     };
     
     state.loader_thread_ready_for_interp = true;
+    @if(!FEAT_COMPILE) return(.Err);
+    
     (Ok = src)
 }
 

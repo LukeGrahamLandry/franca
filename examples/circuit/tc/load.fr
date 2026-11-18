@@ -835,23 +835,21 @@ inline_for_bidirectional_gates :: fn(parent: *Circuit, child_logical: *Component
     enumerate child_gates { rel_gate_i, gate |
         @debug_assert(gate.pre_read == -1, "shouldnt do real schedule if bidirectional");
         
-        out, in := (gate.outputs.shallow_copy(a), gate.inputs.shallow_copy(a));
-        wires := @slice(out, in);
-        for wires { wires |
-            each wires { it |
+        @debug_assert(gate.inputs.len == 0 || identical(gate.outputs.end_pointer(), gate.inputs.ptr));
+        w := gate.outputs.ptr.slice(gate.outputs.len + gate.inputs.len).shallow_copy(a);
+            each w { it |
                 it[] = map&.get_or_insert(it[], => {
                     new: WireId = (id = wire_count[].trunc());
                     wire_count[] += 1;
                     new
                 })[]
             };
-        };
         
         // not putting it in record.gates because it will be patched after schedual_gates (and it would be junk down anyway because `kill` removes gates)
         gates.push(
             kind = gate.kind, 
-            outputs = out, 
-            inputs = in, 
+            outputs = w.slice(0, gate.outputs.len), 
+            inputs = w.rest(gate.outputs.len), 
             param = gate.param, 
             temporary_auto_width = gate.temporary_auto_width, 
             temporary_disconnected_pins_bitset = gate.temporary_disconnected_pins_bitset,
@@ -921,7 +919,8 @@ fn push_inputs_outputs(gates: *List(Component.Gate), out: []WireId, in: []WireId
          @run get_component_by_name("output", builtin_components),
     );
     gates.insert(0, (kind = I, inputs = empty(), outputs = in));
-    gates.push(kind = O, inputs = out, outputs = empty());
+    // hack: out.ptr nonnull
+    gates.push(kind = O, inputs = out, outputs = out.slice(0, 0));
 }
 
 // TODO: pull things without side effects closer to thier first use. 
@@ -1596,10 +1595,11 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
             // @fmtln(warn, "cast % => % (want=%, found=%)", old.id, new.id, want, found);
             casts&.insert((old, want), new);
             width_known&.set(new.id.zext());
+            w := @slice(new, old) a;
             gates.push(
                 kind = cast_id,
-                inputs = a.alloc_init(WireId, 1, fn(_) => old),
-                outputs = a.alloc_init(WireId, 1, fn(_) => new),
+                inputs = w.rest(1),
+                outputs = w.slice(0, 1),
                 param = want.zext(),
             );
         }
@@ -1622,10 +1622,12 @@ fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate),
                 new: WireId = (id = wire_count[].trunc());
                 wire_count[] += 1;
                 width.push(want);
+                
+                w := @slice(gates[gate_i].outputs[0], new) a;
                 gates.push(
                     kind = cast_id,
-                    inputs = a.alloc_init(WireId, 1, fn(_) => new),
-                    outputs = a.alloc_init(WireId, 1, fn(_) => gates[gate_i].outputs[0]),
+                    inputs = w.rest(1),
+                    outputs = w.slice(0, 1),
                     param = want.zext(),
                 );
                 gates[gate_i].outputs[0] = new;

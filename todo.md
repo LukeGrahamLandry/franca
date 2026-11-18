@@ -36,6 +36,7 @@ the problem might actually be that the ir i generate is just too dumb for it to 
 
 TODO: since you're not allowed to change sgl.texturing_enabled for different vertices, just set it on texture()
 
+- discovering you're baking an internal pointer too late really needs to be an error. 
 - alas theres still a terminal bounds check. i did it twice i a row but now i can't. open_hovered_link->slice somehow
 - run tests/compiler.fr on wasm. needs aot exec which is annoying to think about :(
 - the extra math added to libc_exports in host/web is too late for LIGHT_WEB because there the imports are real. need to do startup_table_assign

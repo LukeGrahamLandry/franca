@@ -1,4 +1,15 @@
 
+## (Nov 18)
+
+- pull info the interpreter needs out of Gate into Op so it doesn't have to step through as big an array
+  - forcing the arrays to be next to eachother feels a bit hacky but like what could go wrong
+  - ?? gui works but maze test doesn't. wire ids are wrong in eval somehow. 
+    ugghh, waste of time. test_defs bakes the thing that now doesn't have a length. 
+    Op.hack_wire_count_for_bake:u8=i_n_+o_n and then bake_relocatable_value(Component.Op) and put that field before gates also works but i think bake_relocatable_value(Gate) that merges the arrays is less confusing perhaps. 
+  - size: 104(Gate)->32(Op). (safe); defs.overture: 6060ms->4100ms. (unsafe); lifesymphony: 240->260 khz, life32x32: 18->21 tick_rate. 
+    hard to say if the cache locality is actually what helped or if it was the other stuff i cleaned up in eval (dont zero if no switches and dont make a random bitset... clearly i forgot something when debugging a long time ago) 
+  - probably shouldn't have bothered with that. nice little reminder that my language is terrible, oh well :(
+
 ## (Nov 17)
 
 - level map can use wires for labels until i decide if i want to make the components boxy to fit labels
@@ -6,6 +17,8 @@
 - fixed calling update_image twice if was already enabled and then needed to resize bigger for switching to new circuit
 - i sure am doing string comparisons in text_box_selection. not like it matters but its easier to fix it than to stop obsessing 
 - disheartening how much new code i seem to grow every time i touch it. idk what im doing wrong. 
+- move out the loader if you try to do something else while its compiling and drop it later
+- web: fix crash when divide by 0 dt when calibrating the first tick time because Date.now() is ms resolution
 
 ## (Nov 16)
 

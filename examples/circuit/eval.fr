@@ -45,73 +45,65 @@ World :: @struct {
     doing_pre_read: bool;
     // for visualization, don't unscratch so can show values of wires in nested gates. 
     save_wire_values: bool;
-    pre_read_depth := 0;
     tc_file_loader_device: []Tc.LoadedFile;
     tc_halt_device := -1;  // Tc.Builtin.Settings.Halt (circ/gate into graphical circuit to get data field for message)
     timestamp_ns: ?i64 = .None;
     buf: RawList(i64);
 };
 
-fn eval(world: *World, parent: []WireValue, it: *Component.Gate) void = {
+fn eval(world: *World, parent: []WireValue, it: *Component.Op) void = {
     c := world[it.kind]&;
     
-    if c.is_switch {
-        return eval_switch(world, parent, it);
-    };
-    
-    if c.gates.len == 0 {
+    if c.compile_order&[0].len == 0 {
+        if c.is_switch {
+            return eval_switch(world, parent, it);
+        };
         eval_compiled(world, parent, it);
         return();
     };
     
-    if world.doing_pre_read && get_compiled(world, it.kind).is_some() {
+    if world.doing_pre_read && c.signeture < 4 {
         eval_compiled(world, parent, it);
         return();
     };
     wires := world.scratch(c.wire_count);
-    wires.set_zeroed();  // switches with none enabled default to zero TODO: could just do it for those specific wires, compile the list like compile_order etc. 
-    
-    inputs, outputs := (c.gates[0].outputs, c.gates[c.gates.len - 1].inputs);
-    @debug_assert_eq(inputs.len, it.inputs.len, "eval input arity %", c.name);
-    
-    #use("@/lib/collections/bit_set.fr");
-    write: DynamicBitSet = empty(temp());
-    range(0, inputs.len) { i |
-        wires[inputs[i].id.zext()] = parent[it.inputs[i].id.zext()];
-        write&.set(inputs[i].id.zext());
+    if c.has_switches {
+        wires.set_zeroed();  // switches with none enabled default to zero TODO: could just do it for those specific wires, compile the list like compile_order etc. 
     };
-    gates := c.gates.slice(1, c.gates.len - 1);
+    
+    doing_pre_read, instance := (world.doing_pre_read, world.instance);
+    ops := c.compile_order&[int(!doing_pre_read)];
+    outputs := ops[ops.len-1].wires.slice(ops[ops.len-1].param);
+    inputs := ops[0].wires.slice(ops[0].param);
+    
+    range(0, inputs.len) { i |
+        wires[inputs[i].id.zext()] = parent[it.wires.offset(outputs.len + i)[].id.zext()];
+    };
     if c.storage_count != 0 {
-        doing_pre_read, instance := (world.doing_pre_read, world.instance);
-        ops := c.compile_order&[int(!doing_pre_read)];
-        for ops.slice(1, ops.len - 1) { op |
-            world.instance = instance + c.instance_offset_by_gate[op.gate_i];
+        each ops.slice(1, ops.len - 1) { op |
+            world.instance = instance + op.instance;
             world.doing_pre_read = op.pre_read;
-            world.pre_read_depth += int(op.pre_read);
-            world.eval(wires, c.gates.index(op.gate_i));
-            world.pre_read_depth -= int(op.pre_read);
+            world.eval(wires, op);
         };
-        world.instance = instance + c.instance_offset_by_gate[c.gates.len - 1];
+        world.instance = instance + ops[ops.len - 1].instance;
         world.doing_pre_read = doing_pre_read;
     } else {
-        each gates { it |
+        enumerate ops.slice(1, ops.len - 1) { i, it |
             world.eval(wires, it);
         };
     };
     
-    @debug_assert_eq(outputs.len, it.outputs.len, "eval output arity %", c.name);
     range(0, outputs.len) { i |
-        parent[it.outputs[i].id.zext()] = wires[outputs[i].id.zext()];
+        parent[it.wires.offset(i)[].id.zext()] = wires[outputs[i].id.zext()];
     };
     
-    // pre_read_depth: when a preread calls one without stroage it sets doing_pre_read to false but still want to unscratch those until called again for.
-    if !world.save_wire_values || world.pre_read_depth > 0 {
+    if !world.save_wire_values || doing_pre_read {
         world.unscratch(wires);
     };
 }
 
-eval_switch :: fn(world: *World, parent: []WireValue, it: *Component.Gate) = {
-    in, out := (it.inputs, it.outputs);
+eval_switch :: fn(world: *World, parent: []WireValue, it: *Component.Op) = {
+    in, out := (it.wires.offset(1).slice(2), it.wires.slice(1));
     a, b := (parent[in[0].id.zext()], parent[in[1].id.zext()] != 0);  // value, cond
     if b {
         parent[out[0].id.zext()] = a;
@@ -147,15 +139,16 @@ fn evaluate(world: *World, values: []WireValue, kind: ComponentId, param: i64, s
 }
 
 // expose the compiled version with the intepreter's calling convention. 
-fn eval_compiled(world: *World, parent: []WireValue, it: *Component.Gate) void = {
+fn eval_compiled(world: *World, parent: []WireValue, it: *Component.Op) void = {
     a := Arena'stack_alloc(size_of(WireValue) * max_in_out_wires);
-    values := a.alloc_zeroed(WireValue, it.outputs.len + it.inputs.len);
-    range(0, it.inputs.len) { i |
-        values[i + it.outputs.len] = parent[it.inputs[i].id.zext()];
+    o_n, i_n := world[it.kind].primitive_arity;
+    values := a.alloc_zeroed(WireValue, o_n+i_n);
+    range(0, i_n) { i |
+        values[i + o_n] = parent[it.wires.offset(o_n+i)[].id.zext()];
     };
     eval_compiled(world, values, it.kind, it.param);
-    range(0, it.outputs.len) { i |
-        parent[it.outputs[i].id.zext()] = values[i];
+    range(0, o_n) { i |
+        parent[it.wires.offset(i)[].id.zext()] = values[i];
     };
 }
 
@@ -195,9 +188,11 @@ fn eval_top(world: *World, values: []WireValue, kind: ComponentId, param: i64) [
     a := Arena'stack_alloc(size_of(WireId) * max_in_out_wires);
     o_n, i_n := world[kind]&.arity();
     @assert_eq(values.len, o_n + i_n, "arity error calling gate");  
-    it: Component.Gate = (
-        inputs = a.alloc_init(WireId, i_n, fn(i) => (id = (i + o_n).trunc())),
-        outputs = a.alloc_init(WireId, o_n, fn(i) => (id = i.trunc())),
+    w := a.alloc_init(WireId, o_n + i_n, fn(i) => (id = i.trunc()));
+    it: Component.Op = (
+        wires = w.ptr,
+        pre_read = false,
+        instance = 0,
         kind = kind,
         param = param,
     );

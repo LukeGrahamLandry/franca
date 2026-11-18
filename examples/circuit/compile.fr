@@ -18,6 +18,7 @@ Component :: @struct {
     signeture: u8 = 255;  // see eval_compiled
     has_probes := false;
     error := false;
+    has_switches := false;
     
     usage: *Usage #use = zeroed(*Usage);
     Usage :: @struct {
@@ -53,12 +54,13 @@ Component :: @struct {
         inline_index: u32 = 0xFFFFFFFF;   // logical index before being inlined  
     };
     
-    // TODO: maybe copy all the info for the interpreter out into here 
-    //       so i dont need to obsess about keeping Gate compact. 
-    //       (kind, out_arity, pre_read, param, *WireId) is 24 bytes which is already better than the 48 Gate was before i started adding a bunch of stuff. 
+    // the idea is this not being index into .gates means Gate being giant doesn't slow the interpreter
     Op :: @struct {
-        gate_i: i64;
+        wires: *WireId;  // (out, in)
+        kind: ComponentId;
         pre_read: bool;
+        param: i64;
+        instance: i64;
     };
 };
 
@@ -100,14 +102,16 @@ calculate_usage :: fn(components: []Component, a: Alloc, warn: *List(u8)) bool =
         need_storage := false;
         enumerate c.gates { i, it |
             child := components[it.kind.id.zext()]&;
-            wire_sum += child.wire_sum;
-            wire_depth = max(wire_depth, child.wire_depth);
-            gate_sum += child.gate_sum;
             if it.post_read == -1 {
+                wire_sum += child.wire_sum;
+                wire_depth = max(wire_depth, child.wire_depth);
+                gate_sum += child.gate_sum;
                 storage_count += get_storage_count(components, it);
                 need_storage = need_storage || has_storage(components, it.kind);
             };
-            
+            if child.is_switch {
+                c.has_switches = true;
+            };
             if i != 0 && i != c.gates.len - 1 {
                 gate_i := i;
                 // give a better error message than array length mismatch when typechecking the generated code.
@@ -162,6 +166,7 @@ calculate_usage :: fn(components: []Component, a: Alloc, warn: *List(u8)) bool =
         };
         
         gates_needed: DynamicBitSet = empty(a);
+        gates_needed&.set(0);  // eval() skips one so input always needs to be first even if all inputs unused.
         gates_needed&.set(c.gates.len - 1);
         for out_gate.inputs { id |
             needed&.set(id.id.zext());
@@ -260,6 +265,7 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
     child := self.components[it.kind.id.zext()]&;
     
     if !self.c.gates_needed_for_pure_eval&.get(gate_i) && self.doing_pre_read{
+        @debug_assert(it.kind.group() != .LogicalIO);
         return();
     };
     if child.error {
@@ -289,11 +295,14 @@ fn compile_gate(self: *CompileGates, gate_i: i64) void = {
         };
     };
     
-    if it.pre_read == -1 {
-        self.compile_order&.push(gate_i = gate_i, pre_read = self.doing_pre_read);
-    } else {
-        self.compile_order&.push(gate_i = it.pre_read, pre_read = true);
-    };
+    @debug_assert(it.inputs.len == 0 || identical(it.outputs.end_pointer(), it.inputs.ptr), "expected contigous out,in for %", name);
+    self.compile_order&.push(
+        wires = it.outputs.ptr,
+        param = @if(group(it.kind) != .LogicalIO, it.param, it.outputs.len + it.inputs.len),
+        kind = it.kind,
+        instance = self.c.instance_offset_by_gate[gate_i],
+        pre_read = it.pre_read != -1 || self.doing_pre_read,
+    );
     
     result_used := it.outputs.len > 0 && self.c.wires_used&.get(it.outputs[0].id.zext());
     @switch(name) {
@@ -351,6 +360,7 @@ fn compile_component(self: *CompileGates, doing_pre_read: bool) void = {
             return();
         };
     };
+    @debug_assert(self.compile_order.len >= 2 && self.compile_order[0].kind.group() == .LogicalIO && self.compile_order[self.compile_order.len-1].kind.group() == .LogicalIO);
 }
 
 // each Component becomes a function pointer (*World, *Array(WireValue, OutputN), *Array(WireValue, InputN))
@@ -429,16 +439,16 @@ compile_gates_source :: fn(components: []Component, a: Alloc, first_index_that_n
                 @fmt(out, "return();\n};\n");
                 
                 @if(self.failed) break();
-                // eval() skips one so input always needs to be first even if all inputs unused.
-                if self.compile_order[0].gate_i != 0 {
-                    self.compile_order&.insert(0, (gate_i = 0, pre_read = false));
-                };
+                // TODO: this is wrong when fake_extra_storage, make a test where its a problem
+                @debug_assert_eq(self.compile_order[self.compile_order.len - 1].instance, c.storage_count, "eval uses this at the end");
                 
                 self.c.compile_order&[iter_i] = self.compile_order.items().shallow_copy(a);
                 self.compile_order&.clear();
             };
         } else {
             self.compile_component(false);
+            ops := self.compile_order.items().shallow_copy(a);
+            self.c.compile_order = (ops, ops); 
         };
         @fmt(out, "};\n");  // func
         if self.failed {
@@ -535,3 +545,11 @@ fn index(self: RawList(Tc.Circuit.InlineRecord), i: u32) *Tc.Circuit.InlineRecor
 fn index(self: RawList(Tc.Circuit.Gate), i: u32) *Tc.Circuit.Gate = self.index(i.zext());
 fn index(self: []Component, i: ComponentId) *Component = self.index(i.id.zext());
 fn eq(a: ComponentId, b: ComponentId) bool = a.id == b.id;
+
+// the only place i bake one is test.fr->test_defs->finished_components. 
+// Op.wires doesn't have a length. my baking internal pointers is :FUCKED and order dependent so making sure it sees the whole thing first lets it reuse it properly. this should really be fixed in the :compiler :(
+fn bake_relocatable_value(it: *Component.Gate) []BakedEntry = {
+    @debug_assert(it.inputs.len == 0 || identical(it.outputs.end_pointer(), it.inputs.ptr), "expected contigous out,in");
+    _ := bake_relocatable_slice_erased(WireId.raw_from_ptr(it.outputs.ptr), it.outputs.len + it.inputs.len, WireId);
+    dyn_bake_relocatable_value(Component.Gate.cast_to_bytes(it), Component.Gate, true)
+}
