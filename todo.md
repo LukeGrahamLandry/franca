@@ -95,9 +95,11 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
   - hide some of the buttons in the level map?
   - hide some of the components in the tutorial?
   - with new level map, can no longer manually test my old maze things
+  - web: use indexeddb instead of localstorage. (so can have blob and less size limit)
+  - web: it seems extra blurry
+  - web: scroll wheel feels backwards to me. am i asking for direction in a way that doesn't listen to the os natural scrolling thing? its also too fast
 ```
 // TODO: bundle the source files the jit needs so binary is self contained
-// TODO: web localstorage
 // TODO: for paste/dragndrop: choose (replace all, replace one, add new, view without saving).
 // TODO: allow enter custom component while in edit mode / make new custom components
 // - need to have some sort of feedback if you try to change the pin layout in a way that makes a usage site broken

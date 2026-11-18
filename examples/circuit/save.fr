@@ -1,4 +1,6 @@
-write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *List(u8), spec: bool) void = {
+// allow_binary=false could probably go away if i did the platform layer better. 
+// rn i use localstorage for web save and NSString for macos clipboard which don't want arbitrary bytes.
+write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *List(u8), spec: bool, allow_binary: bool) void = {
     out.reserve(1.shift_left(21));
     #use("@/lib/collections/bit_set.fr");
     kinds_used: DynamicBitSet = empty(temp());
@@ -232,8 +234,18 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
         write_int_to_buffer(dest, out.len - size_patch_offset -1-max_size_chars);
     };
     
-    write_bytes :: fn(out: *List(u8), data: []u8) void = {
-        encoded := false;  // TODO: if need to put in web localstorage and it's not utf8
+    write_bytes :: fn(out: *List(u8), data: []u8) void => {
+        encoded := !allow_binary && data.len > 0;
+        if encoded {
+            data := data;
+            dowhile {
+                Utf8 :: import("@/examples/import_c/unicode.fr");
+                _, codepoint_length := Utf8'decode_utf8(data);
+                data = data.rest(codepoint_length);
+                data.len > 0 && codepoint_length != 0
+            };
+            encoded = data.len != 0;
+        };
         if encoded {
             out := @ref u8.list(temp());
             B64'encode(out, data);
@@ -550,6 +562,7 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
 
 undo_format_version :: 5;
 progress_format_version :: 123;
+progress_text_magic :: "circuitprogressencoded:";
 #use("@/examples/circuit/eval.fr");
 B64 :: import("@/lib/encoding/base64.fr");
 
@@ -580,9 +593,20 @@ write_progress :: fn(out: *List(u8), levels: []LevelEntry, settings: Str) void =
         out.len - start,
         level_count,
     );
+    if query_current_arch() == .wasm32 {
+        in := out.items().shallow_copy(temp());
+        out.clear();
+        out.push_all(progress_text_magic);
+        B64'encode(out, in);
+    };
 };
 
 read_progress :: fn(in: []u8, levels: *List(LevelEntry)) Result(Str, Str) = {
+    if in&.pop_prefix(progress_text_magic) {
+        out := @ref u8.list(temp());
+        B64'base64_decode(out, in);
+        in = out.items();
+    };
     @if(in.len < 24) return(Err = "too small");
     header := in&.pop_type(Array(i64, 3));
     magic, bytes, level_count := (header[0], header[1], header[2]);

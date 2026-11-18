@@ -214,12 +214,12 @@ fn new_token(c: *Ctx, kind: TokenKind, start: *u8, end: *u8) *Token #inline = {
 // If p does not point to a valid identifier, 0 is returned.
 fn read_ident(start: *u8) i64 #inline = {
     p := start;
-    c := Unicode'decode_utf8(p&, p);
+    c, _ := Unicode'decode_utf8(p&, p);
     if(!Unicode'is_ident1(c), => return(0));
     
     loop {
         q := p;
-        c = Unicode'decode_utf8(q&, p);
+        c, _ := Unicode'decode_utf8(q&, p);
         if(!Unicode'is_ident2(c), => return(ptr_diff(start, p)));
         p = q;
     }
@@ -377,7 +377,8 @@ fn read_string_literal(c: *Ctx, start: *u8, quote: *u8) *Token = {
 // is called a "surrogate pair".
 fn read_utf16_string_literal(c: *Ctx, start: *u8, quote: *u8) *Token = {
     read_string_literal(c, start, quote, u16, c.ty_ushort) { p, len, buf |
-        ch   := Unicode'decode_utf8(p, p[]);
+        ch, ok := Unicode'decode_utf8(p, p[]);
+        @if(!ok) @error_at(c, p[], "invalid utf8");
         wide := ch >= 0x10000;
         if ch < 0x10000 {
             // Encode a code point in 2 bytes.
@@ -398,7 +399,9 @@ fn read_utf16_string_literal(c: *Ctx, start: *u8, quote: *u8) *Token = {
 // encoded in 4 bytes.
 fn read_utf32_string_literal(c: *Ctx, start: *u8, quote: *u8, ty: *CType) *Token = {
     read_string_literal(c, start, quote, u32, c.ty_uint) { p, len, buf |
-        buf[len[]] = Unicode'decode_utf8(p, p[]);
+        ch, ok := Unicode'decode_utf8(p, p[]);
+        @if(!ok) @error_at(c, p[], "invalid utf8");
+        buf[len[]] = ch;
         len[] += 1;
     }
 }
@@ -472,7 +475,9 @@ fn read_char_literal(c: *Ctx, start: *u8, quote: *u8, ty: *CType) *Token = {
         ch, _ := c.read_escaped_char(p&, p.offset(1));
         ch.trunc()
     } else {
-        Unicode'decode_utf8(p&, p)
+        ch, ok := Unicode'decode_utf8(p&, p);
+        @if(!ok) @error_at(c, p, "invalid utf8");
+        ch
     };
     
     end := p;

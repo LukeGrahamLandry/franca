@@ -254,6 +254,7 @@ fn text_box_selection(self: *Draw) bool = {
             };
             fn LevelMap() => {
                 if state.looking_at_examples&.take() {
+                    sync_local_storage_if_web(circuit_save_path, true, 4096);
                     state.load_path_async(circuit_save_path, false);
                 } else { 
                 // TODO: track which circuit you clicked a level gate in to get here so can have multiple and go back to the right one
@@ -300,7 +301,7 @@ fn text_box_selection(self: *Draw) bool = {
             if @is(action.tag(), .ThisCircuit, .AllCircuits) {
                 state.stash_undo();
                 i: ?i64 = @if(action.is(.AllCircuits) || state.tree.len == 0, .None, state.tree[0].diagram_circuit);
-                out := state.write_save(i, action.is(.AllCircuits));
+                out := state.write_save(i, action.is(.AllCircuits), false);
                 buf.append_string(out);
                 state.unstash_undo();
             };
@@ -427,7 +428,7 @@ fn set_edit_mode(state: *State, new_edit_mode: bool) void = {
 
     // compile_circuit leaks arena space forever so eventually need to dump save and reload to reset it
     if state.circuit_arena&.current_used_size()/1024 >= e.arena_gc_threshold_kb {
-        out := state.write_save(.None, false);
+        out := state.write_save(.None, false, true);
         load_path_async(state, out, true, (Some = i));
         return();
     };
@@ -623,9 +624,9 @@ fn unstash_undo(state: *State) void = {
     state.stash_undo();
 }
 
-fn write_save(state: *State, i: ?i64, spec: bool) []u8 = {
+fn write_save(state: *State, i: ?i64, spec: bool, allow_binary: bool) []u8 = {
     out := @ref u8.list(temp());
-    Save'write_save(state.circuit, state.world.tc_file_loader_device, i, out, spec);
+    Save'write_save(state.circuit, state.world.tc_file_loader_device, i, out, spec, allow_binary);
     out.items()
 }
 
@@ -653,16 +654,16 @@ fn save_progress(state: *State) void = {
 fn autosave(state: *State) void = {
     @if(state.looking_at_examples || state.loader.progress == .Loading) return();
     state.stash_undo();
-    out := state.write_save(.None, true);
+    out := state.write_save(.None, true, query_current_arch() != .wasm32);
     state.save_gracefully(circuit_save_path, out);
     state.unstash_undo();
     state.last_auto_save_time = realtime_ns();
 }
 
 fn save_gracefully(state: *State, path: Str, data: Str) void = {
-    @if(write_entire_file(path, data)) return();
+    @if(write_entire_file(path, data)) return(sync_local_storage_if_web(path, false, 0));
     _ := make_dirs(path.pop_path_segment());
-    @if(write_entire_file(path, data)) return();
+    @if(write_entire_file(path, data)) return(sync_local_storage_if_web(path, false, 0));
     if state.loader.progress != .Loading {
         @fmt(state.warnings&, "failed to write file: %", path);
     };
