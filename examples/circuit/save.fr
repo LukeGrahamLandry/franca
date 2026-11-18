@@ -9,7 +9,8 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
         work := Tc.CustomId.list(temp());
         work&.push(circuits[i].id);
         while => work&.pop() { id |
-            i := circuits.index_of(fn(it) => it.id.id == id.id).unwrap();
+            continue :: local_return;
+            i := circuits.index_of(fn(it) => it.id.id == id.id) || continue();
             if !needed&.get_set(i) {
                 for circuits[i].dependencies { id |
                     work&.push(id);
@@ -24,6 +25,7 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
         if i.is_some() && !needed&.get(circ_i) {
             continue();
         };
+        @if(c.is_synthetic_level_map && i.is_none()) continue();  // HACK
         with_patched_size("CIRCUIT") {
         @fmt(out, " H ");
         if c.compiled { it |
@@ -105,6 +107,7 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
             };
             @if(it.teleport) @fmt(out, "t");
             @if(it.colour != 0) @fmt(out, "c%", it.colour);
+            @if(it.comment.len != 0) { @fmt(out, " L"); write_bytes(out, it.comment); }
             @fmt(out, "\n");
         };
         if c.mnemonics != "" {
@@ -366,10 +369,11 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
             if pop_prefix(in&, "c") {
                 c = get_int().trunc();
             };
+            comment := @if(pop_prefix(in&, "L"), get_str(), "");
             while => in.len > 0 && in[0].is_ascii_whitespace() {
                 in = in.rest(1);
             };
-            (path = path.as_raw(), teleport=t, colour=c)
+            (path = path.as_raw(), teleport=t, colour=c, comment = comment)
         };
         
         mnemonics := @if(pop_prefix(in&, "M "), get_str(), "");
@@ -555,7 +559,8 @@ LevelEntry :: @struct {
     default_circuit: ?Tc.CustomId = .None;
 };
 
-write_progress :: fn(out: *List(u8), levels: []LevelEntry) void = {
+// TODO: should seperate stable level ids from display titles. especially so can have same name in different level sets. 
+write_progress :: fn(out: *List(u8), levels: []LevelEntry, settings: Str) void = {
     start := out.len;
     out.reserve_type(Array(i64, 3))[] = (0, 0, 0);
     level_count := 0;
@@ -568,6 +573,8 @@ write_progress :: fn(out: *List(u8), levels: []LevelEntry) void = {
             out.reserve_type(Tc.CustomId)[] = it.default_circuit || (id = 0);
         };
     };
+    out.reserve_type(i64)[] = settings.len;
+    out.push_all(settings);
     out.items().rest(start).peek_type(Array(i64, 3))[] = (
         progress_format_version,
         out.len - start,
@@ -575,7 +582,7 @@ write_progress :: fn(out: *List(u8), levels: []LevelEntry) void = {
     );
 };
 
-read_progress :: fn(in: []u8, levels: *List(LevelEntry)) Result(void, Str) = {
+read_progress :: fn(in: []u8, levels: *List(LevelEntry)) Result(Str, Str) = {
     @if(in.len < 24) return(Err = "too small");
     header := in&.pop_type(Array(i64, 3));
     magic, bytes, level_count := (header[0], header[1], header[2]);
@@ -597,5 +604,10 @@ read_progress :: fn(in: []u8, levels: *List(LevelEntry)) Result(void, Str) = {
         };
         // TODO: don't stomp when save if dont know the level
     };
-    .Ok
+    @if(in.len == 0) return(Ok = "");
+    n := in&.pop_type(i64)[];
+    @if(in.len < n) return(Err = "too small");
+    settings := in&.pop_slice(u8, n);
+    
+    (Ok = settings)
 };

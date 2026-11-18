@@ -12,7 +12,6 @@ c: reset scale/pos.
 [/]: slower/faster eval (shift:50, cmd:1000). 
 k+shift+cmd: toggle keyboard device capture.
 u: toggle render graphics devices over circuit
-l: fetch schematic archive.
 e: toggle edit mode.
 """;
 
@@ -70,11 +69,14 @@ State :: @rec @struct {
     warnings: List(u8);
     loader: LoaderT;
     download_schematic_archive_before_trying_to_load: bool;
+    looking_at_examples: bool;  // HACK: disable saving so they dont stomp your stuff
     prev_timestamp_ns: i64;
     frame_time_history: RollingAverage;  // us
     tick_count_history: RollingAverage;
     eval_last_frame: bool;
     split_graphics_and_wires: bool;
+    show_wire_comments: bool;
+    show_logic_trace: bool;
     // v1 SpriteDisplay
     atlas: @struct {
         data: @struct(pixels: []u32  /*general_allocator, free after loading on ui thread*/, w: i64, h: i64);
@@ -93,6 +95,7 @@ State :: @rec @struct {
     };
     edit: EditState;
     show_suggested_components: bool;
+    last_auto_save_time: i64;
     
     // only know part way through rendering so won't highlight all the parts on the first frame. 
     // remember for next frame to get all the nodes. 
@@ -345,6 +348,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         have_logic = have_logic,
         mouse_world_pos = (state.mouse_pos - state.pos) / state.scale / screen_scale,
         out = @ref u8.list(32, temp()),
+        label_sdtx = state.edit.text_box.text.default_context&,
     ); self := self&;
     
     if state.gfx_error_last_frame {
@@ -385,10 +389,14 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     if !state.edit.enable {
     self.put_text(HELP, self.text_spacing * vec2(-90, 12), pack_rgba(0, 0, 0, 255));
         if !have_logic && progress == .Idle {
+            // TODO: empty circuit says load error because only 2 gates
             self.put_text("LOAD ERROR", self.text_spacing * vec2(0, 2), pack_rgba(255, 0, 0, 255));
         };
     } else {
         self.gate_selection();
+        if state.looking_at_examples {
+            self.put_text("CHANGES MADE TO EXAMPLE CIRCUITS WILL NOT BE SAVED", self.text_spacing * vec2(0, 2), pack_rgba(255, 0, 0, 255));
+        }
     };
     
     if self.text_box_selection() {
@@ -400,7 +408,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         root_component := state.tree[0].component.unwrap();
         c := world[root_component]&;
         @if(c.error) self.put_text("COMPILE ERROR", self.text_spacing * vec2(0, 2), pack_rgba(255, 0, 0, 255));
-        if progress == .Compiling && state.tick > 0 {
+        if progress == .Compiling && state.auto_eval {
             self.put_text("INTERPRETED", self.text_spacing * vec2(0, 2), pack_rgba(255, 0, 0, 255));
         };
         instance, parent_wire_offset, wire_offset, logical_c := self.walk_component_tree(c&);
@@ -468,8 +476,6 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         self.put_text(state.halt_message.items(), self.text_spacing * vec2(0, 4), pack_rgba(50, 200, 150, 255));
     };
     
-    self.level_selection();
-    
     if state.screen.to_drop&.take() { img |
         sg.destroy(img);
     };
@@ -489,6 +495,16 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sgl.scale(state.scale * screen_scale.x, state.scale * screen_scale.y, 1.0);
     
     if state.current_diagram() { circuit |
+        if state.show_wire_comments {
+            sdtx := self.label_sdtx;
+            sdtx.set_layer(wire_comment_text_layer);
+            old_size := (sdtx.desc.char_width, sdtx.desc.char_height);
+            sdtx.desc.char_height = 10 * state.scale;
+            sdtx.desc.char_width = sdtx.desc.char_height / 2;
+            sdtx.canvas(text_w, text_h);
+            sdtx.desc.char_width = old_size._0; sdtx.desc.char_height = old_size._1;
+        };
+    
         self.draw_circuit_background(circuit);
         self.draw_gate_squares(circuit);
         self.draw_wires(circuit);
@@ -583,11 +599,6 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         state.end_level();
         state.level_index = i;
         state.level = it;
-        // TODO: if last_circuit_id, open that one
-        if it.solutions.len != 0 {
-            // TODO: dont just delete your circuits. etc.
-            state.load_path_async(it.solutions, true);
-        } else {
             new := false;
             if state.levels[i].default_circuit { c |
                 if state.circuit.index_of(fn(it) => it.id == c) { c |
@@ -599,12 +610,14 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                 if c.is_level_map {
                     new = true;
                     state.new_circuit();
+                    // compile so it doesn't say "load error",
+                    // and put in not edit mode to start so it has a level inited and the suggested components highlight properly
+                    load_circuit_index_async(state, state.circuit.len-1, state.world.tc_file_loader_device);
                 };
             };
             if !new {
                 state.reset();
             };
-        };
     };
     
     sgl.end();
@@ -618,16 +631,22 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     Easy'glue_begin_pass(sapp, sg, ClearAction(r = 0.15, g = 0.15, b = 0.15, a = 1));
     sgl.draw_layer(sg, 0);
     sdtx.draw_layer(0);
-    draw_text_boxes(state.edit&, sg);  // TODO: this leaks the apply_scissor_rect so it has to be last
+    put_text_boxes(state.edit&);
+    // i want wire comments behind field backgrounds but needs to be after updated all the buffers
+    // TODO: the field label doesn't have a background so they overlap in an ugly way
+    state.edit.text_box.text.default_context&.draw_layer(wire_comment_text_layer);   
+    draw_text_boxes(state.edit&, sg, vec2(sapp.width().float().cast(), sapp.height().float().cast()));
     sg.end_pass();
     sg.commit();
 };
+wire_comment_text_layer :: 500;
 
 Draw :: @struct {
     state: *State #use;
     diagram_pos: Vec2 = vec2(0);
     screen_scale: Vec2;
     sdtx: *Sdtx.Context;
+    label_sdtx: *Sdtx.Context;
     have_logic: bool;
     emphasized_wire_positions: RawList(Vec2) = empty();
     hovered_wire_index: ?i64 = .None;
@@ -674,20 +693,6 @@ fn arch_selection(self: *Draw) ?i64 = {
         arch_list_count += 1;
     };
     new
-}
-
-// TODO: remove this in favor of the level map
-fn level_selection(self: *Draw) void = {
-    state := self.state;
-    arch_list_count: f32 = 0;
-    new: ?i64 = .None;
-    enumerate state.levels { i, it |
-        selected := i == state.level_index;
-        pos := vec2(50, (7 + arch_list_count));
-        self.do_option(pos, it.level.title, selected, i, new&);
-        arch_list_count += 1;
-    };
-    self.open_level = new;
 }
 
 fn walk_component_tree(self: *Draw, c: **Component) Ty(i64, i64, i64, *Component) = {
@@ -739,6 +744,7 @@ fn walk_component_tree(self: *Draw, c: **Component) Ty(i64, i64, i64, *Component
             };
         };
         @if(c.has_bidirectional_pins, @fmt(out, "(%)", c.name), out.push_all(c.name));
+        @if(!state.show_logic_trace) out.clear();
     };
     (instance, parent_wire_offset, wire_offset, logical_c)
 }
@@ -755,6 +761,7 @@ fn instance_by_gate(self: *Draw, c: *Component, i: i64) i64 = {
 
 fn draw_component_code(self: *Draw, c: *Component, instance: i64, parent_wire_offset: i64) void = {
     sdtx, state := (self.sdtx, self.state);
+    @if(!state.show_logic_trace) return();
     pos := vec2(0, 0);
     if c.gates.len == 0 {
         p := self.mouse_world_pos;
@@ -1029,9 +1036,6 @@ fn draw_gate_squares(self: *Draw, circuit: *Tc.Circuit) void = {
             sdtx.pos = self.world_to_text_pos(b) + vec2(0, self.wire_hover_count);
             base := sdtx.pos.x;
             sdtx.put(@tfmt("(%, %) %", it.pos.x, it.pos.y, name));
-            if it.logical_gate_index != -1 {
-                sdtx.put(@tfmt(" G%", it.logical_gate_index));
-            };
             self.wire_hover_count += 1;
             had_hover = true;
             
@@ -1092,12 +1096,14 @@ fn draw_wires(self: *Draw, circuit: *Tc.Circuit) void = {
     prev_hover := state.prev_emphasized_wire&;
     already_wrote_position := false;
     enumerate circuit.wires { wire_i, wire |
+        // TODO: draw lines on hover if teleport so you can see where it goes. TODO: ui for placing teleport wires? or does that make it boring?
         teleport := wire.teleport;
         base_colour := pack_rgba(100, 50, 50 * int(!teleport), 255);
         if wire.colour != 0 && wire.colour < wire_colours.len().trunc() {
             base_colour = wire_colours[wire.colour.zext()];
         };
         hover_colour := pack_rgba(150, 50, 50, 255);
+        self.draw_wire_comment(wire);
         enumerate wire.path { i, it |
             sgl.color = base_colour;
             b := self.tc_to_world_pos(it.pos);
@@ -1292,10 +1298,7 @@ fn draw_undo_tree(self: *Draw) void = {
                 if node.time != 0 {
                     now := realtime_ns() / NS_PER_S;
                     s0 := now - node.time;
-                    m0, s1 := s0.div_mod(60);
-                    h0, m1 := m0.div_mod(60);
-                    d0, h1 := h0.div_mod(24);
-                    sdtx.put(@tfmt(" %d%h%m%s ago", d0, h1, m1, s1));
+                    sdtx.put(@tfmt(" % ago", format_seconds(s0)));
                 };
                 range(0, 2) { i |
                     @if(node.do&[i] != -1 && node.do&[i].intcast() >= node.transitions.len) sdtx.put(@tfmt(" invalid_do[%](%)", i, node.do&[i]));
@@ -1390,6 +1393,41 @@ fn draw_undo_tree(self: *Draw) void = {
         };
         .None
     };
+};
+
+fn draw_wire_comment(self: *Draw, wire: *Tc.Circuit.Wire) void = {
+    state := self.state;
+    if !(state.show_wire_comments && wire.comment.len != 0 && wire.path.len >= 2 && state.scale >= 0.5) {
+        return();
+    };
+    a, b := (wire.path[wire.path.len - 2].pos, wire.path[wire.path.len - 1].pos);
+    range(0, wire.path.len - 1) { i |
+        if wire.path[i].pos.y == wire.path[i + 1].pos.y {
+            a = wire.path[i].pos;
+            b = wire.path[i + 1].pos;
+        };
+    };
+    if a.x > b.x || (a.x == b.x && a.y > b.y) {
+        t := a; a = b; b = t;
+    };
+    b.x -= 0.1; a.x -= 0.1;
+    b.y -= 0.5; a.y -= 0.5;
+    step := @if(a.x == b.x, @as(f32) 1, 2);
+    dir := normalize(b - a);
+    wire_length := (b - a).norm();
+    text_length := wire.comment.len.float().cast() / step;
+    if wire_length > text_length {
+        a += dir * (wire_length - text_length) / 2;
+    };
+    
+    sdtx := self.label_sdtx;
+    sdtx.color = 0xFFFFFFFF;
+    range(0, wire.comment.len) { i |
+        pos := a + dir * i.float().cast() / step;
+        sdtx.pos = self.world_to_text_pos(self.tc_to_world_pos(pos));
+        sdtx.put(wire.comment[i]);
+    };
+    sdtx.pos = vec2(0);
 };
 
 fn console(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Component.Gate) void = {
@@ -1703,12 +1741,13 @@ fn screen(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Compo
 //       if did that then could easily allow mixed v1/v2 components in one circuit which would be nice. 
 fn finish_screens(state: *State) void = {
     s, sg := (state.screen&, state.sg);
-    if s.need_resize&.take() {
-        state.resize_screen_atlas();
-    };
     if s.enable&.take() {
         sg.update_image(s.img, @ref SubImage(s.atlas.buf.interpret_as_bytes()));
         s.atlas.x = 1; s.atlas.y = 1; s.atlas.current_row_height = 1;  // :WhitePixelForDrawingSolidColours
+    };
+    if s.need_resize&.take() {
+        // do this last so any components that fit before resizing can still draw with the old texture on this frame
+        state.resize_screen_atlas();
     };
 }
 
@@ -2290,6 +2329,8 @@ fn current_diagram(state: *State) ?*Tc.Circuit = {
 
 fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.show_suggested_components = true;
+    state.show_logic_trace = true;
+    state.show_wire_comments = true;
     t := state.edit.text_box&;
     // TODO: don't init_from_cli_args
     on_init(t, sapp, sg);
@@ -2329,23 +2370,16 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     )));
     
     state.sim.text = list(general_allocator());
-    builtin_levels :: {
-        out := @ref list(*LevelApi.Exports, ast_alloc());
-        out.push(@static { x: LevelApi.Exports = (title = "Sandbox"); x });
-        //out.push(import("@/examples/circuit/levels/maze.fr").level_spec);  // only listing my own levels. just keeping this one for tests. (tc has a maze)
-        out.push_all(import("@/examples/circuit/levels/bf.fr").level_specs);
-        out.push_all(import("@/examples/circuit/levels/segment.fr").level_specs);
-        out.push_all(import("@/examples/circuit/levels/screen.fr").level_specs);
-        out.push_all(import("@/examples/circuit/levels/tutorial.fr").level_specs);
-        out.items()
-    };
-    state.levels = list(builtin_levels.len(), a);
-    for builtin_levels { it |
+    l := LevelApi.builtin_levels.levels;
+    state.levels = list(l.len(), a);
+    for l { it |
         state.levels&.push(level = it);
     };
     state.level = state.levels[state.level_index].level;
     if read_entire_file(temp(), progress_save_path) { in |
-        _ := Save'read_progress(in, state.levels&);
+        @if_let(Save'read_progress(in, state.levels&)) fn Ok(settings) => {
+            do_settings_raw(state, @ref assume_owned(settings, panicking_allocator), false); 
+        };
     };
     
     state.halt_message = list(a);
@@ -2356,9 +2390,9 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.dirty = true;
     state.ticks_per_eval = 1;
     state.recenter();
-    state.reset();
     state.prev_timestamp_ns = realtime_ns();
     
+    state.looking_at_examples = true;
     for cli_args() { path |
         path := path.str();
         if path.ends_with("circuit.data") || path.ends_with(".txt") {
@@ -2370,7 +2404,12 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         }
     };
     
-    state.reset();
+    // TODO: this breaks examples/gpu/cubes.fr because it wants idle to load its own thing
+    if state.loader.progress == .Idle {
+        state.looking_at_examples = false;
+        // TODO: no warning if the file doesn't exist yet or doesnt have any circuits in it
+        state.load_path_async(circuit_save_path, false);
+    };
 }
 
 fn recenter(state: *State) void = {
@@ -2441,10 +2480,6 @@ fn reset(state: *State) void = {
     world.scratch.items().set_zeroed();
 }
 
-// TODO: this doesn't happen for new_circuit, because suggested_components wants 
-//       to have an init-ed level for when its a multipart one that switches on .static_data, 
-//       but if new_circuit is called in edit mode, you can't init the level, 
-//       and if it's not in edit mode (because level map doesnt put you in edit mode rn), it hasn't compiled so can't init the level. 
 fn update_suggested_components(state: *State) void = {
     state.level_suggested&.clear();
     @if(!state.level_active) return();
@@ -2541,12 +2576,13 @@ fn find_keyboard(state: *State) void = {
     state.keyboard_data = (Some = data);
     v2 := group(c.gates[gate_i].kind) == .Tc2;
     state.keyboard_character_mode = @if(c.gates[gate_i].param != int(v2), .Char, @if(v2, .V2, .V1));
-    // TODO: v2 locations are different
 }
 
 #use("@/lib/collections/deque.fr");
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
+    @if(@is(event.type, .QUIT_REQUESTED, .UNFOCUSED, .ICONIFIED, .MOUSE_LEAVE)) state.autosave();
+    
     e := state.edit&;
     screen := vec2(sapp.framebuffer_width.float().cast(), sapp.framebuffer_height.float().cast()) 
         / 2;
@@ -2661,32 +2697,6 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                     state.max_ticks_per_eval = clamp(state.max_ticks_per_eval + tick_off, 1, 100_000_000);
                 }
                 fn LEFT_SHIFT() => { state.show_wire_ref_lines = true; }
-                fn L() => if !e.enable {
-                    if state.loader.progress == .Idle {
-                        state.download_schematic_archive_before_trying_to_load = true;
-                        state.load_path_async("Mandelbrot", false);
-                    };
-                }
-                fn Q() => if !state.keyboard_device_focused && state.loader.progress == .Idle {
-                    if state.tree.len > 0 {
-                        if state.tree[0].diagram_circuit { i |
-                            state.stash_undo();
-                            shift := event.modifiers.get(.shift) == 1;
-                            i: ?i64 = @if(shift, (Some = i), .None);
-                            out := state.write_save(i, true);
-                            _ := make_dirs("target");
-                            path := "target/circuit.txt";
-                            if shift {
-                                // hmm i fear initWithBytes in ns_str isn't going to work if its not valid utf8
-                                // sapp.set_clipboard_string(out.items());
-                                path = "target/circuit2.txt";
-                            };
-                            _ := write_entire_file(path, out);
-                            println(path);
-                            state.unstash_undo();
-                        };
-                    };
-                };
                 fn E() => {
                     state.set_edit_mode(!e.enable);
                 }
@@ -2749,10 +2759,14 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             }
         }
         fn CLIPBOARD_PASTED() => if event.pasted.contains("CIRCUIT v1") {
+            state.autosave();
+            state.looking_at_examples = true;
             state.load_path_async(event.pasted, true);
         };
         fn FILES_DROPPED() => for event.drop { path |
             if state.loader.progress == .Idle {
+                state.autosave();
+                state.looking_at_examples = true;
                 state.load_path_async(path, false);
             };
         };
@@ -2868,6 +2882,17 @@ load_path_worker :: fn(state: *State, in: *LoaderT.I, path: Str, is_bytes: bool,
     if requested_root_index { i |
         if i.ult(circuits.len) {
             root_index = i;
+        };
+    };
+    
+    if !state.looking_at_examples {
+        c := a.alloc_zeroed(Tc.Circuit, circuits.len + 1);
+        c.slice(0, circuits.len).copy_from(circuits);
+        l := LevelApi.builtin_levels;
+        build_level_map(l.levels, l.indices, c[c.len-1]&, a);
+        circuits = c;
+        if requested_root_index.is_none() {
+            root_index = c.len - 1;
         };
     };
     

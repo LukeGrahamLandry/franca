@@ -42,11 +42,11 @@ fn text_box_consumes_event(e: *EditState, event: *Sapp.Event) bool = {
 }
 
 // TODO: pass in the sdtx so can use the same one (silly to compile the shader twice)
-fn draw_text_boxes(e: *EditState, sg: *Sg.Self) void = {
-    @if(!e.enable && e.show_info_box.is_none()) return();
+fn put_text_boxes(e: *EditState) void = {
     t := e.text_box&;
+    @if(!e.enable && e.show_info_box.is_none()) return();
+    sdtx := t.text.default_context&;
     Terminal'push_state(t) {
-        sdtx := t.text.default_context&;
         I := reserved_buffers;
         enumerate t.buffers& { i, b |
             if i >= I {
@@ -65,7 +65,14 @@ fn draw_text_boxes(e: *EditState, sg: *Sg.Self) void = {
                 };
             };
         };
-        
+    };
+}
+
+fn draw_text_boxes(e: *EditState, sg: *Sg.Self, frame_size: Vec2) void = {
+    t := e.text_box&;
+    sdtx := t.text.default_context&;
+    @if(!e.enable && e.show_info_box.is_none()) return();
+        I := reserved_buffers;
         range(I, t.buffers.len) { i |
             sdtx.draw_layer(i + t.buffers.len);
         };
@@ -74,12 +81,10 @@ fn draw_text_boxes(e: *EditState, sg: *Sg.Self) void = {
             r := b.at;
             sg.apply_scissor_rect(r.pos.x.cast(), r.pos.y.cast(), r.w.cast(), r.h.cast(), true);
             sdtx.draw_layer(i);
-            i += 1;
         };
-    };
+    sg.apply_scissor_rect(@as(f32) 0, 0, frame_size.x, frame_size.y, true);
 }
 
-// TODO: make sure this can't happen while loader.progress==.Loading because circuit_arena will be used on the other thread
 fn hover_gate(e: *EditState, i: ?i64, c: *Circuit) void = {
     t := e.text_box&;
     @if((e.hovered_gate || -1) == (i || -1)) return();
@@ -181,67 +186,75 @@ fn get_field_string(e: *EditState, c: *Circuit, g: *Circuit.Gate, field: *Tc.Bui
     ""
 }
 
+// TODO: split apart the select from the execute. a) key binds can call the same code. b) dont have to have_logic=false, can delay until the end of the frame without dealing with font size changing
 fn text_box_selection(self: *Draw) bool = {
     state := self.state;
     e, sapp := (state.edit&, state.sapp);
-    no_code := e.enable || state.loader.progress != .Idle;
     idle := state.loader.progress == .Idle;
-    // note: the "\n" ones are computed later
-    names := @slice(
-        ("Component Docs", include_bytes("examples/circuit/docs.md")),
-        ("Level Instructions", state.level.description), 
-        ("Level Code", state.level.quine), 
-        ("Settings", @if(idle, "\n", "")), 
-        ("This Circuit", @if(state.loader.progress == .Loading, "", "\n")),
-        ("All Circuits", @if(state.loader.progress == .Loading, "", "\n")),
-        ("Circuit Code", @if(no_code, "", state.current_jitted_source)), 
-        ("Warnings", @if(no_code, "", state.warnings.items())), 
-        ("Edit Mode", "\n"),
-        ("Undo Tree", @if(e.enable, "\n", "")),
-        ("Level Map", @if(idle && !e.enable, "\n", "")),
-        ("New Circuit", @if(idle, "\n", "")),
+    Action :: @tagged(Show: Str, Toggle: *bool, Settings, EditMode, LevelMap, NewCircuit, ThisCircuit, AllCircuits, None, Fetch, Reset);
+    no_sim := e.enable || state.loader.progress == .Loading;
+    // TODO: make more of these work while compiling (be able to cancel). (and while loading, be able to queue)
+    names := @slice(@as(Ty(Str, Action))
+        ("Component Docs", (Show = include_bytes("examples/circuit/docs.md"))),
+        ("Level Instructions", (Show = state.level.description)), 
+        ("Settings", @if(idle, .Settings, .None)), 
+        ("Edit Mode", .EditMode),
+        ("Run", @if(no_sim, .None, (Toggle = state.auto_eval&))),
+        ("Step", @if(no_sim, .None, (Toggle = state.want_eval&))),
+        ("Undo Tree", @if(e.enable, (Toggle = e.show_undo_tree&), .None)),
+        ("Reset", @if(no_sim, .None, .Reset)),
+        ("Level Map", @if(idle && !e.enable, .LevelMap, .None)),
+        ("New Circuit", @if(idle, .NewCircuit, .None)),
+        ("Warnings", @if(no_sim, .None, (Show = state.warnings.items()))), 
+        ("Export One", @if(state.loader.progress == .Loading, .None, .ThisCircuit)),
+        ("Export All", @if(state.loader.progress == .Loading, .None, .AllCircuits)),
+        ("Circuit Code", @if(no_sim, .None, (Show = state.current_jitted_source))), 
+        ("Level Code", (Show = state.level.quine)), 
+        ("Credits", (Show = credits)), 
+        ("Fetch Examples", @if(idle && !e.enable, .Fetch, .None)),
     );
     prev := e.show_info_box;
     if state.clicked || state.either_clicked {
         e.show_info_box = .None;
     };
     range(0, names.len) { i |
-        pos := vec2(-20, (7 + i.float().cast()));
-        if names[i]._1 != "" {
+        pos := vec2(-23, (2 - i.float().cast()));
+        name, action := names[i];
+        if !action&.is(.None) && (!action&.is(.Show) || action.Show.len > 0) {
             active := false 
-            || (e.show_undo_tree && names[i]._0 == "Undo Tree")
-            || (e.enable && names[i]._0 == "Edit Mode")
-            || (e.show_info_box.is_some() && e.show_info_box.Some == i);
-            self.do_option(pos, names[i]._0, active, i, e.show_info_box&);
+            || (action&.is(.Toggle) && action.Toggle[])
+            || (action&.is(.EditMode) && e.enable)
+            || (action&.is(.Fetch) && state.looking_at_examples)
+            || (action&.is(.LevelMap) && state.current_diagram().is_some() && state.current_diagram().unwrap()[].is_level_map)
+            || ((e.show_info_box || -1) == i);
+            self.do_option(pos, name, active, i, e.show_info_box&);
         };
     };
     if ((prev || -1) != (e.show_info_box || -1)) {
         state.dirty = true;
         t := e.text_box&;
         buf := t.buffers[0];
-        @if(e.info_box_is_settings) do_settings(state, buf, false);
+        @if(e.info_box_is_settings&.take()) do_settings(state, buf, false);
         buf.clear_text();
         e.active_buffer_index = .None;
         each(t.buffers, fn(buf) => { buf.active = false; });
         if e.show_info_box { i |
-            if names[i]._0 == "New Circuit" {
-                e.show_info_box = .None;
+            action := names[i]._1&;
+            @match(action) {
+            fn NewCircuit() => {
                 state.set_edit_mode(true);
                 state.new_circuit();
-                return true;
             };
-            if names[i]._0 == "Undo Tree" {
-                e.show_info_box = .None;
-                e.show_undo_tree = !e.show_undo_tree;
-                return true;
+            fn Toggle(it) => {
+                it[][] = !it[][];
             };
-            if names[i]._0 == "Edit Mode" {
-                e.show_info_box = .None;
+            fn EditMode() => {
                 state.set_edit_mode(!e.enable);
-                return true;
             };
-            if names[i]._0 == "Level Map" {
-                e.show_info_box = .None;
+            fn LevelMap() => {
+                if state.looking_at_examples&.take() {
+                    state.load_path_async(circuit_save_path, false);
+                } else { 
                 // TODO: track which circuit you clicked a level gate in to get here so can have multiple and go back to the right one
                 if state.circuit.index_of(fn(it) => it.is_level_map) { i |
                     // TODO: but this does load async to recompile: state.set_edit_mode(false);
@@ -250,7 +263,30 @@ fn text_box_selection(self: *Draw) bool = {
                     state.level = state.levels[0].level;
                     load_circuit_index_async(state, i, state.world.tc_file_loader_device);
                 };
-                return true;
+                };
+            };
+            fn Fetch() => {
+                state.autosave();
+                state.looking_at_examples = true;
+                state.last_auto_save_time = 0;
+                state.download_schematic_archive_before_trying_to_load = true;
+                state.load_path_async("Mandelbrot", false);
+            }
+            fn Settings() => {
+                e.info_box_is_settings = true;
+                do_settings(state, buf, true);
+            }
+            fn Show(msg) => buf.append_string(msg[]);
+            fn Reset() => {
+                state.end_level();
+                state.reset();
+            }
+            @default => ();
+            };
+            
+            if @is(action.tag(), .NewCircuit, .EditMode, .LevelMap, .Fetch, .Toggle, .Reset) {
+                e.show_info_box = .None;
+                return !@is(action.tag(), .Toggle, .Reset);
             };
             
             e.active_buffer_index = (Some = 0);
@@ -258,18 +294,16 @@ fn text_box_selection(self: *Draw) bool = {
             buf.active = true;
             pad := 75.0;
             buf.at = (pos = (x = pad, y = pad), w = sapp.width().float() - pad*2, h = sapp.height().float() - pad*2);
-            @if(names[i]._0 == "Level Instructions") buf.append_string(state.level.title);
-            buf.append_string(names[i]._1);
             
-            if names[i]._0 == "This Circuit" || names[i]._0 == "All Circuits" {
+            // TODO: i can't copy non-utf8 so need to do the b64 thing 
+            if @is(action.tag(), .ThisCircuit, .AllCircuits) {
                 state.stash_undo();
-                i: ?i64 = @if(names[i]._0 == "All Circuits", .None, state.tree[0].diagram_circuit);
-                out := state.write_save(i, true);
+                i: ?i64 = @if(action.is(.AllCircuits) || state.tree.len == 0, .None, state.tree[0].diagram_circuit);
+                out := state.write_save(i, action.is(.AllCircuits));
                 buf.append_string(out);
                 state.unstash_undo();
             };
-            e.info_box_is_settings = names[i]._0 == "Settings";
-            @if(e.info_box_is_settings) do_settings(state, buf, true);
+            buf.render = (x = 0, y = 0); 
         };
     };
     false
@@ -278,21 +312,25 @@ fn text_box_selection(self: *Draw) bool = {
 // TODO: warning if it didn't parse (number expressions / boolean other than "true"/"false")
 // TODO: bounds (ex. ticks_per_frame is positive, bit_width <=64)
 do_settings :: fn(state: *State, buf: *Terminal.TextBuffer, read: bool) void = {
-    @if(state.tree.len == 0) return();
-    c := state.tree[state.tree.len - 1].diagram_circuit || return();
-    c := state.circuit[c]&;
     out := @ref u8.list(temp());
+    @if(!read) get_string(buf, out);
+    do_settings_raw(state, out, read);
+    @if(read) buf.append_string(out.items());
+};
+
+do_settings_raw :: fn(state: *State, out: *List(u8), read: bool) void = {
     if read {
-        @fmt(out, "# you can edit these values\n\n");
-        @fmt(out, "# circuit settings (saved in the circuit file)\n");
+        if state.current_diagram() { c |
+        @fmt(out, "# circuit settings\n");
         walk_settings_fields c { name, p |
             @fmt(out, "%=%\n", name, p[]);
         };
-        @fmt(out, "\n# simulator settings (not saved)\n");
+        };
+        @fmt(out, "\n# simulator settings\n");  // :magic
         walk_state_settings_fields state { name, p |
             @fmt(out, "%=%\n", name, p[]);
         };
-        @fmt(out, "\n\n# debug info\n");
+        @fmt(out, "\n\n# debug info\n");  // :magic
         @fmt(out, "# adapted_ticks_per_frame=%\n", state.ticks_per_eval);
         @fmt(out, "# arenas: circuit(used=%kb, allocated=%kb) simulation(allocated=%kb) ", state.circuit_arena&.current_used_size()/1024, state.circuit_arena&.current_allocated_size()/1024, state.world.buf.cap*8/1024);
         if state.loader.fr.it { fr, m |
@@ -300,15 +338,17 @@ do_settings :: fn(state: *State, buf: *Terminal.TextBuffer, read: bool) void = {
             @fmt(out, "compile(used=%kb, allocated=%kb) jit(allocated=%kb+%kb) ", arena.current_used_size()/1024, arena.current_allocated_size()/1024, m.segment_allocation.len/1024, m.forever_storage&.current_allocated_size()/1024);
         };
         @fmt(out, "\n");
-
-        buf.append_string(out.items());
+        @if(state.last_auto_save_time != 0) @fmt(out, "# circuits saved % ago\n", format_seconds((realtime_ns() - state.last_auto_save_time) / NS_PER_S));
+        @fmt(out, "# current_level=%\n", state.level.title);
     } else {
         state.dirty = true;
-        get_string(buf, out);
         lines := out.items().split("\n", temp());
+        if state.current_diagram() { c |
         walk_settings_fields c { name, p |
             WRITE(name, p);
         };
+        };
+        // TODO: bit silly that these won't save until you win/switchcircuit a level
         walk_state_settings_fields state { name, p |
             WRITE(name, p);
         };
@@ -354,8 +394,9 @@ do_settings :: fn(state: *State, buf: *Terminal.TextBuffer, read: bool) void = {
         X("max_ticks_per_frame", s.max_ticks_per_eval&);
         X("new_component_default_bit_width", s.edit.default_word_width&);
         X("show_suggested_components", s.show_suggested_components&);
+        X("show_wire_comments", s.show_wire_comments&);
+        X("show_logic_trace", s.show_logic_trace&);
         X("circuit_arena_gc_threshold_kb", s.edit.arena_gc_threshold_kb&);
-        // TODO: selected level/circuit/edit_mode but they need to do something on change
     };
 };
 
@@ -369,11 +410,8 @@ fn set_edit_mode(state: *State, new_edit_mode: bool) void = {
     
     if e.enable {
         state.ensure_holding_nothing();
+        state.autosave();  // TODO: this is a bit excessive since i do it on quit anyway im just afraid of crashes
         state.stash_undo();
-        out := state.write_save(.None, true);
-        _ := make_dirs("target");
-        path := "target/circuit_autosave.txt";
-        _ := write_entire_file(path, out);
     };
     e[] = (enable = !e.enable, dont_reset = e.dont_reset);
     if e.enable {
@@ -424,12 +462,9 @@ fn new_circuit(state: *State) void = {
         name = @afmt(a, "Untitled_%", c.len),
         gates = empty(),
         wires = empty(),
-        programs = empty(),
         min = vec2(0),
-        max = vec2(100),
+        max = state.level.default_size,
         dependencies = empty(),
-        v2 = false,
-        default_tick_rate = 1,
         is_arch = true,
     );
     c[c.len-1].undo&.push((transitions = empty(), time = realtime_ns() / NS_PER_S), a);
@@ -438,9 +473,7 @@ fn new_circuit(state: *State) void = {
     state.tree&.push(diagram_circuit = (Some = c.len-1));
     state.unstash_undo();
     default := state.levels[state.level_index].default_circuit&;
-    if default.is_none() {
-        default[] = (Some = c[c.len-1].id);
-    };
+    default[] = (Some = c[c.len-1].id);
 }
 
 UndoEntry :: Tc.Circuit.UndoEntry;
@@ -595,13 +628,105 @@ fn write_save(state: *State, i: ?i64, spec: bool) []u8 = {
     out.items()
 }
 
+circuit_save_path :: "target/circuit.txt";
 progress_save_path :: "target/circuitprogress.data";
 fn save_progress(state: *State) void = {
-    _ := make_dirs("target");
+    settings := {
+        out := @ref u8.list(temp());
+        do_settings_raw(state, out, true);
+        out := out.items();
+        // HACK
+        while => out.len > 0 && !out.starts_with("# simulator settings") {  // :magic
+            out = out.rest(1);
+        };
+        while => out.len > 0 && !out.ends_with("# debug info") {  // :magic
+            out.len -= 1;
+        };
+        out
+    };
     out := @ref u8.list(temp());
-    Save'write_progress(out, state.levels.items());
-    _ := write_entire_file(progress_save_path, out.items());
+    Save'write_progress(out, state.levels.items(), settings);
+    state.save_gracefully(progress_save_path, out.items());
 }
+
+fn autosave(state: *State) void = {
+    @if(state.looking_at_examples || state.loader.progress != .Idle) return();
+    state.stash_undo();
+    out := state.write_save(.None, true);
+    state.save_gracefully(circuit_save_path, out);
+    state.unstash_undo();
+    state.last_auto_save_time = realtime_ns();
+}
+
+fn save_gracefully(state: *State, path: Str, data: Str) void = {
+    @if(write_entire_file(path, data)) return();
+    _ := make_dirs(path.pop_path_segment());
+    @if(write_entire_file(path, data)) return();
+    if state.loader.progress != .Loading {
+        @fmt(state.warnings&, "failed to write file: %", path);
+    };
+}
+
+// TODO: do i want to do something like this for the sandbox examples too?
+build_level_map :: fn(levels: []*LevelApi.Exports, indices: []i64, c: *Tc.Circuit, arena: Alloc) void = {
+    gates := @ref Tc.Circuit.Gate.list(arena);
+    wires := @ref Tc.Circuit.Wire.list(arena);
+    level_gate, on, probe := (get_component_by_name("Level_gate", builtin_components), get_component_by_name("On_v2", builtin_components), get_component_by_name("Probe_wire_bit", builtin_components));
+    min_pos := vec2(0);
+    names := @const_slice("Tutorial", "Clockwork Devices", "Basic Foundations");
+    make_wire :: fn(a, b) => wires.push(path = (@slice(@as(Tc.Circuit.WireNode) (pos = a), (pos = b)) arena).as_raw_list());
+    range(0, indices.len - 1) { y |
+        start, end := (indices[y], indices[y+1]);
+        Y := y.float().cast()*-16;
+        if y == indices.len - 2 {
+            make_wire(vec2(-18, Y-7), vec2(2, Y-7));
+            wires[wires.len-1].comment = "click a yellow square to open a level";
+            make_wire(vec2(-18, Y-8), vec2(2, Y-8));
+            wires[wires.len-1].comment = "scroll to zoom";
+        };
+        w := vec2(2, Y+4);
+        gates.push(pos = w, kind = on, rotation = 2);
+        make_wire(w+vec2(-1,0), w + vec2(-2,0));
+        width := (end - start).float().cast() * -8;
+        make_wire(vec2(width+8-4, Y-5), vec2(0+4, Y-5));
+        wires[wires.len-1].comment = names[names.len-1-y];
+        range(0, end - start) { x |
+            name := levels[start + x].title;
+            pos := vec2(x.float().cast()*-8, Y);
+            gates.push(pos = pos, kind = level_gate, rotation = 3);
+            g := gates[gates.len - 1]&;
+            g.label&.push_all(name, arena);
+            make_wire(pos + vec2(4, 5), pos + vec2(-4, 5));
+            wires[wires.len-1].comment = name;
+            a, b := (g.pos + vec2(0, -4), g.pos + vec2(-8, 4));
+            if x != end - start - 1 {
+                make_wire(a, b);
+                min_pos = min(g.pos, min_pos);
+            };
+        };
+        w := vec2(width + 5, Y -4);
+        gates.push(pos = w, kind = probe, rotation = 2);
+        make_wire(w+ vec2(3,0), w + vec2(2,0));
+    };
+    c[] = (
+        id = (id = 1234567),
+        wires = wires.as_raw(),
+        gates = gates.as_raw(),
+        min = min_pos - vec2(12, 8),
+        max = vec2(4, 8),
+        dependencies = empty(),
+        name = "Level Map",
+        is_level_map = true, is_synthetic_level_map = true, is_arch = true,
+    );
+    c.undo&.push((transitions = empty(), time = realtime_ns() / NS_PER_S), arena);
+};
+
+format_seconds :: fn(s0: i64) Str = {
+    m0, s1 := s0.div_mod(60);
+    h0, m1 := m0.div_mod(60);
+    d0, h1 := h0.div_mod(24);
+    @tfmt("%d%h%m%s", d0, h1, m1, s1)
+};
 
 Terminal :: import("@/examples/gpu/terminal.fr");
 #use("@/examples/circuit/tc/load.fr");
@@ -609,5 +734,15 @@ Terminal :: import("@/examples/gpu/terminal.fr");
 #use("@/examples/circuit/gui.fr");
 #use("@/examples/circuit/eval.fr");
 #use("@/graphics/lib.fr");
+
+credits :: """
+https://franca.lukegrahamlandry.ca
+- the rules for the logic simulation are based on turingcomplete.game
+- dependencies (see franca/tests/deps.fr for versions & sources)
+    - libraries: stb_image, stb_truetype
+    - fonts: jetbrains mono, cpc
+    - sandbox example circuits are from the tc schematic hub
+- some code adapted from: qbe, sokol
+""";
 
 // TODO: move more stuff out of gui.fr

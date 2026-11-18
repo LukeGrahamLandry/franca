@@ -75,14 +75,11 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
     - option to emphasize wires that don't match pin width?
   - not having copy/paste/(move group) is really annoying
   - edit wire comments/colours
-  - show wire comments in the ui without needing to hover a specific wire
   - now that i have enough to compare, try to make the level code less verbose
   - circuit list levels it should pass so you can auto-test everything when you change a cc you use a lot
   - dont store is_arch (used for compile bidirectional differently) in circuit. 
     store show_in_cc_menu and show_in_arch_menu and just compile differently 
     if it is the top level thing. 
-  - dont stomp everything if accidently press L
-  - auto save 
   - be able to undo load/rename/delete circuit?
   - have an option to clear undos (or export circuit.txt without them)
   - dont load the undo graph until select circuit
@@ -92,12 +89,19 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
   - a bunch of the places that are `state.loader.progress == .Idle` could be `state.loader.progress != .Loading`,
     but shouldn't be looking at it at all because it can change in the middle of the frame which is bad karma. 
     should only count it after main_prepare_interp. 
-  - the level map needs to be stored seperately from your own circuits. open level map on start.
+  - copy forward your old circuit for the levels that are a sequence instead of creating a new one. 
+  - show "Level Map" button in edit mode too
+  - do the background for text boxes with draw quad instead of a bunch of chars. im just being lazy with not going back to screen space. 
+    box labels should have a background too so they're not as hard to read if they overlap with diagram text
+  - gui test that loads one with 1 screen then one with many to make sure update_image isn't called twice when resizing but already enabled
+  - should i have circuit embed part of cubes.fr instead of vice versa?
+  - hide some of the buttons in the level map?
+  - hide some of the components in the tutorial?
+  - with new level map, can no longer manually test my old maze things
 ```
 // TODO: bundle the source files the jit needs so binary is self contained
-// TODO: autosave & web localstorage
-//       - (rn i do save when leaving editor but to a different file that i dont load by default)
-// TODO: be able to paste to add one circuit without stomping everything. choose (replace all, replace one, add new). same for dragndrop and cli. 
+// TODO: web localstorage
+// TODO: for paste/dragndrop: choose (replace all, replace one, add new, view without saving).
 // TODO: allow enter custom component while in edit mode / make new custom components
 // - need to have some sort of feedback if you try to change the pin layout in a way that makes a usage site broken
 // TODO: copy paste an area

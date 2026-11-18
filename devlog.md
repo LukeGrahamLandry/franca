@@ -1,4 +1,12 @@
 
+## (Nov 17)
+
+- level map can use wires for labels until i decide if i want to make the components boxy to fit labels
+- vaugly trying to make the save system less terrible
+- fixed calling update_image twice if was already enabled and then needed to resize bigger for switching to new circuit
+- i sure am doing string comparisons in text_box_selection. not like it matters but its easier to fix it than to stop obsessing 
+- disheartening how much new code i seem to grow every time i touch it. idk what im doing wrong. 
+
 ## (Nov 16)
 
 - in interpreter, only setting output when it.post_read==-1 is wrong when !FEAT_COMPILE (otherwise even the interpreted pass bails to eval_compiled for pre_read)
@@ -14,6 +22,9 @@
     first frame always being 1 tick and is always gonna be a more sane estimate even if its not enough ticks to be super accurite. 
     i made it so overcomplicated in my quest to make it not constantly readjust. 
     is it worth how hard it is to recalibrate upwards when the loop is clamped to 60fps just to avoid an extra get time call at the end of the frame?
+- kinda did wire comments. they don't look good tho. mostly cause im using the nice font but not rebaking it for the right size. 
+- ugh, clearly the most urgant thing is not losing circuits if you press l then q. 
+  might as well make my level map programatically since im not doing anything interesting with it yet. 
 
 ## (Nov 15)
 
