@@ -190,15 +190,15 @@ fn get_field_string(e: *EditState, c: *Circuit, g: *Circuit.Gate, field: *Tc.Bui
 fn text_box_selection(self: *Draw) bool = {
     state := self.state;
     e, sapp := (state.edit&, state.sapp);
-    idle := state.loader.progress == .Idle;
+    idle := state.loader.progress != .Loading;
     Action :: @tagged(Show: Str, Toggle: *bool, Settings, EditMode, LevelMap, NewCircuit, ThisCircuit, AllCircuits, None, Fetch, Reset);
-    no_sim := e.enable || state.loader.progress == .Loading;
+    no_sim := e.enable || !idle;
     // TODO: make more of these work while compiling (be able to cancel). (and while loading, be able to queue)
     names := @slice(@as(Ty(Str, Action))
         ("Component Docs", (Show = include_bytes("examples/circuit/docs.md"))),
         ("Level Instructions", (Show = state.level.description)), 
         ("Settings", @if(idle, .Settings, .None)), 
-        ("Edit Mode", .EditMode),
+        ("Edit Mode", @if(idle, .EditMode, .None)),
         ("Run", @if(no_sim, .None, (Toggle = state.auto_eval&))),
         ("Step", @if(no_sim, .None, (Toggle = state.want_eval&))),
         ("Undo Tree", @if(e.enable, (Toggle = e.show_undo_tree&), .None)),
@@ -206,8 +206,8 @@ fn text_box_selection(self: *Draw) bool = {
         ("Level Map", @if(idle && !e.enable, .LevelMap, .None)),
         ("New Circuit", @if(idle, .NewCircuit, .None)),
         ("Warnings", @if(no_sim, .None, (Show = state.warnings.items()))), 
-        ("Export One", @if(state.loader.progress == .Loading, .None, .ThisCircuit)),
-        ("Export All", @if(state.loader.progress == .Loading, .None, .AllCircuits)),
+        ("Export One", @if(!idle, .None, .ThisCircuit)),
+        ("Export All", @if(!idle, .None, .AllCircuits)),
         ("Circuit Code", @if(no_sim, .None, (Show = state.current_jitted_source))), 
         ("Level Code", (Show = state.level.quine)), 
         ("Credits", (Show = credits)), 
@@ -243,6 +243,7 @@ fn text_box_selection(self: *Draw) bool = {
             @match(action) {
             fn NewCircuit() => {
                 state.set_edit_mode(true);
+                state.prepare_async();
                 state.new_circuit();
             };
             fn Toggle(it) => {
@@ -403,16 +404,17 @@ do_settings_raw :: fn(state: *State, out: *List(u8), read: bool) void = {
 fn set_edit_mode(state: *State, new_edit_mode: bool) void = {
     e := state.edit&;
     @if(e.enable == new_edit_mode) return();
-    @if(state.loader.progress != .Idle) return();
     @if(state.tree.len == 0) return();
     i := state.tree[0].diagram_circuit || return();
-    state.end_level();
     
     if e.enable {
         state.ensure_holding_nothing();
         state.autosave();  // TODO: this is a bit excessive since i do it on quit anyway im just afraid of crashes
         state.stash_undo();
+    } else {
+        @if(state.loader.progress == .Loading) return();
     };
+    state.end_level();
     e[] = (enable = !e.enable, dont_reset = e.dont_reset);
     if e.enable {
         state.unstash_undo();
@@ -451,7 +453,6 @@ fn forget_already_compiled(circuits: []Tc.Circuit) void = {
 }
 
 fn new_circuit(state: *State) void = {
-    @if(state.loader.progress != .Idle) return();
     a := state.edit.circuit_arena;
     state.ensure_holding_nothing();
     state.stash_undo();
@@ -650,7 +651,7 @@ fn save_progress(state: *State) void = {
 }
 
 fn autosave(state: *State) void = {
-    @if(state.looking_at_examples || state.loader.progress != .Idle) return();
+    @if(state.looking_at_examples || state.loader.progress == .Loading) return();
     state.stash_undo();
     out := state.write_save(.None, true);
     state.save_gracefully(circuit_save_path, out);

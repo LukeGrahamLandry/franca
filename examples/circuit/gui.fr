@@ -67,7 +67,8 @@ State :: @rec @struct {
     load_time: i64;
     compile_time: i64;
     warnings: List(u8);
-    loader: LoaderT;
+    loader: *LoaderT;
+    canceled_compilers: List(*LoaderT);
     download_schematic_archive_before_trying_to_load: bool;
     looking_at_examples: bool;  // HACK: disable saving so they dont stomp your stuff
     prev_timestamp_ns: i64;
@@ -121,7 +122,7 @@ main_use_output :: fn(state: *State, in: LoaderT.I, out: Result(rawptr, void)) v
     @if_let(out) fn Ok(callee) => {
         // doing this on the main thread so fast_eval&signeture fields can't tear
         fill_fast_eval(state.world.components, callee);
-        state.compile_time = timestamp() - state.loader.start_time;
+        state.compile_time = timestamp() - state.loader.start_time - state.load_time;
         state.first_jitted_frame = true;
         state.first_interpreted_frame = false;
     };
@@ -292,7 +293,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     if state.loader_thread_ready_for_interp&.take() {
         main_prepare_interp(state);
     };
-    progress := state.loader&.check();
+    progress := state.loader.check();
     if progress == .Loading {
         in := state.loader.in.unwrap();
         name := @match(in) {  // TODO: this is a race. can tear
@@ -378,7 +379,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
                 !state.auto_eval, state.ticks_per_eval, state.max_ticks_per_eval, state.tick, state.keyboard_device_focused, frame_time/1000);
             @if(progress == .Loading) @fmt(out, "loading...%ms ", timestamp() - state.loader.start_time);
             @if(state.load_time != 0) @fmt(out, "load_time=%ms ", state.load_time);
-            @if(progress == .Compiling)  @fmt(out, "compiling....%ms ", timestamp() - state.loader.start_time);
+            @if(progress == .Compiling)  @fmt(out, "compiling....%ms ", timestamp() - state.loader.start_time - state.load_time);
             @if(state.compile_time != 0) @fmt(out, "compile_time=%ms ", state.compile_time);
             if state.auto_eval && frame_time != 0 {
                 hz0 := state.tick_count_history&.get() * US_PER_S / frame_time;
@@ -586,7 +587,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         state.open_gate(a, b, c);
     };
     
-    @if(state.loader.progress == .Idle) if open_arch { i |
+    @if(state.loader.progress != .Loading) if open_arch { i |
         state.dirty = true;
         state.warnings&.clear();
         load_circuit_index_async(state, i, state.world.tc_file_loader_device);
@@ -966,7 +967,7 @@ fn draw_circuit_background(self: *Draw, circuit: *Tc.Circuit) void = {
     goal_top_right := self.text_spacing * vec2(-30, 2);
     self.diagram_pos = goal_top_right - circuit_top_right;
     
-    if state.loader.progress == .Idle {
+    if state.loader.progress != .Loading {
         self.put_text(state.warnings.items(), self.tc_to_world_pos(vec2(lo.x, hi.y + 5)), pack_rgba(255, 255, 255, 255));
     };
     
@@ -1758,7 +1759,7 @@ fn resize_screen_atlas(state: *State) void = {
     size := 128;
     if s.img.id != 0 {
         if s.atlas.width == texture_size_limit {
-            if !s.did_warning && state.loader.progress == .Idle {
+            if !s.did_warning && state.loader.progress != .Loading {
                 s.did_warning = true;
                 @fmtln(state.warnings&, "TODO: too many screens to fit in one texture");
             };
@@ -2348,7 +2349,6 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     };
     
     sapp.set_window_title("Circuitly Knot");
-    init(state.loader&, state);
     state.screen.to_drop = .None;
     state.keyboard_data = .None;
     state.prev_emphasized_wire = .None;
@@ -2358,6 +2358,9 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sapp.desc.enable_dragndrop = true;
     state.sg = sg; state.sapp = sapp;
     a := general_allocator();
+    state.loader = a.box_zeroed(LoaderT);
+    init(state.loader, state);
+    state.canceled_compilers = list(a);
     state.text&.setup(sg = sg, allocator = a, fonts = @slice(Sdtx.font.cpc), context = (char_buf_size = 100_000));
     state.draw&.setup(allocator = general_allocator(), sg = sg, max_vertices = 1_000_000);
     init_pipeline(state.draw&, state.pipe&, sg, (colors = (
@@ -2703,9 +2706,6 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 fn BACKSPACE() => {
                     e.action = .Delete;
                 }
-                fn M() => if e.enable {
-                    state.new_circuit();
-                }
                 @default => return();
             };
         }
@@ -2758,13 +2758,13 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                 state.left_mouse_down = false;
             }
         }
-        fn CLIPBOARD_PASTED() => if event.pasted.contains("CIRCUIT v1") {
+        fn CLIPBOARD_PASTED() => if state.loader.progress != .Loading && event.pasted.contains("CIRCUIT v1") {
             state.autosave();
             state.looking_at_examples = true;
             state.load_path_async(event.pasted, true);
         };
         fn FILES_DROPPED() => for event.drop { path |
-            if state.loader.progress == .Idle {
+            if state.loader.progress != .Loading {
                 state.autosave();
                 state.looking_at_examples = true;
                 state.load_path_async(path, false);
@@ -2811,7 +2811,8 @@ fn load_path_async(state: *State, path: Str, is_bytes: bool, requested_root_inde
     state.edit.field_names = empty();
     path := path.shallow_copy(a);
     state.warnings = list(a);
-    state.loader&.start_async(Path = (path = path, is_bytes = is_bytes, requested_root_index = requested_root_index));
+    state.prepare_async();
+    state.loader.start_async(Path = (path = path, is_bytes = is_bytes, requested_root_index = requested_root_index));
 }
 
 LoadSource :: @tagged(
@@ -2911,7 +2912,6 @@ load_path_worker :: fn(state: *State, in: *LoaderT.I, path: Str, is_bytes: bool,
 }
 
 fn load_circuit_index_async(state: *State, root_index: i64, tc_file_loader_device: []Tc.LoadedFile) void = {
-    @debug_assert_eq(state.loader.progress, .Idle);
     state.ensure_holding_nothing();
     state.end_level();
     state.stash_undo();
@@ -2920,7 +2920,29 @@ fn load_circuit_index_async(state: *State, root_index: i64, tc_file_loader_devic
     state.tree&.clear();
     forget_already_compiled(state.circuit);
     state.push_tree_node(diagram_circuit = (Some = root_index));
-    state.loader&.start_async(Index = (root_index = root_index, tc_file_loader_device = tc_file_loader_device, just_reset_arena = false));
+    state.prepare_async();
+    state.loader.start_async(Index = (root_index = root_index, tc_file_loader_device = tc_file_loader_device, just_reset_arena = false));
+}
+
+// TODO: if progress changes part way through the frame, will leak main_prepare_interp->load_atlas_part2->dealloc(a.pixels)
+fn prepare_async(state: *State) void = {
+    progress := state.loader.progress;
+    @debug_assert_ne(progress, .Loading);
+    a := general_allocator();
+    state.canceled_compilers&.unordered_retain(fn(it) => {
+        done := it.progress == .Ready;
+        if done {
+            it[].drop();
+            a.dealloc_one(LoaderT, it[]);
+        };
+        !done
+    });
+    if @is(progress, .Compiling, .Ready) {
+        state.current_jitted_source = "";
+        state.canceled_compilers&.push(state.loader);
+        state.loader = a.box_zeroed(LoaderT);
+        init(state.loader, state);
+    };
 }
 
 // should fine for the ui to show the diagram on the other thread while this compiles. 
@@ -3052,12 +3074,17 @@ Builtin :: Tc.Builtin;
 
 fn on_cleanup(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     on_cleanup(state.edit.text_box&, sapp, sg);
-    drop(state.loader&);
+    a := general_allocator();
+    state.canceled_compilers&.push(state.loader);
+    for state.canceled_compilers { it |
+        drop(it);
+        a.dealloc_one(LoaderT, it);
+    };
+    state.canceled_compilers&.drop();
     state.text&.shutdown();
     sg.destroy_pipeline(state.pipe&);
     sg.destroy(state.screen.img);
     sg.destroy(state.atlas.img);
-    a := general_allocator();
     state.draw&.destroy(sg, a);
     state.circuit_arena&.deinit();
     a.dealloc(u32, state.screen.atlas.buf);

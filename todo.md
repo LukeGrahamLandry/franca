@@ -83,11 +83,7 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
   - be able to undo load/rename/delete circuit?
   - have an option to clear undos (or export circuit.txt without them)
   - dont load the undo graph until select circuit
-  - allow doing things that would want to cancel the compile while in interpreted mode. 
-    mostly just have to track the index of the current compile job so you know to discard it (because the slow thing is just the franca compiler which obviously doesn't look at the World/Components/whatever). 
-    problem is that you need to know to make a new loader thread and not to reset_jit which is a bit involved. 
-  - a bunch of the places that are `state.loader.progress == .Idle` could be `state.loader.progress != .Loading`,
-    but shouldn't be looking at it at all because it can change in the middle of the frame which is bad karma. 
+  - shouldn't be looking at state.loader.progress at all because it can change in the middle of the frame which is bad karma. 
     should only count it after main_prepare_interp. 
   - copy forward your old circuit for the levels that are a sequence instead of creating a new one. 
   - show "Level Map" button in edit mode too
