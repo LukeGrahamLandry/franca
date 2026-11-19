@@ -900,7 +900,7 @@ fn draw_primitive_code(self: *Draw, instance: i64, parent_wire_offset: i64, hove
         if state.tree[state.tree.len - 1].graphical_gate { i |
             it := c.gates[i]&;
             if it.label.len != 0 {
-                sdtx.put(it.label.items());
+                sdtx.put(it.label);
                 sdtx.put("\n");
             };
         };
@@ -1064,9 +1064,9 @@ fn draw_gate_squares(self: *Draw, circuit: *Tc.Circuit) void = {
                 sdtx.put(s);
             };
             
-            put_line(it.label.items());
+            put_line(it.label);
             if group(it.kind) == .Tc2 && @is(Tc'gate_name(it.kind, .Tc2), .Static_eval, .Constant, .Static_indexer, .Halt_v2) {
-                put_line(it.data.items());
+                put_line(it.data);
             };
             
             if state.clicked {
@@ -1832,7 +1832,7 @@ EditState :: @struct {
     enable: bool = false;
     selected_gate: ?i64 = .None;
     original_gate_position: ?@struct(i: i64, rotation: u8, pos: Vec2, spawn: bool) = .None;
-    placing_wire_start: ?Ty(i64, i64) = .None;   // (wire index, path index)
+    placing_wire_start: ?Vec2 = .None;
     action: @enum(None, NewGate, Rotate, Delete, Copy) = .None;
     placing_type := zeroed(ComponentId); 
     
@@ -1883,16 +1883,15 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
         };
     };
     
-    if e.placing_wire_start { wire_i, path_i |
+    if e.placing_wire_start { start |
         sgl, W := (self.draw&, self.wire_node_width);
-        w := c.wires[wire_i]&;
-        start := w.path[path_i].pos;
         a := self.tc_to_world_pos(start);
         rounded := self.world_to_tc_pos(self.mouse_world_pos);
         inside := in_bounds(rounded);
         sgl.color = pack_rgba(100 + 150*int(!inside), 50, 50, 255);
         
         route := plan_route(start, rounded);
+        sgl.line(a - vec2(0, W/2), a + vec2(0, W/2), W);
         for route { pos |
             b := self.tc_to_world_pos(pos);
             sgl.line(a, b, W/2.5);
@@ -1908,19 +1907,21 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
             
             state.dirty = true;
             a := state.circuit_arena&.borrow();
-            if w.path.len == 1 && start == rounded {
-                w.path.len = 0;
-                e.placing_wire_start = .None;
+            e.placing_wire_start = .None;
+            if start == rounded {
                 break();
             };
-            
-                e.placing_wire_start = .None;
                 
                 splits := @ref Tc.Circuit.WireSplit.list(a);
+                path := @ref Tc.Circuit.WireNode.list(2, a);
+                path.push(pos = start);
+                split_for_node(c.wires&, start, a, splits);
                 for route { pos |
                     split_for_node(c.wires&, pos, a, splits);
-                    w.path&.push((pos = pos), a);
+                    path.push((pos = pos));
                 };
+                wire_i := c.wires.len;
+                c.wires&.push((path = path.items()), a);
                 @if(splits.len > 0) e.push_undo(SplitWires = (wires = splits.items(), undo = true));
                 e.push_undo(DeleteWire = (i = wire_i));
         };
@@ -1973,7 +1974,6 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
             if e.selected_gate&.take() { i |
                 perform_new_action(e, c, (DeleteGate = (i = i)));
             } else {
-                _ := e.placing_wire_start&.take();
                 pos := self.world_to_tc_pos(self.mouse_world_pos);
                 enumerate c.wires { i, it |
                     each it.path { p |
@@ -2008,17 +2008,7 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
         enumerate c.gates { i, it |
             @if(it.pos == rounded) break();
         };
-        a := state.circuit_arena&.borrow(); 
-        i := c.wires&.index_of(fn(it) => it.path.len == 0) || {
-            c.wires&.push((path = empty()), a);
-            c.wires.len - 1
-        };
-        c.wires[i].path = empty(); // cant reuse because undo has shallow copy
-        c.wires[i].path&.push((pos = rounded), a);
-        e.placing_wire_start = (Some = (i, 0));
-        splits := @ref Tc.Circuit.WireSplit.list(a);
-        split_for_node(c.wires&, rounded, a, splits);
-        @if(splits.len > 0) e.push_undo(SplitWires = (wires = splits.items(), undo = true));
+        e.placing_wire_start = (Some = rounded);
         state.dirty = true;
     };
 }
@@ -2082,13 +2072,17 @@ fn split_for_node(wires: *RawList(Tc.Circuit.Wire), pos: Vec2, a: Alloc, splits:
                     dir := dir / len;
                     range(0, len.cast().int()) { _ |
                         if fst == pos {
-                            old := it.path.items().rest(path_i);
-                            wires.push((path = old.shallow_copy(a).as_raw_list()), a);
-                            wires[wires.len - 1].path&.insert(0, (pos = pos), a);
+                            path := it.path;
+                            old := it.path.rest(path_i);
+                            new := a.alloc_init(Tc.Circuit.WireNode, old.len+1, fn(i) => @if(i == 0, (pos=pos), old[i-1]));
+                            wires.push((path = new), a);
                             it = wires[wire_i]&;
-                            it.path.len = path_i;
-                            it.path&.push((pos = pos), a);
-                            splits.push(old = wire_i, path_i = path_i, new = wires.len - 1, pos = pos);
+                            if it.path[path_i].pos == pos {
+                                it.path.len = path_i+1;
+                            } else {
+                                it.path = a.alloc_init(Tc.Circuit.WireNode, path_i+1, fn(i) => @if(i == path_i, (pos=pos), it.path[i]));
+                            };
+                            splits.push(old = wire_i, path_i = path_i, new = wires.len - 1, pos = pos, path = path);
                             break();
                         };
                         fst += dir;
@@ -2470,7 +2464,7 @@ fn reset(state: *State) void = {
         if group(g.kind) == .Tc2 && Tc'gate_name(g.kind, .Tc2) == .Level_gate && g.logical_gate_index != -1 {
             instance := state.world&[root].instance_offset_by_gate[g.logical_gate_index];
             data := state.world.storage.rest(instance).interpret_as_bytes().peek_type(Tc.Builtin.LevelGateData);
-            if state.levels.index_of(fn(it) => it.level.title == g.label.items()) { level_index |
+            if state.levels.index_of(fn(it) => it.level.title == g.label) { level_index |
                 data.output = state.levels[level_index].completed;
                 data.level_index = level_index.intcast();
             } else {

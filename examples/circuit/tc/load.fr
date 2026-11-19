@@ -43,7 +43,7 @@ Circuit :: @struct {
     
     Wire :: @struct {
         // only the first and last can connect to things. the others are just visual.
-        path: RawList(WireNode);
+        path: []WireNode;
         logical: WireId = (id = 0xFFFFFFFF);
         teleport := false;
         comment := "";
@@ -57,10 +57,10 @@ Circuit :: @struct {
         custom_id: CustomId = (id=0);  // when kind is Custom
         mystery_spice_for_custom_pins: Vec2 = vec2(0);
         settings: []i64 = empty();
-        data: RawList(u8) = empty();
+        data: []u8 = empty();
         logical_gate_index := -1;
         link_id: i64 = 0;  // ram.link_id is referenced by console.data. `{rom.link_id}.rom` file has init data. 
-        label: RawList(u8) = empty();
+        label: []u8 = empty();
         // (screen, console) -> ram
         // ram -> ports
         // port points to the one above it, which it depends on, they're executed top to bottom (reverse order of the linked list)
@@ -109,7 +109,7 @@ Circuit :: @struct {
         SplitWires: @struct(wires: []WireSplit, undo: bool),
     );
     // TODO: i shouldn't need to keep this much info because can just redo split_for_node when going forward
-    WireSplit :: @struct(old: i64, path_i: i64, new: i64, pos: Vec2);
+    WireSplit :: @struct(old: i64, path_i: i64, new: i64, pos: Vec2, path: []WireNode = empty(), path2: []WireNode = empty());
     UndoNode :: @struct {
         transitions: RawList(Transition) = empty();
         time: i64;
@@ -228,10 +228,10 @@ load_all_circuits :: fn(original_root: Str, a: Alloc, warn: *List(u8)) Ty([]Circ
             if it.kind.id == kind.id {
                 it.data = empty();
                 if read_entire_file(a, @tfmt("%%.%", dir, it.link_id, ext)) { data |
-                    it.data = data.as_raw_list();
+                    it.data = data;
                 };
                 if read_entire_file(a, @tfmt("%sandbox/%.%", dir, it.link_id, ext)) { data |
-                    it.data = data.as_raw_list();
+                    it.data = data;
                 };
                 continue();
             };
@@ -242,19 +242,19 @@ load_all_circuits :: fn(original_root: Str, a: Alloc, warn: *List(u8)) Ty([]Circ
             };
             file_index := it.settings&[0]&;
             file_index[] = -1;
-            if has_path_escapes(it.data.items()) {
-                @fmtln(warn, "FileLoader path [%] is sketchy", it.data.items());
+            if has_path_escapes(it.data) {
+                @fmtln(warn, "FileLoader path [%] is sketchy", it.data);
                 continue();
             };
             @if(it.data.len == 0) continue();  // none selected
             
-            path := @tfmt("%%", dir, it.data.items());
+            path := @tfmt("%%", dir, it.data);
             data := read_entire_file(a, path) || {
                 @fmtln(warn, "- failed to read [%] for file loader in [%]", path, name);
                 continue();
             };
             file_index[] = tc_file_loader_device.len;
-            tc_file_loader_device&.push(name = it.data.items(), data = data);
+            tc_file_loader_device&.push(name = it.data, data = data);
         };
         
         circuits&.push(info);
@@ -436,8 +436,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 
                 x, y := fix_pin_position(original_gate.pos);
                 insert(custom_pins&, dest, (x, y));
-                // TODO: bad if you then edit the label (editor shows pin names on hover)
-                name := original_gate.label.items();
+                name := original_gate.label;
                 if name == "" {
                     if shape.name == "Level_input_switched" || shape.name == "LevelInputArch" {
                         name = "in";
@@ -683,7 +682,7 @@ find_links_for_lastest_component :: fn(c: *Circuit, components: []Component, lin
                 continue();
             };
             // TODO: can id be negative?
-            custom_string := it.data.items();
+            custom_string := it.data;
             linked0, s := convert_number(custom_string, 10, dec_digit);
             if s.len == custom_string.len {
                 if custom_string != "" {
@@ -1753,7 +1752,7 @@ infer_auto_width :: fn(components: []Component, gates: []Component.Gate, width: 
 find_static_eval_expression :: fn(circuits: []Circuit, c: *Circuit, logical_to_circuit: []i64, gate_i: i64, gate: *Component.Gate, components: []Component) ?Str = {
     gi := logical_to_circuit[gate_i];
     if gi != -1 {
-        return(Some = c.gates[gi].data.items());
+        return(Some = c.gates[gi].data);
     };
     gate_i := (); logical_to_circuit := ();
     
@@ -1769,7 +1768,7 @@ find_static_eval_expression :: fn(circuits: []Circuit, c: *Circuit, logical_to_c
             || return(.None);
         // :SLOW
         if source.gates.find(fn(it) => it.logical_gate_index == gate.inline_index.zext()) { g_gate |
-            return(Some = g_gate.data.items());
+            return(Some = g_gate.data);
         };
         
         c = source;
@@ -2032,7 +2031,7 @@ set_initial_data_verbose :: fn(world: *World, circuits: []Tc.Circuit, root: Comp
         n := get_storage_count(world.components, gate);
         dest := world.storage.subslice(instance, n);
         src := @match(gate.kind.name(.Tc1)) {
-            fn Rom() => c_gate.data.items();
+            fn Rom() => c_gate.data;
             fn Program() => {
                 asm := circuit.programs.find(fn(it) => it.level_id == Tc.Circuit.Program.SANDBOX_LEVEL_ID && it.assembled.is_some() && it.gate_index == c_gate_i) 
                     || continue(@fmtln(warn, "TODO: missing program assembly for gate[%] in %", gate_i, circuit.name));
@@ -2348,7 +2347,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
             kind = (id = kind.zext() + component_offset(.Tc1).trunc()),
             pos = pos,
             settings = shallow_copy(@slice(s1, s2), a),
-            data = custom_string.shallow_copy(a).as_raw_list(),
+            data = custom_string.shallow_copy(a),
             mystery_spice_for_custom_pins = custom_pos + vec2(15), 
             link_id = id,
         );
@@ -2417,9 +2416,9 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
                     kind = (id = kind.zext() + trunc(component_offset(.Tc2))),
                     pos = pos,
                     settings = s.items(),
-                    data = custom_string.shallow_copy(a).as_raw_list(),
+                    data = custom_string.shallow_copy(a),
                     link_id = id,
-                    label = user_label.shallow_copy(a).as_raw_list(),
+                    label = user_label.shallow_copy(a),
                     watched = watched.items(),
                 );
                 
@@ -2488,7 +2487,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
         // non-version 16 has path reversed but i dont think direction matters?
         
         @if(path.len == 1) return(Err = "bad wire path length?");
-        wires&.push(path = path.as_raw(), teleport = path[0].length == 0, comment = comment.shallow_copy(a), colour = colour);
+        wires&.push(path = path.items(), teleport = path[0].length == 0, comment = comment.shallow_copy(a), colour = colour);
         
         for path { it |
             min_pos = min(min_pos, it.pos);

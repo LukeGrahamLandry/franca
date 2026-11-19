@@ -106,10 +106,10 @@ fn hover_gate(e: *EditState, i: ?i64, c: *Circuit) void = {
             continue :: local_return;
             out.clear(); get_string(t.buffers[i+I], out); text := out.items();
             
-            old := get_field_string(e, c, g, field);
+            old := get_field_string(e, c, g, field, true);
             @if(old == text) continue();
-            e.push_undo(SetGateField = (i = old_i, field = i, value = old.shallow_copy(a)));
-            set_field_string(e, c, g, field, text);
+            e.push_undo(SetGateField = (i = old_i, field = i, value = old));
+            set_field_string(e, c, g, field, text, false);
         };
     };
 
@@ -125,16 +125,20 @@ fn hover_gate(e: *EditState, i: ?i64, c: *Circuit) void = {
     enumerate shape.fields { i, field |
         e.field_names[i] = field.name;
         buf := t.buffers[i+I];
-        buf.append_string(get_field_string(e, c, g, field));
+        buf.append_string(get_field_string(e, c, g, field, false));
     };
     e.has_text_field = shape.fields.len > 0;
 }
 
 // TODO: warning if it didn't parse
 // TODO: bounds (width <= 64, endian 0/1, abs(shift) < 64). especially because bit_fields.set will debug assert
-fn set_field_string(e: *EditState, c: *Circuit, g: *Circuit.Gate, field: *Tc.Builtin.EditField, text: Str) void = {
-    @if(field.data_string) { g.data&.clear(); g.data&.push_all(text, e.circuit_arena); };
-    @if(field.label_string) { g.label&.clear(); g.label&.push_all(text, e.circuit_arena); };
+fn set_field_string(e: *EditState, c: *Circuit, g: *Circuit.Gate, field: *Tc.Builtin.EditField, text: Str, owned: bool) void = {
+    if field.data_string { 
+        g.data = @if(owned, text, text.shallow_copy(e.circuit_arena));
+    };
+    if field.label_string { 
+        g.label = @if(owned, text, text.shallow_copy(e.circuit_arena));
+    };
     if field.setting { settings_index |
         if settings_index >= g.settings.len {
             s := e.circuit_arena.alloc_zeroed(i64, settings_index+1);
@@ -150,8 +154,8 @@ fn set_field_string(e: *EditState, c: *Circuit, g: *Circuit.Gate, field: *Tc.Bui
     };
     
     if field.is_link_label {
-        g.watched.set_zeroed();
-        @if(text != "") if c.gates.find(fn(it) => it.label.items() == text) { target |
+        g.watched = empty();
+        @if(text != "") if c.gates.find(fn(it) => it.label == text) { target |
             if target.link_id == 0 || target.link_id == -1 {
                 target.link_id = realtime_ns();
             };
@@ -162,24 +166,24 @@ fn set_field_string(e: *EditState, c: *Circuit, g: *Circuit.Gate, field: *Tc.Bui
     };
 }
 
-fn get_field_string(e: *EditState, c: *Circuit, g: *Circuit.Gate, field: *Tc.Builtin.EditField) Str = {
-        @if(field.label_string) return(g.label.items());
+fn get_field_string(e: *EditState, c: *Circuit, g: *Circuit.Gate, field: *Tc.Builtin.EditField, owned: bool) Str = {
+        @if(field.label_string) return(g.label);
         @if(g.data.len == 0 || !field.data_string) if field.setting { settings_index |
             n := @if(settings_index < g.settings.len, g.settings&[settings_index], 0);
             if field.allow_auto && n == MIN_i64 {
                 return "auto";
             } else {
-                return @tfmt("%", n);
+                return @afmt(@if(owned, e.circuit_arena, temp()), "%", n);
             };
         };
-        @if(field.data_string) return(g.data.items()); 
+        @if(field.data_string) return(g.data); 
         
         if field.is_link_label && g.watched.len > 0 && g.watched[0].id != 0 {
             if c.gates.find(fn(it) => it.link_id == g.watched[0].id) { target |
-                if target.label.items() == "" {
-                    target.label&.push_all(@tfmt("%", g.watched[0].id), e.circuit_arena);
+                if target.label == "" {
+                    target.label = @afmt(e.circuit_arena, "%", g.watched[0].id);
                 };
-                return(target.label.items());
+                return target.label;
             };
         };
     
@@ -575,8 +579,6 @@ fn perform_action(e: *EditState, c: *Circuit, u: UndoEntry) UndoEntry = {
     (data = inverse, child_state_id = parent_state_id)
 }
 
-// TODO: now that i always need to re-copy out of the fields, should just be immutable Str not a rawlist (would save one direction of copy)
-//       rn leak arena space (until you toggle edit mode) if you spam undo<->redo
 fn perform_action_inner(e: *EditState, c: *Circuit, u: Circuit.UndoPayload) Circuit.UndoPayload = {
     a := e.circuit_arena;
     @match(u) {
@@ -584,8 +586,9 @@ fn perform_action_inner(e: *EditState, c: *Circuit, u: Circuit.UndoPayload) Circ
             g := c.gates[it.i]&;
             shape := get_builtin_shape(g.kind);
             f := shape.fields.index(it.field);
-            old := get_field_string(e, c, g, f).shallow_copy(e.circuit_arena);
-            set_field_string(e, c, g, f, it.value);
+            // TODO: this still does extra copies for ones that aren't stored as strings (like word width)
+            old := get_field_string(e, c, g, f, true);
+            set_field_string(e, c, g, f, it.value, true);
             (SetGateField = (i = it.i, field = it.field, value = old))
         }
         fn SetGatePosition(it) => {
@@ -597,9 +600,8 @@ fn perform_action_inner(e: *EditState, c: *Circuit, u: Circuit.UndoPayload) Circ
         }
         fn CopyGate(it) => {
             g := c.gates[it.i];
-            g.watched = g.watched.shallow_copy(a);
-            g.data = g.data.items().shallow_copy(a).as_raw_list();
-            g.label = g.label.items().shallow_copy(a).as_raw_list();
+            // note: data,label,watched are aliased
+            // TODO: no copy when going back and forth
             g.settings = g.settings.shallow_copy(a);
             c.gates[it.dest] = g;
             // TODO: copy entries in .programs
@@ -624,27 +626,46 @@ fn perform_action_inner(e: *EditState, c: *Circuit, u: Circuit.UndoPayload) Circ
         }
         fn DeleteWire(it) => {
             wire := c.wires[it.i];
-            c.wires[it.i].path.len = 0;
+            c.wires[it.i].path = empty();
             (UndeleteWire = (i = it.i, wire = wire))
         }
+        // ugh this is convoluted. the goal of keeping (.path,.path2) is to not spam copies 
+        // if you undo<->redo back and forth, but they're easy to recreate so not worth serializing. 
+        // TODO: i really need to write tests for this because this code fucking around with the indices is kinda write-only
+        // TODO: redo of whatever caused this split could call split_for_node again instead of storing extra at all. 
+        //       is avoiding spaming the copy worth doing all this? the sane thing would probably stop using an arena and then none of this would matter. 
         fn SplitWires(it) => {
             if it.undo {
                 each_rev it.wires { it |
                     old := c.wires[it.old].path&;
                     new := c.wires[it.new].path&;
-                    new.ordered_remove(0);
-                    old.ordered_remove(old.len - 1);
-                    old.push_all(new.items(), a);
-                    new.len = 0;
+                    it.path2 = old[];
+                    if it.path.len > 0 {
+                        old[] = it.path;
+                    } else {
+                        old[] = a.alloc_init(Circuit.WireNode, old.len-1+new.len-1, fn(i) => @if(i<old.len-1, old[i], new[i-(old.len-1)+1]));
+                    };
+                    it.path = new[];
+                    new[] = empty();
                 };
             } else {
                 each it.wires { it |
                     old := c.wires[it.old].path&;
                     new := c.wires[it.new].path&;
-                    new.push_all(old.items().rest(it.path_i), a);
-                    new.insert(0, (pos = it.pos), a);
-                    old.len = it.path_i;
-                    old.push((pos = it.pos), a);
+                    if it.path.len > 0 {
+                        new[] = it.path;
+                        it.path = old[];
+                        old[] = it.path2;
+                    } else {
+                        it.path = old[];
+                        OLD := old[].rest(it.path_i);
+                        new[] = a.alloc_init(Tc.Circuit.WireNode, OLD.len+1, fn(i) => @if(i == 0, (pos=it.pos), OLD[i-1]));
+                        if OLD[it.path_i].pos == it.pos {
+                            old[] = old[].slice(0, it.path_i+1);
+                        } else {
+                            old[] = a.alloc_init(Tc.Circuit.WireNode, it.path_i+1, fn(i) => @if(i == it.path_i, (pos=it.pos), old[i]));
+                        };
+                    };
                 };
             };
             (SplitWires = (wires = it.wires, undo = !it.undo))
@@ -716,7 +737,7 @@ build_level_map :: fn(levels: []*LevelApi.Exports, indices: []i64, c: *Tc.Circui
     level_gate, on, probe := (get_component_by_name("Level_gate", builtin_components), get_component_by_name("On_v2", builtin_components), get_component_by_name("Probe_wire_bit", builtin_components));
     min_pos := vec2(0);
     names := @const_slice("Tutorial", "Clockwork Devices", "Basic Foundations");
-    make_wire :: fn(a, b) => wires.push(path = (@slice(@as(Tc.Circuit.WireNode) (pos = a), (pos = b)) arena).as_raw_list());
+    make_wire :: fn(a, b) => wires.push(path = (@slice(@as(Tc.Circuit.WireNode) (pos = a), (pos = b)) arena));
     range(0, indices.len - 1) { y |
         start, end := (indices[y], indices[y+1]);
         Y := y.float().cast()*-16;
@@ -737,7 +758,7 @@ build_level_map :: fn(levels: []*LevelApi.Exports, indices: []i64, c: *Tc.Circui
             pos := vec2(x.float().cast()*-8, Y);
             gates.push(pos = pos, kind = level_gate, rotation = 3);
             g := gates[gates.len - 1]&;
-            g.label&.push_all(name, arena);
+            g.label = name;
             make_wire(pos + vec2(4, 5), pos + vec2(-4, 5));
             wires[wires.len-1].comment = name;
             a, b := (g.pos + vec2(0, -4), g.pos + vec2(-8, 4));

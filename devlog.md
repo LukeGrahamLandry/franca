@@ -7,7 +7,8 @@
   - the splitting needs to be in select_gate(None). ex. before if you started moving a gate and then did Copy, it woudn't make nodes for the pins. 
   - i feel like you can never have a UndeleteWire in the tree while you're going stuff with the nodes 
     because you would have had to redo through it to see the wire again because there are no cycles. 
-    but the fact that i have to think this hard about it means its too complicated and i shouldn't have mutable rawlists for things that will be undone. 
+    but the fact that i have to think this hard about it means its too complicated and i shouldn't have mutable rawlists for things that will be undone. then perform_action_inner wouldn't need to copy. 
+- switched a bunch of fields back to slices. less copy is good but i made SplitWires even more confusing in that quest
 
 ## (Nov 18)
 
