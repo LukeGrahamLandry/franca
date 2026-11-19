@@ -70,7 +70,7 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
             };
             
             if group(it.kind) == .Loaded || shape.body == .Custom {
-                p := it.mystery_spice_minus_fifteen_for_custom_pins;
+                p := it.mystery_spice_for_custom_pins - vec2(15);
                 @fmt(out, "%,%,% ", it.custom_id.id, p.x, p.y);
             };
             
@@ -164,6 +164,12 @@ write_save :: fn(circuits: []Tc.Circuit, files: []Tc.LoadedFile, i: ?i64, out: *
                         }
                         fn DeleteWire(it) => @fmt(out, "% ", it.i);
                         fn CopyGate(it) => @fmt(out, "% % ", it.i, it.dest);
+                        fn SplitWires(it) => {
+                            @fmt(out, "% % ", it.wires.len, it.undo.int());
+                            each it.wires { it |
+                                @fmt(out, "%,%,%,%,% ", it.old, it.path_i, it.new, it.pos.x, it.pos.y);
+                            };
+                        }
                     };
                     @if(@is(it.data&.tag(), .UndeleteGate, .UndeleteWire)) { out.len -= 1; };
                     
@@ -326,7 +332,7 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
                 custom_id = zeroed(Tc.CustomId),
                 kind = (id = kind_id.trunc()),
                 pos = vec2(pos_x.float().cast(), pos_y.float().cast()),
-                mystery_spice_minus_fifteen_for_custom_pins = vec2(0), 
+                mystery_spice_for_custom_pins = vec2(0), 
                 link_id = -1,
             );
             
@@ -344,7 +350,7 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
             if group(shape.kind) == .Loaded || shape.body == .Custom {
                 gate.custom_id = (id = get_int());
                 tc_junk_x, tc_junk_y := (get_int(), get_int());
-                gate.mystery_spice_minus_fifteen_for_custom_pins = vec2(tc_junk_x.float().cast(), tc_junk_y.float().cast());
+                gate.mystery_spice_for_custom_pins = vec2(tc_junk_x.float().cast(), tc_junk_y.float().cast()) + vec2(15);
             };
             
             if in&.pop_prefix("id") {
@@ -459,6 +465,14 @@ read_save :: fn(in: Str, a: Alloc) Result(Ty([]Tc.Circuit, []Tc.LoadedFile), Str
                     }
                     fn DeleteWire(it) => { it[] = (i = i); }
                     fn CopyGate(it) => { it[] = (i = i, dest = get_int()); }
+                    fn SplitWires(it) => {
+                        w := a.alloc_uninit(Tc.Circuit.WireSplit, i);
+                        undo := get_int() == 1;
+                        range(0, i) { i |
+                            w[i] = (old = get_int(), path_i = get_int(), new = get_int(), pos = vec2(get_int().float().cast(), get_int().float().cast()));
+                        };
+                        it[] = (wires = w, undo = undo);
+                    }
                 };
                 @if(parent_state_id == -1 || u.child_state_id == -1) continue();
                 

@@ -1,12 +1,3 @@
-// TODO: get rid of all the places i do string comparisons on the name. 
-//       put flags on the Template so don't have to be defensive about someone naming their CC "Output12456z" or whatever 
-// TODO: another source of bad things if i want to cope with malicious inputs: 
-//       every time i try to check if a path looks evil and if so print it out instead of using, 
-//       what if those bytes have magic terminal escape codes that do crazy shit.
-//       goes away if i just report errors gracefully in the gui instead. 
-
-SPAM_LOG :: false;
-
 // TODO: be consistant about how files are treated: rom/hdd has file loaded into .data for set_initial_data, sprites/file_loader has file in tc_file_loader_device indexed by .param. 
 // TODO: generally want to make the format i use here and in ../save.fr 
 //       make more sense to me and convert when loading a tc file. 
@@ -43,7 +34,7 @@ Circuit :: @struct {
     
     inlined: RawList(InlineRecord) = empty();
     
-    // this is annoying becuase mystery_spice_minus_fifteen_for_custom_pins is stored on the gate not the circuit so can be different each time but it never is? hopefully i'll understand when i need to edit custom components myself. probably about centering on the field?
+    // this is annoying becuase mystery_spice_for_custom_pins is stored on the gate not the circuit so can be different each time but it never is? hopefully i'll understand when i need to edit custom components myself. probably about centering on the field?
     cached_pin_radius: @struct(r: f32 = -1, p := vec2(0)) = ();
     
     undo: RawList(UndoNode) = empty();
@@ -64,8 +55,7 @@ Circuit :: @struct {
         kind: ComponentId;
         rotation: u8;
         custom_id: CustomId = (id=0);  // when kind is Custom
-        // TODO: v2 sanely got rid of the -15 so move that just to the v1 loader
-        mystery_spice_minus_fifteen_for_custom_pins: Vec2 = vec2(0);
+        mystery_spice_for_custom_pins: Vec2 = vec2(0);
         settings: []i64 = empty();
         data: RawList(u8) = empty();
         logical_gate_index := -1;
@@ -116,7 +106,10 @@ Circuit :: @struct {
         UndeleteWire: @struct(i: i64, wire: Wire),
         DeleteWire: @struct(i: i64),
         CopyGate: @struct(i: i64, dest: i64),
+        SplitWires: @struct(wires: []WireSplit, undo: bool),
     );
+    // TODO: i shouldn't need to keep this much info because can just redo split_for_node when going forward
+    WireSplit :: @struct(old: i64, path_i: i64, new: i64, pos: Vec2);
     UndoNode :: @struct {
         transitions: RawList(Transition) = empty();
         time: i64;
@@ -311,7 +304,6 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     @if(c.compiled.is_some()) return();
     c.inlined = empty();  // might be recompiling after editing
     
-    @if(SPAM_LOG) @fmtln(warn, "loading (%):", c.name);
     a := arena;
     gates, wire_count := find_pins(c, a, circuits, warn, unimplemented&);
     custom_pins := Ty(i64, i64).list(a);
@@ -516,7 +508,6 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
                 it := ();
                 @if(!unimplemented)
                 if child.has_bidirectional_pins {
-                    @if(SPAM_LOG) @fmtln(warn, "(%) calls (%) with bidirectional pins", c.name, child.name);
                     kill&.set(i);
                     child_logical := child.compiled || {
                         @fmtln(warn, "TODO: missing (%).compiled", child.name);
@@ -1464,6 +1455,7 @@ CONST_INDEX :: get_component_by_name("Constant", builtin_components);
 
 // TODO: save the index in param now that i call for_pins in the editor
 fn find_custom_impl(g_gate: *Circuit.Gate, circuits: []Circuit) ?*Circuit = {
+    ::AutoEq(CustomId); ::RefEq(CustomId);
     if circuits.find(fn(it) => it.id == g_gate.custom_id) { child |
         if child.compiled { child_id |
             return(Some = child);  // will also have computed pin locations
@@ -1500,10 +1492,10 @@ fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, 
         pins = child.pins;
         
         // TODO: i don't understand why this is part of the gate not the component or why 15 is the magic number but it makes the ones i've tested look right so here we are. 
-        p := gate.mystery_spice_minus_fifteen_for_custom_pins;
+        p := gate.mystery_spice_for_custom_pins;
         child.cached_pin_radius.p = p;  // editor uses this when placing custom component. TODO: calculate something sane myself for when i let you make new CCs
-        dx = p.x.cast().int() + 15;
-        dy = p.y.cast().int() + 15;
+        dx = p.x.cast().int();
+        dy = p.y.cast().int();
     };
     
     rot: i64 = gate.rotation.zext();
@@ -2066,7 +2058,7 @@ fn get_pin_radius(gate: *Circuit.Gate, circuits: []Circuit) f32 = {
     shape := get_builtin_shape(gate.kind);
     @if(shape.body != .Custom) return(shape.pin_radius);
     c := find_custom_impl(gate, circuits) || return(1.0/0.0);
-    p := gate.mystery_spice_minus_fifteen_for_custom_pins;
+    p := gate.mystery_spice_for_custom_pins;
     if c.cached_pin_radius.r >= 0 && c.cached_pin_radius.p == p {
         return c.cached_pin_radius.r;
     };
@@ -2357,7 +2349,7 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
             pos = pos,
             settings = shallow_copy(@slice(s1, s2), a),
             data = custom_string.shallow_copy(a).as_raw_list(),
-            mystery_spice_minus_fifteen_for_custom_pins = custom_pos, 
+            mystery_spice_for_custom_pins = custom_pos + vec2(15), 
             link_id = id,
         );
         } else {
@@ -2426,7 +2418,6 @@ load_circuit :: fn(in: Str, arena: Alloc, name: Str) Result(Circuit, Str) = {
                     pos = pos,
                     settings = s.items(),
                     data = custom_string.shallow_copy(a).as_raw_list(),
-                    mystery_spice_minus_fifteen_for_custom_pins = vec2(-15), 
                     link_id = id,
                     label = user_label.shallow_copy(a).as_raw_list(),
                     watched = watched.items(),

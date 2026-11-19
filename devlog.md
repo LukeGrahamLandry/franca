@@ -1,4 +1,14 @@
 
+## (Nov 19)
+
+- soon i want to have more tests for the ui part so seperating more of the draw from doing the thing
+- split_for_node in the undo tree
+  - need to be careful about the order. the thing that caused the split needs to be undone before the split itself
+  - the splitting needs to be in select_gate(None). ex. before if you started moving a gate and then did Copy, it woudn't make nodes for the pins. 
+  - i feel like you can never have a UndeleteWire in the tree while you're going stuff with the nodes 
+    because you would have had to redo through it to see the wire again because there are no cycles. 
+    but the fact that i have to think this hard about it means its too complicated and i shouldn't have mutable rawlists for things that will be undone. 
+
 ## (Nov 18)
 
 - pull info the interpreter needs out of Gate into Op so it doesn't have to step through as big an array

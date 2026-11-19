@@ -22,8 +22,6 @@ State :: @rec @struct {
     pipe: Sgl.Pipeline;
     pos: Vec2;
     scale: f32;
-    sg: *Sg.Self;
-    sapp: *Sapp.Self;
     dirty: bool;
     mouse_pos: Vec2;
     world: World;
@@ -132,7 +130,7 @@ main_use_output :: fn(state: *State, in: LoaderT.I, out: Result(rawptr, void)) v
     // OR: failed to make new code and won't run because component.error
 }
 
-main_prepare_interp :: fn(state: *State) void = {
+main_prepare_interp :: fn(state: *State, sg: *Sg.Self) void = {
     state.first_jitted_frame = false;
     state.first_interpreted_frame = true;
     if state.current_diagram() { c |
@@ -155,7 +153,7 @@ main_prepare_interp :: fn(state: *State) void = {
     };
     @if(state.source_unchanged&.take()) return();
     
-    state.load_atlas_part2(state.sg);
+    state.load_atlas_part2(sg);
     state.load_time = timestamp() - state.loader.start_time;
 }
 
@@ -297,7 +295,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sgl := state.draw&;
     
     if state.loader_thread_ready_for_interp&.take() {
-        main_prepare_interp(state);
+        main_prepare_interp(state, sg);
     };
     progress := state.loader.check();
     if progress == .Loading {
@@ -406,9 +404,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         }
     };
     
-    if self.text_box_selection() {
-        have_logic = false;
-    };
+    new_text_box := self.menu_selection();
     open_arch := self.arch_selection();
     
     if have_logic {
@@ -501,6 +497,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     sgl.translate(state.pos.x, state.pos.y, 0.0);
     sgl.scale(state.scale * screen_scale.x, state.scale * screen_scale.y, 1.0);
     
+    goto_undo: ?i64 = .None;
     if state.current_diagram() { circuit |
         if state.show_wire_comments {
             sdtx := self.label_sdtx;
@@ -518,7 +515,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         self.draw_pin_lines(circuit);
         self.draw_gate_hover_line(circuit);
         self.update_edit(circuit, state.circuit);
-        self.draw_undo_tree();
+        goto_undo = self.draw_undo_tree();
     };
     
     positions := self.emphasized_wire_positions;
@@ -585,8 +582,11 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             };
         };
         
-        state.finish_screens();
+        state.finish_screens(sg);
     };
+    
+    if(goto_undo, fn(i) => state.goto_undo_node(i));
+    if(new_text_box, fn(i) => state.apply_menu_action(i));
     
     // without this you get a flicker and occasionally a bounds check assertion! for hopefully intuitive reasons. dear rust would like to have a word im sure.
     if self.open_gate&.take() { a, b, c |  // wait until done rendering components to change the tree. 
@@ -1072,7 +1072,7 @@ fn draw_gate_squares(self: *Draw, circuit: *Tc.Circuit) void = {
             if state.clicked {
                 if e.enable {
                     if e.no_selection() {
-                        e.select_gate((Some = g_gate_index), circuit, false);
+                        e.select_gate((Some = g_gate_index), circuit, false, state.circuit);
                         state.clicked = false;
                     };
                 } else {
@@ -1265,12 +1265,10 @@ fn highlight_inlined(self: *Draw, inline_record: u32, c: *Component) void = {
 }
 
 // TODO: pre-clip the whole thing if it can't be in the view port
-fn draw_undo_tree(self: *Draw) void = {
+fn draw_undo_tree(self: *Draw) ?i64 = {
     state, e, sgl, sdtx := (self.state, self.edit&, self.draw&, self.sdtx);
-    if !(state.tree.len > 0 && e.enable && e.show_undo_tree && state.loader.progress == .Idle) {
-        return();
-    };
-    c := state.current_diagram() || return();
+    @if(!e.enable || !e.show_undo_tree) return(.None);
+    c := state.current_diagram() || return(.None);
     W := (self.wire_node_width);
     
     GraphicsUndoNode :: @struct(pos: Vec2, current: bool, seen: bool);
@@ -1347,9 +1345,13 @@ fn draw_undo_tree(self: *Draw) void = {
             stack.pop();
         };
     };
-    
+    goto
+};
+
+// TODO: if the path is really long, animate it across multiple frames?
+fn goto_undo_node(state: *State, goal: i64) void = {
+    e := state.edit&;
     // TODO: dont leave redo dust in the tree
-    if goto { goal |
         state.ensure_holding_nothing();  // can add nodes so needs to be before path finding. 
         
         // TODO: detect cycles even tho there shouldn't be any because i don't deduplicate states
@@ -1359,9 +1361,9 @@ fn draw_undo_tree(self: *Draw) void = {
         while => path.len > 0 && path[path.len - 1].node != goal {
             it := path[path.len - 1]&;
             if it.edge < e.undo[it.node].transitions.len {
-                t := e.undo[it.node].transitions[it.edge];
+                t := e.undo[it.node].transitions[it.edge].action.child_state_id;
                 it.edge += 1;
-                path.push(node = t.action.child_state_id);
+                path.push(node = t);
             } else {
                 path.pop();
             };
@@ -1371,14 +1373,13 @@ fn draw_undo_tree(self: *Draw) void = {
             @fmtln(state.warnings&, "failed to find path to target undo state. this should be unreachable");
             return();
         };
-        graph := e.undo;
         _ := path.pop();
         for path { it |
             @debug_assert_eq(it.node, current[]);
             apply_transition(state, it.edge - 1);
         };
         state.dirty = true;
-    };
+} 
     
     slowly_display_transition :: fn(state: *State, it: Tc.Circuit.UndoEntry, parent_state_id: i64) ?Str = {  // time to do some sketchy shit do da do da
         state.stash_undo();
@@ -1396,7 +1397,6 @@ fn draw_undo_tree(self: *Draw) void = {
         };
         .None
     };
-};
 
 fn draw_wire_comment(self: *Draw, wire: *Tc.Circuit.Wire) void = {
     state := self.state;
@@ -1563,7 +1563,7 @@ fn child_probes(self: *Draw, gate: *Tc.Circuit.Gate, parent: *Tc.Circuit) void =
     c := world[gate.kind]&;
     @if(!c.has_probes) return();
     child := state.circuit.find(fn(it) => it.compiled.is_some() && it.compiled.Some.id == gate.kind.id) || return();
-    pos := gate.pos + gate.mystery_spice_minus_fifteen_for_custom_pins + vec2(15);
+    pos := gate.pos + gate.mystery_spice_for_custom_pins;
     
     prev_instance := self.base_instance;
     parent_c := world[parent.compiled.unwrap()]&;
@@ -1742,22 +1742,22 @@ fn screen(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Compo
 // TODO: use this for DotMatrixDisplay too 
 //       but then need to deal with switching textures between this and the sprite screen one. 
 //       if did that then could easily allow mixed v1/v2 components in one circuit which would be nice. 
-fn finish_screens(state: *State) void = {
-    s, sg := (state.screen&, state.sg);
+fn finish_screens(state: *State, sg: *Sg.Self) void = {
+    s := state.screen&;
     if s.enable&.take() {
         sg.update_image(s.img, @ref SubImage(s.atlas.buf.interpret_as_bytes()));
         s.atlas.x = 1; s.atlas.y = 1; s.atlas.current_row_height = 1;  // :WhitePixelForDrawingSolidColours
     };
     if s.need_resize&.take() {
         // do this last so any components that fit before resizing can still draw with the old texture on this frame
-        state.resize_screen_atlas();
+        state.resize_screen_atlas(sg);
     };
 }
 
 // TODO: dont hard code this. my metal is double this but webgpu makes you ask for it in the limits. 
 texture_size_limit :: 8192;
-fn resize_screen_atlas(state: *State) void = {
-    s, sg, a := (state.screen&, state.sg, general_allocator());
+fn resize_screen_atlas(state: *State, sg: *Sg.Self) void = {
+    s, a := (state.screen&, general_allocator());
     size := 128;
     if s.img.id != 0 {
         if s.atlas.width == texture_size_limit {
@@ -1831,7 +1831,7 @@ fn text_to_world_pos(self: *Draw, pos: Vec2) Vec2 =
 EditState :: @struct {
     enable: bool = false;
     selected_gate: ?i64 = .None;
-    original_gate_position: ?get_variant_type(Tc.Circuit.UndoPayload, .SetGatePosition) = .None;
+    original_gate_position: ?@struct(i: i64, rotation: u8, pos: Vec2, spawn: bool) = .None;
     placing_wire_start: ?Ty(i64, i64) = .None;   // (wire index, path index)
     action: @enum(None, NewGate, Rotate, Delete, Copy) = .None;
     placing_type := zeroed(ComponentId); 
@@ -1878,13 +1878,7 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
                 // TODO: some type of visual feedback
                 break();
             };
-            a := state.circuit_arena&.borrow();
-            for_pins(info, gate, circuits) { _, dx, dy |
-                pos := gate.pos + vec2(dx.float().cast(), dy.float().cast());
-                split_for_node(c.wires&, pos, a);
-            };
-            
-            e.select_gate(.None, c, false);
+            e.select_gate(.None, c, false, state.circuit);
             state.dirty = true;
         };
     };
@@ -1919,14 +1913,16 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
                 e.placing_wire_start = .None;
                 break();
             };
-            e.push_undo(DeleteWire = (i = wire_i));
             
                 e.placing_wire_start = .None;
                 
+                splits := @ref Tc.Circuit.WireSplit.list(a);
                 for route { pos |
-                    split_for_node(c.wires&, pos, a);
+                    split_for_node(c.wires&, pos, a, splits);
                     w.path&.push((pos = pos), a);
                 };
+                @if(splits.len > 0) e.push_undo(SplitWires = (wires = splits.items(), undo = true));
+                e.push_undo(DeleteWire = (i = wire_i));
         };
     };
     
@@ -1938,7 +1934,6 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
                 c.gates&.push(zeroed(Tc.Circuit.Gate), a);
                 c.gates.len - 1
             };
-            e.push_undo(DeleteGate = (i = gate_i));
             gate := c.gates[gate_i]&;
             ;{  // can't reuse pointed at stuff because its shallow copied in UndoEntry for now
                 gate[] = zeroed(Tc.Circuit.Gate);  
@@ -1961,12 +1956,12 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
                     if check.compiled { kind |
                         if kind.id == gate.kind.id {
                             gate.custom_id = check.id;
-                            gate.mystery_spice_minus_fifteen_for_custom_pins = check.cached_pin_radius.p;
+                            gate.mystery_spice_for_custom_pins = check.cached_pin_radius.p;
                         };
                     };
                 };
             };
-            e.select_gate((Some = gate_i), c, true);
+            e.select_gate((Some = gate_i), c, true, state.circuit);
         }
         fn Rotate() => if e.selected_gate { gate_i |
             gate := c.gates[gate_i]&;
@@ -1992,14 +1987,14 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
         fn Copy() => {
             a := e.circuit_arena;
             if e.selected_gate { gate_i |
-                e.select_gate(.None, c, false);
+                e.select_gate(.None, c, false, state.circuit);
                 dest_i := c.gates&.index_of(fn(it) => it.kind.is_placeholder()) || {
                     c.gates&.push(zeroed(Tc.Circuit.Gate), a);
                     c.gates.len - 1
                 };
                 perform_new_action(e, c, (CopyGate = (i = gate_i, dest = dest_i)));
                 // TODO: you want this to be `true` so undoing once doesn't setposition back to overlap the original gate but then the copy also needs to include the first destination you put it at
-                e.select_gate((Some = dest_i), c, false);
+                e.select_gate((Some = dest_i), c, false, state.circuit);
             };
         }
         fn None() => ();
@@ -2021,8 +2016,9 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
         c.wires[i].path = empty(); // cant reuse because undo has shallow copy
         c.wires[i].path&.push((pos = rounded), a);
         e.placing_wire_start = (Some = (i, 0));
-        // TODO: be able to undo this
-        split_for_node(c.wires&, rounded, a);
+        splits := @ref Tc.Circuit.WireSplit.list(a);
+        split_for_node(c.wires&, rounded, a, splits);
+        @if(splits.len > 0) e.push_undo(SplitWires = (wires = splits.items(), undo = true));
         state.dirty = true;
     };
 }
@@ -2071,7 +2067,7 @@ plan_route :: fn(start: Vec2, rounded: Vec2) []Vec2 = {
     (@slice(rounded)).shallow_copy(temp())
 };
 
-fn split_for_node(wires: *RawList(Tc.Circuit.Wire), pos: Vec2, a: Alloc) void = {
+fn split_for_node(wires: *RawList(Tc.Circuit.Wire), pos: Vec2, a: Alloc, splits: *List(Tc.Circuit.WireSplit)) void = {
     range(0, wires.len) { wire_i |
         break :: local_return;
         it := wires[wire_i]&;
@@ -2092,6 +2088,7 @@ fn split_for_node(wires: *RawList(Tc.Circuit.Wire), pos: Vec2, a: Alloc) void = 
                             it = wires[wire_i]&;
                             it.path.len = path_i;
                             it.path&.push((pos = pos), a);
+                            splits.push(old = wire_i, path_i = path_i, new = wires.len - 1, pos = pos);
                             break();
                         };
                         fst += dir;
@@ -2107,20 +2104,37 @@ fn is_end(it: *Tc.Circuit.Wire, pos: Vec2) bool =
 
 fn no_selection(e: *EditState) bool = e.placing_wire_start.is_none() && e.selected_gate.is_none();
 
-fn select_gate(e: *EditState, i: ?i64, c: *Tc.Circuit, spawn: bool) void = {
+fn select_gate(e: *EditState, i: ?i64, c: *Tc.Circuit, spawn: bool, circuits: []Tc.Circuit) void = {
     if e.selected_gate { old_i |
         if ((i || -1) != old_i) {
             g := c.gates[old_i]&;
+            
+            a := e.circuit_arena;
+            splits := @ref Tc.Circuit.WireSplit.list(a);
+            info := get_builtin_shape(g.kind);
+            for_pins(info, g, circuits) { _, dx, dy |
+                pos := g.pos + vec2(dx.float().cast(), dy.float().cast());
+                split_for_node(c.wires&, pos, a, splits);
+            };
+            if splits.len > 0 {
+                e.push_undo(SplitWires = (wires = splits.items(), undo = true));
+            };
+            
             if e.original_gate_position&.take() { it |
-                @if(it.i == old_i) if !(it.pos == g.pos) || it.rotation != g.rotation {
-                    e.push_undo(SetGatePosition = it);
-                };
+                @if(it.i == old_i) 
+                if it.spawn {
+                    e.push_undo(DeleteGate = (i = it.i));
+                } else {
+                    if !(it.pos == g.pos) || it.rotation != g.rotation {
+                        e.push_undo(SetGatePosition = (i = it.i, pos = it.pos, rotation = it.rotation));
+                    };
+                }
             };
         };
     };
-    @if(!spawn) if i { i |
+    if i { i |
         g := c.gates[i]&;
-        e.original_gate_position = (Some = (i = i, pos = g.pos, rotation = g.rotation));
+        e.original_gate_position = (Some = (i = i, pos = g.pos, rotation = g.rotation, spawn = spawn));
     };
     
     e.selected_gate = i;
@@ -2348,6 +2362,7 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
             buf.single_line = i >= reserved_buffers;
             push(t.buffers&, buf);
         };
+        fit_screen(sapp, t.buffers[0]);
     };
     
     sapp.set_window_title("Circuitly Knot");
@@ -2358,7 +2373,6 @@ fn on_init(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     state.edit = (circuit_arena = state.circuit_arena&.borrow(), text_box = state.edit.text_box);
     sapp.desc.enable_clipboard = true;
     sapp.desc.enable_dragndrop = true;
-    state.sg = sg; state.sapp = sapp;
     a := general_allocator();
     state.loader = a.box_zeroed(LoaderT);
     init(state.loader, state);
@@ -2589,8 +2603,9 @@ fn find_keyboard(state: *State) void = {
 
 fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
     @if(@is(event.type, .QUIT_REQUESTED, .UNFOCUSED, .ICONIFIED, .MOUSE_LEAVE)) state.autosave();
-    
     e := state.edit&;
+    @if(event.type == .RESIZED) fit_screen(sapp, e.text_box.buffers[0]);
+    
     screen := vec2(sapp.framebuffer_width.float().cast(), sapp.framebuffer_height.float().cast()) 
         / 2;
     mouse := vec2(event.mouse_x, -event.mouse_y) / screen + vec2(-1.0, 1.0);
@@ -2603,7 +2618,6 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
         };
         return();
     };
-    
     
     if !event.key_repeat && @is(event.type, .KEY_DOWN, .KEY_UP) {
         if event.key_code == .K && event.type == .KEY_DOWN && event.modifiers.get(.shift) != 0  && event.modifiers.get(.super) != 0 {
@@ -2661,15 +2675,11 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
             tick_off := @if(event.modifiers.get(.super) == 1, 1000, tick_off);
             @match(event.key_code) {
                 fn ESCAPE() => {
-                    @if(e.show_info_box.is_some() && e.info_box_is_settings) do_settings(state, e.text_box.buffers[0], false);
-                    
-                    e.show_info_box = .None;
-                    e.active_buffer_index = .None;
+                    state.close_info_box();
                     if e.enable {
-                        @if(state.tree.len == 0) return();
-                        i := state.tree[state.tree.len - 1].diagram_circuit || return();
-                        c := state.circuit[i]&;
-                        hover_gate(e, .None, c);
+                        if state.current_diagram() { c |
+                            hover_gate(e, .None, c);
+                        };
                     } else {
                         state.pop_tree_node();
                     };
@@ -2780,13 +2790,13 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
 }
 
 pan_directions :: @const_slice(vec2(0, -1), vec2(1, 0), vec2(0, 1), vec2(-1, 0));
-pan_keys :: @const_slice(Sapp.Keycode.W, .A, .S, .D);
+pan_keys :: @const_slice(Sapp.Keycode.W, .A, .S, .D, .UP, .LEFT, .DOWN, .RIGHT);
 fn check_movement(state: *State) void = if state.pan_keys_pressed != 0 && !state.keyboard_device_focused {
     state.dirty = true;
     dir := vec2(0);
-    range(0, 4) { i |
+    range(0, 8) { i |
         if state.pan_keys_pressed.bit_and(1.shift_left(i)) != 0 {
-            dir += pan_directions[i];
+            dir += pan_directions[i.umod(4)];
         };
     };
     if dir.x != 0 || dir.y != 0 {  // dont be NaN if opposite keys cancel

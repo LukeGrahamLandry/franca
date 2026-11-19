@@ -186,15 +186,12 @@ fn get_field_string(e: *EditState, c: *Circuit, g: *Circuit.Gate, field: *Tc.Bui
     ""
 }
 
-// TODO: split apart the select from the execute. a) key binds can call the same code. b) dont have to have_logic=false, can delay until the end of the frame without dealing with font size changing
-fn text_box_selection(self: *Draw) bool = {
-    state := self.state;
-    e, sapp := (state.edit&, state.sapp);
+MenuAction :: @tagged(Show: Str, Toggle: *bool, Settings, EditMode, LevelMap, NewCircuit, ThisCircuit, AllCircuits, None, Fetch, Reset);
+fn get_menu_options(state: *State) []Ty(Str, MenuAction) = {
+    e := state.edit&;
     idle := state.loader.progress != .Loading;
-    Action :: @tagged(Show: Str, Toggle: *bool, Settings, EditMode, LevelMap, NewCircuit, ThisCircuit, AllCircuits, None, Fetch, Reset);
     no_sim := e.enable || !idle;
-    // TODO: make more of these work while compiling (be able to cancel). (and while loading, be able to queue)
-    names := @slice(@as(Ty(Str, Action))
+    @slice(@as(Ty(Str, MenuAction))
         ("Component Docs", (Show = include_bytes("examples/circuit/docs.md"))),
         ("Level Instructions", (Show = state.level.description)), 
         ("Settings", @if(idle, .Settings, .None)), 
@@ -212,11 +209,17 @@ fn text_box_selection(self: *Draw) bool = {
         ("Level Code", (Show = state.level.quine)), 
         ("Credits", (Show = credits)), 
         ("Fetch Examples", @if(idle && !e.enable, .Fetch, .None)),
-    );
-    prev := e.show_info_box;
+    ) temp()
+}
+
+fn menu_selection(self: *Draw) ?i64 = {
+    state := self.state;
+    e := state.edit&;
     if state.clicked || state.either_clicked {
-        e.show_info_box = .None;
+        state.close_info_box();
     };
+    names := state.get_menu_options();
+    new: ?i64 = .None;
     range(0, names.len) { i |
         pos := vec2(-23, (2 - i.float().cast()));
         name, action := names[i];
@@ -227,20 +230,21 @@ fn text_box_selection(self: *Draw) bool = {
             || (action&.is(.Fetch) && state.looking_at_examples)
             || (action&.is(.LevelMap) && state.current_diagram().is_some() && state.current_diagram().unwrap()[].is_level_map)
             || ((e.show_info_box || -1) == i);
-            self.do_option(pos, name, active, i, e.show_info_box&);
+            self.do_option(pos, name, active, i, new&);
         };
     };
-    if ((prev || -1) != (e.show_info_box || -1)) {
-        state.dirty = true;
+    new
+}
+
+fn apply_menu_action(state: *State, i: i64) void = {
+    state.close_info_box();
+    names := state.get_menu_options();
+        e := state.edit&;
         t := e.text_box&;
         buf := t.buffers[0];
-        @if(e.info_box_is_settings&.take()) do_settings(state, buf, false);
-        buf.clear_text();
-        e.active_buffer_index = .None;
-        each(t.buffers, fn(buf) => { buf.active = false; });
-        if e.show_info_box { i |
-            action := names[i]._1&;
-            @match(action) {
+        action := names[i]._1&;
+        state.dirty = true;
+        @match(action) {
             fn NewCircuit() => {
                 state.set_edit_mode(true);
                 state.prepare_async();
@@ -269,6 +273,9 @@ fn text_box_selection(self: *Draw) bool = {
             };
             fn Fetch() => {
                 state.autosave();
+                state.end_level();
+                state.level_index = 0;
+                state.level = state.levels[0].level;
                 state.looking_at_examples = true;
                 state.last_auto_save_time = 0;
                 state.download_schematic_archive_before_trying_to_load = true;
@@ -284,20 +291,16 @@ fn text_box_selection(self: *Draw) bool = {
                 state.reset();
             }
             @default => ();
-            };
+        };
             
             if @is(action.tag(), .NewCircuit, .EditMode, .LevelMap, .Fetch, .Toggle, .Reset) {
-                e.show_info_box = .None;
-                return !@is(action.tag(), .Toggle, .Reset);
+                return();
             };
+            e.show_info_box = (Some = i);
             
             e.active_buffer_index = (Some = 0);
             t.lock_to_bottom = false;
             buf.active = true;
-            pad := 75.0;
-            buf.at = (pos = (x = pad, y = pad), w = sapp.width().float() - pad*2, h = sapp.height().float() - pad*2);
-            
-            // TODO: i can't copy non-utf8 so need to do the b64 thing 
             if @is(action.tag(), .ThisCircuit, .AllCircuits) {
                 state.stash_undo();
                 i: ?i64 = @if(action.is(.AllCircuits) || state.tree.len == 0, .None, state.tree[0].diagram_circuit);
@@ -306,9 +309,23 @@ fn text_box_selection(self: *Draw) bool = {
                 state.unstash_undo();
             };
             buf.render = (x = 0, y = 0); 
-        };
-    };
-    false
+}
+
+fn close_info_box(state: *State) void = {
+    e := state.edit&;
+    e.active_buffer_index = .None;
+    @if(e.show_info_box&.take().is_none()) return();
+    state.dirty = true;
+    t := e.text_box&;
+    buf := t.buffers[0];
+    @if(e.info_box_is_settings&.take()) do_settings(state, buf, false);
+    buf.clear_text();
+    each(t.buffers, fn(buf) => { buf.active = false; });
+}
+
+fit_screen :: fn(sapp: *Sapp.Self, buf: *Terminal.TextBuffer) void = {
+    pad := 75.0;
+    buf.at = (pos = (x = pad, y = pad), w = sapp.width().float() - pad*2, h = sapp.height().float() - pad*2);
 };
 
 // TODO: warning if it didn't parse (number expressions / boolean other than "true"/"false")
@@ -484,7 +501,7 @@ fn ensure_holding_nothing(state: *State) void = {
     e := state.edit&;
     @if(!e.enable) return();
     c := state.current_diagram() || return();
-    e.select_gate(.None, c, false);
+    e.select_gate(.None, c, false, state.circuit);
     hover_gate(e, .None, c);
     // TODO: same for placing_wire_start
 }
@@ -559,7 +576,9 @@ fn perform_action(e: *EditState, c: *Circuit, u: UndoEntry) UndoEntry = {
 }
 
 // TODO: now that i always need to re-copy out of the fields, should just be immutable Str not a rawlist (would save one direction of copy)
+//       rn leak arena space (until you toggle edit mode) if you spam undo<->redo
 fn perform_action_inner(e: *EditState, c: *Circuit, u: Circuit.UndoPayload) Circuit.UndoPayload = {
+    a := e.circuit_arena;
     @match(u) {
         fn SetGateField(it) => {
             g := c.gates[it.i]&;
@@ -578,7 +597,6 @@ fn perform_action_inner(e: *EditState, c: *Circuit, u: Circuit.UndoPayload) Circ
         }
         fn CopyGate(it) => {
             g := c.gates[it.i];
-            a := e.circuit_arena;
             g.watched = g.watched.shallow_copy(a);
             g.data = g.data.items().shallow_copy(a).as_raw_list();
             g.label = g.label.items().shallow_copy(a).as_raw_list();
@@ -608,6 +626,28 @@ fn perform_action_inner(e: *EditState, c: *Circuit, u: Circuit.UndoPayload) Circ
             wire := c.wires[it.i];
             c.wires[it.i].path.len = 0;
             (UndeleteWire = (i = it.i, wire = wire))
+        }
+        fn SplitWires(it) => {
+            if it.undo {
+                each_rev it.wires { it |
+                    old := c.wires[it.old].path&;
+                    new := c.wires[it.new].path&;
+                    new.ordered_remove(0);
+                    old.ordered_remove(old.len - 1);
+                    old.push_all(new.items(), a);
+                    new.len = 0;
+                };
+            } else {
+                each it.wires { it |
+                    old := c.wires[it.old].path&;
+                    new := c.wires[it.new].path&;
+                    new.push_all(old.items().rest(it.path_i), a);
+                    new.insert(0, (pos = it.pos), a);
+                    old.len = it.path_i;
+                    old.push((pos = it.pos), a);
+                };
+            };
+            (SplitWires = (wires = it.wires, undo = !it.undo))
         }
     }
 }
