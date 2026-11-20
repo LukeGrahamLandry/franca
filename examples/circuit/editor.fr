@@ -377,6 +377,11 @@ do_settings_raw :: fn(state: *State, out: *List(u8), read: bool) void = {
         walk_settings_fields c { name, p |
             @fmt(out, "%=%\n", name, p[]);
         };
+        if state.allow_delete() && !c.is_synthetic_level_map && c.is_arch {
+            // TODO: delete non-arch in a way that checks for usages first
+            // TODO: do i trust people to not name the circuit "# type name to confirm"? lol should make that an achievement
+            @fmt(out, "delete_this_circuit=# type name to confirm\n");  
+        };
         };
         @fmt(out, "\n# simulator settings\n");  // :magic
         walk_state_settings_fields state { name, p |
@@ -392,12 +397,20 @@ do_settings_raw :: fn(state: *State, out: *List(u8), read: bool) void = {
         @fmt(out, "\n");
         @if(state.last_auto_save_time != 0) @fmt(out, "# circuits saved % ago\n", format_seconds((realtime_ns() - state.last_auto_save_time) / NS_PER_S));
         @fmt(out, "# current_level=%\n", state.level.title);
+        @fmt(out, "# circuit_save_path=%\n# progress_save_path=%\n", circuit_save_path, progress_save_path);
     } else {
         state.dirty = true;
         lines := out.items().split("\n", temp());
         if state.current_diagram() { c |
         walk_settings_fields c { name, p |
             WRITE(name, p);
+        };
+        if state.allow_delete() {
+            name := "";
+            WRITE("delete_this_circuit", name&);
+            if name.starts_with(c.name) {
+                state.edit.delete_name = (Some = c.name);
+            };
         };
         };
         // TODO: bit silly that these won't save until you win/switchcircuit a level
@@ -527,6 +540,34 @@ fn new_circuit(state: *State) void = {
     default := state.levels[state.level_index].default_circuit&;
     default[] = (Some = c[c.len-1].id);
 }
+
+fn trash_top_circuit(state: *State, name: Str) void = {
+    @if(!state.allow_delete()) return();
+    i := state.tree[0].diagram_circuit || return();
+    c := state.circuit[i]&;
+    @if(c.name != name) return();
+    state.dirty = true;
+    state.stash_undo();
+    state.tree.len = 0;
+    nontrivial := c.gates.len > 0 || c.wires.len > 0 || c.undo.len > 1;
+    if query_current_os() == .macos && nontrivial {
+        out := state.write_save((Some = i), false, true);
+        tmp_path := anon_temp_path("circuit.txt");
+        if write_file_direct(tmp_path.as_cstr(), out) {
+            _ := run_cmd_blocking("trash", @slice(tmp_path));
+        };
+    };
+    state.circuit = {
+        c: RawList(Circuit) = state.circuit.as_raw_list();
+        c&.ordered_remove(i);
+        c.items()
+    };
+    state.autosave();
+    state.load_path_async(circuit_save_path, false);
+}
+
+fn allow_delete(state: *State) bool =
+    state.tree.len == 1 && !state.looking_at_examples && state.loader.progress != .Loading;
 
 UndoEntry :: Tc.Circuit.UndoEntry;
 

@@ -20,13 +20,6 @@ for none is way more memory efficient. should let you use that syntax for cool n
 
 ---
 
-DO THE FUCKING INLINING SORT ORDER THING   
-BECAUSE SEEING SAMPLES OF VEC(SUB,ADD,MAX)   
-IS GOING TO MAKE ME LOSE MY FUCKING MIND  
-the problem might actually be that the ir i generate is just too dumb for it to realize its small until too late. 
-
----
-
 // TODO: i really don't understand the attachments thing, 
 //       somehow it's easy to draw on the screen but to draw to a texture 
 //       you have to bake an attatchments object that does nothing and 
@@ -98,6 +91,7 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
   - web: use indexeddb instead of localstorage. (so can have blob and less size limit)
   - web: it seems extra blurry
   - web: scroll wheel feels backwards to me. am i asking for direction in a way that doesn't listen to the os natural scrolling thing? its also too fast
+  - visual feedback for a gate that wasn't conencted to a root so wasn't compiled and so wire values shown in ui (when you hover graphical wire) are always 0. 
 ```
 // TODO: bundle the source files the jit needs so binary is self contained
 // TODO: for paste/dragndrop: choose (replace all, replace one, add new, view without saving).
@@ -1720,6 +1714,7 @@ actually that's a bit too agressive but certainly stop processing ANSI escape co
 - webgpu: array type, transpose, load (for index), addrof
 - the cpu code generated for individual graphics/vec.fr functions is garbage
     because opt/slots.fr can't cope with the s->l casts for abi copies.
+  and its too big to save for inlining which is before a bunch gets removed. 
 - offsets on storage buffers (they added it in Resource View Update)
 - https://github.com/floooh/sokol/commit/50bbbe4521af356c3b0879e1d46e30114feb4e6b
 - example program that tries to use all features

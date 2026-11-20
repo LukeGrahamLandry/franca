@@ -103,6 +103,7 @@ Self :: @struct {
     sim: *Simulation;
     shape := zeroed(IoShape);
     maze: Maze;
+    bad := false;
 };
 
 level_spec :: @static @as(Exports) (
@@ -117,10 +118,12 @@ start = fn(sim) = {
 end = fn(self) = general_allocator().dealloc_one(Self, Self.ptr_from_raw(self)),
 before = fn(self, values) = {
     self := Self.ptr_from_raw(self);
+    @if(self.bad) return();
     values[self.shape.in] = self.maze&.input().zext();
 },
 after = fn(self, values) = {
     self := Self.ptr_from_raw(self);
+    @if(self.bad) return(false);
     out, out_on := (values[self.shape.out], values[self.shape.out_used] != 0);
     @if(out_on) self.maze&.output(out.trunc());
     self.maze.win
@@ -130,8 +133,9 @@ render = fn(self) = {
     self := Self.ptr_from_raw(self);
     out := @ref u8.list(temp());
     self.maze&.render(out);
-    c := pack_rgba(@if(self.maze.win, 255, 50), 200, 150, 255);
-    self.sim.put_text(vec2(-38, 40), c, out.items());
+    c := pack_rgba(@if(self.maze.win, 255, 50), 200, 150*int(!self.bad), 255);
+    @if(self.bad) @fmt(out, "\nmissing arch io");
+    self.sim.put_text(vec2(-38, 25), c, out.items());
 },
 title = "Maze",
 description = """
@@ -159,6 +163,8 @@ init_program :: fn(self: *Self) void = {
         // TODO: else report error
         if find_io_shape(self.sim.circuit) { it |
             self.shape = it;
+        } else {
+            self.bad = true;
         };
     };
     

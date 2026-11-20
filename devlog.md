@@ -1,4 +1,10 @@
 
+## (Nov 20) circuit
+
+- delete in a paranoid way
+  - silly mistake with not putting the slice back after removing but 
+    noticed my ordered_remove (from 2 years ago) does extra work to zero the last slot that's now off the end.
+
 ## (Nov 19)
 
 - soon i want to have more tests for the ui part so seperating more of the draw from doing the thing

@@ -392,7 +392,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         };
     };
     if !state.edit.enable {
-    self.put_text(HELP, self.text_spacing * vec2(-90, 12), pack_rgba(0, 0, 0, 255));
+    self.put_text(HELP, self.text_spacing * vec2(-90, 20), pack_rgba(0, 0, 0, 255));
         if !have_logic && progress == .Idle {
             // TODO: empty circuit says load error because only 2 gates
             self.put_text("LOAD ERROR", self.text_spacing * vec2(0, 2), pack_rgba(255, 0, 0, 255));
@@ -587,6 +587,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     if(goto_undo, fn(i) => state.goto_undo_node(i));
     if(new_text_box, fn(i) => state.apply_menu_action(i));
+    if(state.edit.delete_name&.take(), fn(name) => state.trash_top_circuit(name));
     
     // without this you get a flicker and occasionally a bounds check assertion! for hopefully intuitive reasons. dear rust would like to have a word im sure.
     if self.open_gate&.take() { a, b, c |  // wait until done rendering components to change the tree. 
@@ -1128,7 +1129,6 @@ fn draw_wires(self: *Draw, circuit: *Tc.Circuit) void = {
                 sgl.line(a, b, W/2.5);
             };
             
-            // TODO: be able to hover the pin of a disconnected gate where there's no graphical wire to see value
             if hover {
                 sdtx.pos = self.world_to_text_pos(b) + vec2(0, self.wire_hover_count);
                 base := sdtx.pos.x;
@@ -1215,6 +1215,17 @@ fn draw_pin_lines(self: *Draw, circuit: *Tc.Circuit) void = {
                 
                 if it.logical_gate_index != -1 {
                     sdtx.put(@tfmt(" [%]", it.logical_gate_index));
+                    
+                    // draw_wires can only show value if there's a graphical wire connected. 
+                    if circuit.compiled { c |
+                        g := state.world&[c].gates[it.logical_gate_index]&;
+                        if g.temporary_disconnected_pins_bitset.bit_and(1.shift_left(i)) != 0 {
+                            self.wire_hover_count += 1;
+                            sdtx.pos = self.world_to_text_pos(b) + vec2(0, self.wire_hover_count);
+                            w := @if(is_input, g.inputs[i-out_arity], g.outputs[i]);
+                            self.show_wire_value(w, true);
+                        }
+                    };
                 };
                 self.wire_hover_count += 1;
             };
@@ -1858,6 +1869,7 @@ EditState :: @struct {
     field_names: []Str = empty();
     show_info_box: ?i64 = .None;
     info_box_is_settings := false;
+    delete_name: ?Str = .None;
 };
 
 fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
