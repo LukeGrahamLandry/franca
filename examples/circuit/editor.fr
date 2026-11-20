@@ -1,3 +1,32 @@
+
+fn intercept(it: *Tc.Circuit.Wire, pos: Vec2) ?i64 = {
+    range(1, it.path.len) { path_i |
+        prev := it.path[path_i - 1]&;
+        direction, length := make_direction(prev.pos, pos);
+        if length <= prev.length && direction == prev.direction {
+            if prev.pos + direction*length.float().cast() == pos {
+                return(Some = path_i);
+            };
+        };
+    };
+    .None
+}
+
+fn set_directions(path: []Circuit.WireNode) void = {
+    @if(path.len == 0) return();
+    path[path.len - 1].length = 0;
+    range(0, path.len - 1) { i |
+        d, l := make_direction(path[i].pos, path[i+1].pos);
+        path[i].length = l;
+        path[i].direction = d;
+    };
+}
+
+make_direction :: fn(a: Vec2, b: Vec2) Ty(Vec2, i64) = {
+    dir := b - a;
+    (clamp(dir, vec2(-1), vec2(1)), max(abs(dir.x), abs(dir.y)).cast().int())
+}
+
 max_gate_text_fields :: 4;
 reserved_buffers :: 1;
 
@@ -647,6 +676,7 @@ fn perform_action_inner(e: *EditState, c: *Circuit, u: Circuit.UndoPayload) Circ
                     };
                     it.path = new[];
                     new[] = empty();
+                    set_directions(old[]);
                 };
             } else {
                 each it.wires { it |
@@ -660,12 +690,15 @@ fn perform_action_inner(e: *EditState, c: *Circuit, u: Circuit.UndoPayload) Circ
                         it.path = old[];
                         OLD := old[].rest(it.path_i);
                         new[] = a.alloc_init(Tc.Circuit.WireNode, OLD.len+1, fn(i) => @if(i == 0, (pos=it.pos), OLD[i-1]));
+                        new[] = new[].rest(int(it.pos == new[1].pos));
                         if OLD[it.path_i].pos == it.pos {
                             old[] = old[].slice(0, it.path_i+1);
                         } else {
                             old[] = a.alloc_init(Tc.Circuit.WireNode, it.path_i+1, fn(i) => @if(i == it.path_i, (pos=it.pos), old[i]));
                         };
                     };
+                    set_directions(old[]);
+                    set_directions(new[]);
                 };
             };
             (SplitWires = (wires = it.wires, undo = !it.undo))
@@ -770,6 +803,9 @@ build_level_map :: fn(levels: []*LevelApi.Exports, indices: []i64, c: *Tc.Circui
         w := vec2(width + 5, Y -4);
         gates.push(pos = w, kind = probe, rotation = 2);
         make_wire(w+ vec2(3,0), w + vec2(2,0));
+    };
+    each wires { it |
+        set_directions(it.path);
     };
     c[] = (
         id = (id = 1234567),

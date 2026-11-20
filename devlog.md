@@ -9,6 +9,8 @@
     because you would have had to redo through it to see the wire again because there are no cycles. 
     but the fact that i have to think this hard about it means its too complicated and i shouldn't have mutable rawlists for things that will be undone. then perform_action_inner wouldn't need to copy. 
 - switched a bunch of fields back to slices. less copy is good but i made SplitWires even more confusing in that quest
+- highlight where pins overlap when trying to move a gate. 
+- keeping dir&length on the wires makes it easy to do diagonals in split_for_node and also gets rid of a silly loop
 
 ## (Nov 18)
 

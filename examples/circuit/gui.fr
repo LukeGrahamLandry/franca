@@ -1133,7 +1133,7 @@ fn draw_wires(self: *Draw, circuit: *Tc.Circuit) void = {
                 sdtx.pos = self.world_to_text_pos(b) + vec2(0, self.wire_hover_count);
                 base := sdtx.pos.x;
                 sdtx.color = pack_rgba(255, 255, 255, 255);
-                sdtx.put(@tfmt("% % ", wire_i, wire.colour));
+                sdtx.put(@tfmt("% ", wire_i));
                 if !circuit.has_bidirectional_pins && wire.logical.id != 0xFFFFFFFF {
                     if !already_wrote_position || wire.logical.id != prev_hover.Some.id {
                         self.show_wire_value(wire.logical, true);
@@ -1144,6 +1144,8 @@ fn draw_wires(self: *Draw, circuit: *Tc.Circuit) void = {
                     sdtx.put(@tfmt(" (%, %)", it.pos.x, it.pos.y));
                     already_wrote_position = true;
                 };
+                @if(it.length != 0) sdtx.put(@tfmt("  %*(%, %)", it.length, it.direction.x, it.direction.y));
+                @if(wire.colour != 0) sdtx.put(@tfmt(" %", wire.colour));
                 self.wire_hover_count += 1;
                 
                 if wire.comment.len != 0 {
@@ -1830,7 +1832,7 @@ fn text_to_world_pos(self: *Draw, pos: Vec2) Vec2 =
 
 EditState :: @struct {
     enable: bool = false;
-    selected_gate: ?i64 = .None;
+    selected_gate: ?i64 = .None;  // the one currently being dragged
     original_gate_position: ?@struct(i: i64, rotation: u8, pos: Vec2, spawn: bool) = .None;
     placing_wire_start: ?Vec2 = .None;
     action: @enum(None, NewGate, Rotate, Delete, Copy) = .None;
@@ -1840,6 +1842,7 @@ EditState :: @struct {
     last_click_time := 0;  // for double click to edit gate
     is_double_click := false;
     has_text_field := false;
+    pin_overlap: RawList(Vec2) = empty();
     
     dont_reset: @struct {
     circuit_arena: Alloc;
@@ -1862,6 +1865,7 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
     e := state.edit&;
     @if(!e.enable) return();
     
+    sgl, W := (self.draw&, self.wire_node_width);
     in_bounds :: fn(p) => p.x >= c.min.x && p.y >= c.min.y && p.x <= c.max.x && p.y <= c.max.y;
     if e.selected_gate { gate_i |
         gate := c.gates[gate_i]&;
@@ -1869,22 +1873,25 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
         if !(new == gate.pos) {
             gate.pos = new;
             state.dirty = true;
+            update_pin_overlap(e, gate_i, c, circuits);
+        };
+        
+        for e.pin_overlap { pos |
+            a := self.tc_to_world_pos(pos);
+            sgl.color = pack_rgba(255, 0, 0, 200);
+            sgl.line(a - vec2(0, W/2), a + vec2(0, W/2), W);
         };
         
         if state.clicked&.take() && in_bounds(new) {
             break :: local_return;
-            info := Tc'get_builtin_shape(gate.kind);
-            if has_pin_overlap(gate_i, c, circuits) {
-                // TODO: some type of visual feedback
-                break();
-            };
+            // TODO: you can still do things that force unselect the gate (like Copy) when pins are overlaping
+            @if(e.pin_overlap.len > 0) break();
             e.select_gate(.None, c, false, state.circuit);
             state.dirty = true;
         };
     };
     
     if e.placing_wire_start { start |
-        sgl, W := (self.draw&, self.wire_node_width);
         a := self.tc_to_world_pos(start);
         rounded := self.world_to_tc_pos(self.mouse_world_pos);
         inside := in_bounds(rounded);
@@ -1913,13 +1920,14 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
             };
                 
                 splits := @ref Tc.Circuit.WireSplit.list(a);
-                path := @ref Tc.Circuit.WireNode.list(2, a);
-                path.push(pos = start);
                 split_for_node(c.wires&, start, a, splits);
+                split_for_node(c.wires&, rounded, a, splits);
+                path := @ref Tc.Circuit.WireNode.list(route.len+1, a);
+                path.push(pos = start);
                 for route { pos |
-                    split_for_node(c.wires&, pos, a, splits);
                     path.push((pos = pos));
                 };
+                set_directions(path.items());
                 wire_i := c.wires.len;
                 c.wires&.push((path = path.items()), a);
                 @if(splits.len > 0) e.push_undo(SplitWires = (wires = splits.items(), undo = true));
@@ -2013,7 +2021,8 @@ fn update_edit(self: *Draw, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
     };
 }
 
-fn has_pin_overlap(gate_i: i64, c: *Tc.Circuit, circuits: []Tc.Circuit) bool = {
+fn update_pin_overlap(e: *EditState, gate_i: i64, c: *Tc.Circuit, circuits: []Tc.Circuit) void = {
+    e.pin_overlap&.clear();
     gate := c.gates[gate_i]&;
     r := get_pin_radius(gate, circuits);
     info0 := Tc'get_builtin_shape(gate.kind);
@@ -2023,28 +2032,30 @@ fn has_pin_overlap(gate_i: i64, c: *Tc.Circuit, circuits: []Tc.Circuit) bool = {
         n := r + get_pin_radius(it, circuits);
         @if(norm_sq(it.pos - gate.pos) > n*n) continue();
         
-        @if(gate.pos == it.pos) return(true);
+        @if(gate.pos == it.pos) e.pin_overlap&.push(it.pos, e.circuit_arena);
         info1 := Tc'get_builtin_shape(it.kind);
         for_pins(info0, gate, circuits) { _, dx, dy |
             pos0 := gate.pos + vec2(dx.float().cast(), dy.float().cast());
-            @if(pos0 == it.pos) return(true);
+            @if(pos0 == it.pos) e.pin_overlap&.push(pos0, e.circuit_arena);
             for_pins(info1, it, circuits) { _, dx, dy |
                 pos1 := it.pos + vec2(dx.float().cast(), dy.float().cast());
-                @if(pos0 == pos1 || pos1 == gate.pos) return(true);
+                @if(pos0 == pos1 || pos1 == gate.pos) e.pin_overlap&.push(pos1, e.circuit_arena);
             };
         };
     };
-    false
+    each c.wires { it |
+        if it.is_end(gate.pos) || it.intercept(gate.pos).is_some() {
+            return e.pin_overlap&.push(gate.pos, e.circuit_arena);
+        };
+    };
 }
 
 // TODO: either split if visual part of the new wire hits a node/pin
 //       or route around nodes/pins (tc does the latter)
-// TODO: track length/direction so split_for_node can work on diagonals
 // TODO: dont recalculate this every render if it gets more expensive
-// only allow 8 directions to simplify split_for_node
 plan_route :: fn(start: Vec2, rounded: Vec2) []Vec2 = {
     dir := start - rounded;
-    if dir.x != 0 && dir.y != 0 {
+    if dir.x != 0 && dir.y != 0 && dir.x.abs() != dir.y.abs() {
         extra := start;
         n := int(dir.x.abs() < dir.y.abs());
         while => dir.x.abs() != dir.y.abs() {
@@ -2059,35 +2070,23 @@ plan_route :: fn(start: Vec2, rounded: Vec2) []Vec2 = {
 
 fn split_for_node(wires: *RawList(Tc.Circuit.Wire), pos: Vec2, a: Alloc, splits: *List(Tc.Circuit.WireSplit)) void = {
     range(0, wires.len) { wire_i |
-        break :: local_return;
         it := wires[wire_i]&;
         if !it.is_end(pos) {
-            range(1, it.path.len) { path_i |
-                // TODO: this would be easier if i already had direction/length. 
-                //       rn hack that only works for cardinal directions where length can be integer
-                fst, snd := (it.path[path_i - 1].pos, it.path[path_i].pos);
-                dir := snd - fst;
-                if norm_sq(pos - fst) < dir.norm_sq() && norm_sq(pos - snd) < dir.norm_sq() {
-                    len := dir.norm();
-                    dir := dir / len;
-                    range(0, len.cast().int()) { _ |
-                        if fst == pos {
+            if it.intercept(pos) { path_i |
                             path := it.path;
                             old := it.path.rest(path_i);
                             new := a.alloc_init(Tc.Circuit.WireNode, old.len+1, fn(i) => @if(i == 0, (pos=pos), old[i-1]));
-                            wires.push((path = new), a);
+                            new = new.rest(int(pos == new[1].pos));
+                            set_directions(new);
+                            wires.push((path = new, colour = it.colour), a);
                             it = wires[wire_i]&;
                             if it.path[path_i].pos == pos {
                                 it.path.len = path_i+1;
                             } else {
                                 it.path = a.alloc_init(Tc.Circuit.WireNode, path_i+1, fn(i) => @if(i == path_i, (pos=pos), it.path[i]));
                             };
+                            set_directions(it.path);
                             splits.push(old = wire_i, path_i = path_i, new = wires.len - 1, pos = pos, path = path);
-                            break();
-                        };
-                        fst += dir;
-                    };
-                };
             };
         };
     };
@@ -2132,6 +2131,7 @@ fn select_gate(e: *EditState, i: ?i64, c: *Tc.Circuit, spawn: bool, circuits: []
     };
     
     e.selected_gate = i;
+    e.pin_overlap&.clear();
 }
 
 fn gate_selection(self: *Draw) void = {
@@ -3109,6 +3109,7 @@ main :: fn() void = Easy'start(State);
 #use("@/examples/circuit/editor.fr");
 
 #use("@/examples/circuit/eval.fr");
+// TODO: this doesn't work with build_for_graphics2(_,_,true)
 ENABLE_TRACY :: Foreign.ENV.FRANCA_TRACY.get_environment_variable().is_some();  // ugh
 #use("@/lib/sys/threads.fr");
 Futex :: import("@/lib/sys/sync/futex.fr");
