@@ -1,4 +1,13 @@
 
+## (Nov 21) circuit
+
+- adding original_root if collect_schematics doesn't find it means you get duplicate 
+  if try to load a path from cli with wrong case because macos file system isn't case sensitive.
+- debugging "PVZ" schematic. symptom is it never writes to the memory used for the screen. 
+  - highlight addresses of currently active ports when showing ram contents
+  - im afraid im hiding information if the wire width is too small but looks like its always just the truncation so cant be the problem here
+  - aaaa the carry of Add depends on the width. i was always doing 64 bit carry. 
+
 ## (Nov 20) circuit
 
 - delete in a paranoid way

@@ -159,7 +159,7 @@ load_all_circuits :: fn(original_root: Str, a: Alloc, warn: *List(u8)) Ty([]Circ
     
     // TODO: could just look at the headers and only load full data if in dependencies
     files := collect_schematics(root, temp());
-    if !files&.contains(original_root) {
+    if files.len == 0 {
         files&.push(original_root);
     };
     if root.ends_with("/v1/schematics/") {  // HACK
@@ -549,6 +549,7 @@ compile_circuit :: fn(circuits: []Circuit, root_index: i64, components: *List(Co
     //       ex. "ITPC" in "Symphony-Pro"
     if cc_output.len != 0 {
         break :: local_return;
+        c.has_bidirectional_pins = true; break(); 
         // @if(c.name == "ITPC") { c.has_bidirectional_pins = true; break(); }; // HACK example
         for cc_output { id |
             has_def := false;
@@ -1403,7 +1404,7 @@ pack_param :: fn(circuits: []Circuit, c: *Circuit, it: *Circuit.Gate, gate_i: i6
                     param = s.repr.bitcast();
                 };
                 @default => {
-                    if @is(k, .Splitter_word_8, .Splitter_word_4, .Splitter_word_2, .Less_s, .Asr, .Clz, .Ctz) {
+                    if @is(k, .Splitter_word_8, .Splitter_word_4, .Splitter_word_2, .Add, .Less_s, .Asr, .Clz, .Ctz) {
                         param = @if(s[0] == MIN_i64, 0, s[0]);
                     };
                     if @is(k, .Splitter_bit_8, .Splitter_bit_4, .Splitter_bit_2) {
@@ -1516,8 +1517,7 @@ fn for_pins(shape: *Builtin.Template, gate: *Circuit.Gate, circuits: []Circuit, 
 fn insert_bit_width_casts(components: []Component, gates: *List(Component.Gate), wire_count: *i64, bit_width: []u8, warn: *List(u8), c: *Circuit, logical_to_circuit: []i64, circuits: []Circuit) []u8 = {
     has_bidirectional_pins := c.has_bidirectional_pins;
     a := gates.gpa;
-    cast_id: ComponentId = (id = trunc(component_offset(.Tc2) - 1));
-    @debug_assert_eq(components[cast_id.id.zext()].name, "SyntheticCast_FR");
+    cast_id := @run get_component_by_name("SyntheticCast_FR", builtin_components);
     width := @ref u8.list(a);
     width_known: DynamicBitSet = empty(temp());
     width.push_repeated(wire_count[], 0);
@@ -1722,7 +1722,7 @@ infer_auto_width :: fn(components: []Component, gates: []Component.Gate, width: 
             };
             
             shape := get_builtin_shape(gate.kind);
-            @if(param == 0) if !shape.has_param || @is(k, .Less_s, .Asr, .Clz, .Ctz) {
+            @if(param == 0) if !shape.has_param || @is(k, .Add, .Less_s, .Asr, .Clz, .Ctz) {
                 x: u8 = 0;
                 enumerate gate.inputs { i, id |
                     x = max(x, width[id.id.zext()]);
@@ -1736,6 +1736,7 @@ infer_auto_width :: fn(components: []Component, gates: []Component.Gate, width: 
                 bit_width := get_bit_width(components, gate);
                 enumerate gate.outputs { i, id |
                     width[id.id.zext()] = max(bit_width[i], width[id.id.zext()]);
+                    // TODO: multiple auto width switches might output to the same wire. dont know width until seen all of them
                     width_known.set(id.id.zext());
                 };
             };

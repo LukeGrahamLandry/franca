@@ -36,6 +36,7 @@ State :: @rec @struct {
     old_max_ticks_per_eval: i64;
     first_interpreted_frame: bool;
     first_jitted_frame: bool;
+    is_first_load: bool;
     last_frame_was_recalibrate: bool;
     tree_ready: bool;
     sim: LevelApi.Simulation;
@@ -133,6 +134,7 @@ main_use_output :: fn(state: *State, in: LoaderT.I, out: Result(rawptr, void)) v
 main_prepare_interp :: fn(state: *State, sg: *Sg.Self) void = {
     state.first_jitted_frame = false;
     state.first_interpreted_frame = true;
+    state.is_first_load = false;
     if state.current_diagram() { c |
         @debug_assert_eq(state.tree.len, 1, "// TODO: its possible to enter a gate while it's loading");
         state.tree[0].component = c.compiled;
@@ -308,7 +310,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         state.dirty = true;
         msg := @tfmt("loading %\nit's been % ms\nif you can read all this it's too slow!", name, t);
         // dont flicker for a frame when exiting exit mode without changes
-        if t > 50 { 
+        if t > 50 || state.is_first_load { 
             show_alert(msg, sdtx, sapp);
         } else {
             sapp.webgpu.noframe = true;
@@ -907,14 +909,52 @@ fn draw_primitive_code(self: *Draw, instance: i64, parent_wire_offset: i64, hove
         };
     };
     
+    // TODO: make a better ui for this. 
+    // - show which port is which colour
+    // - use more distinct colours. hue wheel?
+    // - show addresses and let you jump to one
+    // - scroll bar and only stringify the visible part instead of all spatially with an arbitrary limit
+    Port :: @struct(address: i64, size: i64);
+    ports := {
+        ports := @ref Port.list(temp());
+        @if(!state.halted_without_wire_values)
+        if it.kind.group() == .Tc2 && Tc'gate_name(it.kind, .Tc2) == .Ram_v2 {
+            it := it;
+            wires := world.scratch.items().subslice(parent_wire_offset, parent.wire_count);
+            while => it.port_linked_list != -1 {
+                it = parent.gates[it.port_linked_list]&;
+                if it.kind.is_port() {
+                    size := it.get_param(.Port)[].get(.width)/8;
+                    enable, addr := (wires[it.inputs[0].id.zext()] != 0, wires[it.inputs[1].id.zext()]);
+                    @if(enable) ports.push(address = addr, size = size);
+                };
+            };
+            Sort'default(Port, ports.items(), fn(a, b) => a.address <= b.address);
+        };
+        ports.items()
+    };
+    port_i := 0;
+    
     // show contents of the memory this gate owns
     data := world.storage.subslice(instance, n.min(4096)).interpret_as_bytes();
     enumerate data { i, c |
         @if(i.umod(16) == 0) sdtx.put("\n");
+        
+        cc := sdtx.color;
+        if port_i < ports.len && (i - ports[port_i].address).ult(ports[port_i].size) {
+            sdtx.color = pack_rgba(64*port_i, 100, 200, 255);
+            while => port_i < ports.len && i - ports[port_i].address == ports[port_i].size - 1 {
+                port_i += 1;
+                cc = pack_rgba(255, 255, 255, 255);
+            };
+        };
+        
         push_hex_byte(out, c[], true);
         sdtx.put(out.items());
         sdtx.pos.x += 1;
         out.clear();
+        
+        sdtx.color = cc;
     };
 }
 
@@ -928,9 +968,7 @@ fn show_wire_value(self: *Draw, id: WireId, is_for_graphical_node: bool) = {
         p := self.world_to_text_pos(self.mouse_world_pos);
         hover := p.x > start.x && p.x < end.x && p.y > start.y && p.y < end.y;
         if hover {
-            self.set_hover_wire = true;
-            state.prev_emphasized_wire = (Some = id);
-            self.hovered_wire_index = (Some = self.emphasized_wire_positions.len);
+            self.start_hovering_wire(id);
         };
     
         if state.prev_emphasized_wire { prev |
@@ -949,6 +987,15 @@ fn show_wire_value(self: *Draw, id: WireId, is_for_graphical_node: bool) = {
         sdtx.put("=");
         c := self.logical.unwrap();
         bit_width: i64 = @if(i.ult(c.wire_bit_width.len), c.wire_bit_width[i].zext(), 64);
+        if bit_width != 64 && value.shift_right_logical(bit_width) != 0 {
+            // this happens for a word component that has an auto cast inserted immediately
+            bit_width = 0;
+            sdtx.color = pack_rgba(100, 100, 100, 255);
+        };
+        if bit_width == 0 && value == 0 {
+            // the constant inserted for disconnected pin
+            bit_width = 1;
+        };
         if bit_width == 1 {
             @fmt(out, "%", value);
         } else {
@@ -1113,9 +1160,7 @@ fn draw_wires(self: *Draw, circuit: *Tc.Circuit) void = {
             b := self.tc_to_world_pos(it.pos);
             hover := self.hovering_node(b);
             if hover && wire.logical.id != 0xFFFFFFFF && !already_wrote_position {
-                self.set_hover_wire = true;
-                prev_hover[] = (Some = wire.logical);
-                self.hovered_wire_index = (Some = self.emphasized_wire_positions.len);
+                self.start_hovering_wire(wire.logical);
                 self.emphasized_wire_positions&.push(self.world_to_text_pos(b), temp());
             };
             if prev_hover[] { prev |
@@ -1169,6 +1214,16 @@ fn draw_wires(self: *Draw, circuit: *Tc.Circuit) void = {
     };
 }
 
+fn start_hovering_wire(self: *Draw, id: WireId) void = {
+    state := self.state;
+    if state.prev_emphasized_wire.is_none() || state.prev_emphasized_wire.Some.id != id.id {
+        state.dirty = true;
+    };
+    self.set_hover_wire = true;
+    state.prev_emphasized_wire = (Some = id);
+    self.hovered_wire_index = (Some = self.emphasized_wire_positions.len);
+}
+
 // TODO: seperate out all the hover and do it at the end
 fn draw_pin_lines(self: *Draw, circuit: *Tc.Circuit) void = {
     sdtx, state, sgl, W := (self.sdtx, self.state, self.draw&, self.wire_node_width);
@@ -1214,8 +1269,6 @@ fn draw_pin_lines(self: *Draw, circuit: *Tc.Circuit) void = {
                 };
                 
                 if it.logical_gate_index != -1 {
-                    sdtx.put(@tfmt(" [%]", it.logical_gate_index));
-                    
                     // draw_wires can only show value if there's a graphical wire connected. 
                     if circuit.compiled { c |
                         g := state.world&[c].gates[it.logical_gate_index]&;
@@ -2832,6 +2885,7 @@ fn load_path_async(state: *State, path: Str, is_bytes: bool, requested_root_inde
     path := path.shallow_copy(a);
     state.warnings = list(a);
     state.prepare_async();
+    state.is_first_load = true;
     state.loader.start_async(Path = (path = path, is_bytes = is_bytes, requested_root_index = requested_root_index));
 }
 
