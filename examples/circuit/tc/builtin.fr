@@ -339,7 +339,7 @@ Counter64 :: device(1, 2,
     fn(_) => 8*8,
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 2), param: i64, instance: i64, doing_pre_read: bool) void = {
         value, set := (i[0], i[1] != 0);
-        slot := world.storage[instance]&;
+        slot := world.storage(instance, i64);
         o[0] = slot[]; 
         if !doing_pre_read {
             slot[] = @if(set, value, slot[] + param);
@@ -363,7 +363,7 @@ Register64 :: device(1, 3,
     fn(_) => 8*8,
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 3), instance: i64, doing_pre_read: bool) void = {
         _load, save, value := (i[0] != 0, i[1] != 0, i[2]);
-        slot := world.storage[instance]&;
+        slot := world.storage(instance, i64);
         o[0] = slot[];
         if !doing_pre_read && save {
             slot[] = value;
@@ -424,7 +424,7 @@ BitMemory :: device(1, 2,
     fn(_) => 64,
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 2), instance: i64, doing_pre_read: bool) void = {
         value, save := (i[0], i[1] != 0);
-        slot := world.storage[instance]&;
+        slot := world.storage(instance, i64);
         o[0] = slot[];
         if !doing_pre_read && save {
             slot[] = i[0];
@@ -459,7 +459,7 @@ Keyboard :: device(3, 1,
     fn(_) => size_of(KeyboardData) * 8,
     fn(world: *World, o: *Array(i64, 3), i: *Array(i64, 1), _: i64, instance: i64, doing_pre_read: bool) void = {
         read_next := i[0] != 0;
-        data := bit_cast_unchecked(*WireValue, *KeyboardData, world.storage.index(instance));
+        data := world.storage(instance, KeyboardData);
         o[] = (int(data.have_next > 0 || data.prev_value != 0), data.prev_value.int(), data.prev_up.int());
         if read_next {
             o[] = (int(data.have_next > 0 || data.value != 0), data.value.int(), data.up.int());
@@ -551,7 +551,7 @@ VirtualDelayLine1 :: todo();
 Console :: device(0, 1,
     fn(_) => size_of(ConsoleData)*8,
     fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 1), _: i64, instance: i64, _doing_pre_read: bool) void = {
-        data := world.storage.rest(instance).interpret_as_bytes().peek_type(ConsoleData);
+        data := world.storage(instance, ConsoleData);
         data.offset = i[0];
     },
 );
@@ -595,7 +595,7 @@ DotMatrixDisplay :: device(0, 4,
     fn(_) => size_of(DotData)*8,
     fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 4), param: i64, instance: i64, _: bool) void = {
         coloumn_major_pixels := param == 1;
-        data := world.storage.rest(instance).interpret_as_bytes().peek_type(DotData);
+        data := world.storage(instance, DotData);
         enable, pixel_mask, colour := (i[1] != 0 && i[3] != 0, i[0], i[2]);
         @if(!enable) return();
         flush := pixel_mask.shift_right_logical(56) == 1;
@@ -628,7 +628,7 @@ DotMatrixDisplay :: device(0, 4,
 SegmentDisplay :: device(0, 2, 
     fn(_) => 64,
     fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 2), param: i64, instance: i64, doing_pre_read: bool) void = {
-        world.storage[instance] = @if(i[1] == 0, 0, i[0]);
+        world.storage(instance, i64)[] = @if(i[1] == 0, 0, i[0]);
     },
 );
 Input16 :: Input64;
@@ -742,8 +742,7 @@ Ram :: device(4, 7,
             return();
         };
         
-        n := (storage_size * word_size).ualign_to(8).udiv(8);
-        bytes := interpret_as_bytes(world.storage.subslice(instance, n));
+        bytes := world.storage_bytes(instance, storage_size * word_size);
         
         impl :: fn($T: Type, N: i64) => {
             data := T.reinterpret_bytes(bytes);
@@ -806,8 +805,7 @@ RamDualLoad :: device(2, 6,
         word_size_index, storage_size := (param.get(.word_size_index), param.get(.storage_size));
         word_size := param.word_size();
         
-        n := (storage_size * word_size).ualign_to(8).udiv(8);
-        bytes := interpret_as_bytes(world.storage.subslice(instance, n));
+        bytes := world.storage_bytes(instance, storage_size * word_size);
         a := @slice(a0, a1);
         // :SLOW
         impl :: fn($T: Type) => {
@@ -866,7 +864,7 @@ SpriteDisplay :: device(0, 4,
     fn(it) => size_of(SpriteData) * 256 * 8,
     fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 4), _0: i64, instance: i64, _1: bool) void = {
         command, sprite, position, size := (i[0], i[1], i[2], i[3]);
-        data := world.storage.rest(instance).interpret_as_bytes().peek_slice(SpriteData, 256);
+        data := world.storage(instance, Array(SpriteData, 256));
         @switch(command) {
             @case(1) => {
                 s := data[sprite]&;
@@ -974,7 +972,7 @@ Register_word :: device(1, 2,
     fn(_) => 8*8,
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 2), instance: i64, doing_pre_read: bool) void = {
         save, value := (i[0] != 0, i[1]);
-        slot := world.storage[instance]&;
+        slot := world.storage(instance, i64);
         o[0] = slot[];
         if !doing_pre_read && save {
             slot[] = value;
@@ -1004,7 +1002,7 @@ Delay_line_word_asm :: todo();
 Push_button :: device(1, 0,
     fn(it) => 64,
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 0), instance: i64, doing_pre_read: bool) void = {
-        o[0] = world.storage[instance];
+        o[0] = world.storage(instance, i64)[];
     },
 );
 Pipelined_load_port :: todo();
@@ -1015,8 +1013,8 @@ Load_port :: device(1, 2,
         @if(!enable) return();
         param: Settings.Port = (repr = param.bitcast());
         @if(param.get(.connected) == 0) return();
-        instance := world.storage[instance];  // the linked ram
-        data := world.storage.rest(instance).interpret_as_bytes().slice(0, param.get(.ram_size_bytes));
+        instance := world.storage(instance, i64)[];  // the linked ram
+        data := world.storage_bytes(instance, param.get(.ram_size_bytes));
         address := address.umod(data.len);  // TODO: i think its always a power of 2
         
         //if ((address + param.get(.width)/8).ugt(data.len)) {
@@ -1048,8 +1046,8 @@ Store_port :: device(0, 3,
         if param.get(.little_endian) == 0 {
             value = value.byte_swap().shift_right_logical(64 - param.get(.width));
         };
-        instance := world.storage[instance];  // the linked ram
-        data := world.storage.rest(instance).interpret_as_bytes().slice(0, param.get(.ram_size_bytes));
+        instance := world.storage(instance, i64)[];  // the linked ram
+        data := world.storage_bytes(instance, param.get(.ram_size_bytes));
         address := address.umod(data.len);  // TODO: i think its always a power of 2
         data := data.rest(address);
         @if(param.get(.width).udiv(8).ugt(data.len)) return();  // TODO: am i supposed to wrap the bytes seperately for unaligned store?
@@ -1069,7 +1067,7 @@ Cc_level_output :: todo();
 Level_gate :: device(1, 1, 
     fn(_) => size_of(LevelGateData)*8,
     fn(world: *World, o: *Array(i64, 1), i: *Array(i64, 1), instance: i64, doing_pre_read: bool) void = {
-        data := world.storage.rest(instance).interpret_as_bytes().peek_type(LevelGateData);
+        data := world.storage(instance, LevelGateData);
         o[0] = int(data.output);
         if !doing_pre_read {
             data.input = i[0] != 0;
@@ -1104,7 +1102,7 @@ Probe_wire_bit :: Probe_wire_word;
 Probe_wire_word :: device(0, 1, 
     fn(_) => 64,
     fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 1), instance: i64, _2: bool) void = {
-        world.storage[instance] = i[0];
+        world.storage(instance, i64)[] = i[0];
     },
 );
 _20_v2 :: todo();
@@ -1113,7 +1111,7 @@ _1 :: todo();
 Segment_display :: device(0, 1, 
     fn(_) => 64,
     fn(world: *World, o: *Array(i64, 0), i: *Array(i64, 1), _0: i64, instance: i64, _2: bool) void = {
-        world.storage[instance] = i[0];
+        world.storage(instance, i64)[] = i[0];
     },
 );
 Static_value :: math_param(2, 0) { o, i, p |
@@ -1126,7 +1124,7 @@ Screen :: device(0, 3,
         // note: enable is of the settings write, not the screen itself (which is always enabled)
         enable, setting_index, value := (i[0] != 0, i[1], i[2]);
         @if(!enable) return();
-        data := world.storage.rest(instance).interpret_as_bytes().peek_type(ScreenData);
+        data := world.storage(instance, ScreenData);
         @switch(setting_index) {
             @case(0) => {
                 data.mode = @as(@type data.mode) @as(u8) value.umod(4).trunc();

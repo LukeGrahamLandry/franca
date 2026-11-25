@@ -1,4 +1,8 @@
 
+## (Nov 24)
+
+- silly amount of `R1 =l load R2, I48` to get world.storage every time. 
+
 ## (Nov 21) circuit
 
 - adding original_root if collect_schematics doesn't find it means you get duplicate 
@@ -7,6 +11,15 @@
   - highlight addresses of currently active ports when showing ram contents
   - im afraid im hiding information if the wire width is too small but looks like its always just the truncation so cant be the problem here
   - aaaa the carry of Add depends on the width. i was always doing 64 bit carry. 
+- backend: helps for this specific case but feels too fragile. wont work if i want to reuse cmps later and doesn't work if there was a fixarg so cmp and flag aren't adjacent. 
+```
+@if(is_flag(i[].op()) || is_sel_flag(i[].op())) if !identical(i[], b.ins.ptr) {
+  i0 := i[].offset(-1);
+  if @is(i0.op(), .acmp, .acmn, .afcmp, .xtest, .xcmp) {
+    i0.set_nop();
+  };
+};
+```
 
 ## (Nov 20) circuit
 

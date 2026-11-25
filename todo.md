@@ -43,7 +43,6 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
   - cubes get ioshape by label like the other levels
   - tests for the editor. ex. wire routing/splitting
   - why does circuit fetch the wasm4 dep. it uses that file for atlas but shouldn't be compiling the c? an overload signeture i guess, thats so annoying. 
-  - allocate World contigously with .storage
   - merge GateName() enums so dont need to keep checking group()?
   - decide if i care enough to bring back show_known_disassembly
   - "Game Of Life 32x32" takes 10s to compile. (insert_phis, spill, emit_expr, compile_expr). 
@@ -92,6 +91,7 @@ TODO: since you're not allowed to change sgl.texturing_enabled for different ver
   - web: it seems extra blurry
   - web: scroll wheel feels backwards to me. am i asking for direction in a way that doesn't listen to the os natural scrolling thing? its also too fast
   - visual feedback for a gate that wasn't conencted to a root so wasn't compiled and so wire values shown in ui (when you hover graphical wire) are always 0. 
+  - fix compile in web playground (lang=aot works tho)
 ```
 // TODO: bundle the source files the jit needs so binary is self contained
 // TODO: for paste/dragndrop: choose (replace all, replace one, add new, view without saving).

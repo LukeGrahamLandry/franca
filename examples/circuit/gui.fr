@@ -24,7 +24,7 @@ State :: @rec @struct {
     scale: f32;
     dirty: bool;
     mouse_pos: Vec2;
-    world: World;
+    world: *World;
     tree: List(CircuitNode);
     clicked: bool;
     either_clicked: bool;
@@ -160,7 +160,7 @@ main_prepare_interp :: fn(state: *State, sg: *Sg.Self) void = {
 }
 
 do_eval :: fn(state: *State) void = {
-    world := state.world&;
+    world := state.world;
     root_component := state.tree[0].component.unwrap();
     child := world[root_component]&;
     @if(child.error) return();
@@ -276,7 +276,7 @@ do_eval :: fn(state: *State) void = {
 };
 
 do_halt :: fn(state: *State) void = {
-    world := state.world&;
+    world := state.world;
     msg := get_halt_message(world, state.circuit).unwrap();
     @fmt(state.halt_message&, "halted after % ticks: %", state.tick, msg);
     world.tc_halt_device = -1;
@@ -322,7 +322,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         state.dirty = true;
     }
     
-    world := state.world&;
+    world := state.world;
     // for debugging circuits i can't load correctly, can still have_logic=true 
     // when Component.error=true. that's disallowed from running seperately. 
     have_logic := progress != .Loading 
@@ -707,7 +707,7 @@ fn arch_selection(self: *Draw) ?i64 = {
 
 fn walk_component_tree(self: *Draw, c: **Component) Ty(i64, i64, i64, *Component) = {
     logical_c := c[];
-    state := self.state;
+    state, world := (self.state, self.world);
     instance, parent_wire_offset, wire_offset := (0, 0, 0);
     self.put_text(self.text_spacing * vec2(0, 1), pack_rgba(255, 255, 255, 255)) { out |
         enumerate state.tree.items().rest(1) { tree_i, tree_it |
@@ -721,7 +721,7 @@ fn walk_component_tree(self: *Draw, c: **Component) Ty(i64, i64, i64, *Component
                             ci := state.circuit[ci]&;
                             if ci.compiled { parent_kind |
                                 logical_gate = (Some = ii);
-                                c[] = state.world&[parent_kind]&;
+                                c[] = world[parent_kind]&;
                             };
                         };
                     };
@@ -739,17 +739,17 @@ fn walk_component_tree(self: *Draw, c: **Component) Ty(i64, i64, i64, *Component
                 wire_offset += c.wire_count;
                 range(0, it) { i |
                     if c.gates[i].pre_read == -1 {
-                        child := state.world&[c.gates[i].kind]&;
+                        child := world[c.gates[i].kind]&;
                         wire_offset += child.wire_sum;
                     }
                 };
                 instance += c.instance_offset_by_gate[it];
-                c[] = state.world&[c.gates[it].kind]&;
+                c[] = world[c.gates[it].kind]&;
                 logical_c = c[];
             } else {
                 if tree_it.component { kind |
                     @if(tree_it.logical_gate.is_none()) @if(c.has_bidirectional_pins, @fmt(out, "(%), ", c.name), @fmt(out, "%, ", c.name));
-                    c[] = state.world&[kind]&;
+                    c[] = world[kind]&;
                 };
             };
         };
@@ -762,7 +762,7 @@ fn walk_component_tree(self: *Draw, c: **Component) Ty(i64, i64, i64, *Component
 fn instance_by_gate(self: *Draw, c: *Component, i: i64) i64 = {
     @if(!c.has_bidirectional_pins) return(self.base_instance + c.instance_offset_by_gate[i]);
     
-    state, world := (self.state, self.world&);
+    state, world := (self.state, self.world);
     @debug_assert(identical(c, world[state.tree[state.tree.len - 1].component.expect("component")]&), "TODO: instance_by_gate not of bottom");
     parent_ci, logical_gate_index := find_index_in_real_parent(state, false, i).unwrap();
     parent := world[state.circuit[parent_ci].compiled.expect("compiled")]&;
@@ -799,7 +799,7 @@ fn draw_component_code(self: *Draw, c: *Component, instance: i64, parent_wire_of
 
 // TODO: show the right inferred (param, wire widths) for a temporary_auto_width inside a has_bidirectional_pins
 fn draw_gate_code(self: *Draw, it: *Component.Gate, hover: bool) void = {
-    sdtx, world := (self.sdtx, self.world&);
+    sdtx, world := (self.sdtx, self.world);
     base_colour := @if(hover, pack_rgba(0, 255, 0, 255), pack_rgba(255, 255, 0, 255));
     if it.post_read == -1 {
         for(it.outputs, fn(it) => self.show_wire_value(it, false));
@@ -853,7 +853,7 @@ fn draw_gate_code(self: *Draw, it: *Component.Gate, hover: bool) void = {
 }
 
 fn draw_primitive_code(self: *Draw, instance: i64, parent_wire_offset: i64, hover: bool) void = {
-    sdtx, state, world, out := (self.sdtx, self.state, self.world&, self.out);
+    sdtx, state, world, out := (self.sdtx, self.state, self.world, self.out);
     
     sdtx.color = @if(hover, pack_rgba(0, 255, 0, 255), pack_rgba(255, 255, 0, 255));
     sdtx.put("output(intrinsic(input()));\n");
@@ -1271,7 +1271,7 @@ fn draw_pin_lines(self: *Draw, circuit: *Tc.Circuit) void = {
                 if it.logical_gate_index != -1 {
                     // draw_wires can only show value if there's a graphical wire connected. 
                     if circuit.compiled { c |
-                        g := state.world&[c].gates[it.logical_gate_index]&;
+                        g := state.world[c].gates[it.logical_gate_index]&;
                         if g.temporary_disconnected_pins_bitset.bit_and(1.shift_left(i)) != 0 {
                             self.wire_hover_count += 1;
                             sdtx.pos = self.world_to_text_pos(b) + vec2(0, self.wire_hover_count);
@@ -1500,7 +1500,7 @@ fn draw_wire_comment(self: *Draw, wire: *Tc.Circuit.Wire) void = {
 };
 
 fn console(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Component.Gate) void = {
-    sdtx, world, sgl := (self.sdtx, self.world&, self.draw&);
+    sdtx, world, sgl := (self.sdtx, self.world, self.draw&);
     
     sdtx.pos = vec2(0);
     a := self.tc_to_world_pos(gate.pos + vec2(-16, -8));
@@ -1517,8 +1517,8 @@ fn console(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Comp
     bytes_per_char := @if(param.get(.colour) == 0, 1, 8);
     w, h := (80, 24);
     data := {
-        data := world.storage.rest(self.instance_by_gate(c, i)).interpret_as_bytes().peek_type(Tc.Builtin.ConsoleData);
-        buf := world.storage.rest(data.ram_instance).interpret_as_bytes().slice(0, data.ram_size_bytes);
+        data := world.storage(self.instance_by_gate(c, i), Tc.Builtin.ConsoleData);
+        buf := world.storage_bytes(data.ram_instance, data.ram_size_bytes);
         start, count := (data.offset*bytes_per_char, w*h*bytes_per_char);
         @if(start.uge(buf.len)) return();
         // "LEG ARCHITECTURE 5 - console display" has too small a ram
@@ -1576,7 +1576,7 @@ fn console(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Comp
 };
 
 fn segment_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Component.Gate) void = {
-    world, sgl := (self.world&, self.draw&);
+    world, sgl := (self.world, self.draw&);
     base := self.tc_to_world_pos(gate.pos + vec2(-1, -1.5 - @if(gate.kind.group() == .Tc2, 1, 0)));
     w: f32 = 0.02;
     s: f32 = 0.06;
@@ -1608,7 +1608,7 @@ fn probe_bit(self: *Draw, pos: Vec2, instance: i64) void = {
 fn level_gate(self: *Draw, pos: Vec2, c: *Component, i: i64) void = {
     instance := self.instance_by_gate(c, i);
     state, sgl, W := (self.state, self.draw&, self.wire_node_width * 0.8);
-    data := state.world.storage.rest(instance).interpret_as_bytes().peek_type(Tc.Builtin.LevelGateData);
+    data := state.world.storage(instance, Tc.Builtin.LevelGateData);
     b := self.tc_to_world_pos(pos);
     sgl.color = pack_rgba(255 * int(!data.output), 255 * int(data.input), 255 * int(data.level_index == -1), 255);
     sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
@@ -1624,7 +1624,7 @@ fn level_gate(self: *Draw, pos: Vec2, c: *Component, i: i64) void = {
 // TODO: include this in circuit bounds
 // TODO: word probes? static value. 
 fn child_probes(self: *Draw, gate: *Tc.Circuit.Gate, parent: *Tc.Circuit) void = {
-    state, world := (self.state, self.world&);
+    state, world := (self.state, self.world);
     inlined := gate.logical_gate_index == -1;
     c := world[gate.kind]&;
     @if(!c.has_probes) return();
@@ -1671,8 +1671,8 @@ fn child_probes(self: *Draw, gate: *Tc.Circuit.Gate, parent: *Tc.Circuit) void =
 
 // TODO: should write a texture instead of doing it with 6 vertices per pixel
 fn dot_matrix_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, _: *Component.Gate) void = {
-    world, sgl := (self.world&, self.draw&);
-    data := world.storage.rest(self.instance_by_gate(c, i)).interpret_as_bytes().peek_type(Tc.Builtin.DotData);
+    world, sgl := (self.world, self.draw&);
+    data := world.storage(self.instance_by_gate(c, i), Tc.Builtin.DotData);
     buf := data.active&;
     
     i := 0;
@@ -1691,8 +1691,8 @@ fn dot_matrix_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64
 }
 
 fn sprite_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Component.Gate) void = {
-    state, world, sgl := (self.state, self.world&, self.draw&);
-    data := world.storage.rest(self.instance_by_gate(c, i)).interpret_as_bytes().peek_slice(Tc.Builtin.SpriteData, 256);
+    state, world, sgl := (self.state, self.world, self.draw&);
+    data := world.storage(self.instance_by_gate(c, i), Array(Tc.Builtin.SpriteData, 256));
     p := self.tc_to_world_pos(gate.pos + vec2(-16.5, 12));
     @debug_assert(state.atlas.enable, "SpriteDisplay but no atlas");
     uv0, uv1, texture_size := state.atlas.uvs&.get(it.param) || return();
@@ -1734,7 +1734,7 @@ fn sprite_display(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it
 // TODO: not bounds checked so can read into next thing if config doesnt match ram size
 #use("@/examples/circuit/tc/devices.fr");
 fn screen(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Component.Gate) void = {
-    sdtx, world, sgl := (self.sdtx, self.world&, self.draw&);
+    sdtx, world, sgl := (self.sdtx, self.world, self.draw&);
     
     a_tc := gate.pos + vec2(-25, -19);
     a := self.tc_to_world_pos(a_tc);
@@ -2249,7 +2249,7 @@ fn open_gate(state: *State, logical_gate_index: ?i64, diagram_gate_index: ?i64, 
     @if(state.tree.len > 0)
     if logical_gate_index { i |
         if state.tree[state.tree.len - 1].component { parent |
-            gate := state.world&[parent].gates[i]&;
+            gate := state.world[parent].gates[i]&;
             if gate.pre_read != -1 {
                 // Circuit.Gate.logical_gate_index only points to the write one. swap so graphical can be found. 
                 logical_gate_index = (Some = gate.pre_read);
@@ -2304,7 +2304,7 @@ fn open_gate(state: *State, logical_gate_index: ?i64, diagram_gate_index: ?i64, 
     if new_component { i |
         // TODO: do this with shape.kind == .io ?
         if @is(group(i), .LogicalIO, .Tc1, .Tc2) {
-            name := state.world&[i].name;
+            name := state.world[i].name;
             is_io = is_io || name.contains("input") || name.contains("output") || name.contains("Input") || name.contains("Output")|| name.contains("Level_input") || name.contains("Level_output");
         };
     };
@@ -2511,7 +2511,7 @@ fn reset(state: *State) void = {
     state.halt_message&.clear();
     state.halted_without_wire_values = true;  // dont show zeroes before first tick
     
-    world := state.world&;
+    world := state.world;
     world.storage.set_zeroed();
     
     world.scratch.len = world.scratch.cap;
@@ -2519,7 +2519,7 @@ fn reset(state: *State) void = {
     @if(state.tree.len == 0) return();
     root := state.tree[0].component || return();
     
-    name := state.world&[root].name;
+    name := world[root].name;
 
     i := state.tree[0].diagram_circuit || return();
     c := state.circuit[i]&;
@@ -2527,8 +2527,8 @@ fn reset(state: *State) void = {
     
     each c.gates { g |
         if group(g.kind) == .Tc2 && Tc'gate_name(g.kind, .Tc2) == .Level_gate && g.logical_gate_index != -1 {
-            instance := state.world&[root].instance_offset_by_gate[g.logical_gate_index];
-            data := state.world.storage.rest(instance).interpret_as_bytes().peek_type(Tc.Builtin.LevelGateData);
+            instance := world[root].instance_offset_by_gate[g.logical_gate_index];
+            data := world.storage(instance, Tc.Builtin.LevelGateData);
             if state.levels.index_of(fn(it) => it.level.title == g.label) { level_index |
                 data.output = state.levels[level_index].completed;
                 data.level_index = level_index.intcast();
@@ -2550,7 +2550,7 @@ fn reset(state: *State) void = {
         static_userdata = state.level.static_userdata,
         text = state.sim.text,
     );
-    if !state.world&[root].error {
+    if !world[root].error {
     state.level.userdata = state'level'start(state.sim&);
     state.level_active = state.level.title != "Sandbox";
     state.update_suggested_components();
@@ -2644,7 +2644,7 @@ fn find_keyboard(state: *State) void = {
     state.keyboard_data = .None;
     @if(state.tree.len == 0) return();
     root := state.tree[0].component || return();
-    world := state.world&;
+    world := state.world;
     c := world[root]&;
     gate_i := c.gates.index_of(fn(it) => @match(group(it.kind)) {
         fn Tc1() => name(it.kind, .Tc1) == .Keyboard;
@@ -2652,7 +2652,7 @@ fn find_keyboard(state: *State) void = {
         @default => false;
     }) || return();
     instance := c.instance_offset_by_gate[gate_i];
-    data := bit_cast_unchecked(*WireValue, *Tc.Builtin.KeyboardData, world.storage.index(instance));
+    data := world.storage(instance, Tc.Builtin.KeyboardData);
     state.keyboard_data = (Some = data);
     v2 := group(c.gates[gate_i].kind) == .Tc2;
     state.keyboard_character_mode = @if(c.gates[gate_i].param != int(v2), .Char, @if(v2, .V2, .V1));
@@ -2995,6 +2995,7 @@ fn load_circuit_index_async(state: *State, root_index: i64, tc_file_loader_devic
     forget_already_compiled(state.circuit);
     state.push_tree_node(diagram_circuit = (Some = root_index));
     state.prepare_async();
+    state.keyboard_data = .None;
     state.loader.start_async(Index = (root_index = root_index, tc_file_loader_device = tc_file_loader_device, just_reset_arena = false));
 }
 
@@ -3068,9 +3069,8 @@ worker_get_output :: fn(state: *State, in: *LoaderT.I, callee: rawptr) Result(ra
 
 worker_prepare_interp :: fn(state: *State, components: []Component, root_index: i64, tc_file_loader_device: []Tc.LoadedFile) void = {
     circuits := state.circuit;
-    world := state.world&; 
-    init(world, general_allocator(), true, components);
-    world.tc_file_loader_device = tc_file_loader_device;
+    init(state.world&, general_allocator(), true, components);
+    state.world.tc_file_loader_device = tc_file_loader_device;
     
     c := circuits[root_index]&; 
     state.load_atlas_part1(c);
@@ -3082,7 +3082,7 @@ Atlas :: import("@/tests/external/wasm4.fr").Atlas;
 fn load_atlas_part1(state: *State, c: *Tc.Circuit) void = {
     @if(!FEAT_PNG) return();
     Viewer :: import("@/examples/gpu/viewer.fr");
-    world := state.world&;
+    world := state.world;
     files := world.tc_file_loader_device;
     c := c.compiled || return();
     c := world[c]&;

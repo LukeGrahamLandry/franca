@@ -1,5 +1,6 @@
 
-fn init(world: *World, a: Alloc, save_wire_values: bool, components: []Component) void = {
+fn init(world: **World, a: Alloc, save_wire_values: bool, components: []Component) void = {
+    ::ptr_utils(World);
     wire_sum, wire_depth, storage_count := {
         ws, wd, s := (0, 0, 0);
         for components { it |
@@ -11,13 +12,15 @@ fn init(world: *World, a: Alloc, save_wire_values: bool, components: []Component
     };
     wires := @if(save_wire_values, wire_sum, wire_depth);
     
-    buf := world.buf;  // note: `world` has to be valid or zeroed. can't be uninit
-    buf&.reserve_total(wires + storage_count, a);
-    world[] = (
+    buf: RawList(i64) = @if(world[].is_null(), empty(), world.buf);  // note: `world` has to be valid or zeroed. can't be uninit
+    N := size_of(World)/8;
+    buf&.reserve_total(N+storage_count+wires, a);
+    world[] = buf.maybe_uninit().interpret_as_bytes().peek_type(World); 
+    world[][] = (
         components = components,
-        scratch = buf.maybe_uninit().subslice(storage_count, wires).from_capacity(),
+        scratch = buf.maybe_uninit().subslice(N+storage_count, wires).from_capacity(),
         instance = 0,
-        storage = buf.maybe_uninit().subslice(0, storage_count),
+        storage = buf.maybe_uninit().subslice(N, storage_count),
         doing_pre_read = false,
         save_wire_values = save_wire_values,
         tc_file_loader_device = empty(),
@@ -25,10 +28,17 @@ fn init(world: *World, a: Alloc, save_wire_values: bool, components: []Component
     );
 }
 
-fn drop(world: *World, a: Alloc) void = {
-    world.buf&.drop(a);
-    world[] = zeroed(World);
+fn drop(world: **World, a: Alloc) void = {
+    @debug_assert(identical(World.raw_from_ptr(world[]), i64.raw_from_ptr(world.buf.ptr)));
+    buf := world.buf;
+    buf&.drop(a);
+    world[] = zeroed(*World);
 }
+
+fn storage(world: *World, instance: i64, $T: Type) *T #generic #inline = 
+    world.storage_bytes(instance, size_of(T)).peek_type(T);
+fn storage_bytes(world: *World, instance: i64, count: i64) []u8 #inline = 
+    bit_cast_unchecked(*i64, *u8, bit_cast_unchecked(*World, *i64, world).offset(size_of(World)/8+instance)).slice(count);
 
 WireValue :: i64;
 

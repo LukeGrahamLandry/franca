@@ -90,7 +90,7 @@ init_harness :: fn(image_callback: ?ImageFn) Harness = {
     harness := @ref @as(Harness) (
         temp = temp().mark(),
         circuits = circuits,
-        world = zeroed(World),
+        world = zeroed(*World),
         tc_file_loader_device = tc_file_loader_device,
         msg = list(general_allocator()),
         image_callback = image_callback || (f = fn(_0, _1) = (), userdata = zeroed(rawptr)),
@@ -115,7 +115,7 @@ main :: fn() void = {
 }
 
 Harness :: @rec @struct {
-    world: World;
+    world: *World;
     circuits: []Tc.Circuit;
     temp: Alloc.Mark;
     msg: List(u8);
@@ -181,28 +181,28 @@ fn load(self: *Harness, name: Str) *Harness = {
         @fmt(self.msg&, "\n- failed to compile");
         return self;
     };
-    if self.world&[kind].error {
+    if self.world[kind].error {
         @fmt(self.msg&, "\n- failed to compile");
         return self;
     };
     self.world.storage.set_zeroed();
-    Tc'set_initial_data(self.world&, self.circuits, kind, 0);
+    Tc'set_initial_data(self.world, self.circuits, kind, 0);
     self
 }
 
 fn run(self: *Harness, ticks: i64) *Harness = self.run(ticks, false);
 fn run(self: *Harness, ticks: i64, allow_halt: bool) *Harness = {
     kind := self.root || return(self);
-    o_n, i_n := self.world&[kind]&.arity();
+    o_n, i_n := self.world[kind]&.arity();
     values := temp().alloc_zeroed(WireValue, o_n + i_n);
     start := realtime_ns();
     i := 0;
     while => i < ticks {
         self.world.timestamp_ns = (Some = start + i);
-        evaluate(self.world&, values, kind, 0, false);
+        evaluate(self.world, values, kind, 0, false);
         
         i += 1;
-        if get_halt_message(self.world&, self.circuits) { msg |
+        if get_halt_message(self.world, self.circuits) { msg |
             if !allow_halt {
                 @fmt(self.msg&, "\n- halted on tick % (%)", i, msg);
             };
@@ -219,7 +219,7 @@ fn run(self: *Harness, ticks: i64, allow_halt: bool) *Harness = {
 
 fn then_halt(self: *Harness, expect: Str) *Harness = self.run(1, true).halted(expect);
 fn halted(self: *Harness, expect: Str) *Harness = {
-    msg := get_halt_message(self.world&, self.circuits) || {
+    msg := get_halt_message(self.world, self.circuits) || {
         @fmt(self.msg&, "\n- expected halt");
         return self;
     };
@@ -246,7 +246,7 @@ fn console_contains(self: *Harness, msg: Str) *Harness = {
 }
 
 fn for_consoles(self: *Harness, $body: @Fn(data: Str) void) void = {
-    world := self.world&;
+    world := self.world;
     for_gates(self, .Tc1, .Console) { c, i, _ |
         continue :: local_return;
         it := c.gates[i]&;
@@ -262,7 +262,7 @@ fn for_consoles(self: *Harness, $body: @Fn(data: Str) void) void = {
 
 #use("@/examples/circuit/tc/devices.fr");
 fn for_text_screens(self: *Harness, $body: @Fn(text: Str) void) void = {
-    world := self.world&;
+    world := self.world;
     for_gates(self, .Tc2, .Screen) { c, i, _ |
         continue :: local_return;
         data, memory := world.get_screen(c.instance_offset_by_gate[i]);
@@ -277,7 +277,7 @@ fn for_text_screens(self: *Harness, $body: @Fn(text: Str) void) void = {
 } 
 
 fn for_gates(self: *Harness, $g: Tc.GateGroup, k: GateName(g), $body: @Fn(c: *Component, i: i64, gate: *Tc.Circuit.Gate) void) void #generic = {
-    root, world := (self.root || return(), self.world&);
+    root, world := (self.root || return(), self.world);
     circuit := self.circuits.find(fn(it) => it.compiled.is_some() && it.compiled.Some.id == root.id).unwrap();
     c := world[root];
     each circuit.gates { gate |
@@ -319,7 +319,7 @@ fn screen_contains_lines(self: *Harness, expect: Str) *Harness = {
 }
 
 fn check_probes(self: *Harness) void = {
-    world := self.world&;
+    world := self.world;
     for_gates(self, .Tc2, .Probe_wire_bit) { c, i, gate |
         if world.storage[c.instance_offset_by_gate[i]] == 0 {
             @fmt(self.msg&, "\n- probe off: %", gate.label);
@@ -333,7 +333,7 @@ fn maze(self: *Harness, limit: i64) *Harness = {
     
     circ := self.circuits.find(fn(it) => it.compiled.is_some() && it.compiled.unwrap() == kind).unwrap();
     
-    c := self.world&[kind]&;
+    c := self.world[kind]&;
     name := c.name;
     Defs :: import("@/examples/circuit/defs.fr");
     program := @if(name == "LEG", Defs.the_maze_leg, Defs.the_maze);
@@ -353,7 +353,7 @@ fn maze(self: *Harness, limit: i64) *Harness = {
     values := @slice(0, 0, 0, 0);
     range(0, limit) { _ |
         values[shape.in] = in.zext();
-        evaluate(self.world&, values, kind, 0, false);
+        evaluate(self.world, values, kind, 0, false);
         if values[shape.out_used] != 0 {
             maze.output(values[shape.out].trunc());
             in = maze.input();
@@ -386,7 +386,7 @@ jit_circuit :: fn(slot: *CachedCompilerEnv, components: []Component, a: Alloc) v
 Main :: import().examples.circuit;
 test_defs :: fn() void = {
     #use("@/examples/circuit/parse_defs.fr");
-    world := @ref zeroed(World);
+    world := zeroed(*World);
     a := general_allocator();
     finished_components :: @run {
         components := @ref Component.list(ast_alloc());
@@ -397,7 +397,7 @@ test_defs :: fn() void = {
         compile_gates(current_compiler_context(), components);
         components
     };
-    init(world, a, false, finished_components);
+    init(world&, a, false, finished_components);
     
     Defs :: Main.defs;
     cpus := @slice(
@@ -468,7 +468,7 @@ test_defs :: fn() void = {
         @if(values[1] != 0, (Some = values[0].trunc()), .None)
     };
     
-    drop(world, a);
+    drop(world&, a);
     
     if query_current_arch() != .wasm32 {
         umulh :: import("@/examples/circuit/tc/builtin.fr").multiply_high_u64;
