@@ -277,3 +277,18 @@ Level_output_switched, Level_input_switched
 While the simulation is running:
 - you can hover a pin to see its value (only if it's connected to a wire). 
 - you can hold shift to draw a line between a graphical component and its entry in the code view on the right
+
+## Evaluator Implementation Details
+
+The simulator has two ways of running circuits (interpreted and compiled). 
+The compiled code runs a few orders of magnitude faster but doesn't save intermediate wire values for the visualisation. 
+Each frame runs many ticks with the compiled code and one with the interpreter to update the wire values shown in the logic trace. 
+- If the simulation halts on a tick that used the compiled code, the wire values won't be visible in the ui. 
+  You can use the jump_to_tick option in the Settings menu to re-run the simulation to the halting tick 
+  (so the simulator knows which tick is last and will need to show wire values). 
+- The Time component only checks the time once per frame and interpolates across all the ticks run that frame. 
+- If you're trying to optimise a circuit for simulation performace, using fewer components is generally better. 
+  Using narrower width components is NOT faster (I always use 64 bit operations and truncate the results as needed). 
+  The spatial layout of your circuit has no effect on how it is compiled.
+- Only some components are considered roots for the evaluation (probes, Cc_output, anything with visuals or memory). 
+  Parts of the circuit that aren't depended on by any roots won't be evaluated (and those wire values won't be visible). 

@@ -219,7 +219,7 @@ fn get_field_string(e: *EditState, c: *Circuit, g: *Circuit.Gate, field: *Tc.Bui
     ""
 }
 
-MenuAction :: @tagged(Show: Str, Toggle: *bool, Settings, EditMode, LevelMap, NewCircuit, ThisCircuit, AllCircuits, None, Fetch, Reset);
+MenuAction :: @tagged(Show: Str, Toggle: *bool, Settings, EditMode, LevelMap, NewCircuit, ThisCircuit, AllCircuits, None, Fetch, Reset, StepBack);
 fn get_menu_options(state: *State) []Ty(Str, MenuAction) = {
     e := state.edit&;
     idle := state.loader.progress != .Loading;
@@ -231,6 +231,8 @@ fn get_menu_options(state: *State) []Ty(Str, MenuAction) = {
         ("Edit Mode", @if(idle, .EditMode, .None)),
         ("Run", @if(no_sim, .None, (Toggle = state.auto_eval&))),
         ("Step", @if(no_sim, .None, (Toggle = state.want_eval&))),
+        ("Previous", @if(no_sim || state.tick < 0, .None, .StepBack)),
+        ("Focus Keyboard", @if(no_sim || state.keyboard_data.is_none(), .None, (Toggle = state.keyboard_device_focused&))),
         ("Undo Tree", @if(e.enable, (Toggle = e.show_undo_tree&), .None)),
         ("Reset", @if(no_sim, .None, .Reset)),
         ("Level Map", @if(idle && !e.enable, .LevelMap, .None)),
@@ -262,6 +264,7 @@ fn menu_selection(self: *Draw) ?i64 = {
             || (action&.is(.EditMode) && e.enable)
             || (action&.is(.Fetch) && state.looking_at_examples)
             || (action&.is(.LevelMap) && state.current_diagram().is_some() && state.current_diagram().unwrap()[].is_level_map)
+            || (action&.is(.StepBack) && state.stop_at_tick >= 0)
             || ((e.show_info_box || -1) == i);
             self.do_option(pos, name, active, i, new&);
         };
@@ -320,13 +323,15 @@ fn apply_menu_action(state: *State, i: i64) void = {
             }
             fn Show(msg) => buf.append_string(msg[]);
             fn Reset() => {
-                state.end_level();
                 state.reset();
             }
+            // this won't be helpful if there is keyboard/buttons/time
+            // TODO: could save which tick input happened so could replay it 
+            fn StepBack() => state.stop_at_tick(state.tick - 1);
             @default => ();
         };
             
-            if @is(action.tag(), .NewCircuit, .EditMode, .LevelMap, .Fetch, .Toggle, .Reset) {
+            if @is(action.tag(), .NewCircuit, .EditMode, .LevelMap, .Fetch, .Toggle, .Reset, .StepBack) {
                 return();
             };
             e.show_info_box = (Some = i);
@@ -342,6 +347,14 @@ fn apply_menu_action(state: *State, i: i64) void = {
                 state.unstash_undo();
             };
             buf.render = (x = 0, y = 0); 
+}
+
+fn stop_at_tick(state: *State, tick: i64) void = {
+    // rerun even if stopping at the same tick so you can use it to fix halted_without_wire_values
+    @if(tick <= state.tick) state.reset();
+    @if(tick < 0) return();
+    state.stop_at_tick = tick;
+    state.auto_eval = true;
 }
 
 fn close_info_box(state: *State) void = {
@@ -377,17 +390,22 @@ do_settings_raw :: fn(state: *State, out: *List(u8), read: bool) void = {
         walk_settings_fields c { name, p |
             @fmt(out, "%=%\n", name, p[]);
         };
+        
+        @fmt(out, "\n# actions\n");
         if state.allow_delete() && !c.is_synthetic_level_map && c.is_arch {
             // TODO: delete non-arch in a way that checks for usages first
             // TODO: do i trust people to not name the circuit "# type name to confirm"? lol should make that an achievement
             @fmt(out, "delete_this_circuit=# type name to confirm\n");  
+        };
+        if !state.edit.enable {
+            @fmt(out, "jump_to_tick=# number\n");  
         };
         };
         @fmt(out, "\n# simulator settings\n");  // :magic
         walk_state_settings_fields state { name, p |
             @fmt(out, "%=%\n", name, p[]);
         };
-        @fmt(out, "\n\n# debug info\n");  // :magic
+        @fmt(out, "\n# debug info\n");  // :magic
         @fmt(out, "# adapted_ticks_per_frame=%\n", state.ticks_per_eval);
         @fmt(out, "# arenas: circuit(used=%kb, allocated=%kb) simulation(allocated=%kb) ", state.circuit_arena&.current_used_size()/1024, state.circuit_arena&.current_allocated_size()/1024, state.world.buf.cap*8/1024);
         if state.loader.fr.it { fr, m |
@@ -412,6 +430,9 @@ do_settings_raw :: fn(state: *State, out: *List(u8), read: bool) void = {
                 state.edit.delete_name = (Some = c.name);
             };
         };
+        tick := MIN_i64;
+        WRITE("jump_to_tick", tick&);
+        @if(tick != MIN_i64) state.stop_at_tick(tick);
         };
         // TODO: bit silly that these won't save until you win/switchcircuit a level
         walk_state_settings_fields state { name, p |

@@ -2,6 +2,9 @@
 ## (Nov 24)
 
 - silly amount of `R1 =l load R2, I48` to get world.storage every time. 
+  can at least make it an add instead by storing the World at the front of storage. 
+- ui to jump to a specific tick. can also use that to fake stepping backwards. 
+- lol i was letting you open a level through the text box which among other confusion would change its default circuit's name to "Level Map" because it would close the settings on a different circuit than opened them. 
 
 ## (Nov 21) circuit
 

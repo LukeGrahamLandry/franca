@@ -34,6 +34,7 @@ State :: @rec @struct {
     ticks_per_eval: i64;
     max_ticks_per_eval: i64;
     old_max_ticks_per_eval: i64;
+    stop_at_tick: i64;
     first_interpreted_frame: bool;
     first_jitted_frame: bool;
     is_first_load: bool;
@@ -172,12 +173,13 @@ do_eval :: fn(state: *State) void = {
     state.prev_timestamp_ns = this_timestamp;
     delta_time := this_timestamp - prev_timestamp;
     recalibrate := 1;
+    max_ticks_per_eval := @if(state.stop_at_tick >= 0, state.max_ticks_per_eval, MAX_i64);
     if state.eval_last_frame {
         state.frame_time_history&.push(delta_time / 1000);
         
         if state.frame_time_history.history&.len() > 32 {
             break :: local_return;
-            if state.ticks_per_eval == state.max_ticks_per_eval && delta_time < 18_000_000 {
+            if state.ticks_per_eval == max_ticks_per_eval && delta_time < 18_000_000 {
                 break();
             };
             
@@ -194,7 +196,7 @@ do_eval :: fn(state: *State) void = {
                         // didn't manage to slow the frame down
                         state.ticks_per_eval *= 2;
                     };
-                    if state.ticks_per_eval < state.max_ticks_per_eval {
+                    if state.ticks_per_eval < max_ticks_per_eval {
                         recalibrate = 2;
                         state.last_frame_was_recalibrate = true;
                     };
@@ -210,9 +212,12 @@ do_eval :: fn(state: *State) void = {
         delta_time = min(delta_time, 16 * NS_PER_MS);
         prev_timestamp = this_timestamp - delta_time;
     };
-    state.ticks_per_eval = min(state.ticks_per_eval, state.max_ticks_per_eval);
+    state.ticks_per_eval = min(state.ticks_per_eval, max_ticks_per_eval);
     
     count := @if(state.auto_eval && !state.first_interpreted_frame, state.ticks_per_eval * recalibrate, 1);
+    if state.stop_at_tick >= 0 && state.tick + count > state.stop_at_tick {
+        count = state.stop_at_tick - state.tick;
+    };
     state.tick_count_history&.push(count);
     
     o_n, i_n := child.arity();
@@ -249,7 +254,7 @@ do_eval :: fn(state: *State) void = {
         // last so the level is allowed to expect you to halt
         if world.tc_halt_device != -1 {
             if !have_level {
-                state.tick += i;
+                state.tick += i + 1;
             };
             state.halted_without_wire_values = i != count - 1;
             return do_halt(state);
@@ -259,10 +264,14 @@ do_eval :: fn(state: *State) void = {
     if !have_level {
         state.tick += count;
     };
+    if state.tick == state.stop_at_tick {
+        state.stop_at_tick = -1;
+        state.auto_eval = false;
+    };
     
     // jit is much faster than interp so times between them are meaningless. 
-    if state.first_interpreted_frame&.take() || state.first_jitted_frame&.take() || state.max_ticks_per_eval != state.old_max_ticks_per_eval {
-        state.old_max_ticks_per_eval = state.max_ticks_per_eval;
+    if state.first_interpreted_frame&.take() || state.first_jitted_frame&.take() || max_ticks_per_eval != state.old_max_ticks_per_eval {
+        state.old_max_ticks_per_eval = max_ticks_per_eval;
         state.frame_time_history&.clear();
         state.tick_count_history&.clear();
         dt := realtime_ns() - this_timestamp;
@@ -271,16 +280,17 @@ do_eval :: fn(state: *State) void = {
             // the `delta_time` above is across frames so will be ~16ms and doesn't matter but this one is only for running a tick. 
             dt = max(int((timestamp_s() - website_date_resolution_is_ass) * (NS_PER_S/1000).float()) * 1000, 1);
         };
-        state.ticks_per_eval = (16*NS_PER_MS*count/dt).min(state.max_ticks_per_eval).max(1);
+        state.ticks_per_eval = (16*NS_PER_MS*count/dt).min(max_ticks_per_eval).max(1);
     };
 };
 
 do_halt :: fn(state: *State) void = {
     world := state.world;
     msg := get_halt_message(world, state.circuit).unwrap();
-    @fmt(state.halt_message&, "halted after % ticks: %", state.tick, msg);
+    @fmt(state.halt_message&, "halted on tick %: %", state.tick, msg);
     world.tc_halt_device = -1;
     state.auto_eval = false;
+    state.stop_at_tick = -1;
 };
 
 fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
@@ -337,7 +347,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     if eval_this_frame {
         do_eval(state);
         if state.win {
-            @fmt(state.halt_message&, "solved in % ticks", state.tick);
+            @fmt(state.halt_message&, "solved on tick %", state.tick);
+            state.stop_at_tick = -1;
             completed := state.levels[state.level_index].completed&;
             changed := !completed[];
             completed[] = true;
@@ -401,7 +412,8 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         };
     } else {
         self.gate_selection();
-        if state.looking_at_examples {
+        generated := state.current_diagram().is_some() && state.current_diagram().unwrap()[].is_synthetic_level_map;
+        if state.looking_at_examples || generated {
             self.put_text("CHANGES MADE TO EXAMPLE CIRCUITS WILL NOT BE SAVED", self.text_spacing * vec2(0, 2), pack_rgba(255, 0, 0, 255));
         }
     };
@@ -422,7 +434,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
         
         // TODO: even if halted_without_wire_values can show values of probes (from world.storage) on hover
         if !state.halted_without_wire_values && c.gates.len > 0 {
-            @debug_assert(world.scratch.len >= wire_offset + logical_c.wire_count, "misconfigured scratch");
+            @debug_assert_ge(world.scratch.len, wire_offset + logical_c.wire_count, "misconfigured scratch");
             self.wires = world.scratch.items().subslice(wire_offset, logical_c.wire_count);
         };
         self.logical = (Some = c);
@@ -593,10 +605,12 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     // without this you get a flicker and occasionally a bounds check assertion! for hopefully intuitive reasons. dear rust would like to have a word im sure.
     if self.open_gate&.take() { a, b, c |  // wait until done rendering components to change the tree. 
+        state.close_info_box();
         state.open_gate(a, b, c);
     };
     
     @if(state.loader.progress != .Loading) if open_arch { i |
+        state.close_info_box();
         state.dirty = true;
         state.warnings&.clear();
         load_circuit_index_async(state, i, state.world.tc_file_loader_device);
@@ -604,6 +618,7 @@ fn on_render(state: *State, sapp: *Sapp.Self, sg: *Sg.Self) void = {
     
     // TODO: option to disable the compiler per circuit. no point compiling the level map that will only ever run one tick at a time.
     @if(state.loader.progress == .Idle) if self.open_level { i |
+        state.close_info_box();
         it := state.levels[i].level;
         state.dirty = true;
         state.end_level();
@@ -1612,7 +1627,7 @@ fn level_gate(self: *Draw, pos: Vec2, c: *Component, i: i64) void = {
     b := self.tc_to_world_pos(pos);
     sgl.color = pack_rgba(255 * int(!data.output), 255 * int(data.input), 255 * int(data.level_index == -1), 255);
     sgl.line(b - vec2(0, W/2), b + vec2(0, W/2), W);
-    on := state.left_mouse_down && self.hovering_node(self.tc_to_world_pos(pos));
+    on := self.hovering_node(self.tc_to_world_pos(pos)) && state.either_clicked&.take();
     if on && data.level_index != -1 {
         if data.input || self.show_wire_ref_lines {
             self.open_level = (Some = data.level_index.intcast());
@@ -1749,7 +1764,7 @@ fn screen(self: *Draw, gate: *Tc.Circuit.Gate, c: *Component, i: i64, it: *Compo
     };
     sgl.line(vec2(a.x, b.y + s.y/2), vec2(b.x, b.y + s.y/2), s.y);
 
-    @if(self.state.tick == 0) return();  // dont show whatever junk is at the start of memory before you run
+    @if(self.state.tick == -1) return();  // dont show whatever junk is at the start of memory before you run
     @if(data.ram_size_bytes == 0) return();
     
     width, height, _ := data.size();
@@ -2504,10 +2519,11 @@ fn end_level(state: *State) void = {
 }
 
 fn reset(state: *State) void = {
+    state.end_level();
     state.frame_time_history&.clear();
     state.tick_count_history&.clear();
 
-    state.tick = 0;
+    state.tick = -1;
     state.halt_message&.clear();
     state.halted_without_wire_values = true;  // dont show zeroes before first tick
     
@@ -2541,7 +2557,6 @@ fn reset(state: *State) void = {
     v := @static @as(LevelApi.Imports) (
         put_text = LevelApi.impl.put_text,
     );
-    @debug_assert(!state.level_active, "end level before reset so its called with the old .sim just for sanity");
     state.sim = (
         fns = v,
         world = world,
@@ -2756,7 +2771,6 @@ fn on_event(state: *State, sapp: *Sapp.Self, event: *Sapp.Event) void = {
                     state.apply_undo(event.modifiers.get(.shift) == 0);
                 };
                 fn R() => {
-                    state.end_level();
                     state.reset();
                 }
                 fn C() => if event.modifiers.get(.super) == 0 {
@@ -3024,7 +3038,6 @@ fn prepare_async(state: *State) void = {
 // there needs to not use the logical part while progress==.Loading and here needs to not push to state.tree. 
 fn load_circuit_index_worker(state: *State, root_index: i64, tc_file_loader_device: []Tc.LoadedFile, just_reset_arena: bool) Result(Str, void) = {
     circuits := state.circuit;
-    state.tick = 0;
     
     // TODO: bring back FEAT_RT_COMPILE which doesn't compile the franca compiler. 
     

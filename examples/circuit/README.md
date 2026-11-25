@@ -4,6 +4,7 @@
 this is a logic gate simulator. it understands two forms of circuit programs (`defs` and `tc`). 
 circuit graphs are compiled into franca code and then jitted. 
 there's a very ugly visualization that's mostly just enough to tell what's going on while debugging it. 
+i also have an editor and a few of my own levels. 
 
 ## `defs`
 
@@ -37,46 +38,4 @@ it works well enough to run my overture/leg in the maze and a few things from th
 
 > i've started to support circuits the 2.x rewrite of the game 
 
-## TODO (v1)
-
-- devices
-  - missing: network, hdd, sound
-  - console: wrong font
-  - keyboard: click to focus instead of a keybind. 
-  - display: rotation
-  - latency ram, Stack
-  - sprite display: positioning is wrong
-  - dot display: wrong default colour
-- Mul64 high on wasm
-- assembler
-  - expressions with spaces in them are wrong
-  - what happens when a label is definied multiple times
-- from schematic hub
-  - 3D Engine: "str scratch frame"
-  - screenvurture: "H" as char literal in expression
-  - ASM computer 64 bit: Hdd, RamLatency
-  - ploter: SR-Latch: use-before-def ("Allow circular recipies")
-- the game has a setting ("Allow circular recipies") to idiom-regognise a few shapes of circular dependencies and convert to (AndOrLatch,NandNandLatch,NorNorLatch)
-- i don't think im doing the keyboard right. ex. mandelbrot is behind a key sometimes?
-- use f64 for pos/zoom in ui because it gets jerky scrolled down far in the trace for big circuits
-- make the defs language less painful
-  - number literal instead of const()
-  - nested expressions
-  - variable names
-  - speed mode that cheats and implements components with native instructions (like tc) instead of nand gates
-- ui: allow copying the code to clipboard
-- `Main :: import().examples.circuit;` doesn't work in the web demo
-- nice ui for web gallery from my archive of the old schematic hub
-- it's annoying that you can't see the wire values if it halts on a tick that was evaled in fast mode. 
-  delay all writes to the end somehow so can rerun the tick in slow mode after knowing it will halt?
-- use 32 bit instructions instead of bit_and(0xFFFFFFFF)
-- arm has nice merged (and,or)+shift in one instruction
-- option to see -d jit logging in the ui
-
-```
-// TODO: don't always recompile everything when loading a new circuit. it might reuse some custom components. 
-//       and don't reset the state.fr every time because bootstrapping the comptime stuff takes ~50ms. just reset when arena is getting too full. 
-//       similarly don't bother recompiling the natives every time. import them from the host exe (if not inlinable). 
-// TODO: if i want to let you edit the circuit in the ui, 
-//       have two copies that swap when you change something so it doesn't hang the ui while compiling the new one. 
-```
+- not implemented v1 components: network, hdd, sound
